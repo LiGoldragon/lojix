@@ -122,9 +122,107 @@ No zero-state holders.
 - The daemon is cluster-operator-owned, not per-host. A single
   instance per operator workstation (or per shared deploy host); not
   running on every cluster node.
-- One Nota record in, one Nota record out at the socket boundary
-  (matches the operator surface discipline today's `lojix-cli/skills.md`
-  established).
+- One Nota record in, one Nota record out at the socket boundary.
+
+## 6 · Constraints
+
+Each constraint below becomes a test (per ESSENCE §"Constraints
+become tests"). The new stack is "ready to replace the old one"
+when every constraint has a green witness *and* the test cluster
+exercises the deploy path through `nspawn-dune-on-prometheus`-style
+end-to-end smoke against a controller-hosting node.
+
+**Crate shape**
+- C1. `lojix` is one crate with two binaries: `lojix-daemon` and
+  `lojix`. No `-cli` suffix on the CLI binary.
+- C2. The library `lojix` re-exports the wire vocabulary as
+  `lojix::wire` (= `signal_lojix`).
+- C3. Storage is `sema-engine`. Wire is `signal-core` carrying
+  `signal-lojix` records. No second actor framework, no second
+  database engine.
+
+**Wire boundary**
+- C4. `lojix-daemon` binds `/run/lojix/daemon.sock` (mode `0660`,
+  cluster-operator group) at startup; binds nowhere else.
+- C5. The socket carries only `signal-core`-framed
+  `signal-lojix::Request` / `signal-lojix::Reply` payloads.
+- C6. `lojix` opens the socket, sends one Nota request, prints one
+  Nota reply, exits.
+- C7. Frame decode rejects short prefixes, mismatched lengths, and
+  bytecheck failures with typed errors (delegated to `signal-core`).
+
+**Actor topology**
+- C8. `RuntimeRoot` is a Kameo `Actor` with state carrying child
+  refs (`LiveSetActor`, `GcRootActor`, `EventLogActor`,
+  `ContainerLifecycleActor`, `SocketAcceptor`). No ZST root.
+- C9. Each daemon-internal plane is its own Kameo actor with a
+  named state field; no `State = ()` actors.
+- C10. Failure policy: each supervisor has typed
+  `RestartPolicy::Permanent` for sema-backed actors (LiveSet,
+  EventLog) and `RestartPolicy::Never` for transient actors
+  (per-connection handlers).
+- C11. No `Arc<Mutex<T>>` between actors. State has one owner.
+- C12. No detached `tokio::spawn`. Long-running work is a
+  supervised actor or `DelegatedReply<R>` for short reply
+  deferral.
+
+**Durable state**
+- C13. The live generation set lives in a sema-engine table
+  (`Generation { generation, cluster, node, kind, store_path,
+  state }`); reconstructed on restart from sema, not from memory.
+- C14. The deploy event log is append-only via sema-engine
+  `Assert`; subscribers receive deltas through sema-engine
+  `Subscribe` (push-not-poll).
+- C15. GC roots are filesystem state at
+  `/nix/var/nix/gcroots/criomos/<cluster>/<node>/<kind>/<generation>`
+  with per-`<kind>` slots (`current`, `boot-pending`,
+  `rollback/<n>`, `pinned/<label>`, `recent/<timestamp>`); the
+  daemon never queries them via polling — its in-memory + sema
+  view is the source of truth.
+
+**Deploy pipeline**
+- C16. `DeploymentSubmission` triggers the projection-then-build
+  pipeline: read horizon-rs in-process, project the requested
+  cluster/node, build the toplevel via `nix build` with the
+  projected horizon as override-input, copy the closure to the
+  target node, activate per the requested `SystemAction`.
+- C17. Each pipeline phase emits a `DeploymentObservation` event
+  (`Submitted`, `Building`, `Built`, `Copying`, `Activating`,
+  `Succeeded` / `Failed`); subscribers see them live.
+- C18. Activation failure rolls back the GC root for that kind
+  (the failed generation does not become `current`).
+
+**Cache retention**
+- C19. `CacheRetentionRequest::PinGeneration` adds the generation
+  to `pinned/<label>`; `UnpinGeneration` removes it; `RetireGeneration`
+  removes the generation's GC roots and emits a `Retired`
+  observation. All transitions are committed via sema-engine
+  `Atomic` so subscribers see one `SnapshotId` per request.
+
+**Generation queries**
+- C20. `GenerationQuery` returns the live set filtered by the
+  query's optional `cluster`/`node`/`kind`. Read via sema-engine
+  `Match`; never blocks the mailbox on disk reads (the snapshot
+  is in memory).
+
+**Test discipline**
+- C21. Every constraint above has at least one test that fails
+  if the constraint is violated. (Topology / trace / forbidden-edge
+  / no-blocking / no-zst-actor families per
+  `~/primary/skills/actor-systems.md` §"Test actor density".)
+- C22. End-to-end smoke: a synthetic deploy on the test cluster
+  (atlas eval + dune nspawn boot) succeeds and emits the expected
+  `DeploymentObservation` event sequence.
+- C23. `goldragon`'s `datom.nota` projects + builds + activates
+  through the daemon for `prometheus` (the production-shape
+  smoke).
+
+**Cutover**
+- C24. After every constraint is green, `lojix-cli` is retired:
+  `CriomOS-home/flake.lock` and `CriomOS/flake.lock` no longer
+  pin `lojix-cli`; `lojix` and `lojix-daemon` are the only
+  cluster-deploy surfaces; the legacy `horizon-rs` `main` branch
+  closes the gap with `horizon-re-engineering`.
 
 ## 6 · Cross-cutting context
 
