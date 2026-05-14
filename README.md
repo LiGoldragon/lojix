@@ -1,23 +1,35 @@
-# lojix-daemon
+# lojix
 
-Long-lived deploy orchestrator daemon. Owns the live generation set, GC
-roots tree, deploy event log, and container lifecycle observation for
-the cluster. Receives typed deploy requests over
-`/run/lojix/daemon.sock`.
+The new deploy stack — one crate, two binaries:
 
-**Status: skeleton.** Documentation only — no code yet. See
-`ARCHITECTURE.md` for the planned shape and
-`~/primary/protocols/active-repositories.md` for the replacement-stack
-context.
+- **`lojix-daemon`** — long-lived deploy orchestrator. Owns the live
+  generation set, GC roots tree, deploy event log, and container
+  lifecycle observation. Binds `/run/lojix/daemon.sock`; receives
+  typed `signal-lojix` deploy requests; pushes
+  `DeploymentObservation` + `CacheRetentionObservation` to subscribers.
+- **`lojix`** — thin CLI client. Reads one Nota request, sends it to
+  the daemon as a `signal-lojix` frame, prints one Nota reply.
 
-Replaces the implementation surface of today's `lojix-cli` once shipped;
-`lojix-cli` becomes a thin client over this daemon.
+Storage lives in `sema-engine` (the typed database engine library);
+wire framing is `signal-core`. The contract repo is `signal-lojix`.
+
+**Status: in development.** First implementation lands on the
+`horizon-re-engineering` feature branch alongside the parallel horizon
+schema refactor. See `ARCHITECTURE.md` for the planned shape and
+`~/primary/protocols/active-repositories.md` for the broader context.
 
 ## Related
 
-- `signal-lojix` — the typed wire contract.
-- `lojix-cli` — today's monolithic deploy orchestrator (parallel build
-  until cutover).
+- `signal-lojix` — typed wire contract (DeploymentSubmission/Accepted/
+  Rejected/Observation, CacheRetentionRequest/Accepted/Rejected/
+  Observation, GenerationQuery/Listing).
+- `signal-core` — wire kernel that signal-lojix builds on.
+- `sema-engine` — typed database engine library used for durable state.
+- `horizon-rs` — cluster-proposal projection (read-only per request).
+- `lojix-cli` — legacy monolithic orchestrator; parallel build until
+  CriomOS migrates over.
+- `goldragon` — cluster proposal source.
+- `clavifaber` — per-host key material (separate component).
 
 ## License
 
