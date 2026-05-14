@@ -10,8 +10,7 @@ orchestrator + `lojix` thin CLI client). Implementation lands on the
 
 This repo is the **implementation home** for the new deploy stack that
 replaces today's monolithic `lojix-cli`. The architectural decisions
-are settled (per `ARCHITECTURE.md` + `~/primary/reports/system-assistant/04-dedicated-cloud-host-plan-second-revision.md`
-§P5); what remains is implementation.
+are settled (per `ARCHITECTURE.md`); what remains is implementation.
 
 The library half (`lojix`) holds shared types, Kameo actor
 implementations, and request/reply plumbing. The two binaries
