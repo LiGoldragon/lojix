@@ -1,0 +1,56 @@
+//! Smoke tests for the lojix scaffolding.
+//!
+//! These are the minimum witnesses that the crate compiles and that
+//! the substrate dependencies (signal-core, signal-lojix, sema-engine,
+//! nota-codec) link in cleanly. Subsequent test files cover the
+//! actor runtime, socket protocol, and deploy pipeline as those land.
+
+#[test]
+fn crate_compiles_and_names_itself() {
+    assert_eq!(env!("CARGO_PKG_NAME"), "lojix");
+}
+
+#[test]
+fn wire_vocabulary_is_reachable_via_re_export() {
+    // `lojix::wire` re-exports `signal_lojix`; the typed Request enum
+    // is what the daemon's socket loop and the CLI both speak.
+    let _ = std::any::type_name::<lojix::wire::Request>();
+}
+
+#[test]
+fn signal_core_is_on_the_dep_path() {
+    // The wire kernel comes via signal-core; signal-lojix's
+    // Request/Reply enums build on signal_channel! from this crate.
+    let _ = std::any::type_name::<signal_core::SignalVerb>();
+}
+
+#[test]
+fn sema_engine_is_on_the_dep_path() {
+    // The daemon's durable state lives in a sema-engine Engine.
+    let _ = std::any::type_name::<sema_engine::Engine>();
+}
+
+#[test]
+fn deployment_request_round_trips_via_wire_vocabulary() {
+    use lojix::wire::{
+        BuildLocally, BuilderSelection, ClusterName, DeploymentPlan, DeploymentSubmission,
+        FlakeReference, FullOsDeployment, NodeName, ProposalSource, Request, SystemAction,
+    };
+
+    let submission = DeploymentSubmission {
+        cluster: ClusterName::try_from("goldragon").unwrap(),
+        node: NodeName::try_from("prometheus").unwrap(),
+        source: ProposalSource::try_from("github:LiGoldragon/goldragon").unwrap(),
+        flake: FlakeReference::try_from("github:LiGoldragon/CriomOS").unwrap(),
+        plan: DeploymentPlan::FullOsDeployment(FullOsDeployment {
+            action: SystemAction::Switch,
+        }),
+        builder: BuilderSelection::BuildLocally(BuildLocally {}),
+        substituters: Vec::new(),
+    };
+    let request = Request::DeploymentSubmission(submission);
+
+    // The library compiles with the wire vocabulary it will speak;
+    // round-trip semantics live in signal-lojix's own tests.
+    assert!(matches!(request, Request::DeploymentSubmission(_)));
+}
