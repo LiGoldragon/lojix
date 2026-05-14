@@ -44,10 +44,15 @@ and binds the socket; `lojix` opens the socket, sends one
   Generation>` persisted via `sema-engine`. Source of truth for
   "what's running on every node right now."
 - **GC roots tree** —
-  `/nix/var/nix/gcroots/criomos/<cluster>/<node>/<kind>/<generation>`
-  symlink layout per
-  `~/primary/reports/system-assistant/04-dedicated-cloud-host-plan-second-revision.md`
-  §P4. Two-phase deletion respecting narinfo TTL.
+  `/nix/var/nix/gcroots/criomos/<cluster>/<node>/<kind>/<generation>` →
+  `<store-path>` symlinks. Per-`<kind>` slots: `current` (active
+  top-level), `boot-pending` (closure on `system.profile` not yet
+  activated), `rollback/<n>` (last N rolled-back generations,
+  default 4), `pinned/<label>` (operator-pinned releases),
+  `recent/<timestamp>` (short-grace builds protecting freshly-built
+  closures from cache eviction). Closure introspection via
+  `nix path-info -r`; do not reimplement Nix's reachability graph.
+  Two-phase deletion respecting narinfo TTL.
 - **Deploy event log** — append-only log of typed events
   (`BuildRealized`, `CachePublished`, `ActivationSucceeded`,
   `GenerationRetired`, `ContainerStarted`, `ContainerStopped`).
@@ -74,9 +79,13 @@ and binds the socket; `lojix` opens the socket, sends one
   horizon-rs).
 - **Per-host key material** — `clavifaber` (this stack is
   cluster-side, not per-host).
-- **Cluster trust runtime** — separate component (today missing; see
-  `~/primary/reports/system-specialist/118-criomos-state-and-sandbox-audit.md`
-  §"Cluster-trust runtime is still missing").
+- **Cluster trust runtime** — separate component (today missing).
+  Horizon carries policy and fingerprints; ClaviFaber emits local
+  public material; a separate runtime distributes that public
+  material across the cluster. That runtime does not exist yet, so
+  the data path for "new host publishes its SSH public key,
+  Yggdrasil address, Wi-Fi cert, and those facts reach the cluster"
+  is still conceptual.
 
 ## 3 · Code map (planned)
 
