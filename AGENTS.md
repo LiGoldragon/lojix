@@ -14,10 +14,8 @@ You MUST read [~/primary/repos/lore/AGENTS.md](../../../lore/AGENTS.md) — the 
   cluster deploys flow through it.
 
 - **Spec.** `ARCHITECTURE.md` is the local source of truth.
-  Cross-references:
-  - `~/primary/reports/system-assistant/04-dedicated-cloud-host-plan-second-revision.md`
-    §P5 — the broader implementation plan.
-  - `signal-lojix` at `github:LiGoldragon/signal-lojix` — wire contract.
+  Cross-reference: `signal-lojix` at `github:LiGoldragon/signal-lojix`
+  — wire contract.
 
 - **Actor discipline.** When implementation lands, every plane is a
   Kameo actor with declared mailbox, message protocol, and supervision.
