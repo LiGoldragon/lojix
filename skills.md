@@ -64,12 +64,21 @@ these):
   schema for the duration of the horizon re-engineering arc; retires
   after CriomOS migrates to consume this daemon's projection.
 
-## Status (2026-05-14)
+## Status (2026-05-15)
 
 - Repo recently renamed from `lojix-daemon`. GitHub redirect from old
   name in place.
-- First commits land on the `horizon-re-engineering` branch (see
+- Active implementation branch: `horizon-re-engineering` (see
   `~/primary/skills/feature-development.md` for the worktree-based
   branch convention).
+- The first runtime slice is present: `lojix-daemon` binds a Unix
+  socket, `lojix` sends one Nota request and prints one Nota reply,
+  and `RuntimeRoot` answers generation queries plus observation-stream
+  subscribe/retract requests. Socket handling uses one Kameo actor per
+  accepted connection; the listener is not held by a stalled client.
+- The durable deploy actors are still the next implementation step:
+  live generation set, GC roots, event log, container lifecycle
+  observation, and deployment pipeline.
 - The `signal-lojix` contract crate (`github:LiGoldragon/signal-lojix`)
-  evolves in parallel.
+  now uses the current `signal-core` streaming channel macro for
+  observations.

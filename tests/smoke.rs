@@ -1,9 +1,10 @@
-//! Smoke tests for the lojix scaffolding.
+//! Smoke tests for the lojix crate shape.
 //!
 //! These are the minimum witnesses that the crate compiles and that
 //! the substrate dependencies (signal-core, signal-lojix, sema-engine,
-//! nota-codec) link in cleanly. Subsequent test files cover the
-//! actor runtime, socket protocol, and deploy pipeline as those land.
+//! nota-codec) link in cleanly. Socket and actor witnesses live in
+//! `tests/socket.rs`; subsequent test files cover durable state and the
+//! deploy pipeline as those land.
 
 #[test]
 fn crate_compiles_and_names_itself() {

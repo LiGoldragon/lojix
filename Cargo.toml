@@ -2,7 +2,7 @@
 name         = "lojix"
 version      = "0.1.0"
 edition      = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license      = "MIT OR Apache-2.0"
 repository   = "https://github.com/LiGoldragon/lojix"
 description  = "Long-lived deploy orchestrator daemon (`lojix-daemon`) + thin CLI client (`lojix`) for the criome cluster."
@@ -29,8 +29,8 @@ signal-core  = { git = "https://github.com/LiGoldragon/signal-core.git" }
 signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix.git", branch = "horizon-re-engineering" }
 
 # Typed database engine (registered record families, Assert/Mutate/Match/
-# Subscribe/Atomic/Validate). The daemon owns one redb file via Engine.
-sema-engine  = { git = "https://github.com/LiGoldragon/sema-engine.git" }
+# Subscribe/commit/Validate). The daemon owns one redb file via Engine.
+sema-engine  = { git = "https://github.com/LiGoldragon/sema-engine.git", branch = "main" }
 
 # Text codec for the CLI's nota-in / nota-out boundary.
 nota-codec   = { git = "https://github.com/LiGoldragon/nota-codec.git", branch = "main" }

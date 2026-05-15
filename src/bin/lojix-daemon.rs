@@ -1,19 +1,19 @@
 //! lojix-daemon — long-lived deploy orchestrator entry point.
 //!
-//! Today this is a placeholder that exits cleanly. Subsequent commits
-//! wire up the supervised actor runtime per `ARCHITECTURE.md`:
-//! `RuntimeRoot` → (`LiveSetActor`, `GcRootActor`, `EventLogActor`,
-//! `ContainerLifecycleActor`, socket accept loop). The socket lives at
-//! `/run/lojix/daemon.sock` (mode `0660`, cluster-operator group).
+//! The first runtime slice binds the socket and routes requests through
+//! a Kameo `RuntimeRoot`. Effect-bearing deploy/cache actors land behind
+//! that root; until then those operations fail closed with typed replies.
 
 use std::process::ExitCode;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    eprintln!(
-        "lojix-daemon: scaffold ({}). \
-         Actor runtime + socket accept loop land in subsequent commits.",
-        env!("CARGO_PKG_VERSION")
-    );
-    ExitCode::SUCCESS
+    let server = lojix::SocketServer::new(lojix::SocketAddress::from_environment());
+    match server.serve_forever().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("lojix-daemon: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }

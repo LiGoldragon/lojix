@@ -1,20 +1,55 @@
 //! lojix — thin CLI client for `lojix-daemon`.
 //!
-//! Today this is a placeholder that exits cleanly. Subsequent commits
-//! wire up the one-record-in / one-record-out shape per
-//! `ARCHITECTURE.md`: read one Nota request from stdin (or argv),
-//! open `/run/lojix/daemon.sock`, send a `signal-core` frame carrying
-//! a `signal_lojix::Request`, await the matching `signal_lojix::Reply`,
-//! print it as Nota.
+//! Reads one Nota request from argv (joined with spaces) or stdin,
+//! opens `/run/lojix/daemon.sock` unless `LOJIX_SOCKET_PATH` overrides
+//! the launch boundary, sends a `signal-core` frame carrying a
+//! `signal_lojix::Request`, awaits the matching `signal_lojix::Reply`,
+//! and prints the reply payload as Nota.
 
+use std::io::Read;
 use std::process::ExitCode;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    eprintln!(
-        "lojix: scaffold ({}). \
-         One-nota-record-in / one-nota-record-out lands in subsequent commits.",
-        env!("CARGO_PKG_VERSION")
-    );
-    ExitCode::SUCCESS
+    let input = match InputText::read() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("lojix: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let client = lojix::Client::from_environment();
+    match client.send_text(input.as_str()).await {
+        Ok(reply) => {
+            println!("{reply}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("lojix: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+struct InputText {
+    value: String,
+}
+
+impl InputText {
+    fn read() -> std::io::Result<Self> {
+        let arguments: Vec<String> = std::env::args().skip(1).collect();
+        let value = if arguments.is_empty() {
+            let mut buffer = String::new();
+            std::io::stdin().read_to_string(&mut buffer)?;
+            buffer
+        } else {
+            arguments.join(" ")
+        };
+        Ok(Self { value })
+    }
+
+    fn as_str(&self) -> &str {
+        self.value.trim()
+    }
 }

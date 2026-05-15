@@ -4,12 +4,13 @@
 deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 (`lojix`) that speaks the daemon over a Unix socket.
 
-> **Status (2026-05-14):** in-development — repo recently renamed from
-> `lojix-daemon`. First implementation lands on the
-> `horizon-re-engineering` feature branch alongside the parallel
-> horizon schema refactor. Today's `lojix-cli` (separate repo) stays
-> at the current schema for the duration; retires after CriomOS
-> migrates to consume this daemon's projection.
+> **Status (2026-05-15):** in-development — repo recently renamed from
+> `lojix-daemon`. The `horizon-re-engineering` branch now has the first
+> socket/client/runtime slice against the current `signal-core` streaming
+> channel macro and the `signal-lojix` streaming observation contract.
+> Today's `lojix-cli` (separate repo) stays at the current schema for
+> the duration; retires after CriomOS migrates to consume this daemon's
+> projection.
 
 > **Scope (today vs eventually).** This stack sits on today's substrate
 > — Rust on Linux, `signal-core` over a Unix socket, `sema-engine`
@@ -37,9 +38,10 @@ and binds the socket; `lojix` opens the socket, sends one
 
 ## 1 · Owned surface
 
-- **`/run/lojix/daemon.sock`** — Unix socket binding (mode `0660`,
-  cluster-operator group). Receives `signal-lojix` requests; emits
-  `signal-lojix` replies and observations.
+- **`/run/lojix/daemon.sock`** — Unix socket binding. Receives
+  `signal-core` frames carrying `signal-lojix` requests; emits
+  matching replies. Production service wiring owns the final mode and
+  group.
 - **Live generation set** — `BTreeMap<(ClusterName, NodeName, Kind),
   Generation>` persisted via `sema-engine`. Source of truth for
   "what's running on every node right now."
@@ -51,8 +53,9 @@ and binds the socket; `lojix` opens the socket, sends one
 - **Deploy event log** — append-only log of typed events
   (`BuildRealized`, `CachePublished`, `ActivationSucceeded`,
   `GenerationRetired`, `ContainerStarted`, `ContainerStopped`).
-  Subscribers consume via `signal-lojix` `DeploymentObservation` /
-  `CacheRetentionObservation`.
+  Subscribers consume via `signal-lojix` streams opened by
+  `DeploymentObservationSubscription` /
+  `CacheRetentionObservationSubscription`.
 - **Container lifecycle observation** — systemd dbus subscriptions
   for `containers.<name>.service` transitions; mirrors into the
   event log.
@@ -78,27 +81,33 @@ and binds the socket; `lojix` opens the socket, sends one
   `~/primary/reports/system-specialist/118-criomos-state-and-sandbox-audit.md`
   §"Cluster-trust runtime is still missing").
 
-## 3 · Code map (planned)
+## 3 · Code map
 
 ```
 src/
-  lib.rs                # module entry; types + handlers
+  lib.rs                # module entry; public exports
+  client.rs             # thin client: one Nota request -> one Nota reply
+  error.rs              # crate-owned typed errors
+  runtime.rs            # Kameo RuntimeRoot + first message handler
+  socket.rs             # listener + per-connection actors + frames
   bin/
     lojix-daemon.rs     # daemon entry: socket bind, supervisor root
     lojix.rs            # CLI: read one nota, send, print one nota
-  daemon/
-    live_set.rs         # LiveSetActor: BTreeMap<...> via sema-engine
-    gc_roots.rs         # GcRootActor: /nix/var/nix/gcroots/criomos/...
-    events.rs           # EventLogActor: append-only typed events
-    container.rs        # ContainerLifecycleActor: systemd dbus observer
-    socket.rs           # accept loop; signal-core frame decode/encode
-    supervisor.rs       # Kameo supervisor wiring
-  client/
-    mod.rs              # CLI's request/reply handling
 ```
 
-Each daemon actor is a Kameo actor per `~/primary/skills/actor-systems.md`.
-No zero-state holders.
+Next implementation slices add the durable actors:
+
+```
+src/daemon/
+  live_set.rs           # LiveSetActor: BTreeMap<...> via sema-engine
+  gc_roots.rs           # GcRootActor: /nix/var/nix/gcroots/criomos/...
+  events.rs             # EventLogActor: append-only typed events
+  container.rs          # ContainerLifecycleActor: systemd dbus observer
+  supervisor.rs         # Kameo supervisor wiring
+```
+
+Each daemon actor is a Kameo actor per
+`~/primary/skills/actor-systems.md`. No zero-state holders.
 
 ## 4 · Storage and wire
 
@@ -107,7 +116,9 @@ No zero-state holders.
   pattern"). One redb file owned by the daemon; tables for live set,
   GC roots, event log, container lifecycle records.
 - **Wire:** `signal-core` frames carrying `signal-lojix` records.
-  Length-prefixed rkyv archives over the Unix socket.
+  Length-prefixed rkyv archives over the Unix socket. Streaming
+  observations are modeled as `signal-core` stream kinds, not ad hoc
+  reply variants.
 
 ## 5 · Invariants
 
@@ -142,8 +153,9 @@ end-to-end smoke against a controller-hosting node.
   database engine.
 
 **Wire boundary**
-- C4. `lojix-daemon` binds `/run/lojix/daemon.sock` (mode `0660`,
-  cluster-operator group) at startup; binds nowhere else.
+- C4. `lojix-daemon` binds `/run/lojix/daemon.sock` at startup;
+  binds nowhere else. Production service wiring sets the final mode
+  and cluster-operator group.
 - C5. The socket carries only `signal-core`-framed
   `signal-lojix::Request` / `signal-lojix::Reply` payloads.
 - C6. `lojix` opens the socket, sends one Nota request, prints one
@@ -162,9 +174,10 @@ end-to-end smoke against a controller-hosting node.
   EventLog) and `RestartPolicy::Never` for transient actors
   (per-connection handlers).
 - C11. No `Arc<Mutex<T>>` between actors. State has one owner.
-- C12. No detached `tokio::spawn`. Long-running work is a
-  supervised actor or `DelegatedReply<R>` for short reply
-  deferral.
+- C12. No detached `tokio::spawn` in production code. Long-running
+  work is a supervised actor or `DelegatedReply<R>` for short reply
+  deferral. The socket listener spawns one Kameo actor per accepted
+  connection so a stalled client cannot hold the listener.
 
 **Durable state**
 - C13. The live generation set lives in a sema-engine table
@@ -196,8 +209,8 @@ end-to-end smoke against a controller-hosting node.
 - C19. `CacheRetentionRequest::PinGeneration` adds the generation
   to `pinned/<label>`; `UnpinGeneration` removes it; `RetireGeneration`
   removes the generation's GC roots and emits a `Retired`
-  observation. All transitions are committed via sema-engine
-  `Atomic` so subscribers see one `SnapshotId` per request.
+  observation. All transitions are committed through sema-engine's
+  commit boundary so subscribers see one `SnapshotId` per request.
 
 **Generation queries**
 - C20. `GenerationQuery` returns the live set filtered by the
@@ -224,7 +237,7 @@ end-to-end smoke against a controller-hosting node.
   cluster-deploy surfaces; the legacy `horizon-rs` `main` branch
   closes the gap with `horizon-re-engineering`.
 
-## 6 · Cross-cutting context
+## 7 · Cross-cutting context
 
 - Workspace `~/primary/ESSENCE.md` is upstream of every rule.
 - `signal-lojix` at `github:LiGoldragon/signal-lojix` is the wire

@@ -475,7 +475,7 @@ dependencies = [
 [[package]]
 name = "sema-engine"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/sema-engine.git#78872ceec45db6f0d170299496d982fefbc78fea"
+source = "git+https://github.com/LiGoldragon/sema-engine.git?branch=main#d38091494eb1e8ba245091e28bb197ad6e994430"
 dependencies = [
  "rkyv",
  "sema",
@@ -516,11 +516,22 @@ dependencies = [
 [[package]]
 name = "signal-core"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-core.git#aa7a0d93ca8f516557c2be789f8556a7aec66da7"
+source = "git+https://github.com/LiGoldragon/signal-core.git#25212c0d2a3f6403e8131d8db4b810e14fdd826b"
 dependencies = [
  "nota-codec",
  "rkyv",
+ "signal-core-macros",
  "thiserror",
+]
+
+[[package]]
+name = "signal-core-macros"
+version = "0.1.0"
+source = "git+https://github.com/LiGoldragon/signal-core.git#25212c0d2a3f6403e8131d8db4b810e14fdd826b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -536,7 +547,7 @@ dependencies = [
 [[package]]
 name = "signal-lojix"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=horizon-re-engineering#40def9b57fc88cfa702c2c2a43a8a45fdf05c9d3"
+source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=horizon-re-engineering#bcad01a21f97457c5f0a91140f5ec65f0ece2fcc"
 dependencies = [
  "nota-codec",
  "rkyv",

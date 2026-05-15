@@ -18,15 +18,21 @@
 //! - **Text projection**: `nota-codec` for the CLI's nota-in /
 //!   nota-out boundary.
 //!
-//! ## Status
-//!
-//! Scaffolding. The library + binary entry points compile and link
-//! against the substrate dependencies. Actor implementations
-//! (`LiveSetActor`, `GcRootActor`, `EventLogActor`,
-//! `ContainerLifecycleActor`, socket accept loop, supervisor root)
-//! land in subsequent commits per the architecture in
-//! `ARCHITECTURE.md`.
+//! The first runtime slice owns the Signal socket path and a Kameo
+//! `RuntimeRoot` that returns typed safe replies. Deploy/build/copy/
+//! activation effects land behind additional actors; until then,
+//! effect-bearing requests are rejected rather than pretending to run.
+
+pub mod client;
+pub mod error;
+pub mod runtime;
+pub mod socket;
 
 // Re-export the wire vocabulary so dependents (the binaries below)
 // reach `Request`, `Reply`, and the typed records via `lojix::wire`.
 pub use signal_lojix as wire;
+
+pub use client::Client;
+pub use error::{Error, Result};
+pub use runtime::{RuntimeRequest, RuntimeRoot};
+pub use socket::{Connection, DEFAULT_SOCKET_PATH, SocketAddress, SocketServer};

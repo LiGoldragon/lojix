@@ -11,8 +11,16 @@
     crane.url = "github:ipetkov/crane";
   };
 
-  outputs = { self, nixpkgs, flake-utils, fenix, crane }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+      fenix,
+      crane,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = import nixpkgs { inherit system; };
         toolchain = fenix.packages.${system}.fromToolchainFile {
@@ -28,28 +36,50 @@
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
       in
       {
-        packages.default = craneLib.buildPackage (commonArgs // {
-          inherit cargoArtifacts;
-        });
+        packages.default = craneLib.buildPackage (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+          }
+        );
 
         checks = {
-          build = craneLib.cargoBuild (commonArgs // {
-            inherit cargoArtifacts;
-          });
-          test = craneLib.cargoTest (commonArgs // {
-            inherit cargoArtifacts;
-          });
-          test-smoke = craneLib.cargoTest (commonArgs // {
-            inherit cargoArtifacts;
-            cargoTestExtraArgs = "--test smoke";
-          });
+          build = craneLib.cargoBuild (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+            }
+          );
+          test = craneLib.cargoTest (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+            }
+          );
+          test-smoke = craneLib.cargoTest (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoTestExtraArgs = "--test smoke";
+            }
+          );
+          test-socket = craneLib.cargoTest (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoTestExtraArgs = "--test socket";
+            }
+          );
           fmt = craneLib.cargoFmt {
             inherit src;
           };
-          clippy = craneLib.cargoClippy (commonArgs // {
-            inherit cargoArtifacts;
-            cargoClippyExtraArgs = "--all-targets -- -D warnings";
-          });
+          clippy = craneLib.cargoClippy (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoClippyExtraArgs = "--all-targets -- -D warnings";
+            }
+          );
         };
 
         devShells.default = pkgs.mkShell {
@@ -60,5 +90,6 @@
             toolchain
           ];
         };
-      });
+      }
+    );
 }

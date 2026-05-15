@@ -5,17 +5,19 @@ The new deploy stack — one crate, two binaries:
 - **`lojix-daemon`** — long-lived deploy orchestrator. Owns the live
   generation set, GC roots tree, deploy event log, and container
   lifecycle observation. Binds `/run/lojix/daemon.sock`; receives
-  typed `signal-lojix` deploy requests; pushes
-  `DeploymentObservation` + `CacheRetentionObservation` to subscribers.
+  `signal-core` frames carrying typed `signal-lojix` deploy requests;
+  pushes `DeploymentObservation` + `CacheRetentionObservation` stream
+  events to subscribers.
 - **`lojix`** — thin CLI client. Reads one Nota request, sends it to
   the daemon as a `signal-lojix` frame, prints one Nota reply.
 
 Storage lives in `sema-engine` (the typed database engine library);
 wire framing is `signal-core`. The contract repo is `signal-lojix`.
 
-**Status: in development.** First implementation lands on the
-`horizon-re-engineering` feature branch alongside the parallel horizon
-schema refactor. See `ARCHITECTURE.md` for the planned shape and
+**Status: in development.** The `horizon-re-engineering` branch has
+the first socket/client/runtime slice. Durable deploy actors and
+sema-backed state are the next implementation step. See
+`ARCHITECTURE.md` for the full constraint set and
 `~/primary/protocols/active-repositories.md` for the broader context.
 
 ## Related
