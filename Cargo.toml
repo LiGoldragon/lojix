@@ -35,8 +35,14 @@ sema-engine  = { git = "https://github.com/LiGoldragon/sema-engine.git", branch 
 # Text codec for the CLI's nota-in / nota-out boundary.
 nota-codec   = { git = "https://github.com/LiGoldragon/nota-codec.git", branch = "main" }
 
+# Typed startup configuration boundary for production binaries.
+nota-config  = { git = "https://github.com/LiGoldragon/nota-config.git", branch = "main" }
+
 # Wire-format derives shared with signal-core / signal-lojix.
 rkyv         = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
+
+# Unix socket ownership and group lookup.
+nix          = { version = "0.30", features = ["fs", "user"] }
 
 # Crate-typed errors (per skills/rust/errors.md).
 thiserror    = "2"

@@ -50,6 +50,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "cfg_aliases"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
+
+[[package]]
 name = "downcast-rs"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -246,7 +252,9 @@ name = "lojix"
 version = "0.1.0"
 dependencies = [
  "kameo",
+ "nix",
  "nota-codec",
+ "nota-config",
  "rkyv",
  "sema-engine",
  "signal-core",
@@ -293,11 +301,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "nota-codec"
 version = "0.1.0"
 source = "git+https://github.com/LiGoldragon/nota-codec.git?branch=main#2618adbfc140d856723a729c316203d006af8207"
 dependencies = [
  "nota-derive",
+ "thiserror",
+]
+
+[[package]]
+name = "nota-config"
+version = "0.1.0"
+source = "git+https://github.com/LiGoldragon/nota-config.git?branch=main#d557fbf1dea78e417aa26a3b2858e810a6b6f292"
+dependencies = [
+ "nota-codec",
+ "rkyv",
  "thiserror",
 ]
 
@@ -516,7 +546,7 @@ dependencies = [
 [[package]]
 name = "signal-core"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-core.git#25212c0d2a3f6403e8131d8db4b810e14fdd826b"
+source = "git+https://github.com/LiGoldragon/signal-core.git#f17efc1c9c8c2d3bf755ef3a285a8618886c49fa"
 dependencies = [
  "nota-codec",
  "rkyv",
@@ -527,7 +557,7 @@ dependencies = [
 [[package]]
 name = "signal-core-macros"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-core.git#25212c0d2a3f6403e8131d8db4b810e14fdd826b"
+source = "git+https://github.com/LiGoldragon/signal-core.git#f17efc1c9c8c2d3bf755ef3a285a8618886c49fa"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -547,9 +577,10 @@ dependencies = [
 [[package]]
 name = "signal-lojix"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=horizon-re-engineering#bcad01a21f97457c5f0a91140f5ec65f0ece2fcc"
+source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=horizon-re-engineering#c4eed7d4e6ae7aadd88ce3bdf7ecba2207598262"
 dependencies = [
  "nota-codec",
+ "nota-config",
  "rkyv",
  "signal-core",
  "thiserror",

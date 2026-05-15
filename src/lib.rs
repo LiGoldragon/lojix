@@ -22,6 +22,9 @@
 //! `RuntimeRoot` that returns typed safe replies. Deploy/build/copy/
 //! activation effects land behind additional actors; until then,
 //! effect-bearing requests are rejected rather than pretending to run.
+//! Both production binaries read typed `signal-lojix` startup
+//! configuration records through `nota-config`; environment variables
+//! are not a production control-plane channel.
 
 pub mod client;
 pub mod error;
@@ -34,5 +37,5 @@ pub use signal_lojix as wire;
 
 pub use client::Client;
 pub use error::{Error, Result};
-pub use runtime::{RuntimeRequest, RuntimeRoot};
+pub use runtime::{RuntimeConfiguration, RuntimeRequest, RuntimeRoot};
 pub use socket::{Connection, DEFAULT_SOCKET_PATH, SocketAddress, SocketServer};

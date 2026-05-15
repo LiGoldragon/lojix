@@ -13,6 +13,18 @@ pub enum Error {
     #[error("nota error: {0}")]
     Nota(#[from] nota_codec::Error),
 
+    #[error("configuration error: {0}")]
+    Configuration(#[from] nota_config::Error),
+
+    #[error("signal-lojix boundary error: {0}")]
+    SignalLojix(#[from] signal_lojix::Error),
+
+    #[error("unix group does not exist: {0}")]
+    UnknownUnixGroup(String),
+
+    #[error("failed to apply unix socket ownership: {0}")]
+    UnixOwnership(#[from] nix::errno::Errno),
+
     #[error("expected a request frame")]
     ExpectedRequestFrame,
 

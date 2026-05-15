@@ -34,14 +34,15 @@
           strictDeps = true;
         };
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-      in
-      {
-        packages.default = craneLib.buildPackage (
+        package = craneLib.buildPackage (
           commonArgs
           // {
             inherit cargoArtifacts;
           }
         );
+      in
+      {
+        packages.default = package;
 
         checks = {
           build = craneLib.cargoBuild (
@@ -70,6 +71,26 @@
               cargoTestExtraArgs = "--test socket";
             }
           );
+          test-configuration-boundary = craneLib.cargoTest (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoTestExtraArgs = "--test configuration_boundary";
+            }
+          );
+          daemon-cli-integration =
+            pkgs.runCommand "lojix-daemon-cli-integration"
+              {
+                nativeBuildInputs = [
+                  package
+                  pkgs.coreutils
+                  pkgs.gnugrep
+                  pkgs.socat
+                ];
+              }
+              ''
+                bash ${./tests/daemon-cli-integration.sh}
+              '';
           fmt = craneLib.cargoFmt {
             inherit src;
           };

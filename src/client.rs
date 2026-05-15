@@ -15,8 +15,10 @@ impl Client {
         Self { address }
     }
 
-    pub fn from_environment() -> Self {
-        Self::new(SocketAddress::from_environment())
+    pub fn from_configuration(configuration: &wire::LojixCliConfiguration) -> Self {
+        Self::new(SocketAddress::new(
+            configuration.daemon_socket_path.as_str(),
+        ))
     }
 
     pub async fn send(&self, request: wire::Request) -> Result<wire::Reply> {
@@ -48,6 +50,27 @@ impl Client {
         let mut decoder = Decoder::new(text);
         let request = wire::Request::decode(&mut decoder)?;
         let reply = self.send(request).await?;
+        Self::render_reply(reply, wire::ReplyRendering::Compact)
+    }
+
+    pub async fn send_text_with_rendering(
+        &self,
+        text: &str,
+        rendering: wire::ReplyRendering,
+    ) -> Result<String> {
+        let mut decoder = Decoder::new(text);
+        let request = wire::Request::decode(&mut decoder)?;
+        let reply = self.send(request).await?;
+        Self::render_reply(reply, rendering)
+    }
+
+    fn render_reply(reply: wire::Reply, rendering: wire::ReplyRendering) -> Result<String> {
+        match rendering {
+            wire::ReplyRendering::Compact => Self::render_compact_reply(reply),
+        }
+    }
+
+    fn render_compact_reply(reply: wire::Reply) -> Result<String> {
         let mut encoder = Encoder::new();
         reply.encode(&mut encoder)?;
         Ok(encoder.into_string())

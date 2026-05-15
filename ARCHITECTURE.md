@@ -153,15 +153,36 @@ end-to-end smoke against a controller-hosting node.
   database engine.
 
 **Wire boundary**
-- C4. `lojix-daemon` binds `/run/lojix/daemon.sock` at startup;
-  binds nowhere else. Production service wiring sets the final mode
-  and cluster-operator group.
+- C4. `lojix-daemon` binds the socket named by
+  `LojixDaemonConfiguration.daemon_socket_path` at startup; binds
+  nowhere else. Production service wiring passes
+  `/run/lojix/daemon.sock` and the cluster-operator group.
 - C5. The socket carries only `signal-core`-framed
   `signal-lojix::Request` / `signal-lojix::Reply` payloads.
-- C6. `lojix` opens the socket, sends one Nota request, prints one
-  Nota reply, exits.
+- C6. `lojix` reads `LojixCliConfiguration` from argv position 0,
+  opens the configured socket, sends one Nota request read from argv
+  position 1+ or stdin, prints one Nota reply, exits.
 - C7. Frame decode rejects short prefixes, mismatched lengths, and
   bytecheck failures with typed errors (delegated to `signal-core`).
+- C7a. The flake has a binary-level Nix witness that starts the
+  installed `lojix-daemon`, drives the installed `lojix` client over a
+  private Unix socket using typed `nota-config` files, checks socket
+  mode, argv and stdin request modes, opens an observation subscription,
+  and proves a stalled raw socket client does not block a second CLI
+  request.
+
+**Configuration boundary**
+- C7b. Production binaries read control-plane configuration through
+  `nota_config::ConfigurationSource`; environment variables are not a
+  production socket/configuration channel. Witness:
+  `tests/configuration_boundary.rs`.
+- C7c. `LojixDaemonConfiguration` is data-bearing: the daemon applies
+  the configured socket mode, optional socket group, state directory,
+  GC-root directory, operator identity, owned cluster, and peer daemon
+  bindings at startup.
+- C7d. `LojixCliConfiguration` is control-plane only. Deploy plans,
+  generation queries, and cache-retention mutations remain data-plane
+  `Request` records and are never embedded in CLI configuration.
 
 **Actor topology**
 - C8. `RuntimeRoot` is a Kameo `Actor` with state carrying child

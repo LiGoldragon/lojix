@@ -64,7 +64,7 @@ these):
   schema for the duration of the horizon re-engineering arc; retires
   after CriomOS migrates to consume this daemon's projection.
 
-## Status (2026-05-15)
+## Status (2026-05-16)
 
 - Repo recently renamed from `lojix-daemon`. GitHub redirect from old
   name in place.
@@ -76,6 +76,21 @@ these):
   and `RuntimeRoot` answers generation queries plus observation-stream
   subscribe/retract requests. Socket handling uses one Kameo actor per
   accepted connection; the listener is not held by a stalled client.
+- Production binaries use typed `nota-config` configuration records
+  from `signal-lojix`. `lojix-daemon` reads a
+  `LojixDaemonConfiguration`; `lojix` reads a `LojixCliConfiguration`
+  as argv position 0 and the data-plane request from argv position 1+
+  or stdin. Do not reintroduce socket-path environment variables as a
+  production control plane.
+- `checks.<system>.daemon-cli-integration` is the current binary-level
+  Nix witness. It starts the packaged daemon from a typed daemon
+  configuration file, drives the packaged CLI from a typed CLI
+  configuration file through argv and stdin request modes, checks the
+  socket mode, opens a subscription, and checks that a stalled raw
+  Unix-socket connection does not block another CLI request.
+- `checks.<system>.test-configuration-boundary` is the source-level
+  witness that production code uses typed `nota-config` sources and no
+  socket-path environment-variable control plane.
 - The durable deploy actors are still the next implementation step:
   live generation set, GC roots, event log, container lifecycle
   observation, and deployment pipeline.

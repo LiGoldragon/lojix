@@ -5,17 +5,66 @@ use kameo::message::{Context, Message};
 
 use crate::wire;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeConfiguration {
+    operator_identity: wire::OperatorIdentity,
+    owned_cluster: wire::ClusterName,
+    peer_daemons: Vec<wire::PeerDaemonBinding>,
+}
+
+impl RuntimeConfiguration {
+    pub fn from_daemon_configuration(configuration: &wire::LojixDaemonConfiguration) -> Self {
+        Self {
+            operator_identity: configuration.operator_identity.clone(),
+            owned_cluster: configuration.owned_cluster.clone(),
+            peer_daemons: configuration.peer_daemons.clone(),
+        }
+    }
+
+    pub fn for_in_process_tests() -> Self {
+        Self {
+            operator_identity: wire::OperatorIdentity::from_text("in_process_test")
+                .expect("static operator identity"),
+            owned_cluster: wire::ClusterName::from_text("test_cluster")
+                .expect("static cluster name"),
+            peer_daemons: Vec::new(),
+        }
+    }
+
+    pub fn operator_identity(&self) -> &wire::OperatorIdentity {
+        &self.operator_identity
+    }
+
+    pub fn owned_cluster(&self) -> &wire::ClusterName {
+        &self.owned_cluster
+    }
+
+    pub fn peer_daemons(&self) -> &[wire::PeerDaemonBinding] {
+        &self.peer_daemons
+    }
+}
+
 pub struct RuntimeRoot {
+    configuration: RuntimeConfiguration,
     next_deployment_observation_token: u64,
     next_cache_retention_observation_token: u64,
 }
 
 impl RuntimeRoot {
     pub fn new() -> Self {
+        Self::with_configuration(RuntimeConfiguration::for_in_process_tests())
+    }
+
+    pub fn with_configuration(configuration: RuntimeConfiguration) -> Self {
         Self {
+            configuration,
             next_deployment_observation_token: 1,
             next_cache_retention_observation_token: 1,
         }
+    }
+
+    pub fn configuration(&self) -> &RuntimeConfiguration {
+        &self.configuration
     }
 }
 

@@ -1,9 +1,11 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use kameo::Actor;
 use kameo::actor::{ActorRef, Spawn};
 use kameo::error::Infallible;
 use kameo::message::{Context, Message};
+use nix::unistd::{Group, chown};
 use signal_core::{
     ExchangeIdentifier, ExchangeLane, LaneSequence, NonEmpty, Reply as CoreReply, SessionEpoch,
     SubReply,
@@ -12,10 +14,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::error::{Error, Result};
-use crate::runtime::{RuntimeRequest, RuntimeRoot};
+use crate::runtime::{RuntimeConfiguration, RuntimeRequest, RuntimeRoot};
 use crate::wire;
 
 pub const DEFAULT_SOCKET_PATH: &str = "/run/lojix/daemon.sock";
+const DEFAULT_SOCKET_MODE: u32 = 0o600;
 
 pub struct SocketAddress {
     path: PathBuf,
@@ -24,13 +27,6 @@ pub struct SocketAddress {
 impl SocketAddress {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
-    }
-
-    pub fn from_environment() -> Self {
-        match std::env::var_os("LOJIX_SOCKET_PATH") {
-            Some(path) => Self::new(PathBuf::from(path)),
-            None => Self::new(DEFAULT_SOCKET_PATH),
-        }
     }
 
     pub fn path(&self) -> &Path {
@@ -75,15 +71,40 @@ where
 
 pub struct SocketServer {
     address: SocketAddress,
+    socket_mode: u32,
+    socket_group: Option<wire::UnixGroup>,
+    state_directory: Option<PathBuf>,
+    gc_root_directory: Option<PathBuf>,
+    runtime_configuration: RuntimeConfiguration,
 }
 
 impl SocketServer {
     pub fn new(address: SocketAddress) -> Self {
-        Self { address }
+        Self {
+            address,
+            socket_mode: DEFAULT_SOCKET_MODE,
+            socket_group: None,
+            state_directory: None,
+            gc_root_directory: None,
+            runtime_configuration: RuntimeConfiguration::for_in_process_tests(),
+        }
+    }
+
+    pub fn from_configuration(configuration: wire::LojixDaemonConfiguration) -> Self {
+        Self {
+            address: SocketAddress::new(configuration.daemon_socket_path.as_str()),
+            socket_mode: configuration.daemon_socket_mode.into_u32(),
+            socket_group: configuration.daemon_socket_group.clone(),
+            state_directory: Some(PathBuf::from(configuration.state_directory.as_str())),
+            gc_root_directory: Some(PathBuf::from(configuration.gc_root_directory.as_str())),
+            runtime_configuration: RuntimeConfiguration::from_daemon_configuration(&configuration),
+        }
     }
 
     pub async fn serve_forever(self) -> Result<()> {
-        let root = RuntimeRoot::spawn(RuntimeRoot::new());
+        let root = RuntimeRoot::spawn(RuntimeRoot::with_configuration(
+            self.runtime_configuration.clone(),
+        ));
         let listener = self.bind_listener()?;
         loop {
             let (stream, _) = listener.accept().await?;
@@ -92,6 +113,7 @@ impl SocketServer {
     }
 
     fn bind_listener(&self) -> Result<UnixListener> {
+        self.prepare_runtime_directories()?;
         if let Some(parent) = self.address.path().parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -100,7 +122,33 @@ impl SocketServer {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        UnixListener::bind(self.address.path()).map_err(Into::into)
+        let listener = UnixListener::bind(self.address.path())?;
+        std::fs::set_permissions(
+            self.address.path(),
+            std::fs::Permissions::from_mode(self.socket_mode),
+        )?;
+        self.apply_socket_group()?;
+        Ok(listener)
+    }
+
+    fn prepare_runtime_directories(&self) -> Result<()> {
+        if let Some(state_directory) = &self.state_directory {
+            std::fs::create_dir_all(state_directory)?;
+        }
+        if let Some(gc_root_directory) = &self.gc_root_directory {
+            std::fs::create_dir_all(gc_root_directory)?;
+        }
+        Ok(())
+    }
+
+    fn apply_socket_group(&self) -> Result<()> {
+        let Some(group) = &self.socket_group else {
+            return Ok(());
+        };
+        let unix_group = Group::from_name(group.as_str())?
+            .ok_or_else(|| Error::UnknownUnixGroup(group.as_str().to_owned()))?;
+        chown(self.address.path(), None, Some(unix_group.gid))?;
+        Ok(())
     }
 
     async fn spawn_connection(stream: UnixStream, root: ActorRef<RuntimeRoot>) -> Result<()> {

@@ -6,9 +6,21 @@
 
 use std::process::ExitCode;
 
+use nota_config::ConfigurationSource;
+
 #[tokio::main]
 async fn main() -> ExitCode {
-    let server = lojix::SocketServer::new(lojix::SocketAddress::from_environment());
+    let configuration = match ConfigurationSource::from_argv()
+        .and_then(|source| source.decode::<lojix::wire::LojixDaemonConfiguration>())
+    {
+        Ok(configuration) => configuration,
+        Err(error) => {
+            eprintln!("lojix-daemon: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let server = lojix::SocketServer::from_configuration(configuration);
     match server.serve_forever().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
