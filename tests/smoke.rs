@@ -41,8 +41,10 @@ fn deployment_request_round_trips_via_wire_vocabulary() {
     let submission = DeploymentSubmission {
         cluster: ClusterName::try_from("goldragon").unwrap(),
         node: NodeName::try_from("prometheus").unwrap(),
-        source: ProposalSource::try_from("github:LiGoldragon/goldragon").unwrap(),
-        flake: FlakeReference::try_from("github:LiGoldragon/CriomOS").unwrap(),
+        source: ProposalSource::try_from("github:LiGoldragon/goldragon/horizon-re-engineering")
+            .unwrap(),
+        flake: FlakeReference::try_from("github:LiGoldragon/CriomOS/horizon-re-engineering")
+            .unwrap(),
         plan: DeploymentPlan::FullOsDeployment(FullOsDeployment {
             action: SystemAction::Switch,
         }),

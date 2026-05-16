@@ -220,6 +220,10 @@ end-to-end smoke against a controller-hosting node.
   cluster/node, build the toplevel via `nix build` with the
   projected horizon as override-input, copy the closure to the
   target node, activate per the requested `SystemAction`.
+  While this branch is under construction, deploy-facing examples and
+  tests target the matching `horizon-re-engineering` branches of
+  `CriomOS`, `goldragon`, and `horizon-rs`; default-branch examples are
+  not valid witnesses for this arc.
 - C17. Each pipeline phase emits a `DeploymentObservation` event
   (`Submitted`, `Building`, `Built`, `Copying`, `Activating`,
   `Succeeded` / `Failed`); subscribers see them live.
