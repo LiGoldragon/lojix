@@ -91,9 +91,17 @@ these):
 - `checks.<system>.test-configuration-boundary` is the source-level
   witness that production code uses typed `nota-config` sources and no
   socket-path environment-variable control plane.
-- The durable deploy actors are still the next implementation step:
-  live generation set, GC roots, event log, container lifecycle
-  observation, and deployment pipeline.
+- The first deploy actor slice is present. `DeploymentSubmission`
+  validates build-only plans synchronously, rejects local builds and
+  activation actions before any external tool runs, spawns a per-
+  deployment build actor, projects Horizon in-process, stages generated
+  inputs to a remote builder, and records submitted/building/built/
+  failed observations. `checks.<system>.test-build-pipeline` is the
+  current Nix witness for this path.
+- The durable deploy state is still a next implementation step: live
+  generation set, GC roots, sema-backed event log, live pushed stream
+  delivery, container lifecycle observation, closure copy, activation,
+  rollback, and cache retention.
 - The `signal-lojix` contract crate (`github:LiGoldragon/signal-lojix`)
   now uses the current `signal-core` streaming channel macro for
   observations.

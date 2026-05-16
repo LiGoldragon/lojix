@@ -18,16 +18,18 @@
 //! - **Text projection**: `nota-codec` for the CLI's nota-in /
 //!   nota-out boundary.
 //!
-//! The first runtime slice owns the Signal socket path and a Kameo
-//! `RuntimeRoot` that returns typed safe replies. Deploy/build/copy/
-//! activation effects land behind additional actors; until then,
-//! effect-bearing requests are rejected rather than pretending to run.
-//! Both production binaries read typed `signal-lojix` startup
-//! configuration records through `nota-config`; environment variables
-//! are not a production control-plane channel.
+//! The current runtime slice owns the Signal socket path, typed
+//! startup configuration, and a Kameo `RuntimeRoot` that accepts
+//! build-only deployment submissions. Build jobs run in per-deployment
+//! actors; local builds and activation actions are rejected before any
+//! external tool runs. Both production binaries read typed
+//! `signal-lojix` startup configuration records through `nota-config`;
+//! environment variables are not a production control-plane channel.
 
 pub mod client;
+pub mod deploy;
 pub mod error;
+pub mod process;
 pub mod runtime;
 pub mod socket;
 

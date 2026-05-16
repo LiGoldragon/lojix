@@ -91,13 +91,14 @@ impl SocketServer {
     }
 
     pub fn from_configuration(configuration: wire::LojixDaemonConfiguration) -> Self {
+        let runtime_configuration = RuntimeConfiguration::from_daemon_configuration(&configuration);
         Self {
             address: SocketAddress::new(configuration.daemon_socket_path.as_str()),
             socket_mode: configuration.daemon_socket_mode.into_u32(),
             socket_group: configuration.daemon_socket_group.clone(),
-            state_directory: Some(PathBuf::from(configuration.state_directory.as_str())),
-            gc_root_directory: Some(PathBuf::from(configuration.gc_root_directory.as_str())),
-            runtime_configuration: RuntimeConfiguration::from_daemon_configuration(&configuration),
+            state_directory: Some(runtime_configuration.state_directory().to_path_buf()),
+            gc_root_directory: Some(runtime_configuration.gc_root_directory().to_path_buf()),
+            runtime_configuration,
         }
     }
 

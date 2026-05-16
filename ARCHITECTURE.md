@@ -4,13 +4,13 @@
 deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 (`lojix`) that speaks the daemon over a Unix socket.
 
-> **Status (2026-05-15):** in-development — repo recently renamed from
+> **Status (2026-05-16):** in-development — repo recently renamed from
 > `lojix-daemon`. The `horizon-re-engineering` branch now has the first
 > socket/client/runtime slice against the current `signal-core` streaming
-> channel macro and the `signal-lojix` streaming observation contract.
-> Today's `lojix-cli` (separate repo) stays at the current schema for
-> the duration; retires after CriomOS migrates to consume this daemon's
-> projection.
+> channel macro, typed daemon/CLI configuration, and the first
+> build-only deploy actor slice. Today's `lojix-cli` (separate repo)
+> stays at the current schema for the duration; retires after CriomOS
+> migrates to consume this daemon's projection.
 
 > **Scope (today vs eventually).** This stack sits on today's substrate
 > — Rust on Linux, `signal-core` over a Unix socket, `sema-engine`
@@ -87,7 +87,9 @@ and binds the socket; `lojix` opens the socket, sends one
 src/
   lib.rs                # module entry; public exports
   client.rs             # thin client: one Nota request -> one Nota reply
+  deploy.rs             # deployment/event-log actors + build-only request path
   error.rs              # crate-owned typed errors
+  process.rs            # typed external-process invocations/toolchain
   runtime.rs            # Kameo RuntimeRoot + first message handler
   socket.rs             # listener + per-connection actors + frames
   bin/
@@ -95,13 +97,13 @@ src/
     lojix.rs            # CLI: read one nota, send, print one nota
 ```
 
-Next implementation slices add the durable actors:
+Next implementation slices add the sema-backed durable actors:
 
 ```
 src/daemon/
   live_set.rs           # LiveSetActor: BTreeMap<...> via sema-engine
   gc_roots.rs           # GcRootActor: /nix/var/nix/gcroots/criomos/...
-  events.rs             # EventLogActor: append-only typed events
+  events.rs             # EventLogActor: sema-backed append-only typed events
   container.rs          # ContainerLifecycleActor: systemd dbus observer
   supervisor.rs         # Kameo supervisor wiring
 ```
@@ -220,6 +222,11 @@ end-to-end smoke against a controller-hosting node.
   cluster/node, build the toplevel via `nix build` with the
   projected horizon as override-input, copy the closure to the
   target node, activate per the requested `SystemAction`.
+  Current implemented slice accepts only build-only submissions,
+  rejects local builds and activation actions before any external
+  tool runs, stages generated Horizon/System/Deployment inputs to the
+  remote builder, and records `Submitted` / `Building` / `Built` /
+  `Failed` observations.
   While this branch is under construction, deploy-facing examples and
   tests target the matching `horizon-re-engineering` branches of
   `CriomOS`, `goldragon`, and `horizon-rs`; default-branch examples are
@@ -227,6 +234,9 @@ end-to-end smoke against a controller-hosting node.
 - C17. Each pipeline phase emits a `DeploymentObservation` event
   (`Submitted`, `Building`, `Built`, `Copying`, `Activating`,
   `Succeeded` / `Failed`); subscribers see them live.
+  Current implemented slice exposes the in-memory event log through
+  subscription-open snapshots; live pushed stream frames remain part
+  of the next stream-delivery slice.
 - C18. Activation failure rolls back the GC root for that kind
   (the failed generation does not become `current`).
 

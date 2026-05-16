@@ -32,6 +32,10 @@ signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix.git", branch
 # Subscribe/commit/Validate). The daemon owns one redb file via Engine.
 sema-engine  = { git = "https://github.com/LiGoldragon/sema-engine.git", branch = "main" }
 
+# Horizon projection library — projects cluster proposals before build.
+horizon-lib  = { git = "https://github.com/LiGoldragon/horizon-rs.git", branch = "horizon-re-engineering", package = "horizon-lib" }
+horizon-nota-codec = { package = "nota-codec", git = "https://github.com/LiGoldragon/nota-codec.git" }
+
 # Text codec for the CLI's nota-in / nota-out boundary.
 nota-codec   = { git = "https://github.com/LiGoldragon/nota-codec.git", branch = "main" }
 
@@ -46,6 +50,9 @@ nix          = { version = "0.30", features = ["fs", "user"] }
 
 # Crate-typed errors (per skills/rust/errors.md).
 thiserror    = "2"
+
+# JSON materialization for generated horizon input flakes.
+serde_json   = "1"
 
 # Actor framework (per skills/actor-systems.md and skills/kameo.md).
 kameo        = "0.20"

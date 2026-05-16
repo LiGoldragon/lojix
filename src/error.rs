@@ -13,11 +13,30 @@ pub enum Error {
     #[error("nota error: {0}")]
     Nota(#[from] nota_codec::Error),
 
+    #[error("horizon nota error: {0}")]
+    HorizonNota(#[from] horizon_nota_codec::Error),
+
     #[error("configuration error: {0}")]
     Configuration(#[from] nota_config::Error),
 
     #[error("signal-lojix boundary error: {0}")]
     SignalLojix(#[from] signal_lojix::Error),
+
+    #[error("horizon error: {0}")]
+    Horizon(#[from] horizon_lib::Error),
+
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("process {program} failed with exit {status}: {stderr}")]
+    ProcessFailed {
+        program: String,
+        status: i32,
+        stderr: String,
+    },
+
+    #[error("deployment rejected: {0}")]
+    DeploymentRejected(String),
 
     #[error("unix group does not exist: {0}")]
     UnknownUnixGroup(String),
