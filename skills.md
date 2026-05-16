@@ -88,6 +88,10 @@ these):
   configuration file through argv and stdin request modes, checks the
   socket mode, opens a subscription, and checks that a stalled raw
   Unix-socket connection does not block another CLI request.
+- `apps.<system>.real-build-smoke` is the impure real-cluster smoke
+  runner. It requires environment variables for cluster, node, builder,
+  proposal source, and system flake reference; it must not grow
+  hardcoded cluster defaults.
 - `checks.<system>.test-configuration-boundary` is the source-level
   witness that production code uses typed `nota-config` sources and no
   socket-path environment-variable control plane.

@@ -40,9 +40,27 @@
             inherit cargoArtifacts;
           }
         );
+        realBuildSmoke = pkgs.writeShellApplication {
+          name = "lojix-real-build-smoke";
+          runtimeInputs = [
+            package
+            pkgs.coreutils
+            pkgs.gnugrep
+            pkgs.gnused
+          ];
+          text = builtins.readFile ./tests/real-build-smoke.sh;
+        };
       in
       {
-        packages.default = package;
+        packages = {
+          default = package;
+          real-build-smoke = realBuildSmoke;
+        };
+
+        apps.real-build-smoke = {
+          type = "app";
+          program = "${realBuildSmoke}/bin/lojix-real-build-smoke";
+        };
 
         checks = {
           build = craneLib.cargoBuild (

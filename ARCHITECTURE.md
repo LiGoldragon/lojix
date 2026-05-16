@@ -292,7 +292,10 @@ end-to-end smoke against a controller-hosting node.
   `~/primary/skills/actor-systems.md` §"Test actor density".)
 - C22. End-to-end smoke: a synthetic deploy on the test cluster
   (atlas eval + dune nspawn boot) succeeds and emits the expected
-  `DeploymentObservation` event sequence.
+  `DeploymentObservation` event sequence. Current branch exposes an
+  impure operator smoke runner as `apps.<system>.real-build-smoke`;
+  it requires caller-provided cluster/proposal/builder environment
+  variables so Lojix does not hardcode a specific cluster.
 - C23. `goldragon`'s `datom.nota` projects + builds + activates
   through the daemon for `prometheus` (the production-shape
   smoke).

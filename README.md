@@ -28,6 +28,24 @@ witness data on this branch target the matching
 `horizon-rs`. See `ARCHITECTURE.md` for the full constraint set and
 `~/primary/protocols/active-repositories.md` for the broader context.
 
+## Real Build Smoke
+
+The flake exposes an impure operator smoke runner:
+
+```sh
+LOJIX_SMOKE_CLUSTER=... \
+LOJIX_SMOKE_NODE=... \
+LOJIX_SMOKE_BUILDER=... \
+LOJIX_SMOKE_PROPOSAL_SOURCE=/path/to/datom.nota \
+LOJIX_SMOKE_FLAKE_REFERENCE=github:owner/system/branch \
+nix run .#real-build-smoke
+```
+
+It starts a temporary `lojix-daemon`, submits a build-only
+`FullOsDeployment`, waits for `DeploymentBuilt`, checks
+`GenerationQuery`, and verifies the built-output GC root. It is not a
+pure flake check because it uses SSH and the caller's cluster.
+
 ## Related
 
 - `signal-lojix` — typed wire contract (DeploymentSubmission/Accepted/
