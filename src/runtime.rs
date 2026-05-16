@@ -6,7 +6,8 @@ use kameo::error::Infallible;
 use kameo::message::{Context, Message};
 
 use crate::deploy::{
-    DeploymentActor, DeploymentObservationSnapshot, EventLogActor, StartDeployment,
+    DeploymentActor, DeploymentObservationSnapshot, EventLogActor, GarbageCollectionRoots,
+    StartDeployment,
 };
 use crate::process::ProcessToolchain;
 use crate::wire;
@@ -51,6 +52,16 @@ impl RuntimeConfiguration {
         self
     }
 
+    pub fn with_state_directory(mut self, state_directory: impl Into<PathBuf>) -> Self {
+        self.state_directory = state_directory.into();
+        self
+    }
+
+    pub fn with_gc_root_directory(mut self, gc_root_directory: impl Into<PathBuf>) -> Self {
+        self.gc_root_directory = gc_root_directory.into();
+        self
+    }
+
     pub fn operator_identity(&self) -> &wire::OperatorIdentity {
         &self.operator_identity
     }
@@ -80,6 +91,7 @@ pub struct RuntimeRoot {
     configuration: RuntimeConfiguration,
     deployment_actor: ActorRef<DeploymentActor>,
     event_log: ActorRef<EventLogActor>,
+    garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
     next_deployment_identifier: u64,
     next_deployment_observation_token: u64,
     next_cache_retention_observation_token: u64,
@@ -92,14 +104,19 @@ impl RuntimeRoot {
 
     pub fn with_configuration(configuration: RuntimeConfiguration) -> Self {
         let event_log = EventLogActor::spawn(EventLogActor::new());
+        let garbage_collection_roots = GarbageCollectionRoots::spawn(GarbageCollectionRoots::new(
+            configuration.gc_root_directory().to_path_buf(),
+        ));
         let deployment_actor = DeploymentActor::spawn(DeploymentActor::new(
             configuration.clone(),
             event_log.clone(),
+            garbage_collection_roots.clone(),
         ));
         Self {
             configuration,
             deployment_actor,
             event_log,
+            garbage_collection_roots,
             next_deployment_identifier: 1,
             next_deployment_observation_token: 1,
             next_cache_retention_observation_token: 1,
@@ -108,6 +125,10 @@ impl RuntimeRoot {
 
     pub fn configuration(&self) -> &RuntimeConfiguration {
         &self.configuration
+    }
+
+    pub fn garbage_collection_roots(&self) -> &ActorRef<GarbageCollectionRoots> {
+        &self.garbage_collection_roots
     }
 
     fn next_deployment(&mut self) -> wire::DeploymentId {

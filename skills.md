@@ -95,13 +95,15 @@ these):
   validates build-only plans synchronously, rejects local builds and
   activation actions before any external tool runs, spawns a per-
   deployment build actor, projects Horizon in-process, stages generated
-  inputs to a remote builder, and records submitted/building/built/
-  failed observations. `checks.<system>.test-build-pipeline` is the
-  current Nix witness for this path.
+  inputs to a remote builder, pins realized outputs through the
+  `GarbageCollectionRoots` actor before reporting `DeploymentBuilt`,
+  and records submitted/building/built/failed observations.
+  `checks.<system>.test-build-pipeline` is the current Nix witness
+  for this path.
 - The durable deploy state is still a next implementation step: live
-  generation set, GC roots, sema-backed event log, live pushed stream
-  delivery, container lifecycle observation, closure copy, activation,
-  rollback, and cache retention.
+  generation set, sema-backed GC-root records, sema-backed event log,
+  live pushed stream delivery, container lifecycle observation, closure
+  copy, activation, rollback, and cache retention.
 - The `signal-lojix` contract crate (`github:LiGoldragon/signal-lojix`)
   now uses the current `signal-core` streaming channel macro for
   observations.

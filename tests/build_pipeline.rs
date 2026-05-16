@@ -32,7 +32,7 @@ const FAKE_NAR_HASH: &str = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 const FAKE_STORE_PATH: &str = "/nix/store/00000000000000000000000000000000-built-system";
 
 #[tokio::test]
-async fn build_only_deployment_accepts_before_remote_build_completes() {
+async fn build_only_deployment_pins_output_before_reporting_built() {
     let fixture = BuildPipelineFixture::create();
     let root = fixture.runtime_root();
 
@@ -74,6 +74,7 @@ async fn build_only_deployment_accepts_before_remote_build_completes() {
                     if store_path.as_str() == FAKE_STORE_PATH
             )
     )));
+    fixture.assert_built_gc_root(&deployment);
 
     let log = fixture.tool_log();
     assert!(log.contains("root@ouranos.goldragon.criome"));
@@ -179,6 +180,8 @@ fn assert_rejected_with(reply: Reply, expected_detail: &str) {
 
 struct BuildPipelineFixture {
     root: PathBuf,
+    state_directory: PathBuf,
+    gc_root_directory: PathBuf,
     proposal_path: PathBuf,
     log_path: PathBuf,
     process_toolchain: ProcessToolchain,
@@ -191,6 +194,8 @@ impl BuildPipelineFixture {
         std::fs::create_dir_all(&tool_directory).expect("create fake tool directory");
         let log_path = root.join("tool.log");
         std::fs::write(&log_path, "").expect("initialize fake tool log");
+        let state_directory = root.join("state");
+        let gc_root_directory = root.join("gcroots");
 
         let nix_path = tool_directory.join("nix");
         let ssh_path = tool_directory.join("ssh");
@@ -204,6 +209,8 @@ impl BuildPipelineFixture {
 
         Self {
             root,
+            state_directory,
+            gc_root_directory,
             proposal_path,
             log_path,
             process_toolchain: ProcessToolchain::new(
@@ -217,6 +224,8 @@ impl BuildPipelineFixture {
     fn runtime_root(&self) -> ActorRef<RuntimeRoot> {
         RuntimeRoot::spawn(RuntimeRoot::with_configuration(
             RuntimeConfiguration::for_in_process_tests()
+                .with_state_directory(self.state_directory.clone())
+                .with_gc_root_directory(self.gc_root_directory.clone())
                 .with_process_toolchain(self.process_toolchain.clone()),
         ))
     }
@@ -239,6 +248,21 @@ impl BuildPipelineFixture {
 
     fn tool_log(&self) -> String {
         std::fs::read_to_string(&self.log_path).expect("read fake tool log")
+    }
+
+    fn built_gc_root_path(&self, deployment: &lojix::wire::DeploymentId) -> PathBuf {
+        self.gc_root_directory
+            .join("goldragon")
+            .join("zeus")
+            .join("full-os")
+            .join("built")
+            .join(deployment.as_str())
+    }
+
+    fn assert_built_gc_root(&self, deployment: &lojix::wire::DeploymentId) {
+        let link_target = std::fs::read_link(self.built_gc_root_path(deployment))
+            .expect("build output GC root symlink exists");
+        assert_eq!(link_target, PathBuf::from(FAKE_STORE_PATH));
     }
 }
 

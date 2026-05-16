@@ -1,3 +1,4 @@
+use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -126,16 +127,127 @@ impl DeploymentObservationIdentity for wire::DeploymentObservation {
     }
 }
 
+pub struct GarbageCollectionRoots {
+    root_directory: PathBuf,
+}
+
+impl GarbageCollectionRoots {
+    pub fn new(root_directory: impl Into<PathBuf>) -> Self {
+        Self {
+            root_directory: root_directory.into(),
+        }
+    }
+}
+
+impl Actor for GarbageCollectionRoots {
+    type Args = Self;
+    type Error = Infallible;
+
+    async fn on_start(
+        state: Self::Args,
+        _actor_ref: ActorRef<Self>,
+    ) -> std::result::Result<Self, Self::Error> {
+        Ok(state)
+    }
+}
+
+struct PinBuiltOutput {
+    deployment: wire::DeploymentId,
+    cluster: wire::ClusterName,
+    node: wire::NodeName,
+    kind: wire::GenerationKind,
+    store_path: wire::StorePath,
+}
+
+impl Message<PinBuiltOutput> for GarbageCollectionRoots {
+    type Reply = Result<()>;
+
+    async fn handle(
+        &mut self,
+        message: PinBuiltOutput,
+        _context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        GarbageCollectionRootPath::for_built_output(&self.root_directory, &message)
+            .replace_with_store_path(&message.store_path)
+    }
+}
+
+struct GarbageCollectionRootPath {
+    path: PathBuf,
+}
+
+impl GarbageCollectionRootPath {
+    fn for_built_output(root_directory: &Path, output: &PinBuiltOutput) -> Self {
+        Self {
+            path: root_directory
+                .join(output.cluster.as_str())
+                .join(output.node.as_str())
+                .join(output.kind.directory_segment())
+                .join("built")
+                .join(output.deployment.as_str()),
+        }
+    }
+
+    fn replace_with_store_path(&self, store_path: &wire::StorePath) -> Result<()> {
+        let parent = self.path.parent().ok_or_else(|| {
+            Error::DeploymentRejected(format!(
+                "GC-root path has no parent: {}",
+                self.path.display()
+            ))
+        })?;
+        std::fs::create_dir_all(parent)?;
+        let temporary_path = self.temporary_path();
+        match std::fs::remove_file(&temporary_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        unix_fs::symlink(store_path.as_str(), &temporary_path)?;
+        std::fs::rename(&temporary_path, &self.path)?;
+        Ok(())
+    }
+
+    fn temporary_path(&self) -> PathBuf {
+        let file_name = self
+            .path
+            .file_name()
+            .expect("GC-root path always ends with deployment id")
+            .to_string_lossy();
+        self.path
+            .with_file_name(format!(".{file_name}.lojix-new-{}", std::process::id()))
+    }
+}
+
+trait GenerationKindDirectorySegment {
+    fn directory_segment(&self) -> &'static str;
+}
+
+impl GenerationKindDirectorySegment for wire::GenerationKind {
+    fn directory_segment(&self) -> &'static str {
+        match self {
+            wire::GenerationKind::FullOs => "full-os",
+            wire::GenerationKind::OsOnly => "os-only",
+            wire::GenerationKind::HomeOnly => "home-only",
+        }
+    }
+}
+
 pub struct DeploymentActor {
     configuration: RuntimeConfiguration,
     event_log: ActorRef<EventLogActor>,
+    garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
 }
 
 impl DeploymentActor {
-    pub fn new(configuration: RuntimeConfiguration, event_log: ActorRef<EventLogActor>) -> Self {
+    pub fn new(
+        configuration: RuntimeConfiguration,
+        event_log: ActorRef<EventLogActor>,
+        garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
+    ) -> Self {
         Self {
             configuration,
             event_log,
+            garbage_collection_roots,
         }
     }
 }
@@ -172,6 +284,7 @@ impl Message<StartDeployment> for DeploymentActor {
         let job = BuildJobActor::spawn(BuildJobActor::new(
             self.configuration.clone(),
             self.event_log.clone(),
+            self.garbage_collection_roots.clone(),
             message.deployment.clone(),
             message.submission,
         ));
@@ -191,6 +304,7 @@ impl Message<StartDeployment> for DeploymentActor {
 struct BuildJobActor {
     configuration: RuntimeConfiguration,
     event_log: ActorRef<EventLogActor>,
+    garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
     deployment: wire::DeploymentId,
     submission: Option<wire::DeploymentSubmission>,
 }
@@ -199,12 +313,14 @@ impl BuildJobActor {
     fn new(
         configuration: RuntimeConfiguration,
         event_log: ActorRef<EventLogActor>,
+        garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
         deployment: wire::DeploymentId,
         submission: wire::DeploymentSubmission,
     ) -> Self {
         Self {
             configuration,
             event_log,
+            garbage_collection_roots,
             deployment,
             submission: Some(submission),
         }
@@ -227,6 +343,22 @@ impl BuildJobActor {
             },
         ))
         .await;
+    }
+
+    async fn pin_built_output(
+        &self,
+        request: &BuildOnlyRequest,
+        result: &wire::BuildResult,
+    ) -> Result<()> {
+        let Some(pin_request) = request.pin_built_output(&self.deployment, result) else {
+            return Ok(());
+        };
+        self.garbage_collection_roots
+            .ask(pin_request)
+            .await
+            .map_err(|error| {
+                Error::DeploymentRejected(format!("failed to pin build output as GC root: {error}"))
+            })
     }
 }
 
@@ -275,13 +407,17 @@ impl Message<RunBuildJob> for BuildJobActor {
                 .await;
                 match request.run().await {
                     Ok(result) => {
-                        self.append(wire::DeploymentPhase::DeploymentBuilt(
-                            wire::DeploymentBuilt {
-                                deployment: self.deployment.clone(),
-                                result,
-                            },
-                        ))
-                        .await;
+                        if let Err(error) = self.pin_built_output(&request, &result).await {
+                            self.fail(error).await;
+                        } else {
+                            self.append(wire::DeploymentPhase::DeploymentBuilt(
+                                wire::DeploymentBuilt {
+                                    deployment: self.deployment.clone(),
+                                    result,
+                                },
+                            ))
+                            .await;
+                        }
                     }
                     Err(error) => self.fail(error).await,
                 }
@@ -296,8 +432,11 @@ impl Message<RunBuildJob> for BuildJobActor {
 pub struct BuildOnlyRequest {
     state_directory: PathBuf,
     process_toolchain: ProcessToolchain,
-    cluster: HorizonClusterName,
-    node: HorizonNodeName,
+    deployment_cluster: wire::ClusterName,
+    deployment_node: wire::NodeName,
+    generation_kind: wire::GenerationKind,
+    horizon_cluster: HorizonClusterName,
+    horizon_node: HorizonNodeName,
     source: ProposalSource,
     flake: FlakeReference,
     plan: BuildOnlyPlan,
@@ -325,15 +464,19 @@ impl BuildOnlyRequest {
     ) -> Result<Self> {
         Self::validate_fast(&submission)
             .map_err(|error| Error::DeploymentRejected(error.message))?;
+        let plan = BuildOnlyPlan::from_wire(&submission.plan)
+            .map_err(|error| Error::DeploymentRejected(error.message))?;
         Ok(Self {
             state_directory: configuration.state_directory().to_path_buf(),
             process_toolchain: configuration.process_toolchain().clone(),
-            cluster: horizon_cluster_name(&submission.cluster)?,
-            node: horizon_node_name(&submission.node)?,
+            deployment_cluster: submission.cluster.clone(),
+            deployment_node: submission.node.clone(),
+            generation_kind: plan.generation_kind(),
+            horizon_cluster: horizon_cluster_name(&submission.cluster)?,
+            horizon_node: horizon_node_name(&submission.node)?,
             source: ProposalSource::new(submission.source.as_str()),
             flake: FlakeReference::new(submission.flake.as_str()),
-            plan: BuildOnlyPlan::from_wire(&submission.plan)
-                .map_err(|error| Error::DeploymentRejected(error.message))?,
+            plan,
             builder: submission.builder,
             substituters: submission
                 .substituters
@@ -347,11 +490,28 @@ impl BuildOnlyRequest {
         &self.builder
     }
 
+    fn pin_built_output(
+        &self,
+        deployment: &wire::DeploymentId,
+        result: &wire::BuildResult,
+    ) -> Option<PinBuiltOutput> {
+        let wire::BuildResult::RealizedStorePath(realized) = result else {
+            return None;
+        };
+        Some(PinBuiltOutput {
+            deployment: deployment.clone(),
+            cluster: self.deployment_cluster.clone(),
+            node: self.deployment_node.clone(),
+            kind: self.generation_kind,
+            store_path: realized.store_path.clone(),
+        })
+    }
+
     pub async fn run(&self) -> Result<wire::BuildResult> {
         let proposal = self.source.load()?;
         let viewpoint = Viewpoint {
-            cluster: self.cluster.clone(),
-            node: self.node.clone(),
+            cluster: self.horizon_cluster.clone(),
+            node: self.horizon_node.clone(),
         };
         let horizon = proposal.project(&viewpoint)?;
         self.plan.validate_home_user(&horizon)?;
@@ -361,8 +521,8 @@ impl BuildOnlyRequest {
         let materialized = ArtifactMaterialization::new(
             self.state_directory.clone(),
             horizon,
-            self.cluster.clone(),
-            self.node.clone(),
+            self.horizon_cluster.clone(),
+            self.horizon_node.clone(),
             self.source.clone(),
             self.process_toolchain.clone(),
             self.plan.deployment_shape(),
@@ -465,6 +625,14 @@ impl BuildOnlyPlan {
             Self::FullOs => Some(DeploymentShape::home_enabled()),
             Self::OsOnly => Some(DeploymentShape::home_disabled()),
             Self::Home { .. } => None,
+        }
+    }
+
+    fn generation_kind(&self) -> wire::GenerationKind {
+        match self {
+            Self::FullOs => wire::GenerationKind::FullOs,
+            Self::OsOnly => wire::GenerationKind::OsOnly,
+            Self::Home { .. } => wire::GenerationKind::HomeOnly,
         }
     }
 

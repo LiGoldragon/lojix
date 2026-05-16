@@ -21,8 +21,9 @@
 //! The current runtime slice owns the Signal socket path, typed
 //! startup configuration, and a Kameo `RuntimeRoot` that accepts
 //! build-only deployment submissions. Build jobs run in per-deployment
-//! actors; local builds and activation actions are rejected before any
-//! external tool runs. Both production binaries read typed
+//! actors; realized outputs are pinned as GC roots before success is
+//! reported; local builds and activation actions are rejected before
+//! any external tool runs. Both production binaries read typed
 //! `signal-lojix` startup configuration records through `nota-config`;
 //! environment variables are not a production control-plane channel.
 

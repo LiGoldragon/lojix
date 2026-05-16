@@ -102,7 +102,7 @@ Next implementation slices add the sema-backed durable actors:
 ```
 src/daemon/
   live_set.rs           # LiveSetActor: BTreeMap<...> via sema-engine
-  gc_roots.rs           # GcRootActor: /nix/var/nix/gcroots/criomos/...
+  gc_roots.rs           # GarbageCollectionRoots: /nix/var/nix/gcroots/criomos/...
   events.rs             # EventLogActor: sema-backed append-only typed events
   container.rs          # ContainerLifecycleActor: systemd dbus observer
   supervisor.rs         # Kameo supervisor wiring
@@ -188,7 +188,7 @@ end-to-end smoke against a controller-hosting node.
 
 **Actor topology**
 - C8. `RuntimeRoot` is a Kameo `Actor` with state carrying child
-  refs (`LiveSetActor`, `GcRootActor`, `EventLogActor`,
+  refs (`LiveSetActor`, `GarbageCollectionRoots`, `EventLogActor`,
   `ContainerLifecycleActor`, `SocketAcceptor`). No ZST root.
 - C9. Each daemon-internal plane is its own Kameo actor with a
   named state field; no `State = ()` actors.
@@ -214,7 +214,9 @@ end-to-end smoke against a controller-hosting node.
   with per-`<kind>` slots (`current`, `boot-pending`,
   `rollback/<n>`, `pinned/<label>`, `recent/<timestamp>`); the
   daemon never queries them via polling — its in-memory + sema
-  view is the source of truth.
+  view is the source of truth. The current build-only slice pins
+  realized outputs before success is reported at
+  `<gc-root-directory>/<cluster>/<node>/<kind>/built/<deployment>`.
 
 **Deploy pipeline**
 - C16. `DeploymentSubmission` triggers the projection-then-build
@@ -225,8 +227,10 @@ end-to-end smoke against a controller-hosting node.
   Current implemented slice accepts only build-only submissions,
   rejects local builds and activation actions before any external
   tool runs, stages generated Horizon/System/Deployment inputs to the
-  remote builder, and records `Submitted` / `Building` / `Built` /
-  `Failed` observations.
+  remote builder, pins the realized output as a GC-root symlink, and
+  records `Submitted` / `Building` / `Built` / `Failed`
+  observations. `DeploymentBuilt` is emitted only after the
+  build-output root exists.
   While this branch is under construction, deploy-facing examples and
   tests target the matching `horizon-re-engineering` branches of
   `CriomOS`, `goldragon`, and `horizon-rs`; default-branch examples are
