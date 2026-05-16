@@ -103,9 +103,9 @@ impl SocketServer {
     }
 
     pub async fn serve_forever(self) -> Result<()> {
-        let root = RuntimeRoot::spawn(RuntimeRoot::with_configuration(
+        let root = RuntimeRoot::spawn(RuntimeRoot::try_with_configuration(
             self.runtime_configuration.clone(),
-        ));
+        )?);
         let listener = self.bind_listener()?;
         loop {
             let (stream, _) = listener.accept().await?;

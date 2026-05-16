@@ -17,6 +17,12 @@ use kameo::Actor;
 use kameo::actor::{ActorRef, Spawn};
 use kameo::error::Infallible;
 use kameo::message::{Context, Message};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use sema::SchemaVersion;
+use sema_engine::{
+    Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, TableDescriptor, TableName,
+    TableReference,
+};
 
 const HORIZON_FLAKE_TEMPLATE: &str = "{
   outputs = _: {
@@ -26,23 +32,234 @@ const HORIZON_FLAKE_TEMPLATE: &str = "{
 ";
 
 const SOPS_FILE_EXTENSION: &str = "sops";
+const LOJIX_SCHEMA_VERSION: u32 = 1;
+const LOJIX_DATABASE_FILE: &str = "lojix.redb";
+const DEPLOYMENT_IDENTITIES_TABLE: TableName = TableName::new("deployment_identities");
+const DEPLOYMENT_EVENTS_TABLE: TableName = TableName::new("deployment_events");
+const DEPLOYMENT_OBSERVATION_SUBSCRIPTIONS_TABLE: TableName =
+    TableName::new("deployment_observation_subscriptions");
 
-#[derive(Debug, Clone)]
-pub struct EventLogActor {
-    deployment_observations: Vec<wire::DeploymentObservation>,
+pub struct DeploymentEventLog {
+    engine: Engine,
+    deployment_identities: TableReference<DeploymentIdentityRecord>,
+    deployment_events: TableReference<DeploymentEventRecord>,
+    deployment_observation_subscriptions: TableReference<DeploymentObservationSubscriptionRecord>,
 }
 
-impl EventLogActor {
-    pub fn new() -> Self {
+impl DeploymentEventLog {
+    pub fn open(state_directory: impl AsRef<Path>) -> Result<Self> {
+        std::fs::create_dir_all(state_directory.as_ref())?;
+        let database_path = state_directory.as_ref().join(LOJIX_DATABASE_FILE);
+        let mut engine = Engine::open(EngineOpen::new(
+            database_path,
+            SchemaVersion::new(LOJIX_SCHEMA_VERSION),
+        ))?;
+        let deployment_identities =
+            engine.register_table(TableDescriptor::new(DEPLOYMENT_IDENTITIES_TABLE))?;
+        let deployment_events =
+            engine.register_table(TableDescriptor::new(DEPLOYMENT_EVENTS_TABLE))?;
+        let deployment_observation_subscriptions = engine.register_table(TableDescriptor::new(
+            DEPLOYMENT_OBSERVATION_SUBSCRIPTIONS_TABLE,
+        ))?;
+        Ok(Self {
+            engine,
+            deployment_identities,
+            deployment_events,
+            deployment_observation_subscriptions,
+        })
+    }
+
+    pub fn allocate_deployment(&self) -> Result<wire::DeploymentId> {
+        let key = self.next_key("deployment")?;
+        let deployment = wire::DeploymentId::from_text(format!("deployment_{}", key.value()))?;
+        let record = DeploymentIdentityRecord::new(key, deployment.clone());
+        self.engine
+            .assert(Assertion::new(self.deployment_identities, record))?;
+        Ok(deployment)
+    }
+
+    pub fn append_observation(
+        &self,
+        cluster: wire::ClusterName,
+        node: wire::NodeName,
+        observation: wire::DeploymentObservation,
+    ) -> Result<()> {
+        let record = DeploymentEventRecord::new(
+            self.next_key("deployment_event")?,
+            cluster,
+            node,
+            observation,
+        );
+        self.engine
+            .assert(Assertion::new(self.deployment_events, record))?;
+        Ok(())
+    }
+
+    pub fn open_deployment_observation_subscription(
+        &self,
+        subscription: wire::DeploymentObservationSubscription,
+    ) -> Result<wire::DeploymentObservationSubscriptionOpened> {
+        let key = self.next_key("deployment_observation_subscription")?;
+        let token = wire::DeploymentObservationToken::new(key.value());
+        let record =
+            DeploymentObservationSubscriptionRecord::new(key, token.clone(), subscription.clone());
+        self.engine.assert(Assertion::new(
+            self.deployment_observation_subscriptions,
+            record,
+        ))?;
+        let observations = self.snapshot_deployment_observations(&subscription)?;
+        Ok(wire::DeploymentObservationSubscriptionOpened {
+            token,
+            observations,
+        })
+    }
+
+    pub fn snapshot_deployment_observations(
+        &self,
+        subscription: &wire::DeploymentObservationSubscription,
+    ) -> Result<Vec<wire::DeploymentObservation>> {
+        Ok(self
+            .engine
+            .match_records(QueryPlan::all(self.deployment_events))?
+            .records()
+            .iter()
+            .filter(|record| record.matches(subscription))
+            .map(|record| record.observation.clone())
+            .collect())
+    }
+
+    fn next_key(&self, prefix: &'static str) -> Result<DurableKey> {
+        Ok(DurableKey::new(
+            prefix,
+            self.engine.latest_snapshot()?.next(),
+        ))
+    }
+}
+
+struct DurableKey {
+    prefix: &'static str,
+    value: u64,
+}
+
+impl DurableKey {
+    fn new(prefix: &'static str, snapshot: sema_engine::SnapshotId) -> Self {
         Self {
-            deployment_observations: Vec::new(),
+            prefix,
+            value: snapshot.value(),
+        }
+    }
+
+    fn value(&self) -> u64 {
+        self.value
+    }
+
+    fn into_string(self) -> String {
+        format!("{}_{:020}", self.prefix, self.value)
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct DeploymentIdentityRecord {
+    key: String,
+    deployment: wire::DeploymentId,
+}
+
+impl DeploymentIdentityRecord {
+    fn new(key: DurableKey, deployment: wire::DeploymentId) -> Self {
+        Self {
+            key: key.into_string(),
+            deployment,
         }
     }
 }
 
-impl Default for EventLogActor {
-    fn default() -> Self {
-        Self::new()
+impl EngineRecord for DeploymentIdentityRecord {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.key.clone())
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct DeploymentEventRecord {
+    key: String,
+    cluster: wire::ClusterName,
+    node: wire::NodeName,
+    observation: wire::DeploymentObservation,
+}
+
+impl DeploymentEventRecord {
+    fn new(
+        key: DurableKey,
+        cluster: wire::ClusterName,
+        node: wire::NodeName,
+        observation: wire::DeploymentObservation,
+    ) -> Self {
+        Self {
+            key: key.into_string(),
+            cluster,
+            node,
+            observation,
+        }
+    }
+
+    fn matches(&self, subscription: &wire::DeploymentObservationSubscription) -> bool {
+        subscription
+            .cluster
+            .as_ref()
+            .is_none_or(|cluster| cluster == &self.cluster)
+            && subscription
+                .node
+                .as_ref()
+                .is_none_or(|node| node == &self.node)
+            && subscription
+                .deployment
+                .as_ref()
+                .is_none_or(|deployment| self.observation.deployment_id() == Some(deployment))
+    }
+}
+
+impl EngineRecord for DeploymentEventRecord {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.key.clone())
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct DeploymentObservationSubscriptionRecord {
+    key: String,
+    token: wire::DeploymentObservationToken,
+    subscription: wire::DeploymentObservationSubscription,
+}
+
+impl DeploymentObservationSubscriptionRecord {
+    fn new(
+        key: DurableKey,
+        token: wire::DeploymentObservationToken,
+        subscription: wire::DeploymentObservationSubscription,
+    ) -> Self {
+        Self {
+            key: key.into_string(),
+            token,
+            subscription,
+        }
+    }
+}
+
+impl EngineRecord for DeploymentObservationSubscriptionRecord {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.key.clone())
+    }
+}
+
+pub struct EventLogActor {
+    log: DeploymentEventLog,
+}
+
+impl EventLogActor {
+    pub fn open(state_directory: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            log: DeploymentEventLog::open(state_directory)?,
+        })
     }
 }
 
@@ -59,53 +276,52 @@ impl Actor for EventLogActor {
 }
 
 pub struct AppendDeploymentObservation {
+    pub cluster: wire::ClusterName,
+    pub node: wire::NodeName,
     pub observation: wire::DeploymentObservation,
 }
 
 impl Message<AppendDeploymentObservation> for EventLogActor {
-    type Reply = std::result::Result<(), Infallible>;
+    type Reply = Result<()>;
 
     async fn handle(
         &mut self,
         message: AppendDeploymentObservation,
         _context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.deployment_observations.push(message.observation);
-        Ok(())
+        self.log
+            .append_observation(message.cluster, message.node, message.observation)
     }
 }
 
-pub struct DeploymentObservationSnapshot {
-    pub subscription: wire::DeploymentObservationSubscription,
-}
+pub struct AllocateDeployment;
 
-impl Message<DeploymentObservationSnapshot> for EventLogActor {
-    type Reply = std::result::Result<Vec<wire::DeploymentObservation>, Infallible>;
+impl Message<AllocateDeployment> for EventLogActor {
+    type Reply = Result<wire::DeploymentId>;
 
     async fn handle(
         &mut self,
-        message: DeploymentObservationSnapshot,
+        _message: AllocateDeployment,
         _context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        Ok(self
-            .deployment_observations
-            .iter()
-            .filter(|observation| message.subscription.matches(observation))
-            .cloned()
-            .collect())
+        self.log.allocate_deployment()
     }
 }
 
-trait DeploymentObservationFilter {
-    fn matches(&self, observation: &wire::DeploymentObservation) -> bool;
+pub struct OpenDeploymentObservationSubscription {
+    pub subscription: wire::DeploymentObservationSubscription,
 }
 
-impl DeploymentObservationFilter for wire::DeploymentObservationSubscription {
-    fn matches(&self, observation: &wire::DeploymentObservation) -> bool {
-        let Some(expected) = &self.deployment else {
-            return true;
-        };
-        observation.deployment_id() == Some(expected)
+impl Message<OpenDeploymentObservationSubscription> for EventLogActor {
+    type Reply = Result<wire::DeploymentObservationSubscriptionOpened>;
+
+    async fn handle(
+        &mut self,
+        message: OpenDeploymentObservationSubscription,
+        _context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.log
+            .open_deployment_observation_subscription(message.subscription)
     }
 }
 
@@ -306,6 +522,8 @@ struct BuildJobActor {
     event_log: ActorRef<EventLogActor>,
     garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
     deployment: wire::DeploymentId,
+    cluster: wire::ClusterName,
+    node: wire::NodeName,
     submission: Option<wire::DeploymentSubmission>,
 }
 
@@ -317,32 +535,42 @@ impl BuildJobActor {
         deployment: wire::DeploymentId,
         submission: wire::DeploymentSubmission,
     ) -> Self {
+        let cluster = submission.cluster.clone();
+        let node = submission.node.clone();
         Self {
             configuration,
             event_log,
             garbage_collection_roots,
             deployment,
+            cluster,
+            node,
             submission: Some(submission),
         }
     }
 
-    async fn append(&self, phase: wire::DeploymentPhase) {
-        let _ = self
-            .event_log
+    async fn append(&self, phase: wire::DeploymentPhase) -> Result<()> {
+        self.event_log
             .ask(AppendDeploymentObservation {
+                cluster: self.cluster.clone(),
+                node: self.node.clone(),
                 observation: wire::DeploymentObservation { phase },
             })
-            .await;
+            .await
+            .map_err(|error| {
+                Error::DeploymentRejected(format!("failed to append deployment event: {error}"))
+            })?;
+        Ok(())
     }
 
     async fn fail(&self, error: Error) {
-        self.append(wire::DeploymentPhase::DeploymentFailed(
-            wire::DeploymentFailed {
-                deployment: self.deployment.clone(),
-                reason: failure_text(error.to_string()),
-            },
-        ))
-        .await;
+        let _ = self
+            .append(wire::DeploymentPhase::DeploymentFailed(
+                wire::DeploymentFailed {
+                    deployment: self.deployment.clone(),
+                    reason: failure_text(error.to_string()),
+                },
+            ))
+            .await;
     }
 
     async fn pin_built_output(
@@ -389,34 +617,50 @@ impl Message<RunBuildJob> for BuildJobActor {
             return;
         };
 
-        self.append(wire::DeploymentPhase::DeploymentSubmitted(
-            wire::DeploymentSubmitted {
-                deployment: self.deployment.clone(),
-            },
-        ))
-        .await;
+        if let Err(error) = self
+            .append(wire::DeploymentPhase::DeploymentSubmitted(
+                wire::DeploymentSubmitted {
+                    deployment: self.deployment.clone(),
+                },
+            ))
+            .await
+        {
+            self.fail(error).await;
+            context.stop();
+            return;
+        }
 
         match BuildOnlyRequest::from_submission(&self.configuration, submission) {
             Ok(request) => {
-                self.append(wire::DeploymentPhase::DeploymentBuilding(
-                    wire::DeploymentBuilding {
-                        deployment: self.deployment.clone(),
-                        builder: request.builder_selection().clone(),
-                    },
-                ))
-                .await;
+                if let Err(error) = self
+                    .append(wire::DeploymentPhase::DeploymentBuilding(
+                        wire::DeploymentBuilding {
+                            deployment: self.deployment.clone(),
+                            builder: request.builder_selection().clone(),
+                        },
+                    ))
+                    .await
+                {
+                    self.fail(error).await;
+                    context.stop();
+                    return;
+                }
                 match request.run().await {
                     Ok(result) => {
                         if let Err(error) = self.pin_built_output(&request, &result).await {
                             self.fail(error).await;
                         } else {
-                            self.append(wire::DeploymentPhase::DeploymentBuilt(
-                                wire::DeploymentBuilt {
-                                    deployment: self.deployment.clone(),
-                                    result,
-                                },
-                            ))
-                            .await;
+                            if let Err(error) = self
+                                .append(wire::DeploymentPhase::DeploymentBuilt(
+                                    wire::DeploymentBuilt {
+                                        deployment: self.deployment.clone(),
+                                        result,
+                                    },
+                                ))
+                                .await
+                            {
+                                self.fail(error).await;
+                            }
                         }
                     }
                     Err(error) => self.fail(error).await,

@@ -22,6 +22,9 @@ pub enum Error {
     #[error("signal-lojix boundary error: {0}")]
     SignalLojix(#[from] signal_lojix::Error),
 
+    #[error("sema-engine error: {0}")]
+    SemaEngine(#[from] sema_engine::Error),
+
     #[error("horizon error: {0}")]
     Horizon(#[from] horizon_lib::Error),
 

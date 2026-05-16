@@ -16,8 +16,10 @@ wire framing is `signal-core`. The contract repo is `signal-lojix`.
 
 **Status: in development.** The `horizon-re-engineering` branch has
 the first socket/client/runtime slice plus typed `nota-config`
-configuration for both binaries. Durable deploy actors and sema-backed
-state are the next implementation step. Deploy-facing examples and
+configuration for both binaries. The build-only deployment path is
+active: it projects Horizon, builds through Nix, pins realized outputs
+as GC roots before reporting success, and records deployment
+observations in a sema-backed event log. Deploy-facing examples and
 witness data on this branch target the matching
 `horizon-re-engineering` branches of `CriomOS`, `goldragon`, and
 `horizon-rs`. See `ARCHITECTURE.md` for the full constraint set and

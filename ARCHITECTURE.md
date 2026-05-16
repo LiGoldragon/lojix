@@ -8,7 +8,9 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 > `lojix-daemon`. The `horizon-re-engineering` branch now has the first
 > socket/client/runtime slice against the current `signal-core` streaming
 > channel macro, typed daemon/CLI configuration, and the first
-> build-only deploy actor slice. Today's `lojix-cli` (separate repo)
+> build-only deploy actor slice. Deployment IDs, deployment-observation
+> subscription tokens, and the deployment event log are now backed by
+> `sema-engine`. Today's `lojix-cli` (separate repo)
 > stays at the current schema for the duration; retires after CriomOS
 > migrates to consume this daemon's projection.
 
@@ -97,13 +99,14 @@ src/
     lojix.rs            # CLI: read one nota, send, print one nota
 ```
 
-Next implementation slices add the sema-backed durable actors:
+Future implementation slices may split the current actors into these
+module files as their surfaces grow:
 
 ```
 src/daemon/
   live_set.rs           # LiveSetActor: BTreeMap<...> via sema-engine
   gc_roots.rs           # GarbageCollectionRoots: /nix/var/nix/gcroots/criomos/...
-  events.rs             # EventLogActor: sema-backed append-only typed events
+  events.rs             # EventLogActor / DeploymentEventLog sema-backed event records
   container.rs          # ContainerLifecycleActor: systemd dbus observer
   supervisor.rs         # Kameo supervisor wiring
 ```
@@ -207,8 +210,14 @@ end-to-end smoke against a controller-hosting node.
   (`Generation { generation, cluster, node, kind, store_path,
   state }`); reconstructed on restart from sema, not from memory.
 - C14. The deploy event log is append-only via sema-engine
-  `Assert`; subscribers receive deltas through sema-engine
-  `Subscribe` (push-not-poll).
+  `Assert`; the current build-only slice stores deployment IDs,
+  deployment-observation subscription records, and
+  `Submitted`/`Building`/`Built`/`Failed` observations in one
+  daemon-owned redb file. `tests/event_log.rs` and
+  `checks.<system>.test-event-log` prove observations and deployment
+  identifier allocation survive reopening the database. Subscribers
+  still receive subscription-open snapshots today; live delta delivery
+  through pushed stream frames remains the next stream-delivery slice.
 - C15. GC roots are filesystem state at
   `/nix/var/nix/gcroots/criomos/<cluster>/<node>/<kind>/<generation>`
   with per-`<kind>` slots (`current`, `boot-pending`,
@@ -238,7 +247,7 @@ end-to-end smoke against a controller-hosting node.
 - C17. Each pipeline phase emits a `DeploymentObservation` event
   (`Submitted`, `Building`, `Built`, `Copying`, `Activating`,
   `Succeeded` / `Failed`); subscribers see them live.
-  Current implemented slice exposes the in-memory event log through
+  Current implemented slice exposes the sema-backed event log through
   subscription-open snapshots; live pushed stream frames remain part
   of the next stream-delivery slice.
 - C18. Activation failure rolls back the GC root for that kind

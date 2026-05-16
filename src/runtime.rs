@@ -6,9 +6,10 @@ use kameo::error::Infallible;
 use kameo::message::{Context, Message};
 
 use crate::deploy::{
-    DeploymentActor, DeploymentObservationSnapshot, EventLogActor, GarbageCollectionRoots,
-    StartDeployment,
+    AllocateDeployment, DeploymentActor, EventLogActor, GarbageCollectionRoots,
+    OpenDeploymentObservationSubscription, StartDeployment,
 };
+use crate::error::Result as LojixResult;
 use crate::process::ProcessToolchain;
 use crate::wire;
 
@@ -35,14 +36,15 @@ impl RuntimeConfiguration {
     }
 
     pub fn for_in_process_tests() -> Self {
+        let root = unique_in_process_directory();
         Self {
             operator_identity: wire::OperatorIdentity::from_text("in_process_test")
                 .expect("static operator identity"),
             owned_cluster: wire::ClusterName::from_text("test_cluster")
                 .expect("static cluster name"),
             peer_daemons: Vec::new(),
-            state_directory: std::env::temp_dir().join("lojix-in-process-state"),
-            gc_root_directory: std::env::temp_dir().join("lojix-in-process-gcroots"),
+            state_directory: root.join("state"),
+            gc_root_directory: root.join("gcroots"),
             process_toolchain: ProcessToolchain::production(),
         }
     }
@@ -92,8 +94,6 @@ pub struct RuntimeRoot {
     deployment_actor: ActorRef<DeploymentActor>,
     event_log: ActorRef<EventLogActor>,
     garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
-    next_deployment_identifier: u64,
-    next_deployment_observation_token: u64,
     next_cache_retention_observation_token: u64,
 }
 
@@ -103,7 +103,11 @@ impl RuntimeRoot {
     }
 
     pub fn with_configuration(configuration: RuntimeConfiguration) -> Self {
-        let event_log = EventLogActor::spawn(EventLogActor::new());
+        Self::try_with_configuration(configuration).expect("runtime state opens")
+    }
+
+    pub fn try_with_configuration(configuration: RuntimeConfiguration) -> LojixResult<Self> {
+        let event_log = EventLogActor::spawn(EventLogActor::open(configuration.state_directory())?);
         let garbage_collection_roots = GarbageCollectionRoots::spawn(GarbageCollectionRoots::new(
             configuration.gc_root_directory().to_path_buf(),
         ));
@@ -112,15 +116,13 @@ impl RuntimeRoot {
             event_log.clone(),
             garbage_collection_roots.clone(),
         ));
-        Self {
+        Ok(Self {
             configuration,
             deployment_actor,
             event_log,
             garbage_collection_roots,
-            next_deployment_identifier: 1,
-            next_deployment_observation_token: 1,
             next_cache_retention_observation_token: 1,
-        }
+        })
     }
 
     pub fn configuration(&self) -> &RuntimeConfiguration {
@@ -129,12 +131,6 @@ impl RuntimeRoot {
 
     pub fn garbage_collection_roots(&self) -> &ActorRef<GarbageCollectionRoots> {
         &self.garbage_collection_roots
-    }
-
-    fn next_deployment(&mut self) -> wire::DeploymentId {
-        let value = format!("deployment_{}", self.next_deployment_identifier);
-        self.next_deployment_identifier += 1;
-        wire::DeploymentId::from_text(value).expect("generated deployment id")
     }
 }
 
@@ -170,7 +166,14 @@ impl Message<RuntimeRequest> for RuntimeRoot {
     ) -> Self::Reply {
         let reply = match message.request {
             wire::Request::DeploymentSubmission(submission) => {
-                let deployment = self.next_deployment();
+                let deployment = match self.event_log.ask(AllocateDeployment).await {
+                    Ok(deployment) => deployment,
+                    Err(error) => {
+                        return Ok(deployment_rejected(format!(
+                            "failed to allocate deployment id: {error}"
+                        )));
+                    }
+                };
                 match self
                     .deployment_actor
                     .ask(StartDeployment {
@@ -208,20 +211,16 @@ impl Message<RuntimeRequest> for RuntimeRoot {
                 })
             }
             wire::Request::DeploymentObservationSubscription(subscription) => {
-                let token =
-                    wire::DeploymentObservationToken::new(self.next_deployment_observation_token);
-                self.next_deployment_observation_token += 1;
-                let observations = self
+                match self
                     .event_log
-                    .ask(DeploymentObservationSnapshot { subscription })
+                    .ask(OpenDeploymentObservationSubscription { subscription })
                     .await
-                    .unwrap_or_default();
-                wire::Reply::DeploymentObservationSubscriptionOpened(
-                    wire::DeploymentObservationSubscriptionOpened {
-                        token,
-                        observations,
-                    },
-                )
+                {
+                    Ok(opened) => wire::Reply::DeploymentObservationSubscriptionOpened(opened),
+                    Err(error) => deployment_rejected(format!(
+                        "failed to open deployment observation subscription: {error}"
+                    )),
+                }
             }
             wire::Request::CacheRetentionObservationSubscription(_) => {
                 let token = wire::CacheRetentionObservationToken::new(
@@ -248,4 +247,27 @@ impl Message<RuntimeRequest> for RuntimeRoot {
         };
         Ok(reply)
     }
+}
+
+fn deployment_rejected(message: impl Into<String>) -> wire::Reply {
+    wire::Reply::DeploymentRejected(wire::DeploymentRejected {
+        reason: wire::DeploymentRejectionReason::InvalidRequest,
+        detail: Some(failure_text(message)),
+    })
+}
+
+fn failure_text(message: impl Into<String>) -> wire::FailureText {
+    let message = message.into().replace(['\n', '\r'], " ");
+    wire::FailureText::from_text(message).expect("sanitized failure text")
+}
+
+fn unique_in_process_directory() -> PathBuf {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "lojix-in-process-{}-{timestamp}",
+        std::process::id()
+    ))
 }

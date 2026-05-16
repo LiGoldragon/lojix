@@ -100,10 +100,14 @@ these):
   and records submitted/building/built/failed observations.
   `checks.<system>.test-build-pipeline` is the current Nix witness
   for this path.
-- The durable deploy state is still a next implementation step: live
-  generation set, sema-backed GC-root records, sema-backed event log,
-  live pushed stream delivery, container lifecycle observation, closure
-  copy, activation, rollback, and cache retention.
+- Deployment identifiers, deployment-observation subscription tokens,
+  and the deployment event log are sema-backed through
+  `DeploymentEventLog`; `checks.<system>.test-event-log` reopens the
+  database and proves observations plus identifier allocation survive
+  restart. Remaining durable slices: live generation set,
+  sema-backed GC-root records, live pushed stream delivery, container
+  lifecycle observation, closure copy, activation, rollback, and cache
+  retention.
 - The `signal-lojix` contract crate (`github:LiGoldragon/signal-lojix`)
   now uses the current `signal-core` streaming channel macro for
   observations.

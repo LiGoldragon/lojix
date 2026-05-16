@@ -284,6 +284,7 @@ dependencies = [
  "nota-codec 0.1.0 (git+https://github.com/LiGoldragon/nota-codec.git)",
  "nota-config",
  "rkyv",
+ "sema",
  "sema-engine",
  "serde_json",
  "signal-core",

@@ -31,6 +31,7 @@ signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix.git", branch
 # Typed database engine (registered record families, Assert/Mutate/Match/
 # Subscribe/commit/Validate). The daemon owns one redb file via Engine.
 sema-engine  = { git = "https://github.com/LiGoldragon/sema-engine.git", branch = "main" }
+sema         = { git = "https://github.com/LiGoldragon/sema.git" }
 
 # Horizon projection library — projects cluster proposals before build.
 horizon-lib  = { git = "https://github.com/LiGoldragon/horizon-rs.git", branch = "horizon-re-engineering", package = "horizon-lib" }

@@ -78,6 +78,13 @@
               cargoTestExtraArgs = "--test build_pipeline -- --test-threads=1";
             }
           );
+          test-event-log = craneLib.cargoTest (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoTestExtraArgs = "--test event_log -- --test-threads=1";
+            }
+          );
           test-configuration-boundary = craneLib.cargoTest (
             commonArgs
             // {
