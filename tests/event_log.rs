@@ -77,6 +77,32 @@ fn deployment_identifiers_do_not_reset_after_reopen() {
     assert_ne!(first, second);
 }
 
+#[test]
+fn deployment_observation_subscription_retraction_removes_durable_record() {
+    let state_directory = unique_temporary_directory("lojix-event-log-subscriptions").join("state");
+    let log = DeploymentEventLog::open(&state_directory).expect("open deployment event log");
+    let opened = log
+        .open_deployment_observation_subscription(DeploymentObservationSubscription {
+            cluster: None,
+            node: None,
+            deployment: None,
+        })
+        .expect("open deployment observation subscription");
+
+    assert_eq!(
+        log.deployment_observation_subscription_count()
+            .expect("count subscriptions"),
+        1
+    );
+    log.close_deployment_observation_subscription(&opened.token)
+        .expect("close deployment observation subscription");
+    assert_eq!(
+        log.deployment_observation_subscription_count()
+            .expect("count subscriptions after close"),
+        0
+    );
+}
+
 fn unique_temporary_directory(prefix: &str) -> PathBuf {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -4,10 +4,11 @@ use kameo::Actor;
 use kameo::actor::{ActorRef, Spawn};
 use kameo::error::Infallible;
 use kameo::message::{Context, Message};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::deploy::{
-    AllocateDeployment, DeploymentActor, EventLogActor, GarbageCollectionRoots,
-    OpenDeploymentObservationSubscription, StartDeployment,
+    AllocateDeployment, CloseDeploymentObservationSubscription, DeploymentActor, EventLogActor,
+    GarbageCollectionRoots, OpenDeploymentObservationSubscription, StartDeployment,
 };
 use crate::error::Result as LojixResult;
 use crate::process::ProcessToolchain;
@@ -132,6 +133,10 @@ impl RuntimeRoot {
     pub fn garbage_collection_roots(&self) -> &ActorRef<GarbageCollectionRoots> {
         &self.garbage_collection_roots
     }
+
+    pub fn event_log(&self) -> &ActorRef<EventLogActor> {
+        &self.event_log
+    }
 }
 
 impl Default for RuntimeRoot {
@@ -213,7 +218,10 @@ impl Message<RuntimeRequest> for RuntimeRoot {
             wire::Request::DeploymentObservationSubscription(subscription) => {
                 match self
                     .event_log
-                    .ask(OpenDeploymentObservationSubscription { subscription })
+                    .ask(OpenDeploymentObservationSubscription {
+                        subscription,
+                        subscriber: None,
+                    })
                     .await
                 {
                     Ok(opened) => wire::Reply::DeploymentObservationSubscriptionOpened(opened),
@@ -235,15 +243,52 @@ impl Message<RuntimeRequest> for RuntimeRoot {
                 )
             }
             wire::Request::DeploymentObservationRetraction(token) => {
-                wire::Reply::DeploymentObservationSubscriptionClosed(
-                    wire::DeploymentObservationSubscriptionClosed { token },
-                )
+                match self
+                    .event_log
+                    .ask(CloseDeploymentObservationSubscription { token })
+                    .await
+                {
+                    Ok(closed) => wire::Reply::DeploymentObservationSubscriptionClosed(closed),
+                    Err(error) => deployment_rejected(format!(
+                        "failed to close deployment observation subscription: {error}"
+                    )),
+                }
             }
             wire::Request::CacheRetentionObservationRetraction(token) => {
                 wire::Reply::CacheRetentionObservationSubscriptionClosed(
                     wire::CacheRetentionObservationSubscriptionClosed { token },
                 )
             }
+        };
+        Ok(reply)
+    }
+}
+
+pub struct OpenDeploymentObservationStream {
+    pub subscription: wire::DeploymentObservationSubscription,
+    pub sender: UnboundedSender<wire::DeploymentObservation>,
+}
+
+impl Message<OpenDeploymentObservationStream> for RuntimeRoot {
+    type Reply = Result<wire::Reply, Infallible>;
+
+    async fn handle(
+        &mut self,
+        message: OpenDeploymentObservationStream,
+        _context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let reply = match self
+            .event_log
+            .ask(OpenDeploymentObservationSubscription {
+                subscription: message.subscription,
+                subscriber: Some(message.sender),
+            })
+            .await
+        {
+            Ok(opened) => wire::Reply::DeploymentObservationSubscriptionOpened(opened),
+            Err(error) => deployment_rejected(format!(
+                "failed to open deployment observation stream: {error}"
+            )),
         };
         Ok(reply)
     }

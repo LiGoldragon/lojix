@@ -1,12 +1,19 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kameo::actor::Spawn;
-use signal_core::{Reply as CoreReply, RequestPayload, SubReply};
+use lojix::deploy::{AppendDeploymentObservation, CountDeploymentObservationSubscriptions};
+use signal_core::{
+    ExchangeIdentifier, ExchangeLane, LaneSequence, Reply as CoreReply, RequestPayload,
+    SessionEpoch, SubReply,
+};
 use tokio::net::UnixStream;
 
 use lojix::wire::{
-    CacheRetentionObservationSubscription, GenerationKind, GenerationQuery, LojixFrame,
-    LojixFrameBody, Request,
+    BuildResult, BuilderSelection, CacheRetentionObservationSubscription, ClusterName,
+    DeploymentBuilding, DeploymentBuilt, DeploymentFailed, DeploymentId, DeploymentObservation,
+    DeploymentObservationSubscription, DeploymentObservationToken, DeploymentPhase,
+    DeploymentSubmitted, DispatcherChoosesBuilder, Event, FailureText, GenerationKind,
+    GenerationQuery, LojixFrame, LojixFrameBody, NodeName, RealizedStorePath, Request, StorePath,
 };
 use lojix::{Client, Connection, RuntimeRoot, SocketAddress, SocketServer};
 
@@ -98,6 +105,110 @@ async fn subscription_request_receives_stream_open_reply() {
 }
 
 #[tokio::test]
+async fn deployment_observation_subscription_receives_live_stream_sequence_and_closes() {
+    let cluster = ClusterName::from_text("goldragon").expect("cluster name");
+    let node = NodeName::from_text("zeus").expect("node name");
+    let deployment = DeploymentId::from_text("deployment_live").expect("deployment id");
+    let observations = deployment_observation_sequence(&deployment);
+
+    let root_state = RuntimeRoot::new();
+    let event_log = root_state.event_log().clone();
+    let root = RuntimeRoot::spawn(root_state);
+    let (client_stream, server_stream) = UnixStream::pair().expect("unix stream pair");
+    let server = SocketServer::handle_stream(Connection::new(server_stream), root);
+
+    let client = async move {
+        let mut connection = Connection::new(client_stream);
+        let exchange = lojix::socket::ExchangeIdentity::first_connector_exchange();
+        let frame = LojixFrame::new(LojixFrameBody::Request {
+            exchange: exchange.value(),
+            request: Request::DeploymentObservationSubscription(
+                DeploymentObservationSubscription {
+                    cluster: Some(cluster.clone()),
+                    node: Some(node.clone()),
+                    deployment: Some(deployment.clone()),
+                },
+            )
+            .into_request(),
+        });
+        connection.write_frame(&frame).await.expect("write request");
+        let token = read_deployment_observation_opened(&mut connection, exchange.value()).await;
+
+        for observation in &observations {
+            event_log
+                .ask(AppendDeploymentObservation {
+                    cluster: cluster.clone(),
+                    node: node.clone(),
+                    observation: observation.clone(),
+                })
+                .await
+                .expect("append deployment observation");
+
+            let event_observation =
+                read_deployment_observation_event(&mut connection, &token).await;
+            assert_eq!(event_observation, *observation);
+        }
+
+        let close_exchange = ExchangeIdentifier::new(
+            SessionEpoch::new(1),
+            ExchangeLane::Connector,
+            LaneSequence::new(1),
+        );
+        let close_frame = LojixFrame::new(LojixFrameBody::Request {
+            exchange: close_exchange,
+            request: Request::DeploymentObservationRetraction(token.clone()).into_request(),
+        });
+        connection
+            .write_frame(&close_frame)
+            .await
+            .expect("write close request");
+        read_deployment_observation_closed(&mut connection, close_exchange, token).await;
+        let remaining_subscriptions = event_log
+            .ask(CountDeploymentObservationSubscriptions)
+            .await
+            .expect("count deployment observation subscriptions");
+        assert_eq!(remaining_subscriptions, 0);
+    };
+
+    let (server_result, ()) = tokio::join!(server, client);
+    server_result.expect("server result");
+}
+
+fn deployment_observation_sequence(deployment: &DeploymentId) -> Vec<DeploymentObservation> {
+    vec![
+        DeploymentObservation {
+            phase: DeploymentPhase::DeploymentSubmitted(DeploymentSubmitted {
+                deployment: deployment.clone(),
+            }),
+        },
+        DeploymentObservation {
+            phase: DeploymentPhase::DeploymentBuilding(DeploymentBuilding {
+                deployment: deployment.clone(),
+                builder: BuilderSelection::DispatcherChoosesBuilder(DispatcherChoosesBuilder {}),
+            }),
+        },
+        DeploymentObservation {
+            phase: DeploymentPhase::DeploymentBuilt(DeploymentBuilt {
+                deployment: deployment.clone(),
+                result: BuildResult::RealizedStorePath(RealizedStorePath {
+                    store_path: StorePath::from_text(
+                        "/nix/store/00000000000000000000000000000000-built-system",
+                    )
+                    .expect("store path"),
+                }),
+            }),
+        },
+        DeploymentObservation {
+            phase: DeploymentPhase::DeploymentFailed(DeploymentFailed {
+                deployment: deployment.clone(),
+                reason: FailureText::from_text("forced failure after stream witness")
+                    .expect("failure text"),
+            }),
+        },
+    ]
+}
+
+#[tokio::test]
 async fn stalled_connection_does_not_block_next_client() {
     let path = temporary_socket_path();
     let _ = std::fs::remove_file(&path);
@@ -122,6 +233,78 @@ async fn stalled_connection_does_not_block_next_client() {
     drop(stalled_stream);
     server_task.abort();
     let _ = std::fs::remove_file(path);
+}
+
+async fn read_deployment_observation_opened(
+    connection: &mut Connection<UnixStream>,
+    exchange: ExchangeIdentifier,
+) -> DeploymentObservationToken {
+    let reply_frame = connection.read_frame().await.expect("read reply");
+    match reply_frame.into_body() {
+        LojixFrameBody::Reply {
+            exchange: reply_exchange,
+            reply,
+        } => {
+            assert_eq!(reply_exchange, exchange);
+            match reply {
+                CoreReply::Accepted { per_operation, .. } => match per_operation.into_head() {
+                    SubReply::Ok {
+                        payload: lojix::wire::Reply::DeploymentObservationSubscriptionOpened(opened),
+                        ..
+                    } => opened.token,
+                    other => panic!("expected deployment observation open reply, got {other:?}"),
+                },
+                other => panic!("expected accepted reply, got {other:?}"),
+            }
+        }
+        other => panic!("expected reply frame, got {other:?}"),
+    }
+}
+
+async fn read_deployment_observation_event(
+    connection: &mut Connection<UnixStream>,
+    token: &DeploymentObservationToken,
+) -> DeploymentObservation {
+    let event_frame = connection.read_frame().await.expect("read stream event");
+    match event_frame.into_body() {
+        LojixFrameBody::SubscriptionEvent {
+            event_identifier,
+            token: inner_token,
+            event: Event::DeploymentObservation(observation),
+        } => {
+            assert_eq!(event_identifier.lane, ExchangeLane::Acceptor);
+            assert_eq!(inner_token.value(), token.value());
+            observation
+        }
+        other => panic!("expected deployment observation stream event, got {other:?}"),
+    }
+}
+
+async fn read_deployment_observation_closed(
+    connection: &mut Connection<UnixStream>,
+    exchange: ExchangeIdentifier,
+    expected: DeploymentObservationToken,
+) {
+    let reply_frame = connection.read_frame().await.expect("read close reply");
+    match reply_frame.into_body() {
+        LojixFrameBody::Reply {
+            exchange: reply_exchange,
+            reply,
+        } => {
+            assert_eq!(reply_exchange, exchange);
+            match reply {
+                CoreReply::Accepted { per_operation, .. } => match per_operation.into_head() {
+                    SubReply::Ok {
+                        payload: lojix::wire::Reply::DeploymentObservationSubscriptionClosed(closed),
+                        ..
+                    } => assert_eq!(closed.token, expected),
+                    other => panic!("expected deployment observation close reply, got {other:?}"),
+                },
+                other => panic!("expected accepted close reply, got {other:?}"),
+            }
+        }
+        other => panic!("expected close reply frame, got {other:?}"),
+    }
 }
 
 fn temporary_socket_path() -> std::path::PathBuf {

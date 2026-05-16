@@ -7,14 +7,17 @@ use kameo::error::Infallible;
 use kameo::message::{Context, Message};
 use nix::unistd::{Group, chown};
 use signal_core::{
-    ExchangeIdentifier, ExchangeLane, LaneSequence, NonEmpty, Reply as CoreReply, SessionEpoch,
-    SubReply,
+    ExchangeIdentifier, ExchangeLane, LaneSequence, NonEmpty, Operation, Reply as CoreReply,
+    SessionEpoch, SignalVerb, StreamEventIdentifier, SubReply, SubscriptionTokenInner,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::error::{Error, Result};
-use crate::runtime::{RuntimeConfiguration, RuntimeRequest, RuntimeRoot};
+use crate::runtime::{
+    OpenDeploymentObservationStream, RuntimeConfiguration, RuntimeRequest, RuntimeRoot,
+};
 use crate::wire;
 
 pub const DEFAULT_SOCKET_PATH: &str = "/run/lojix/daemon.sock";
@@ -42,11 +45,15 @@ impl<IoStream> Connection<IoStream> {
     pub fn new(stream: IoStream) -> Self {
         Self { stream }
     }
+
+    pub fn into_inner(self) -> IoStream {
+        self.stream
+    }
 }
 
 impl<IoStream> Connection<IoStream>
 where
-    IoStream: AsyncRead + AsyncWrite + Unpin,
+    IoStream: AsyncWrite + Unpin,
 {
     pub async fn write_frame(&mut self, frame: &wire::LojixFrame) -> Result<()> {
         let bytes = frame.encode_length_prefixed()?;
@@ -54,7 +61,12 @@ where
         self.stream.flush().await?;
         Ok(())
     }
+}
 
+impl<IoStream> Connection<IoStream>
+where
+    IoStream: AsyncRead + Unpin,
+{
     pub async fn read_frame(&mut self) -> Result<wire::LojixFrame> {
         let mut length_bytes = [0_u8; 4];
         self.stream.read_exact(&mut length_bytes).await?;
@@ -173,9 +185,22 @@ impl SocketServer {
             wire::LojixFrameBody::Request { exchange, request } => (exchange, request),
             _ => return Err(Error::ExpectedRequestFrame),
         };
-        let reply = RuntimeDispatch::new(root, request).into_reply().await?;
-        let frame = wire::LojixFrame::new(wire::LojixFrameBody::Reply { exchange, reply });
-        connection.write_frame(&frame).await
+        match SocketRequest::from_channel_request(request) {
+            SocketRequest::Rejected(reply) => {
+                let frame = wire::LojixFrame::new(wire::LojixFrameBody::Reply { exchange, reply });
+                connection.write_frame(&frame).await
+            }
+            SocketRequest::OneShot(operations) => {
+                let reply = RuntimeDispatch::new(root, operations).into_reply().await?;
+                let frame = wire::LojixFrame::new(wire::LojixFrameBody::Reply { exchange, reply });
+                connection.write_frame(&frame).await
+            }
+            SocketRequest::DeploymentObservationStream(subscription) => {
+                DeploymentObservationStreamConnection::new(connection, root, exchange, subscription)
+                    .run()
+                    .await
+            }
+        }
     }
 }
 
@@ -224,22 +249,17 @@ impl Message<HandleConnection> for ConnectionActor {
 
 struct RuntimeDispatch {
     root: ActorRef<RuntimeRoot>,
-    request: wire::LojixChannelRequest,
+    operations: NonEmpty<Operation<wire::Request>>,
 }
 
 impl RuntimeDispatch {
-    fn new(root: ActorRef<RuntimeRoot>, request: wire::LojixChannelRequest) -> Self {
-        Self { root, request }
+    fn new(root: ActorRef<RuntimeRoot>, operations: NonEmpty<Operation<wire::Request>>) -> Self {
+        Self { root, operations }
     }
 
     async fn into_reply(self) -> Result<wire::LojixChannelReply> {
-        let checked = match self.request.into_checked() {
-            Ok(checked) => checked,
-            Err((reason, _request)) => return Ok(CoreReply::rejected(reason)),
-        };
-
         let mut replies = Vec::new();
-        for operation in checked.operations {
+        for operation in self.operations {
             let verb = operation.verb;
             let payload = self
                 .root
@@ -255,6 +275,215 @@ impl RuntimeDispatch {
             NonEmpty::try_from_vec(replies).map_err(|_| Error::ExpectedSingleReplyPayload)?;
         Ok(CoreReply::completed(per_operation))
     }
+}
+
+enum SocketRequest {
+    OneShot(NonEmpty<Operation<wire::Request>>),
+    DeploymentObservationStream(wire::DeploymentObservationSubscription),
+    Rejected(wire::LojixChannelReply),
+}
+
+impl SocketRequest {
+    fn from_channel_request(request: wire::LojixChannelRequest) -> Self {
+        let checked = match request.into_checked() {
+            Ok(checked) => checked,
+            Err((reason, _request)) => return Self::Rejected(CoreReply::rejected(reason)),
+        };
+        let (head, tail) = checked.operations.into_head_and_tail();
+        if tail.is_empty()
+            && let wire::Request::DeploymentObservationSubscription(subscription) = head.payload
+        {
+            return Self::DeploymentObservationStream(subscription);
+        }
+        Self::OneShot(NonEmpty::from_head_and_tail(head, tail))
+    }
+}
+
+struct DeploymentObservationStreamConnection<IoStream> {
+    reader: Connection<ReadHalf<IoStream>>,
+    writer: Connection<WriteHalf<IoStream>>,
+    root: ActorRef<RuntimeRoot>,
+    exchange: ExchangeIdentifier,
+    subscription: wire::DeploymentObservationSubscription,
+    next_event_sequence: LaneSequence,
+}
+
+impl<IoStream> DeploymentObservationStreamConnection<IoStream>
+where
+    IoStream: AsyncRead + AsyncWrite + Unpin,
+{
+    fn new(
+        connection: Connection<IoStream>,
+        root: ActorRef<RuntimeRoot>,
+        exchange: ExchangeIdentifier,
+        subscription: wire::DeploymentObservationSubscription,
+    ) -> Self {
+        let (reader, writer) = tokio::io::split(connection.into_inner());
+        Self {
+            reader: Connection::new(reader),
+            writer: Connection::new(writer),
+            root,
+            exchange,
+            subscription,
+            next_event_sequence: LaneSequence::first(),
+        }
+    }
+
+    async fn run(mut self) -> Result<()> {
+        let (sender, events) = unbounded_channel();
+        let reply = self
+            .root
+            .ask(OpenDeploymentObservationStream {
+                subscription: self.subscription.clone(),
+                sender,
+            })
+            .await
+            .map_err(|_| Error::RuntimeActorStopped)?;
+        let Some(token) = deployment_observation_token(&reply) else {
+            self.write_reply(
+                self.exchange,
+                completed_single_reply(SignalVerb::Subscribe, reply),
+            )
+            .await?;
+            return Ok(());
+        };
+        self.write_reply(
+            self.exchange,
+            completed_single_reply(SignalVerb::Subscribe, reply),
+        )
+        .await?;
+        self.run_open_stream(token, events).await
+    }
+
+    async fn run_open_stream(
+        &mut self,
+        token: wire::DeploymentObservationToken,
+        mut events: UnboundedReceiver<wire::DeploymentObservation>,
+    ) -> Result<()> {
+        loop {
+            tokio::select! {
+                observation = events.recv() => {
+                    let Some(observation) = observation else {
+                        self.close_subscription(token.clone()).await?;
+                        return Ok(());
+                    };
+                    if let Err(error) = self.write_deployment_observation_event(&token, observation).await {
+                        let _ = self.close_subscription(token.clone()).await;
+                        return Err(error);
+                    }
+                }
+                frame = self.reader.read_frame() => {
+                    let frame = match frame {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            let _ = self.close_subscription(token.clone()).await;
+                            return Err(error);
+                        }
+                    };
+                    let close_current = self.handle_client_frame(frame, &token).await?;
+                    if close_current {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_client_frame(
+        &mut self,
+        frame: wire::LojixFrame,
+        current_token: &wire::DeploymentObservationToken,
+    ) -> Result<bool> {
+        let (exchange, request) = match frame.into_body() {
+            wire::LojixFrameBody::Request { exchange, request } => (exchange, request),
+            _ => return Err(Error::ExpectedRequestFrame),
+        };
+        let close_current = request_closes_deployment_observation(&request, current_token);
+        match SocketRequest::from_channel_request(request) {
+            SocketRequest::Rejected(reply) => {
+                self.write_reply(exchange, reply).await?;
+                Ok(false)
+            }
+            SocketRequest::OneShot(operations) => {
+                let reply = RuntimeDispatch::new(self.root.clone(), operations)
+                    .into_reply()
+                    .await?;
+                self.write_reply(exchange, reply).await?;
+                Ok(close_current)
+            }
+            SocketRequest::DeploymentObservationStream(_) => {
+                let reply = CoreReply::rejected(signal_core::RequestRejectionReason::Internal);
+                self.write_reply(exchange, reply).await?;
+                Ok(false)
+            }
+        }
+    }
+
+    async fn close_subscription(&self, token: wire::DeploymentObservationToken) -> Result<()> {
+        let request = wire::Request::DeploymentObservationRetraction(token);
+        self.root
+            .ask(RuntimeRequest { request })
+            .await
+            .map_err(|_| Error::RuntimeActorStopped)?;
+        Ok(())
+    }
+
+    async fn write_reply(
+        &mut self,
+        exchange: ExchangeIdentifier,
+        reply: wire::LojixChannelReply,
+    ) -> Result<()> {
+        let frame = wire::LojixFrame::new(wire::LojixFrameBody::Reply { exchange, reply });
+        self.writer.write_frame(&frame).await
+    }
+
+    async fn write_deployment_observation_event(
+        &mut self,
+        token: &wire::DeploymentObservationToken,
+        observation: wire::DeploymentObservation,
+    ) -> Result<()> {
+        let frame = wire::LojixFrame::new(wire::LojixFrameBody::SubscriptionEvent {
+            event_identifier: self.next_event_identifier(),
+            token: SubscriptionTokenInner::new(token.value()),
+            event: wire::Event::DeploymentObservation(observation),
+        });
+        self.writer.write_frame(&frame).await
+    }
+
+    fn next_event_identifier(&mut self) -> StreamEventIdentifier {
+        let identifier = StreamEventIdentifier::new(
+            self.exchange.session_epoch,
+            ExchangeLane::Acceptor,
+            self.next_event_sequence,
+        );
+        self.next_event_sequence = self.next_event_sequence.next();
+        identifier
+    }
+}
+
+fn deployment_observation_token(reply: &wire::Reply) -> Option<wire::DeploymentObservationToken> {
+    let wire::Reply::DeploymentObservationSubscriptionOpened(opened) = reply else {
+        return None;
+    };
+    Some(opened.token.clone())
+}
+
+fn completed_single_reply(verb: SignalVerb, payload: wire::Reply) -> wire::LojixChannelReply {
+    CoreReply::completed(NonEmpty::single(SubReply::Ok { verb, payload }))
+}
+
+fn request_closes_deployment_observation(
+    request: &wire::LojixChannelRequest,
+    current_token: &wire::DeploymentObservationToken,
+) -> bool {
+    let operations = request.operations();
+    if !operations.tail().is_empty() {
+        return false;
+    }
+    matches!(
+        operations.head().payload(),
+        wire::Request::DeploymentObservationRetraction(token) if token == current_token
+    )
 }
 
 pub struct ExchangeIdentity {

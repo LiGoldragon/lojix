@@ -10,7 +10,9 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 > channel macro, typed daemon/CLI configuration, and the first
 > build-only deploy actor slice. Deployment IDs, deployment-observation
 > subscription tokens, and the deployment event log are now backed by
-> `sema-engine`. Today's `lojix-cli` (separate repo)
+> `sema-engine`; active deployment-observation subscribers receive
+> pushed `StreamingFrameBody::SubscriptionEvent` frames. Today's
+> `lojix-cli` (separate repo)
 > stays at the current schema for the duration; retires after CriomOS
 > migrates to consume this daemon's projection.
 
@@ -215,9 +217,12 @@ end-to-end smoke against a controller-hosting node.
   `Submitted`/`Building`/`Built`/`Failed` observations in one
   daemon-owned redb file. `tests/event_log.rs` and
   `checks.<system>.test-event-log` prove observations and deployment
-  identifier allocation survive reopening the database. Subscribers
-  still receive subscription-open snapshots today; live delta delivery
-  through pushed stream frames remains the next stream-delivery slice.
+  identifier allocation survive reopening the database, and that
+  subscription retraction removes the durable subscription record.
+  `tests/socket.rs` proves an active deployment-observation subscriber
+  receives a pushed `Submitted` / `Building` / `Built` / `Failed`
+  `SubscriptionEvent` sequence after subscription-open, then closes
+  through token retraction with no durable subscription left behind.
 - C15. GC roots are filesystem state at
   `/nix/var/nix/gcroots/criomos/<cluster>/<node>/<kind>/<generation>`
   with per-`<kind>` slots (`current`, `boot-pending`,
@@ -247,9 +252,9 @@ end-to-end smoke against a controller-hosting node.
 - C17. Each pipeline phase emits a `DeploymentObservation` event
   (`Submitted`, `Building`, `Built`, `Copying`, `Activating`,
   `Succeeded` / `Failed`); subscribers see them live.
-  Current implemented slice exposes the sema-backed event log through
-  subscription-open snapshots; live pushed stream frames remain part
-  of the next stream-delivery slice.
+  Current implemented slice exposes subscription-open snapshots and
+  pushes subsequent deployment-observation events over the same socket
+  connection until the token is retracted or the connection closes.
 - C18. Activation failure rolls back the GC root for that kind
   (the failed generation does not become `current`).
 

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
@@ -20,9 +21,10 @@ use kameo::message::{Context, Message};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema::SchemaVersion;
 use sema_engine::{
-    Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, TableDescriptor, TableName,
-    TableReference,
+    Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, Retraction, TableDescriptor,
+    TableName, TableReference,
 };
+use tokio::sync::mpsc::UnboundedSender;
 
 const HORIZON_FLAKE_TEMPLATE: &str = "{
   outputs = _: {
@@ -114,6 +116,28 @@ impl DeploymentEventLog {
         })
     }
 
+    pub fn close_deployment_observation_subscription(
+        &self,
+        token: &wire::DeploymentObservationToken,
+    ) -> Result<()> {
+        let key = DeploymentObservationSubscriptionRecord::key_from_token(token).to_owned_string();
+        match self.engine.retract(Retraction::new(
+            self.deployment_observation_subscriptions,
+            RecordKey::new(key),
+        )) {
+            Ok(_) | Err(sema_engine::Error::RecordNotFound { .. }) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn deployment_observation_subscription_count(&self) -> Result<usize> {
+        Ok(self
+            .engine
+            .match_records(QueryPlan::all(self.deployment_observation_subscriptions))?
+            .records()
+            .len())
+    }
+
     pub fn snapshot_deployment_observations(
         &self,
         subscription: &wire::DeploymentObservationSubscription,
@@ -143,10 +167,11 @@ struct DurableKey {
 
 impl DurableKey {
     fn new(prefix: &'static str, snapshot: sema_engine::SnapshotId) -> Self {
-        Self {
-            prefix,
-            value: snapshot.value(),
-        }
+        Self::from_value(prefix, snapshot.value())
+    }
+
+    fn from_value(prefix: &'static str, value: u64) -> Self {
+        Self { prefix, value }
     }
 
     fn value(&self) -> u64 {
@@ -232,6 +257,8 @@ struct DeploymentObservationSubscriptionRecord {
 }
 
 impl DeploymentObservationSubscriptionRecord {
+    const KEY_PREFIX: &'static str = "deployment_observation_subscription";
+
     fn new(
         key: DurableKey,
         token: wire::DeploymentObservationToken,
@@ -243,6 +270,10 @@ impl DeploymentObservationSubscriptionRecord {
             subscription,
         }
     }
+
+    fn key_from_token(token: &wire::DeploymentObservationToken) -> RecordKey {
+        RecordKey::new(DurableKey::from_value(Self::KEY_PREFIX, token.value()).into_string())
+    }
 }
 
 impl EngineRecord for DeploymentObservationSubscriptionRecord {
@@ -253,12 +284,14 @@ impl EngineRecord for DeploymentObservationSubscriptionRecord {
 
 pub struct EventLogActor {
     log: DeploymentEventLog,
+    deployment_observation_subscribers: BTreeMap<u64, ActiveDeploymentObservationSubscriber>,
 }
 
 impl EventLogActor {
     pub fn open(state_directory: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
             log: DeploymentEventLog::open(state_directory)?,
+            deployment_observation_subscribers: BTreeMap::new(),
         })
     }
 }
@@ -289,8 +322,13 @@ impl Message<AppendDeploymentObservation> for EventLogActor {
         message: AppendDeploymentObservation,
         _context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.log
-            .append_observation(message.cluster, message.node, message.observation)
+        self.log.append_observation(
+            message.cluster.clone(),
+            message.node.clone(),
+            message.observation.clone(),
+        )?;
+        self.publish_deployment_observation(&message.cluster, &message.node, message.observation);
+        Ok(())
     }
 }
 
@@ -310,6 +348,7 @@ impl Message<AllocateDeployment> for EventLogActor {
 
 pub struct OpenDeploymentObservationSubscription {
     pub subscription: wire::DeploymentObservationSubscription,
+    pub subscriber: Option<UnboundedSender<wire::DeploymentObservation>>,
 }
 
 impl Message<OpenDeploymentObservationSubscription> for EventLogActor {
@@ -320,8 +359,116 @@ impl Message<OpenDeploymentObservationSubscription> for EventLogActor {
         message: OpenDeploymentObservationSubscription,
         _context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let Some(subscriber) = message.subscriber else {
+            let observations = self
+                .log
+                .snapshot_deployment_observations(&message.subscription)?;
+            return Ok(wire::DeploymentObservationSubscriptionOpened {
+                token: wire::DeploymentObservationToken::new(0),
+                observations,
+            });
+        };
+
+        let opened = self
+            .log
+            .open_deployment_observation_subscription(message.subscription.clone())?;
+        self.deployment_observation_subscribers.insert(
+            opened.token.value(),
+            ActiveDeploymentObservationSubscriber {
+                subscription: message.subscription,
+                sender: subscriber,
+            },
+        );
+        Ok(opened)
+    }
+}
+
+pub struct CloseDeploymentObservationSubscription {
+    pub token: wire::DeploymentObservationToken,
+}
+
+impl Message<CloseDeploymentObservationSubscription> for EventLogActor {
+    type Reply = Result<wire::DeploymentObservationSubscriptionClosed>;
+
+    async fn handle(
+        &mut self,
+        message: CloseDeploymentObservationSubscription,
+        _context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.deployment_observation_subscribers
+            .remove(&message.token.value());
         self.log
-            .open_deployment_observation_subscription(message.subscription)
+            .close_deployment_observation_subscription(&message.token)?;
+        Ok(wire::DeploymentObservationSubscriptionClosed {
+            token: message.token,
+        })
+    }
+}
+
+pub struct CountDeploymentObservationSubscriptions;
+
+impl Message<CountDeploymentObservationSubscriptions> for EventLogActor {
+    type Reply = Result<usize>;
+
+    async fn handle(
+        &mut self,
+        _message: CountDeploymentObservationSubscriptions,
+        _context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.log.deployment_observation_subscription_count()
+    }
+}
+
+impl EventLogActor {
+    fn publish_deployment_observation(
+        &mut self,
+        cluster: &wire::ClusterName,
+        node: &wire::NodeName,
+        observation: wire::DeploymentObservation,
+    ) {
+        let mut closed_tokens = Vec::new();
+        for (token, subscriber) in &self.deployment_observation_subscribers {
+            if subscriber.matches(cluster, node, &observation)
+                && subscriber.sender.send(observation.clone()).is_err()
+            {
+                closed_tokens.push(*token);
+            }
+        }
+
+        for token in closed_tokens {
+            self.deployment_observation_subscribers.remove(&token);
+            let token = wire::DeploymentObservationToken::new(token);
+            let _ = self.log.close_deployment_observation_subscription(&token);
+        }
+    }
+}
+
+struct ActiveDeploymentObservationSubscriber {
+    subscription: wire::DeploymentObservationSubscription,
+    sender: UnboundedSender<wire::DeploymentObservation>,
+}
+
+impl ActiveDeploymentObservationSubscriber {
+    fn matches(
+        &self,
+        cluster: &wire::ClusterName,
+        node: &wire::NodeName,
+        observation: &wire::DeploymentObservation,
+    ) -> bool {
+        self.subscription
+            .cluster
+            .as_ref()
+            .is_none_or(|expected| expected == cluster)
+            && self
+                .subscription
+                .node
+                .as_ref()
+                .is_none_or(|expected| expected == node)
+            && self
+                .subscription
+                .deployment
+                .as_ref()
+                .is_none_or(|expected| observation.deployment_id() == Some(expected))
     }
 }
 
