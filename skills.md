@@ -101,14 +101,17 @@ these):
   `checks.<system>.test-build-pipeline` is the current Nix witness
   for this path.
 - Deployment identifiers, deployment-observation subscription tokens,
-  and the deployment event log are sema-backed through
-  `DeploymentEventLog`; `checks.<system>.test-event-log` reopens the
-  database and proves observations plus identifier allocation survive
-  restart. `tests/socket.rs` proves deployment-observation streams
-  push live `SubscriptionEvent` frames over the socket and close via
-  typed token retraction. Remaining durable slices: live generation
-  set, sema-backed GC-root records, container lifecycle observation,
-  closure copy, activation, rollback, and cache retention.
+  deployment observations, and built-generation records are sema-backed
+  through `DeploymentLedger`; `checks.<system>.test-event-log` reopens
+  the database and proves observations, identifier allocation, and
+  built generations survive restart. `tests/build_pipeline.rs` proves a
+  successful build pins its GC root and then appears in
+  `GenerationQuery`. `tests/socket.rs` proves deployment-observation
+  streams push live `SubscriptionEvent` frames over the socket and
+  close via typed token retraction. Remaining durable slices:
+  activation/current-generation semantics, sema-backed GC-root records,
+  container lifecycle observation, closure copy, rollback, and cache
+  retention.
 - The `signal-lojix` contract crate (`github:LiGoldragon/signal-lojix`)
   now uses the current `signal-core` streaming channel macro for
   observations.

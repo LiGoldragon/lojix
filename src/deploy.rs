@@ -40,15 +40,17 @@ const DEPLOYMENT_IDENTITIES_TABLE: TableName = TableName::new("deployment_identi
 const DEPLOYMENT_EVENTS_TABLE: TableName = TableName::new("deployment_events");
 const DEPLOYMENT_OBSERVATION_SUBSCRIPTIONS_TABLE: TableName =
     TableName::new("deployment_observation_subscriptions");
+const GENERATIONS_TABLE: TableName = TableName::new("generations");
 
-pub struct DeploymentEventLog {
+pub struct DeploymentLedger {
     engine: Engine,
     deployment_identities: TableReference<DeploymentIdentityRecord>,
     deployment_events: TableReference<DeploymentEventRecord>,
     deployment_observation_subscriptions: TableReference<DeploymentObservationSubscriptionRecord>,
+    generations: TableReference<GenerationRecord>,
 }
 
-impl DeploymentEventLog {
+impl DeploymentLedger {
     pub fn open(state_directory: impl AsRef<Path>) -> Result<Self> {
         std::fs::create_dir_all(state_directory.as_ref())?;
         let database_path = state_directory.as_ref().join(LOJIX_DATABASE_FILE);
@@ -63,11 +65,13 @@ impl DeploymentEventLog {
         let deployment_observation_subscriptions = engine.register_table(TableDescriptor::new(
             DEPLOYMENT_OBSERVATION_SUBSCRIPTIONS_TABLE,
         ))?;
+        let generations = engine.register_table(TableDescriptor::new(GENERATIONS_TABLE))?;
         Ok(Self {
             engine,
             deployment_identities,
             deployment_events,
             deployment_observation_subscriptions,
+            generations,
         })
     }
 
@@ -136,6 +140,43 @@ impl DeploymentEventLog {
             .match_records(QueryPlan::all(self.deployment_observation_subscriptions))?
             .records()
             .len())
+    }
+
+    pub fn record_built_generation(
+        &self,
+        cluster: wire::ClusterName,
+        node: wire::NodeName,
+        kind: wire::GenerationKind,
+        store_path: wire::StorePath,
+    ) -> Result<wire::Generation> {
+        let key = self.next_key("generation")?;
+        let generation = wire::Generation {
+            generation: wire::GenerationId::from_text(format!("generation_{}", key.value()))?,
+            cluster,
+            node,
+            kind,
+            store_path,
+            state: wire::GenerationState::Built,
+        };
+        self.engine.assert(Assertion::new(
+            self.generations,
+            GenerationRecord::new(key, generation.clone()),
+        ))?;
+        Ok(generation)
+    }
+
+    pub fn query_generations(
+        &self,
+        query: &wire::GenerationQuery,
+    ) -> Result<Vec<wire::Generation>> {
+        Ok(self
+            .engine
+            .match_records(QueryPlan::all(self.generations))?
+            .records()
+            .iter()
+            .filter(|record| record.matches(query))
+            .map(|record| record.generation.clone())
+            .collect())
     }
 
     pub fn snapshot_deployment_observations(
@@ -282,21 +323,54 @@ impl EngineRecord for DeploymentObservationSubscriptionRecord {
     }
 }
 
-pub struct EventLogActor {
-    log: DeploymentEventLog,
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct GenerationRecord {
+    key: String,
+    generation: wire::Generation,
+}
+
+impl GenerationRecord {
+    fn new(key: DurableKey, generation: wire::Generation) -> Self {
+        Self {
+            key: key.into_string(),
+            generation,
+        }
+    }
+
+    fn matches(&self, query: &wire::GenerationQuery) -> bool {
+        query
+            .cluster
+            .as_ref()
+            .is_none_or(|cluster| cluster == &self.generation.cluster)
+            && query
+                .node
+                .as_ref()
+                .is_none_or(|node| node == &self.generation.node)
+            && query.kind.is_none_or(|kind| kind == self.generation.kind)
+    }
+}
+
+impl EngineRecord for GenerationRecord {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.key.clone())
+    }
+}
+
+pub struct DeploymentLedgerActor {
+    ledger: DeploymentLedger,
     deployment_observation_subscribers: BTreeMap<u64, ActiveDeploymentObservationSubscriber>,
 }
 
-impl EventLogActor {
+impl DeploymentLedgerActor {
     pub fn open(state_directory: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
-            log: DeploymentEventLog::open(state_directory)?,
+            ledger: DeploymentLedger::open(state_directory)?,
             deployment_observation_subscribers: BTreeMap::new(),
         })
     }
 }
 
-impl Actor for EventLogActor {
+impl Actor for DeploymentLedgerActor {
     type Args = Self;
     type Error = Infallible;
 
@@ -314,7 +388,7 @@ pub struct AppendDeploymentObservation {
     pub observation: wire::DeploymentObservation,
 }
 
-impl Message<AppendDeploymentObservation> for EventLogActor {
+impl Message<AppendDeploymentObservation> for DeploymentLedgerActor {
     type Reply = Result<()>;
 
     async fn handle(
@@ -322,7 +396,7 @@ impl Message<AppendDeploymentObservation> for EventLogActor {
         message: AppendDeploymentObservation,
         _context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.log.append_observation(
+        self.ledger.append_observation(
             message.cluster.clone(),
             message.node.clone(),
             message.observation.clone(),
@@ -334,7 +408,7 @@ impl Message<AppendDeploymentObservation> for EventLogActor {
 
 pub struct AllocateDeployment;
 
-impl Message<AllocateDeployment> for EventLogActor {
+impl Message<AllocateDeployment> for DeploymentLedgerActor {
     type Reply = Result<wire::DeploymentId>;
 
     async fn handle(
@@ -342,7 +416,7 @@ impl Message<AllocateDeployment> for EventLogActor {
         _message: AllocateDeployment,
         _context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.log.allocate_deployment()
+        self.ledger.allocate_deployment()
     }
 }
 
@@ -351,7 +425,7 @@ pub struct OpenDeploymentObservationSubscription {
     pub subscriber: Option<UnboundedSender<wire::DeploymentObservation>>,
 }
 
-impl Message<OpenDeploymentObservationSubscription> for EventLogActor {
+impl Message<OpenDeploymentObservationSubscription> for DeploymentLedgerActor {
     type Reply = Result<wire::DeploymentObservationSubscriptionOpened>;
 
     async fn handle(
@@ -361,7 +435,7 @@ impl Message<OpenDeploymentObservationSubscription> for EventLogActor {
     ) -> Self::Reply {
         let Some(subscriber) = message.subscriber else {
             let observations = self
-                .log
+                .ledger
                 .snapshot_deployment_observations(&message.subscription)?;
             return Ok(wire::DeploymentObservationSubscriptionOpened {
                 token: wire::DeploymentObservationToken::new(0),
@@ -370,7 +444,7 @@ impl Message<OpenDeploymentObservationSubscription> for EventLogActor {
         };
 
         let opened = self
-            .log
+            .ledger
             .open_deployment_observation_subscription(message.subscription.clone())?;
         self.deployment_observation_subscribers.insert(
             opened.token.value(),
@@ -387,7 +461,7 @@ pub struct CloseDeploymentObservationSubscription {
     pub token: wire::DeploymentObservationToken,
 }
 
-impl Message<CloseDeploymentObservationSubscription> for EventLogActor {
+impl Message<CloseDeploymentObservationSubscription> for DeploymentLedgerActor {
     type Reply = Result<wire::DeploymentObservationSubscriptionClosed>;
 
     async fn handle(
@@ -397,7 +471,7 @@ impl Message<CloseDeploymentObservationSubscription> for EventLogActor {
     ) -> Self::Reply {
         self.deployment_observation_subscribers
             .remove(&message.token.value());
-        self.log
+        self.ledger
             .close_deployment_observation_subscription(&message.token)?;
         Ok(wire::DeploymentObservationSubscriptionClosed {
             token: message.token,
@@ -407,7 +481,7 @@ impl Message<CloseDeploymentObservationSubscription> for EventLogActor {
 
 pub struct CountDeploymentObservationSubscriptions;
 
-impl Message<CountDeploymentObservationSubscriptions> for EventLogActor {
+impl Message<CountDeploymentObservationSubscriptions> for DeploymentLedgerActor {
     type Reply = Result<usize>;
 
     async fn handle(
@@ -415,11 +489,51 @@ impl Message<CountDeploymentObservationSubscriptions> for EventLogActor {
         _message: CountDeploymentObservationSubscriptions,
         _context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.log.deployment_observation_subscription_count()
+        self.ledger.deployment_observation_subscription_count()
     }
 }
 
-impl EventLogActor {
+pub struct RecordBuiltGeneration {
+    pub cluster: wire::ClusterName,
+    pub node: wire::NodeName,
+    pub kind: wire::GenerationKind,
+    pub store_path: wire::StorePath,
+}
+
+impl Message<RecordBuiltGeneration> for DeploymentLedgerActor {
+    type Reply = Result<wire::Generation>;
+
+    async fn handle(
+        &mut self,
+        message: RecordBuiltGeneration,
+        _context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.ledger.record_built_generation(
+            message.cluster,
+            message.node,
+            message.kind,
+            message.store_path,
+        )
+    }
+}
+
+pub struct QueryGenerations {
+    pub query: wire::GenerationQuery,
+}
+
+impl Message<QueryGenerations> for DeploymentLedgerActor {
+    type Reply = Result<Vec<wire::Generation>>;
+
+    async fn handle(
+        &mut self,
+        message: QueryGenerations,
+        _context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.ledger.query_generations(&message.query)
+    }
+}
+
+impl DeploymentLedgerActor {
     fn publish_deployment_observation(
         &mut self,
         cluster: &wire::ClusterName,
@@ -438,7 +552,9 @@ impl EventLogActor {
         for token in closed_tokens {
             self.deployment_observation_subscribers.remove(&token);
             let token = wire::DeploymentObservationToken::new(token);
-            let _ = self.log.close_deployment_observation_subscription(&token);
+            let _ = self
+                .ledger
+                .close_deployment_observation_subscription(&token);
         }
     }
 }
@@ -597,19 +713,19 @@ impl GenerationKindDirectorySegment for wire::GenerationKind {
 
 pub struct DeploymentActor {
     configuration: RuntimeConfiguration,
-    event_log: ActorRef<EventLogActor>,
+    deployment_ledger: ActorRef<DeploymentLedgerActor>,
     garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
 }
 
 impl DeploymentActor {
     pub fn new(
         configuration: RuntimeConfiguration,
-        event_log: ActorRef<EventLogActor>,
+        deployment_ledger: ActorRef<DeploymentLedgerActor>,
         garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
     ) -> Self {
         Self {
             configuration,
-            event_log,
+            deployment_ledger,
             garbage_collection_roots,
         }
     }
@@ -646,7 +762,7 @@ impl Message<StartDeployment> for DeploymentActor {
 
         let job = BuildJobActor::spawn(BuildJobActor::new(
             self.configuration.clone(),
-            self.event_log.clone(),
+            self.deployment_ledger.clone(),
             self.garbage_collection_roots.clone(),
             message.deployment.clone(),
             message.submission,
@@ -666,7 +782,7 @@ impl Message<StartDeployment> for DeploymentActor {
 
 struct BuildJobActor {
     configuration: RuntimeConfiguration,
-    event_log: ActorRef<EventLogActor>,
+    deployment_ledger: ActorRef<DeploymentLedgerActor>,
     garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
     deployment: wire::DeploymentId,
     cluster: wire::ClusterName,
@@ -677,7 +793,7 @@ struct BuildJobActor {
 impl BuildJobActor {
     fn new(
         configuration: RuntimeConfiguration,
-        event_log: ActorRef<EventLogActor>,
+        deployment_ledger: ActorRef<DeploymentLedgerActor>,
         garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
         deployment: wire::DeploymentId,
         submission: wire::DeploymentSubmission,
@@ -686,7 +802,7 @@ impl BuildJobActor {
         let node = submission.node.clone();
         Self {
             configuration,
-            event_log,
+            deployment_ledger,
             garbage_collection_roots,
             deployment,
             cluster,
@@ -696,7 +812,7 @@ impl BuildJobActor {
     }
 
     async fn append(&self, phase: wire::DeploymentPhase) -> Result<()> {
-        self.event_log
+        self.deployment_ledger
             .ask(AppendDeploymentObservation {
                 cluster: self.cluster.clone(),
                 node: self.node.clone(),
@@ -733,6 +849,23 @@ impl BuildJobActor {
             .await
             .map_err(|error| {
                 Error::DeploymentRejected(format!("failed to pin build output as GC root: {error}"))
+            })
+    }
+
+    async fn record_built_generation(
+        &self,
+        request: &BuildOnlyRequest,
+        result: &wire::BuildResult,
+    ) -> Result<()> {
+        let Some(record) = request.built_generation_record(result) else {
+            return Ok(());
+        };
+        self.deployment_ledger
+            .ask(record)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                Error::DeploymentRejected(format!("failed to record built generation: {error}"))
             })
     }
 }
@@ -795,6 +928,10 @@ impl Message<RunBuildJob> for BuildJobActor {
                 match request.run().await {
                     Ok(result) => {
                         if let Err(error) = self.pin_built_output(&request, &result).await {
+                            self.fail(error).await;
+                        } else if let Err(error) =
+                            self.record_built_generation(&request, &result).await
+                        {
                             self.fail(error).await;
                         } else {
                             if let Err(error) = self
@@ -891,6 +1028,18 @@ impl BuildOnlyRequest {
         };
         Some(PinBuiltOutput {
             deployment: deployment.clone(),
+            cluster: self.deployment_cluster.clone(),
+            node: self.deployment_node.clone(),
+            kind: self.generation_kind,
+            store_path: realized.store_path.clone(),
+        })
+    }
+
+    fn built_generation_record(&self, result: &wire::BuildResult) -> Option<RecordBuiltGeneration> {
+        let wire::BuildResult::RealizedStorePath(realized) = result else {
+            return None;
+        };
+        Some(RecordBuiltGeneration {
             cluster: self.deployment_cluster.clone(),
             node: self.deployment_node.clone(),
             kind: self.generation_kind,

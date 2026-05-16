@@ -3,7 +3,7 @@
 The new deploy stack — one crate, two binaries:
 
 - **`lojix-daemon`** — long-lived deploy orchestrator. Owns the live
-  generation set, GC roots tree, deploy event log, and container
+  generation ledger, GC roots tree, deployment ledger, and container
   lifecycle observation. Binds `/run/lojix/daemon.sock`; receives
   `signal-core` frames carrying typed `signal-lojix` deploy requests;
   pushes `DeploymentObservation` + `CacheRetentionObservation` stream
@@ -18,9 +18,10 @@ wire framing is `signal-core`. The contract repo is `signal-lojix`.
 the first socket/client/runtime slice plus typed `nota-config`
 configuration for both binaries. The build-only deployment path is
 active: it projects Horizon, builds through Nix, pins realized outputs
-as GC roots before reporting success, and records deployment
-observations in a sema-backed event log. Active deployment-observation
-subscribers receive pushed stream-event frames for subsequent events.
+as GC roots before reporting success, records built generations in
+sema, and returns those records from `GenerationQuery`. Active
+deployment-observation subscribers receive pushed stream-event frames
+for subsequent events.
 Deploy-facing examples and
 witness data on this branch target the matching
 `horizon-re-engineering` branches of `CriomOS`, `goldragon`, and

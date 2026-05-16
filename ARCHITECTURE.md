@@ -9,9 +9,11 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 > socket/client/runtime slice against the current `signal-core` streaming
 > channel macro, typed daemon/CLI configuration, and the first
 > build-only deploy actor slice. Deployment IDs, deployment-observation
-> subscription tokens, and the deployment event log are now backed by
-> `sema-engine`; active deployment-observation subscribers receive
-> pushed `StreamingFrameBody::SubscriptionEvent` frames. Today's
+> subscription tokens, deployment observations, and built generations
+> are now backed by `sema-engine`; active deployment-observation
+> subscribers receive pushed `StreamingFrameBody::SubscriptionEvent`
+> frames. `GenerationQuery` reads the sema-backed built-generation
+> ledger. Today's
 > `lojix-cli` (separate repo)
 > stays at the current schema for the duration; retires after CriomOS
 > migrates to consume this daemon's projection.
@@ -46,15 +48,18 @@ and binds the socket; `lojix` opens the socket, sends one
   `signal-core` frames carrying `signal-lojix` requests; emits
   matching replies. Production service wiring owns the final mode and
   group.
-- **Live generation set** — `BTreeMap<(ClusterName, NodeName, Kind),
-  Generation>` persisted via `sema-engine`. Source of truth for
-  "what's running on every node right now."
+- **Generation ledger** — typed `Generation` records persisted via
+  `sema-engine`. Current branch records built generations; the future
+  activation slice promotes them into the live/current set for each
+  `(ClusterName, NodeName, Kind)`.
 - **GC roots tree** —
   `/nix/var/nix/gcroots/criomos/<cluster>/<node>/<kind>/<generation>`
   symlink layout per
   `~/primary/reports/system-assistant/04-dedicated-cloud-host-plan-second-revision.md`
   §P4. Two-phase deletion respecting narinfo TTL.
-- **Deploy event log** — append-only log of typed events
+- **Deployment ledger** — sema-backed state for deployment IDs, built
+  generations, deployment-observation subscriptions, and the append-only
+  log of typed events
   (`BuildRealized`, `CachePublished`, `ActivationSucceeded`,
   `GenerationRetired`, `ContainerStarted`, `ContainerStopped`).
   Subscribers consume via `signal-lojix` streams opened by
@@ -91,7 +96,7 @@ and binds the socket; `lojix` opens the socket, sends one
 src/
   lib.rs                # module entry; public exports
   client.rs             # thin client: one Nota request -> one Nota reply
-  deploy.rs             # deployment/event-log actors + build-only request path
+  deploy.rs             # deployment-ledger actors + build-only request path
   error.rs              # crate-owned typed errors
   process.rs            # typed external-process invocations/toolchain
   runtime.rs            # Kameo RuntimeRoot + first message handler
@@ -106,9 +111,9 @@ module files as their surfaces grow:
 
 ```
 src/daemon/
-  live_set.rs           # LiveSetActor: BTreeMap<...> via sema-engine
+  generations.rs        # GenerationLedgerActor: sema-backed generation state
   gc_roots.rs           # GarbageCollectionRoots: /nix/var/nix/gcroots/criomos/...
-  events.rs             # EventLogActor / DeploymentEventLog sema-backed event records
+  events.rs             # DeploymentLedgerActor sema-backed event records
   container.rs          # ContainerLifecycleActor: systemd dbus observer
   supervisor.rs         # Kameo supervisor wiring
 ```
@@ -120,8 +125,9 @@ Each daemon actor is a Kameo actor per
 
 - **Storage:** `sema-engine` (the typed database engine library;
   see `~/primary/skills/rust/storage-and-wire.md` §"The sema-engine
-  pattern"). One redb file owned by the daemon; tables for live set,
-  GC roots, event log, container lifecycle records.
+  pattern"). One redb file owned by the daemon; tables for deployment
+  ledger records, generation records, GC roots, and container lifecycle
+  records.
 - **Wire:** `signal-core` frames carrying `signal-lojix` records.
   Length-prefixed rkyv archives over the Unix socket. Streaming
   observations are modeled as `signal-core` stream kinds, not ad hoc
@@ -193,13 +199,13 @@ end-to-end smoke against a controller-hosting node.
 
 **Actor topology**
 - C8. `RuntimeRoot` is a Kameo `Actor` with state carrying child
-  refs (`LiveSetActor`, `GarbageCollectionRoots`, `EventLogActor`,
+  refs (`DeploymentLedgerActor`, `GarbageCollectionRoots`,
   `ContainerLifecycleActor`, `SocketAcceptor`). No ZST root.
 - C9. Each daemon-internal plane is its own Kameo actor with a
   named state field; no `State = ()` actors.
 - C10. Failure policy: each supervisor has typed
-  `RestartPolicy::Permanent` for sema-backed actors (LiveSet,
-  EventLog) and `RestartPolicy::Never` for transient actors
+  `RestartPolicy::Permanent` for sema-backed actors
+  (`DeploymentLedgerActor`) and `RestartPolicy::Never` for transient actors
   (per-connection handlers).
 - C11. No `Arc<Mutex<T>>` between actors. State has one owner.
 - C12. No detached `tokio::spawn` in production code. Long-running
@@ -208,12 +214,16 @@ end-to-end smoke against a controller-hosting node.
   connection so a stalled client cannot hold the listener.
 
 **Durable state**
-- C13. The live generation set lives in a sema-engine table
+- C13. Generation records live in a sema-engine table
   (`Generation { generation, cluster, node, kind, store_path,
   state }`); reconstructed on restart from sema, not from memory.
+  The current build-only slice records `Built` generations after the
+  build output is pinned and before `DeploymentBuilt` is reported.
+  `tests/event_log.rs` proves built generations survive database
+  reopen.
 - C14. The deploy event log is append-only via sema-engine
   `Assert`; the current build-only slice stores deployment IDs,
-  deployment-observation subscription records, and
+  built-generation records, deployment-observation subscription records, and
   `Submitted`/`Building`/`Built`/`Failed` observations in one
   daemon-owned redb file. `tests/event_log.rs` and
   `checks.<system>.test-event-log` prove observations and deployment
@@ -242,9 +252,9 @@ end-to-end smoke against a controller-hosting node.
   rejects local builds and activation actions before any external
   tool runs, stages generated Horizon/System/Deployment inputs to the
   remote builder, pins the realized output as a GC-root symlink, and
-  records `Submitted` / `Building` / `Built` / `Failed`
-  observations. `DeploymentBuilt` is emitted only after the
-  build-output root exists.
+  records a `Built` generation plus `Submitted` / `Building` / `Built`
+  / `Failed` observations. `DeploymentBuilt` is emitted only after the
+  build-output root exists and the built generation is in sema.
   While this branch is under construction, deploy-facing examples and
   tests target the matching `horizon-re-engineering` branches of
   `CriomOS`, `goldragon`, and `horizon-rs`; default-branch examples are
@@ -269,7 +279,9 @@ end-to-end smoke against a controller-hosting node.
 - C20. `GenerationQuery` returns the live set filtered by the
   query's optional `cluster`/`node`/`kind`. Read via sema-engine
   `Match`; never blocks the mailbox on disk reads (the snapshot
-  is in memory).
+  is in memory). The current build-only slice returns sema-backed
+  built generations; activation/current-state semantics are still a
+  future slice.
 
 **Test discipline**
 - C21. Every constraint above has at least one test that fails

@@ -2,8 +2,8 @@
 //!
 //! This crate ships two binaries and a library:
 //!
-//! - `lojix-daemon` — supervised actor runtime that owns the live
-//!   generation set, GC roots tree, and deploy event log; binds the
+//! - `lojix-daemon` — supervised actor runtime that owns the
+//!   generation ledger, GC roots tree, and deployment ledger; binds the
 //!   `/run/lojix/daemon.sock` Unix socket and accepts `signal-lojix`
 //!   requests, emits `signal-lojix` replies and observations.
 //! - `lojix` — thin CLI client. Reads one Nota request, forwards it
@@ -21,9 +21,10 @@
 //! The current runtime slice owns the Signal socket path, typed
 //! startup configuration, and a Kameo `RuntimeRoot` that accepts
 //! build-only deployment submissions. Build jobs run in per-deployment
-//! actors; realized outputs are pinned as GC roots before success is
-//! reported; local builds and activation actions are rejected before
-//! any external tool runs. Both production binaries read typed
+//! actors; realized outputs are pinned as GC roots and recorded as
+//! built generations before success is reported; local builds and
+//! activation actions are rejected before any external tool runs. Both
+//! production binaries read typed
 //! `signal-lojix` startup configuration records through `nota-config`;
 //! environment variables are not a production control-plane channel.
 

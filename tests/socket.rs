@@ -112,7 +112,7 @@ async fn deployment_observation_subscription_receives_live_stream_sequence_and_c
     let observations = deployment_observation_sequence(&deployment);
 
     let root_state = RuntimeRoot::new();
-    let event_log = root_state.event_log().clone();
+    let deployment_ledger = root_state.deployment_ledger().clone();
     let root = RuntimeRoot::spawn(root_state);
     let (client_stream, server_stream) = UnixStream::pair().expect("unix stream pair");
     let server = SocketServer::handle_stream(Connection::new(server_stream), root);
@@ -135,7 +135,7 @@ async fn deployment_observation_subscription_receives_live_stream_sequence_and_c
         let token = read_deployment_observation_opened(&mut connection, exchange.value()).await;
 
         for observation in &observations {
-            event_log
+            deployment_ledger
                 .ask(AppendDeploymentObservation {
                     cluster: cluster.clone(),
                     node: node.clone(),
@@ -163,7 +163,7 @@ async fn deployment_observation_subscription_receives_live_stream_sequence_and_c
             .await
             .expect("write close request");
         read_deployment_observation_closed(&mut connection, close_exchange, token).await;
-        let remaining_subscriptions = event_log
+        let remaining_subscriptions = deployment_ledger
             .ask(CountDeploymentObservationSubscriptions)
             .await
             .expect("count deployment observation subscriptions");

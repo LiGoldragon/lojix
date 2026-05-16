@@ -7,8 +7,9 @@ use kameo::message::{Context, Message};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::deploy::{
-    AllocateDeployment, CloseDeploymentObservationSubscription, DeploymentActor, EventLogActor,
-    GarbageCollectionRoots, OpenDeploymentObservationSubscription, StartDeployment,
+    AllocateDeployment, CloseDeploymentObservationSubscription, DeploymentActor,
+    DeploymentLedgerActor, GarbageCollectionRoots, OpenDeploymentObservationSubscription,
+    QueryGenerations, StartDeployment,
 };
 use crate::error::Result as LojixResult;
 use crate::process::ProcessToolchain;
@@ -93,7 +94,7 @@ impl RuntimeConfiguration {
 pub struct RuntimeRoot {
     configuration: RuntimeConfiguration,
     deployment_actor: ActorRef<DeploymentActor>,
-    event_log: ActorRef<EventLogActor>,
+    deployment_ledger: ActorRef<DeploymentLedgerActor>,
     garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
     next_cache_retention_observation_token: u64,
 }
@@ -108,19 +109,21 @@ impl RuntimeRoot {
     }
 
     pub fn try_with_configuration(configuration: RuntimeConfiguration) -> LojixResult<Self> {
-        let event_log = EventLogActor::spawn(EventLogActor::open(configuration.state_directory())?);
+        let deployment_ledger = DeploymentLedgerActor::spawn(DeploymentLedgerActor::open(
+            configuration.state_directory(),
+        )?);
         let garbage_collection_roots = GarbageCollectionRoots::spawn(GarbageCollectionRoots::new(
             configuration.gc_root_directory().to_path_buf(),
         ));
         let deployment_actor = DeploymentActor::spawn(DeploymentActor::new(
             configuration.clone(),
-            event_log.clone(),
+            deployment_ledger.clone(),
             garbage_collection_roots.clone(),
         ));
         Ok(Self {
             configuration,
             deployment_actor,
-            event_log,
+            deployment_ledger,
             garbage_collection_roots,
             next_cache_retention_observation_token: 1,
         })
@@ -134,8 +137,8 @@ impl RuntimeRoot {
         &self.garbage_collection_roots
     }
 
-    pub fn event_log(&self) -> &ActorRef<EventLogActor> {
-        &self.event_log
+    pub fn deployment_ledger(&self) -> &ActorRef<DeploymentLedgerActor> {
+        &self.deployment_ledger
     }
 }
 
@@ -171,7 +174,7 @@ impl Message<RuntimeRequest> for RuntimeRoot {
     ) -> Self::Reply {
         let reply = match message.request {
             wire::Request::DeploymentSubmission(submission) => {
-                let deployment = match self.event_log.ask(AllocateDeployment).await {
+                let deployment = match self.deployment_ledger.ask(AllocateDeployment).await {
                     Ok(deployment) => deployment,
                     Err(error) => {
                         return Ok(deployment_rejected(format!(
@@ -210,14 +213,19 @@ impl Message<RuntimeRequest> for RuntimeRoot {
                     ),
                 })
             }
-            wire::Request::GenerationQuery(_) => {
-                wire::Reply::GenerationListing(wire::GenerationListing {
-                    generations: Vec::new(),
-                })
+            wire::Request::GenerationQuery(query) => {
+                match self.deployment_ledger.ask(QueryGenerations { query }).await {
+                    Ok(generations) => {
+                        wire::Reply::GenerationListing(wire::GenerationListing { generations })
+                    }
+                    Err(error) => {
+                        deployment_rejected(format!("failed to query generations: {error}"))
+                    }
+                }
             }
             wire::Request::DeploymentObservationSubscription(subscription) => {
                 match self
-                    .event_log
+                    .deployment_ledger
                     .ask(OpenDeploymentObservationSubscription {
                         subscription,
                         subscriber: None,
@@ -244,7 +252,7 @@ impl Message<RuntimeRequest> for RuntimeRoot {
             }
             wire::Request::DeploymentObservationRetraction(token) => {
                 match self
-                    .event_log
+                    .deployment_ledger
                     .ask(CloseDeploymentObservationSubscription { token })
                     .await
                 {
@@ -278,7 +286,7 @@ impl Message<OpenDeploymentObservationStream> for RuntimeRoot {
         _context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let reply = match self
-            .event_log
+            .deployment_ledger
             .ask(OpenDeploymentObservationSubscription {
                 subscription: message.subscription,
                 subscriber: Some(message.sender),

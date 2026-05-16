@@ -22,8 +22,9 @@ use lojix::process::ProcessToolchain;
 use lojix::wire::{
     BuildLocally, BuilderSelection, ClusterName, DeploymentObservationSubscription,
     DeploymentPhase, DeploymentPlan, DeploymentRejected, DeploymentRejectionReason,
-    DeploymentSubmission, DispatcherChoosesBuilder, FlakeReference, FullOsDeployment, NodeName,
-    ProposalSource, RealizedStorePath, Reply, Request, SystemAction,
+    DeploymentSubmission, DispatcherChoosesBuilder, FlakeReference, FullOsDeployment,
+    GenerationKind, GenerationQuery, GenerationState, NodeName, ProposalSource, RealizedStorePath,
+    Reply, Request, SystemAction,
 };
 use lojix::{RuntimeConfiguration, RuntimeRequest, RuntimeRoot};
 
@@ -75,6 +76,25 @@ async fn build_only_deployment_pins_output_before_reporting_built() {
             )
     )));
     fixture.assert_built_gc_root(&deployment);
+    let generation_listing = ask_runtime(
+        &root,
+        Request::GenerationQuery(GenerationQuery {
+            cluster: Some(ClusterName::from_text("goldragon").expect("cluster name")),
+            node: Some(NodeName::from_text("zeus").expect("node name")),
+            kind: Some(GenerationKind::FullOs),
+        }),
+    )
+    .await;
+    let Reply::GenerationListing(listing) = generation_listing else {
+        panic!("expected generation listing, got {generation_listing:?}");
+    };
+    assert_eq!(listing.generations.len(), 1);
+    let generation = &listing.generations[0];
+    assert_eq!(generation.cluster.as_str(), "goldragon");
+    assert_eq!(generation.node.as_str(), "zeus");
+    assert_eq!(generation.kind, GenerationKind::FullOs);
+    assert_eq!(generation.state, GenerationState::Built);
+    assert_eq!(generation.store_path.as_str(), FAKE_STORE_PATH);
 
     let log = fixture.tool_log();
     assert!(log.contains("root@ouranos.goldragon.criome"));

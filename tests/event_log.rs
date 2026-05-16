@@ -1,36 +1,39 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lojix::deploy::DeploymentEventLog;
+use lojix::deploy::DeploymentLedger;
 use lojix::wire::{
     ClusterName, DeploymentObservation, DeploymentObservationSubscription, DeploymentPhase,
-    DeploymentSubmitted, NodeName,
+    DeploymentSubmitted, GenerationKind, GenerationQuery, GenerationState, NodeName, StorePath,
 };
 
 #[test]
-fn deployment_event_log_survives_reopen_through_sema_engine() {
+fn deployment_ledger_observations_survive_reopen_through_sema_engine() {
     let state_directory = unique_temporary_directory("lojix-event-log").join("state");
     let cluster = ClusterName::from_text("goldragon").expect("cluster name");
     let node = NodeName::from_text("zeus").expect("node name");
     let other_node = NodeName::from_text("ouranos").expect("other node name");
 
     let deployment = {
-        let log = DeploymentEventLog::open(&state_directory).expect("open deployment event log");
-        let deployment = log.allocate_deployment().expect("allocate deployment id");
-        log.append_observation(
-            cluster.clone(),
-            node.clone(),
-            DeploymentObservation {
-                phase: DeploymentPhase::DeploymentSubmitted(DeploymentSubmitted {
-                    deployment: deployment.clone(),
-                }),
-            },
-        )
-        .expect("append submitted observation");
+        let ledger = DeploymentLedger::open(&state_directory).expect("open deployment ledger");
+        let deployment = ledger
+            .allocate_deployment()
+            .expect("allocate deployment id");
+        ledger
+            .append_observation(
+                cluster.clone(),
+                node.clone(),
+                DeploymentObservation {
+                    phase: DeploymentPhase::DeploymentSubmitted(DeploymentSubmitted {
+                        deployment: deployment.clone(),
+                    }),
+                },
+            )
+            .expect("append submitted observation");
         deployment
     };
 
-    let reopened = DeploymentEventLog::open(&state_directory).expect("reopen deployment event log");
+    let reopened = DeploymentLedger::open(&state_directory).expect("reopen deployment ledger");
     let opened = reopened
         .open_deployment_observation_subscription(DeploymentObservationSubscription {
             cluster: Some(cluster.clone()),
@@ -61,16 +64,62 @@ fn deployment_event_log_survives_reopen_through_sema_engine() {
 }
 
 #[test]
+fn deployment_ledger_generations_survive_reopen_through_sema_engine() {
+    let state_directory = unique_temporary_directory("lojix-generation-ledger").join("state");
+    let cluster = ClusterName::from_text("goldragon").expect("cluster name");
+    let node = NodeName::from_text("zeus").expect("node name");
+    let other_node = NodeName::from_text("ouranos").expect("other node name");
+    let store_path =
+        StorePath::from_text("/nix/store/00000000000000000000000000000000-built-system")
+            .expect("store path");
+
+    let generation = {
+        let ledger = DeploymentLedger::open(&state_directory).expect("open deployment ledger");
+        ledger
+            .record_built_generation(
+                cluster.clone(),
+                node.clone(),
+                GenerationKind::FullOs,
+                store_path,
+            )
+            .expect("record built generation")
+    };
+
+    assert_eq!(generation.state, GenerationState::Built);
+
+    let reopened = DeploymentLedger::open(&state_directory).expect("reopen deployment ledger");
+    let listing = reopened
+        .query_generations(&GenerationQuery {
+            cluster: Some(cluster.clone()),
+            node: Some(node.clone()),
+            kind: Some(GenerationKind::FullOs),
+        })
+        .expect("query matching generation");
+    assert_eq!(listing, vec![generation]);
+
+    let filtered = reopened
+        .query_generations(&GenerationQuery {
+            cluster: Some(cluster),
+            node: Some(other_node),
+            kind: Some(GenerationKind::FullOs),
+        })
+        .expect("query filtered generation");
+    assert!(filtered.is_empty());
+}
+
+#[test]
 fn deployment_identifiers_do_not_reset_after_reopen() {
     let state_directory = unique_temporary_directory("lojix-event-log-identities").join("state");
     let first = {
-        let log = DeploymentEventLog::open(&state_directory).expect("open deployment event log");
-        log.allocate_deployment()
+        let ledger = DeploymentLedger::open(&state_directory).expect("open deployment ledger");
+        ledger
+            .allocate_deployment()
             .expect("allocate first deployment")
     };
     let second = {
-        let log = DeploymentEventLog::open(&state_directory).expect("reopen deployment event log");
-        log.allocate_deployment()
+        let ledger = DeploymentLedger::open(&state_directory).expect("reopen deployment ledger");
+        ledger
+            .allocate_deployment()
             .expect("allocate second deployment")
     };
 
@@ -80,8 +129,8 @@ fn deployment_identifiers_do_not_reset_after_reopen() {
 #[test]
 fn deployment_observation_subscription_retraction_removes_durable_record() {
     let state_directory = unique_temporary_directory("lojix-event-log-subscriptions").join("state");
-    let log = DeploymentEventLog::open(&state_directory).expect("open deployment event log");
-    let opened = log
+    let ledger = DeploymentLedger::open(&state_directory).expect("open deployment ledger");
+    let opened = ledger
         .open_deployment_observation_subscription(DeploymentObservationSubscription {
             cluster: None,
             node: None,
@@ -90,14 +139,17 @@ fn deployment_observation_subscription_retraction_removes_durable_record() {
         .expect("open deployment observation subscription");
 
     assert_eq!(
-        log.deployment_observation_subscription_count()
+        ledger
+            .deployment_observation_subscription_count()
             .expect("count subscriptions"),
         1
     );
-    log.close_deployment_observation_subscription(&opened.token)
+    ledger
+        .close_deployment_observation_subscription(&opened.token)
         .expect("close deployment observation subscription");
     assert_eq!(
-        log.deployment_observation_subscription_count()
+        ledger
+            .deployment_observation_subscription_count()
             .expect("count subscriptions after close"),
         0
     );
