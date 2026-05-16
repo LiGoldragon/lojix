@@ -108,10 +108,10 @@ these):
   successful build pins its GC root and then appears in
   `GenerationQuery`. `tests/socket.rs` proves deployment-observation
   streams push live `SubscriptionEvent` frames over the socket and
-  close via typed token retraction. Remaining durable slices:
-  activation/current-generation semantics, sema-backed GC-root records,
-  container lifecycle observation, closure copy, rollback, and cache
-  retention.
+  close via typed token retraction or client disconnect. Remaining
+  durable slices: activation/current-generation semantics,
+  sema-backed GC-root records, container lifecycle observation, closure
+  copy, rollback, and cache retention.
 - The `signal-lojix` contract crate (`github:LiGoldragon/signal-lojix`)
   now uses the current `signal-core` streaming channel macro for
   observations.

@@ -174,6 +174,42 @@ async fn deployment_observation_subscription_receives_live_stream_sequence_and_c
     server_result.expect("server result");
 }
 
+#[tokio::test]
+async fn deployment_observation_subscription_retracts_when_client_disconnects() {
+    let root_state = RuntimeRoot::new();
+    let deployment_ledger = root_state.deployment_ledger().clone();
+    let root = RuntimeRoot::spawn(root_state);
+    let (client_stream, server_stream) = UnixStream::pair().expect("unix stream pair");
+    let server = SocketServer::handle_stream(Connection::new(server_stream), root);
+
+    let client = async move {
+        let mut connection = Connection::new(client_stream);
+        let exchange = lojix::socket::ExchangeIdentity::first_connector_exchange();
+        let frame = LojixFrame::new(LojixFrameBody::Request {
+            exchange: exchange.value(),
+            request: Request::DeploymentObservationSubscription(
+                DeploymentObservationSubscription {
+                    cluster: None,
+                    node: None,
+                    deployment: None,
+                },
+            )
+            .into_request(),
+        });
+        connection.write_frame(&frame).await.expect("write request");
+        read_deployment_observation_opened(&mut connection, exchange.value()).await
+    };
+
+    let (server_result, token) = tokio::join!(server, client);
+    server_result.expect("server result");
+    assert!(token.value() > 0);
+    let remaining_subscriptions = deployment_ledger
+        .ask(CountDeploymentObservationSubscriptions)
+        .await
+        .expect("count deployment observation subscriptions");
+    assert_eq!(remaining_subscriptions, 0);
+}
+
 fn deployment_observation_sequence(deployment: &DeploymentId) -> Vec<DeploymentObservation> {
     vec![
         DeploymentObservation {

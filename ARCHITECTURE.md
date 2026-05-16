@@ -232,7 +232,8 @@ end-to-end smoke against a controller-hosting node.
   `tests/socket.rs` proves an active deployment-observation subscriber
   receives a pushed `Submitted` / `Building` / `Built` / `Failed`
   `SubscriptionEvent` sequence after subscription-open, then closes
-  through token retraction with no durable subscription left behind.
+  through token retraction or client disconnect with no durable
+  subscription left behind.
 - C15. GC roots are filesystem state at
   `/nix/var/nix/gcroots/criomos/<cluster>/<node>/<kind>/<generation>`
   with per-`<kind>` slots (`current`, `boot-pending`,
@@ -264,7 +265,8 @@ end-to-end smoke against a controller-hosting node.
   `Succeeded` / `Failed`); subscribers see them live.
   Current implemented slice exposes subscription-open snapshots and
   pushes subsequent deployment-observation events over the same socket
-  connection until the token is retracted or the connection closes.
+  connection until the token is retracted or the connection closes;
+  both close paths retract the durable subscription record.
 - C18. Activation failure rolls back the GC root for that kind
   (the failed generation does not become `current`).
 

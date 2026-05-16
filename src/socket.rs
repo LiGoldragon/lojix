@@ -377,6 +377,9 @@ where
                         Ok(frame) => frame,
                         Err(error) => {
                             let _ = self.close_subscription(token.clone()).await;
+                            if is_unexpected_eof(&error) {
+                                return Ok(());
+                            }
                             return Err(error);
                         }
                     };
@@ -459,6 +462,10 @@ where
         self.next_event_sequence = self.next_event_sequence.next();
         identifier
     }
+}
+
+fn is_unexpected_eof(error: &Error) -> bool {
+    matches!(error, Error::Io(io_error) if io_error.kind() == std::io::ErrorKind::UnexpectedEof)
 }
 
 fn deployment_observation_token(reply: &wire::Reply) -> Option<wire::DeploymentObservationToken> {
