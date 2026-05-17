@@ -43,6 +43,63 @@ fn daemon_runtime_gets_horizon_source_from_typed_configuration() {
     assert!(!runtime_source.contains("/git/github.com/LiGoldragon/criomos-horizon-config"));
 }
 
+#[test]
+fn cli_has_exactly_one_runtime_peer_the_daemon_socket() {
+    for relative_path in ["src/bin/lojix.rs", "src/client.rs"] {
+        let source = read_source(relative_path);
+        for forbidden in [
+            "horizon_lib",
+            "horizon_nota_codec",
+            "HorizonProposal",
+            "ClusterProposal",
+            "Viewpoint",
+            "ProcessToolchain",
+            "ProcessInvocation",
+            "tokio::process",
+            "Command::new",
+            "sema_engine",
+            "RuntimeRoot",
+            "SocketServer",
+            "DeploymentActor",
+            "BuildOnlyRequest",
+            "std::fs::",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{relative_path} must not reach around lojix-daemon through {forbidden}"
+            );
+        }
+    }
+
+    let cli_source = read_source("src/bin/lojix.rs");
+    let client_source = read_source("src/client.rs");
+
+    assert!(cli_source.contains("Client::from_configuration"));
+    assert!(client_source.contains("UnixStream::connect"));
+    assert!(client_source.contains("LojixFrameBody::Request"));
+    assert!(client_source.contains("write_frame"));
+    assert!(client_source.contains("read_frame"));
+}
+
+#[test]
+fn daemon_deployment_path_owns_horizon_projection() {
+    let deploy_source = read_source("src/deploy.rs");
+
+    for required in [
+        "HorizonProposal",
+        "ClusterProposal",
+        "Viewpoint",
+        "HorizonConfigurationSource",
+        "ProposalSource",
+        "proposal.project(&horizon_proposal, &viewpoint)",
+    ] {
+        assert!(
+            deploy_source.contains(required),
+            "src/deploy.rs must own the daemon-side projection path using {required}"
+        );
+    }
+}
+
 fn read_source(relative_path: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
     std::fs::read_to_string(&path)

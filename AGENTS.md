@@ -8,11 +8,15 @@ You MUST read [~/primary/repos/lore/AGENTS.md](../../../lore/AGENTS.md) — the 
   integration witnesses. The user has explicitly green-lit continued
   implementation on this branch.
 
-- **Future infrastructure, active branch.** Per
-  `~/primary/protocols/active-repositories.md` §"Replacement Stack
-  (Future Infrastructure)", this daemon replaces the implementation
-  surface of today's `lojix-cli` once shipped. Do not assume current
-  cluster deploys flow through it.
+- **Future infrastructure, active branch.** Per the active-repository
+  map, this daemon is the new deploy implementation surface. Do not
+  assume current cluster deploys flow through it until the production
+  deploy stack consumes this branch.
+
+- **CLI has one peer.** The human-facing `lojix` binary talks only to
+  `lojix-daemon` over Signal frames on the configured Unix socket. It
+  never reads Horizon inputs, invokes Nix, opens sema state, or talks to
+  another runtime peer.
 
 - **Typed configuration boundary.** Production binaries read typed
   `signal-lojix` configuration records through `nota-config` argv

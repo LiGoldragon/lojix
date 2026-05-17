@@ -8,14 +8,18 @@ on the `horizon-leaner-shape` feature branch.
 
 ## Repo intent
 
-This repo is the **implementation home** for the new deploy stack that
-replaces today's monolithic `lojix-cli`. The architectural decisions
-are settled (per `ARCHITECTURE.md` + `~/primary/reports/system-assistant/04-dedicated-cloud-host-plan-second-revision.md`
-§P5); what remains is implementation.
+This repo is the **implementation home** for the new deploy stack. The
+architectural decisions are settled in `ARCHITECTURE.md`; what remains
+is implementation and constraint witnesses.
 
 The library half (`lojix`) holds shared types, Kameo actor
 implementations, and request/reply plumbing. The two binaries
 (`lojix-daemon`, `lojix`) are thin entry points.
+
+The `lojix` CLI has exactly one runtime peer: `lojix-daemon`. It is a
+text adapter for the daemon's Signal socket. It does not project
+Horizon, read proposal files, invoke Nix, open sema state, or own a
+deploy runtime.
 
 ## Required reading when implementation starts
 
@@ -60,9 +64,6 @@ these):
 - `goldragon` — cluster proposal source (Nota records read by
   horizon-rs).
 - `clavifaber` — per-host key material; separate component.
-- `lojix-cli` — legacy monolithic orchestrator. Stays at the current
-  schema for the duration of the horizon re-engineering arc; retires
-  after CriomOS migrates to consume this daemon's projection.
 
 ## Status (2026-05-16)
 

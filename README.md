@@ -13,6 +13,7 @@ The new deploy stack — one crate, two binaries:
 
 Storage lives in `sema-engine` (the typed database engine library);
 wire framing is `signal-core`. The contract repo is `signal-lojix`.
+The CLI has exactly one runtime peer: `lojix-daemon`.
 
 **Status: in development.** The `horizon-leaner-shape` branch has
 the first socket/client/runtime slice plus typed `nota-config`
@@ -55,8 +56,6 @@ pure flake check because it uses SSH and the caller's cluster.
 - `signal-core` — wire kernel that signal-lojix builds on.
 - `sema-engine` — typed database engine library used for durable state.
 - `horizon-rs` — cluster-proposal projection (read-only per request).
-- `lojix-cli` — legacy monolithic orchestrator; parallel build until
-  CriomOS migrates over.
 - `goldragon` — cluster proposal source.
 - `clavifaber` — per-host key material (separate component).
 
