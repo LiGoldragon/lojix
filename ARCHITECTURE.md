@@ -8,15 +8,13 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 > `lojix-daemon`. The `horizon-leaner-shape` branch now has the first
 > socket/client/runtime slice against the current `signal-core` streaming
 > channel macro, typed daemon/CLI configuration, and the first
-> build-only deploy actor slice. Deployment IDs, deployment-observation
+> build-only deploy actor slice. The human-facing `lojix` CLI has
+> exactly one peer: `lojix-daemon`. Deployment IDs, deployment-observation
 > subscription tokens, deployment observations, and built generations
 > are now backed by `sema-engine`; active deployment-observation
 > subscribers receive pushed `StreamingFrameBody::SubscriptionEvent`
 > frames. `GenerationQuery` reads the sema-backed built-generation
-> ledger. Today's
-> `lojix-cli` (separate repo)
-> stays at the current schema for the duration; retires after CriomOS
-> migrates to consume this daemon's projection.
+> ledger.
 
 > **Scope (today vs eventually).** This stack sits on today's substrate
 > — Rust on Linux, `signal-core` over a Unix socket, `sema-engine`
@@ -65,6 +63,24 @@ request-time `Viewpoint { cluster, node }`, calls
 the override flake inputs, invokes Nix, and records state in
 `sema-engine`.
 
+```mermaid
+flowchart LR
+    cli["lojix CLI<br/>text adapter only"] -->|Signal request frame| daemon["lojix-daemon"]
+    daemon --> pan["horizon.nota<br/>HorizonProposal"]
+    daemon --> cluster["datom.nota<br/>ClusterProposal"]
+    daemon --> viewpoint["daemon-derived Viewpoint<br/>(cluster,node)"]
+    pan --> project
+    cluster --> project
+    viewpoint --> project
+    project["ClusterProposal::project(&HorizonProposal, &Viewpoint)"] --> view["view::Horizon"]
+    view --> daemon
+    daemon -->|Signal reply frame| cli
+```
+
+No `lojix` CLI edge points at Horizon, Nix, sema state, generated flake
+inputs, or a cluster proposal file. Those edges all begin inside
+`lojix-daemon` after it receives a typed request.
+
 ## 1 · Owned surface
 
 - **`/run/lojix/daemon.sock`** — Unix socket binding. Receives
@@ -92,9 +108,9 @@ the override flake inputs, invokes Nix, and records state in
   for `containers.<name>.service` transitions; mirrors into the
   event log.
 - **Thin CLI** — `lojix` binary reads a single Nota request (per the
-  one-record operator-surface discipline that already lives in
-  `lojix-cli/skills.md`), forwards it as a `signal-lojix` frame to
-  the daemon, prints the reply.
+  one-record operator-surface discipline in primary's
+  `skills/typed-records-over-flags.md`), forwards it as a
+  `signal-lojix` frame to the daemon, prints the reply.
 
 ## 2 · Not owned
 
@@ -328,11 +344,11 @@ end-to-end smoke against a controller-hosting node.
   smoke).
 
 **Cutover**
-- C24. After every constraint is green, `lojix-cli` is retired:
-  `CriomOS-home/flake.lock` and `CriomOS/flake.lock` no longer
-  pin `lojix-cli`; `lojix` and `lojix-daemon` are the only
-  cluster-deploy surfaces; the legacy `horizon-rs` `main` branch
-  closes the gap with `horizon-leaner-shape`.
+- C24. After every constraint is green, `lojix` and `lojix-daemon`
+  are the only cluster-deploy surfaces. The CLI still has exactly
+  one peer: it opens the configured daemon socket, sends a Signal
+  request frame, receives a Signal reply frame, prints the reply, and
+  exits.
 
 ## 7 · Cross-cutting context
 
@@ -346,7 +362,3 @@ end-to-end smoke against a controller-hosting node.
 - `horizon-rs` at `github:LiGoldragon/horizon-rs` is the projection
   of cluster proposals; this stack reads horizon per request, never
   edits it.
-- `lojix-cli` at `github:LiGoldragon/lojix-cli` is the legacy
-  monolithic orchestrator; stays at the current schema for the
-  duration of the horizon re-engineering arc; retires after
-  CriomOS migrates to consume this daemon's projection.
