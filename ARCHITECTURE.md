@@ -14,7 +14,8 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 > are now backed by `sema-engine`; active deployment-observation
 > subscribers receive pushed `StreamingFrameBody::SubscriptionEvent`
 > frames. `GenerationQuery` reads the sema-backed built-generation
-> ledger.
+> ledger. Build jobs now pass through a `CriomeAuthorization` actor
+> before any Nix, SSH, rsync, GC-root, cache, or activation effect.
 
 > **Scope (today vs eventually).** This stack sits on today's substrate
 > — Rust on Linux, `signal-core` over a Unix socket, `sema-engine`
@@ -132,6 +133,7 @@ inputs, or a cluster proposal file. Those edges all begin inside
 ```
 src/
   lib.rs                # module entry; public exports
+  authorization.rs      # CriomeAuthorization actor + digest/scope gate
   client.rs             # thin client: one Nota request -> one Nota reply
   deploy.rs             # deployment-ledger actors + build-only request path
   error.rs              # crate-owned typed errors
@@ -169,6 +171,10 @@ Each daemon actor is a Kameo actor per
   Length-prefixed rkyv archives over the Unix socket. Streaming
   observations are modeled as `signal-core` stream kinds, not ad hoc
   reply variants.
+- **Authorization:** `signal-criome` vocabulary. The deployment digest
+  comes from `signal-lojix::DeploymentSubmission::canonical_digest()`
+  over the typed rkyv payload; `lojix-daemon` gates effects on Criome
+  authorization for that exact digest and scope.
 
 ## 5 · Invariants
 
@@ -184,6 +190,10 @@ Each daemon actor is a Kameo actor per
   instance per operator workstation (or per shared deploy host); not
   running on every cluster node.
 - One Nota record in, one Nota record out at the socket boundary.
+- Criome authorization grants before effects. The daemon may validate
+  request shape first, but no Nix, store, cache, GC-root, remote-copy,
+  or activation effect starts until `CriomeAuthorization` grants the
+  exact canonical deployment request digest and scope.
 
 ## 6 · Constraints
 
@@ -238,10 +248,11 @@ end-to-end smoke against a controller-hosting node.
 
 **Actor topology**
 - C8. `RuntimeRoot` is a Kameo `Actor` with state carrying the
-  current child refs (`DeploymentLedgerActor`, `GarbageCollectionRoots`,
-  `DeploymentActor`). No ZST root. Container-lifecycle observation
-  and a socket-acceptor actor are not present in the current root state
-  until their implementation slices land.
+  current child refs (`DeploymentLedgerActor`, `CriomeAuthorization`,
+  `GarbageCollectionRoots`, `DeploymentActor`). No ZST root.
+  Container-lifecycle observation and a socket-acceptor actor are not
+  present in the current root state until their implementation slices
+  land.
 - C9. Each daemon-internal plane is its own Kameo actor with a
   named state field; no `State = ()` actors.
 - C10. Failure policy is explicit and testable. The current root
@@ -299,6 +310,10 @@ end-to-end smoke against a controller-hosting node.
   records a `Built` generation plus `Submitted` / `Building` / `Built`
   / `Failed` observations. `DeploymentBuilt` is emitted only after the
   build-output root exists and the built generation is in sema.
+  `CriomeAuthorization` must grant the canonical
+  `signal-lojix::DeploymentSubmission` digest before the build job
+  actor is spawned; `tests/build_pipeline.rs` proves Criome denial
+  leaves the fake Nix/SSH/rsync tool log empty.
   While this branch is under construction, deploy-facing examples and
   tests target the matching `horizon-leaner-shape` branches of
   `CriomOS`, `goldragon`, and `horizon-rs`; default-branch examples are

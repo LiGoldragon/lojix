@@ -6,6 +6,7 @@ use kameo::error::Infallible;
 use kameo::message::{Context, Message};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::authorization::{CriomeAuthorization, CriomeAuthorizationPolicy};
 use crate::deploy::{
     AllocateDeployment, CloseDeploymentObservationSubscription, DeploymentActor,
     DeploymentLedgerActor, GarbageCollectionRoots, OpenDeploymentObservationSubscription,
@@ -24,6 +25,7 @@ pub struct RuntimeConfiguration {
     state_directory: PathBuf,
     gc_root_directory: PathBuf,
     process_toolchain: ProcessToolchain,
+    criome_authorization_policy: CriomeAuthorizationPolicy,
 }
 
 impl RuntimeConfiguration {
@@ -38,6 +40,8 @@ impl RuntimeConfiguration {
             state_directory: PathBuf::from(configuration.state_directory.as_str()),
             gc_root_directory: PathBuf::from(configuration.gc_root_directory.as_str()),
             process_toolchain: ProcessToolchain::production(),
+            criome_authorization_policy:
+                CriomeAuthorizationPolicy::unavailable_until_criome_socket_lands(),
         }
     }
 
@@ -53,6 +57,7 @@ impl RuntimeConfiguration {
             state_directory: root.join("state"),
             gc_root_directory: root.join("gcroots"),
             process_toolchain: ProcessToolchain::production(),
+            criome_authorization_policy: CriomeAuthorizationPolicy::grant_for_tests(),
         }
     }
 
@@ -63,6 +68,11 @@ impl RuntimeConfiguration {
 
     pub fn with_process_toolchain(mut self, process_toolchain: ProcessToolchain) -> Self {
         self.process_toolchain = process_toolchain;
+        self
+    }
+
+    pub fn with_criome_authorization_policy(mut self, policy: CriomeAuthorizationPolicy) -> Self {
+        self.criome_authorization_policy = policy;
         self
     }
 
@@ -103,12 +113,17 @@ impl RuntimeConfiguration {
     pub fn process_toolchain(&self) -> &ProcessToolchain {
         &self.process_toolchain
     }
+
+    pub fn criome_authorization_policy(&self) -> &CriomeAuthorizationPolicy {
+        &self.criome_authorization_policy
+    }
 }
 
 pub struct RuntimeRoot {
     configuration: RuntimeConfiguration,
     deployment_actor: ActorRef<DeploymentActor>,
     deployment_ledger: ActorRef<DeploymentLedgerActor>,
+    criome_authorization: ActorRef<CriomeAuthorization>,
     garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
     next_cache_retention_observation_token: u64,
 }
@@ -129,15 +144,20 @@ impl RuntimeRoot {
         let garbage_collection_roots = GarbageCollectionRoots::spawn(GarbageCollectionRoots::new(
             configuration.gc_root_directory().to_path_buf(),
         ));
+        let criome_authorization = CriomeAuthorization::spawn(CriomeAuthorization::new(
+            configuration.criome_authorization_policy().clone(),
+        ));
         let deployment_actor = DeploymentActor::spawn(DeploymentActor::new(
             configuration.clone(),
             deployment_ledger.clone(),
+            criome_authorization.clone(),
             garbage_collection_roots.clone(),
         ));
         Ok(Self {
             configuration,
             deployment_actor,
             deployment_ledger,
+            criome_authorization,
             garbage_collection_roots,
             next_cache_retention_observation_token: 1,
         })
@@ -153,6 +173,10 @@ impl RuntimeRoot {
 
     pub fn deployment_ledger(&self) -> &ActorRef<DeploymentLedgerActor> {
         &self.deployment_ledger
+    }
+
+    pub fn criome_authorization(&self) -> &ActorRef<CriomeAuthorization> {
+        &self.criome_authorization
     }
 }
 

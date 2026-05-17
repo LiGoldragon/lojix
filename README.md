@@ -20,9 +20,10 @@ the first socket/client/runtime slice plus typed `nota-config`
 configuration for both binaries. The build-only deployment path is
 active: it projects Horizon, builds through Nix, pins realized outputs
 as GC roots before reporting success, records built generations in
-sema, and returns those records from `GenerationQuery`. Active
-deployment-observation subscribers receive pushed stream-event frames
-for subsequent events.
+sema, and returns those records from `GenerationQuery` after
+`CriomeAuthorization` grants the canonical deployment request digest
+and scope. Active deployment-observation subscribers receive pushed
+stream-event frames for subsequent events.
 Deploy-facing examples and
 witness data on this branch target the matching
 `horizon-leaner-shape` branches of `CriomOS`, `goldragon`, and
@@ -31,7 +32,11 @@ witness data on this branch target the matching
 
 ## Real Build Smoke
 
-The flake exposes an impure operator smoke runner:
+The flake exposes an impure operator smoke runner. The current daemon
+configuration path fails closed until the real `signal-criome`
+daemon-client slice lands; the in-process build tests use a fake
+authorization grant to keep the build pipeline witnessed without
+teaching production binaries to auto-authorize deploys.
 
 ```sh
 LOJIX_SMOKE_CLUSTER=... \

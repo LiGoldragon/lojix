@@ -15,6 +15,7 @@ use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
 use horizon_lib::species::{Arch, Bootloader, Keyboard, NodeSpecies, Style, UserSpecies};
 use horizon_nota_codec::{Encoder as HorizonNotaEncoder, NotaEncode as HorizonNotaEncode};
 use kameo::actor::{ActorRef, Spawn};
+use lojix::authorization::CriomeAuthorizationPolicy;
 use lojix::process::ProcessToolchain;
 use lojix::wire::{
     BuildLocally, BuilderSelection, ClusterName, DeploymentObservationSubscription,
@@ -120,6 +121,19 @@ async fn build_locally_is_rejected_before_any_tool_runs() {
     .await;
 
     assert_rejected_with(reply, "local builds are disabled");
+    assert_eq!(fixture.tool_log(), "");
+}
+
+#[tokio::test]
+async fn criome_authorization_denial_blocks_every_fake_nix_effect() {
+    let fixture = BuildPipelineFixture::create();
+    let root = fixture.runtime_root_with_criome_policy(CriomeAuthorizationPolicy::Unavailable {
+        reason: "fixture criome denied deployment".to_string(),
+    });
+
+    let reply = ask_runtime(&root, Request::DeploymentSubmission(fixture.submission())).await;
+
+    assert_rejected_with(reply, "fixture criome denied deployment");
     assert_eq!(fixture.tool_log(), "");
 }
 
@@ -255,12 +269,20 @@ impl BuildPipelineFixture {
     }
 
     fn runtime_root(&self) -> ActorRef<RuntimeRoot> {
+        self.runtime_root_with_criome_policy(CriomeAuthorizationPolicy::grant_for_tests())
+    }
+
+    fn runtime_root_with_criome_policy(
+        &self,
+        policy: CriomeAuthorizationPolicy,
+    ) -> ActorRef<RuntimeRoot> {
         RuntimeRoot::spawn(RuntimeRoot::with_configuration(
             RuntimeConfiguration::for_in_process_tests()
                 .with_state_directory(self.state_directory.clone())
                 .with_gc_root_directory(self.gc_root_directory.clone())
                 .with_horizon_configuration_source(self.horizon_configuration_path.clone())
-                .with_process_toolchain(self.process_toolchain.clone()),
+                .with_process_toolchain(self.process_toolchain.clone())
+                .with_criome_authorization_policy(policy),
         ))
     }
 

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
+use crate::authorization::{AuthorizeDeployment, CriomeAuthorization};
 use crate::error::{Error, Result};
 use crate::process::{ProcessInvocation, ProcessToolchain, ShellArgument, ShellCommand};
 use crate::runtime::RuntimeConfiguration;
@@ -714,6 +715,7 @@ impl GenerationKindDirectorySegment for wire::GenerationKind {
 pub struct DeploymentActor {
     configuration: RuntimeConfiguration,
     deployment_ledger: ActorRef<DeploymentLedgerActor>,
+    criome_authorization: ActorRef<CriomeAuthorization>,
     garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
 }
 
@@ -721,11 +723,13 @@ impl DeploymentActor {
     pub fn new(
         configuration: RuntimeConfiguration,
         deployment_ledger: ActorRef<DeploymentLedgerActor>,
+        criome_authorization: ActorRef<CriomeAuthorization>,
         garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
     ) -> Self {
         Self {
             configuration,
             deployment_ledger,
+            criome_authorization,
             garbage_collection_roots,
         }
     }
@@ -759,6 +763,24 @@ impl Message<StartDeployment> for DeploymentActor {
         if let Err(error) = BuildOnlyRequest::validate_fast(&message.submission) {
             return Ok(wire::Reply::DeploymentRejected(error.into_rejection()));
         }
+
+        let authorization = match self
+            .criome_authorization
+            .ask(AuthorizeDeployment::new(
+                message.deployment.clone(),
+                message.submission.clone(),
+            ))
+            .await
+        {
+            Ok(grant) => grant,
+            Err(error) => {
+                return Ok(wire::Reply::DeploymentRejected(
+                    DeploymentError::new(error.to_string()).into_rejection(),
+                ));
+            }
+        };
+        let _authorized_request_digest = authorization.request_digest();
+        let _authorized_scope = authorization.scope();
 
         let job = BuildJobActor::spawn(BuildJobActor::new(
             self.configuration.clone(),

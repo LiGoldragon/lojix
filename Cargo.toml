@@ -28,6 +28,10 @@ signal-core  = { git = "https://github.com/LiGoldragon/signal-core.git" }
 # records). Tracks this feature branch alongside this crate.
 signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix.git", branch = "horizon-leaner-shape" }
 
+# Criome authorization vocabulary. The daemon gates deploy effects on
+# Criome authorization over the canonical signal-lojix request digest.
+signal-criome = { git = "https://github.com/LiGoldragon/signal-criome.git", branch = "main" }
+
 # Typed database engine (registered record families, Assert/Mutate/Match/
 # Subscribe/commit/Validate). The daemon owns one redb file via Engine.
 sema-engine  = { git = "https://github.com/LiGoldragon/sema-engine.git", branch = "main" }

@@ -20,14 +20,16 @@
 //!
 //! The current runtime slice owns the Signal socket path, typed
 //! startup configuration, and a Kameo `RuntimeRoot` that accepts
-//! build-only deployment submissions. Build jobs run in per-deployment
-//! actors; realized outputs are pinned as GC roots and recorded as
-//! built generations before success is reported; local builds and
-//! activation actions are rejected before any external tool runs. Both
-//! production binaries read typed
+//! build-only deployment submissions. A `CriomeAuthorization` actor
+//! must grant the canonical deployment request digest before build jobs
+//! run in per-deployment actors; realized outputs are pinned as GC
+//! roots and recorded as built generations before success is reported;
+//! local builds and activation actions are rejected before any external
+//! tool runs. Both production binaries read typed
 //! `signal-lojix` startup configuration records through `nota-config`;
 //! environment variables are not a production control-plane channel.
 
+pub mod authorization;
 pub mod client;
 pub mod deploy;
 pub mod error;

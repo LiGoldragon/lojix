@@ -57,6 +57,9 @@ these):
 
 - `signal-lojix` — typed wire contract (records this stack
   produces/consumes).
+- `signal-criome` — routed authorization contract. Lojix presents the
+  canonical `signal-lojix` deployment request digest to Criome before
+  running deployment effects.
 - `signal-core` — wire kernel; the substrate signal-lojix builds on.
 - `sema-engine` — typed database engine; depend on this rather than
   `sema` directly.
@@ -98,13 +101,16 @@ these):
   socket-path environment-variable control plane.
 - The first deploy actor slice is present. `DeploymentSubmission`
   validates build-only plans synchronously, rejects local builds and
-  activation actions before any external tool runs, spawns a per-
-  deployment build actor, projects Horizon in-process, stages generated
-  inputs to a remote builder, pins realized outputs through the
-  `GarbageCollectionRoots` actor before reporting `DeploymentBuilt`,
-  and records submitted/building/built/failed observations.
+  activation actions before any external tool runs, asks
+  `CriomeAuthorization` to grant the canonical request digest/scope,
+  spawns a per-deployment build actor only after that grant, projects
+  Horizon in-process, stages generated inputs to a remote builder, pins
+  realized outputs through the `GarbageCollectionRoots` actor before
+  reporting `DeploymentBuilt`, and records
+  submitted/building/built/failed observations.
   `checks.<system>.test-build-pipeline` is the current Nix witness
-  for this path.
+  for this path and includes a negative test proving Criome denial
+  leaves the fake Nix/SSH/rsync tool log empty.
 - Deployment identifiers, deployment-observation subscription tokens,
   deployment observations, and built-generation records are sema-backed
   through `DeploymentLedger`; `checks.<system>.test-event-log` reopens
