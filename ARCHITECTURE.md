@@ -42,6 +42,29 @@ are thin entry points: `lojix-daemon` brings up the actor supervisor
 and binds the socket; `lojix` opens the socket, sends one
 `signal-lojix` request, and prints one reply.
 
+## 0.1 · CLI/daemon boundary
+
+`lojix` is a thin text adapter for `lojix-daemon`. It reads typed CLI
+configuration, decodes exactly one NOTA request into a
+`signal-lojix::Request`, sends that request as a `signal-core` frame to
+the daemon socket, awaits the matching reply, renders the reply as
+NOTA, and exits.
+
+The CLI does not project Horizon, read `horizon.nota`, read
+`datom.nota`, invoke Nix, stage flake inputs, manage GC roots, write
+sema state, or perform deployment work. All effect-bearing work belongs
+to `lojix-daemon` actors. Until agents can speak binary Signal directly,
+the CLI exists only to translate human/agent text into daemon Signal and
+daemon Signal back into text.
+
+The daemon owns the projection/deploy pipeline. On
+`DeploymentSubmission`, a daemon actor loads the configured
+`HorizonProposal`, loads the request's `ClusterProposal`, derives the
+request-time `Viewpoint { cluster, node }`, calls
+`ClusterProposal::project(&HorizonProposal, &Viewpoint)`, materializes
+the override flake inputs, invokes Nix, and records state in
+`sema-engine`.
+
 ## 1 · Owned surface
 
 - **`/run/lojix/daemon.sock`** — Unix socket binding. Receives
@@ -174,7 +197,9 @@ end-to-end smoke against a controller-hosting node.
   `signal-lojix::Request` / `signal-lojix::Reply` payloads.
 - C6. `lojix` reads `LojixCliConfiguration` from argv position 0,
   opens the configured socket, sends one Nota request read from argv
-  position 1+ or stdin, prints one Nota reply, exits.
+  position 1+ or stdin, prints one Nota reply, exits. The CLI is
+  forbidden from reading Horizon inputs, invoking Nix, or writing
+  daemon state; those actions are daemon-owned.
 - C7. Frame decode rejects short prefixes, mismatched lengths, and
   bytecheck failures with typed errors (delegated to `signal-core`).
 - C7a. The flake has a binary-level Nix witness that starts the
@@ -244,11 +269,13 @@ end-to-end smoke against a controller-hosting node.
   `<gc-root-directory>/<cluster>/<node>/<kind>/built/<deployment>`.
 
 **Deploy pipeline**
-- C16. `DeploymentSubmission` triggers the projection-then-build
-  pipeline: read horizon-rs in-process, project the requested
-  cluster/node, build the toplevel via `nix build` with the
-  projected horizon as override-input, copy the closure to the
-  target node, activate per the requested `SystemAction`.
+- C16. `DeploymentSubmission` triggers the daemon-owned
+  projection-then-build pipeline: the daemon reads the configured
+  pan-Horizon source, reads the request's cluster proposal source,
+  derives the request-time `Viewpoint`, projects the requested
+  cluster/node, builds the toplevel via `nix build` with the
+  projected horizon as override-input, copies the closure to the
+  target node, and activates per the requested `SystemAction`.
   Current implemented slice accepts only build-only submissions,
   rejects local builds and activation actions before any external
   tool runs, stages generated Horizon/System/Deployment inputs to the
