@@ -43,8 +43,7 @@ fn deployment_request_round_trips_via_wire_vocabulary() {
         node: NodeName::try_from("prometheus").unwrap(),
         source: ProposalSource::try_from("github:LiGoldragon/goldragon/horizon-leaner-shape")
             .unwrap(),
-        flake: FlakeReference::try_from("github:LiGoldragon/CriomOS/horizon-leaner-shape")
-            .unwrap(),
+        flake: FlakeReference::try_from("github:LiGoldragon/CriomOS/horizon-leaner-shape").unwrap(),
         plan: DeploymentPlan::FullOsDeployment(FullOsDeployment {
             action: SystemAction::Switch,
         }),

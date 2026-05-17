@@ -34,6 +34,15 @@ fn production_binaries_decode_typed_configuration_sources() {
     assert!(daemon_source.contains("decode::<lojix::wire::LojixDaemonConfiguration>()"));
 }
 
+#[test]
+fn daemon_runtime_gets_horizon_source_from_typed_configuration() {
+    let runtime_source = read_source("src/runtime.rs");
+
+    assert!(runtime_source.contains("configuration.horizon_configuration_source.as_str()"));
+    assert!(!runtime_source.contains("DEFAULT_HORIZON_CONFIGURATION_SOURCE"));
+    assert!(!runtime_source.contains("/git/github.com/LiGoldragon/criomos-horizon-config"));
+}
+
 fn read_source(relative_path: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
     std::fs::read_to_string(&path)

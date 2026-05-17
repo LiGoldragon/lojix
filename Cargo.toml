@@ -25,8 +25,8 @@ path = "src/bin/lojix.rs"
 signal-core  = { git = "https://github.com/LiGoldragon/signal-core.git" }
 
 # Lojix wire vocabulary (Request/Reply, deploy/cache-retention/generation
-# records). Tracks the horizon-re-engineering branch alongside this crate.
-signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix.git", branch = "horizon-re-engineering" }
+# records). Tracks this feature branch alongside this crate.
+signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix.git", branch = "horizon-leaner-shape" }
 
 # Typed database engine (registered record families, Assert/Mutate/Match/
 # Subscribe/commit/Validate). The daemon owns one redb file via Engine.

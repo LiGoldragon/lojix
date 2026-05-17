@@ -174,6 +174,18 @@ async fn wait_for_built_observation(
         {
             return opened.observations;
         }
+        if let Some(failed) = opened.observations.iter().find_map(|observation| {
+            if let DeploymentPhase::DeploymentFailed(failed) = &observation.phase {
+                Some(failed)
+            } else {
+                None
+            }
+        }) {
+            panic!(
+                "build deployment failed before reporting built: {}",
+                failed.reason
+            );
+        }
 
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -408,8 +420,11 @@ fn write_horizon_configuration(path: &Path) {
         r#"(HorizonProposal
   TestOperator
   (DomainSuffixes "criome" "criome.net")
-  (LanPool "10.18.0.0/16" 24 "test-lan-v1")
-  [tailnet]
+  (TransitionalIpv4Lan
+    "10.18.0.0/24"
+    "10.18.0.1"
+    (DhcpPool "10.18.0.100" "10.18.0.240")
+    "TEMPORARY: single-router IPv4 LAN until IPv6-first networking lands")
   [])
 "#,
     )

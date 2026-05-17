@@ -37,6 +37,7 @@ LOJIX_SMOKE_CLUSTER=... \
 LOJIX_SMOKE_NODE=... \
 LOJIX_SMOKE_BUILDER=... \
 LOJIX_SMOKE_PROPOSAL_SOURCE=/path/to/datom.nota \
+LOJIX_SMOKE_HORIZON_CONFIGURATION_SOURCE=/path/to/horizon.nota \
 LOJIX_SMOKE_FLAKE_REFERENCE=github:owner/system/branch \
 nix run .#real-build-smoke
 ```

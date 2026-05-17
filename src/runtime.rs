@@ -26,16 +26,15 @@ pub struct RuntimeConfiguration {
     process_toolchain: ProcessToolchain,
 }
 
-const DEFAULT_HORIZON_CONFIGURATION_SOURCE: &str =
-    "/git/github.com/LiGoldragon/criomos-horizon-config/horizon.nota";
-
 impl RuntimeConfiguration {
     pub fn from_daemon_configuration(configuration: &wire::LojixDaemonConfiguration) -> Self {
         Self {
             operator_identity: configuration.operator_identity.clone(),
             owned_cluster: configuration.owned_cluster.clone(),
             peer_daemons: configuration.peer_daemons.clone(),
-            horizon_configuration_source: PathBuf::from(DEFAULT_HORIZON_CONFIGURATION_SOURCE),
+            horizon_configuration_source: PathBuf::from(
+                configuration.horizon_configuration_source.as_str(),
+            ),
             state_directory: PathBuf::from(configuration.state_directory.as_str()),
             gc_root_directory: PathBuf::from(configuration.gc_root_directory.as_str()),
             process_toolchain: ProcessToolchain::production(),
@@ -50,7 +49,7 @@ impl RuntimeConfiguration {
             owned_cluster: wire::ClusterName::from_text("test_cluster")
                 .expect("static cluster name"),
             peer_daemons: Vec::new(),
-            horizon_configuration_source: PathBuf::from(DEFAULT_HORIZON_CONFIGURATION_SOURCE),
+            horizon_configuration_source: root.join("horizon.nota"),
             state_directory: root.join("state"),
             gc_root_directory: root.join("gcroots"),
             process_toolchain: ProcessToolchain::production(),

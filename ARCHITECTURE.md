@@ -190,9 +190,9 @@ end-to-end smoke against a controller-hosting node.
   production socket/configuration channel. Witness:
   `tests/configuration_boundary.rs`.
 - C7c. `LojixDaemonConfiguration` is data-bearing: the daemon applies
-  the configured socket mode, optional socket group, state directory,
-  GC-root directory, operator identity, owned cluster, and peer daemon
-  bindings at startup.
+  the configured socket mode, optional socket group, pan-Horizon
+  configuration source, state directory, GC-root directory, operator
+  identity, owned cluster, and peer daemon bindings at startup.
 - C7d. `LojixCliConfiguration` is control-plane only. Deploy plans,
   generation queries, and cache-retention mutations remain data-plane
   `Request` records and are never embedded in CLI configuration.

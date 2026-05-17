@@ -6,6 +6,7 @@ daemon_configuration_path="$TMPDIR/lojix-daemon.nota"
 cli_configuration_path="$TMPDIR/lojix-cli.nota"
 state_directory="$TMPDIR/lojix-state"
 gc_root_directory="$TMPDIR/lojix-gcroots"
+horizon_configuration_source="$TMPDIR/horizon.nota"
 daemon_process_identifier=
 stalled_connection_process_identifier=
 
@@ -21,8 +22,9 @@ cleanup() {
 }
 
 write_configuration_files() {
-  printf '(LojixDaemonConfiguration "%s" 384 None "%s" "%s" [] operator goldragon)\n' \
+  printf '(LojixDaemonConfiguration "%s" 384 None "%s" "%s" "%s" [] operator goldragon)\n' \
     "$socket_path" \
+    "$horizon_configuration_source" \
     "$state_directory" \
     "$gc_root_directory" \
     > "$daemon_configuration_path"

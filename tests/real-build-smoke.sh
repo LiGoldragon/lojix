@@ -13,6 +13,7 @@ required_environment LOJIX_SMOKE_CLUSTER
 required_environment LOJIX_SMOKE_NODE
 required_environment LOJIX_SMOKE_BUILDER
 required_environment LOJIX_SMOKE_PROPOSAL_SOURCE
+required_environment LOJIX_SMOKE_HORIZON_CONFIGURATION_SOURCE
 required_environment LOJIX_SMOKE_FLAKE_REFERENCE
 
 root_directory="${LOJIX_SMOKE_ROOT:-$(mktemp -d /tmp/lojix-real-build-smoke-XXXXXX)}"
@@ -66,8 +67,9 @@ run_lojix() {
 trap cleanup EXIT
 
 mkdir -p "$root_directory"
-printf '(LojixDaemonConfiguration "%s" 384 None "%s" "%s" [] operator %s)\n' \
+printf '(LojixDaemonConfiguration "%s" 384 None "%s" "%s" "%s" [] operator %s)\n' \
   "$socket_path" \
+  "$LOJIX_SMOKE_HORIZON_CONFIGURATION_SOURCE" \
   "$state_directory" \
   "$gc_root_directory" \
   "$LOJIX_SMOKE_CLUSTER" \

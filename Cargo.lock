@@ -186,7 +186,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "horizon-lib"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/horizon-rs.git?branch=horizon-leaner-shape#45056dc48f862f205b080b6bf4487d10e9ba4aff"
+source = "git+https://github.com/LiGoldragon/horizon-rs.git?branch=horizon-leaner-shape#28dbca890b8d420d97c4af304ea8067d67b7c4cb"
 dependencies = [
  "ipnet",
  "nota-codec 0.1.0 (git+https://github.com/LiGoldragon/nota-codec.git)",
@@ -629,7 +629,7 @@ dependencies = [
 [[package]]
 name = "signal-lojix"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=horizon-re-engineering#c4eed7d4e6ae7aadd88ce3bdf7ecba2207598262"
+source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=horizon-leaner-shape#958a6bb787a64f4dc8472da3f1dea29452f31052"
 dependencies = [
  "nota-codec 0.1.0 (git+https://github.com/LiGoldragon/nota-codec.git?branch=main)",
  "nota-config",
