@@ -93,9 +93,8 @@ inputs, or a cluster proposal file. Those edges all begin inside
   `(ClusterName, NodeName, Kind)`.
 - **GC roots tree** —
   `/nix/var/nix/gcroots/criomos/<cluster>/<node>/<kind>/<generation>`
-  symlink layout per
-  `~/primary/reports/system-assistant/04-dedicated-cloud-host-plan-second-revision.md`
-  §P4. Two-phase deletion respecting narinfo TTL.
+  symlink layout. Retention deletes roots in two phases so binary-cache
+  narinfo TTL can expire before store paths become collectible.
 - **Deployment ledger** — sema-backed state for deployment IDs, built
   generations, deployment-observation subscriptions, and the append-only
   log of typed events
@@ -125,9 +124,8 @@ inputs, or a cluster proposal file. Those edges all begin inside
   horizon-rs).
 - **Per-host key material** — `clavifaber` (this stack is
   cluster-side, not per-host).
-- **Cluster trust runtime** — separate component (today missing; see
-  `~/primary/reports/system-specialist/118-criomos-state-and-sandbox-audit.md`
-  §"Cluster-trust runtime is still missing").
+- **Cluster trust runtime** — separate component. It is not part of
+  this deploy daemon's current owned surface.
 
 ## 3 · Code map
 
