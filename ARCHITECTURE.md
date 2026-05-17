@@ -239,15 +239,17 @@ end-to-end smoke against a controller-hosting node.
   `Request` records and are never embedded in CLI configuration.
 
 **Actor topology**
-- C8. `RuntimeRoot` is a Kameo `Actor` with state carrying child
-  refs (`DeploymentLedgerActor`, `GarbageCollectionRoots`,
-  `ContainerLifecycleActor`, `SocketAcceptor`). No ZST root.
+- C8. `RuntimeRoot` is a Kameo `Actor` with state carrying the
+  current child refs (`DeploymentLedgerActor`, `GarbageCollectionRoots`,
+  `DeploymentActor`). No ZST root. Container-lifecycle observation
+  and a socket-acceptor actor are not present in the current root state
+  until their implementation slices land.
 - C9. Each daemon-internal plane is its own Kameo actor with a
   named state field; no `State = ()` actors.
-- C10. Failure policy: each supervisor has typed
-  `RestartPolicy::Permanent` for sema-backed actors
-  (`DeploymentLedgerActor`) and `RestartPolicy::Never` for transient actors
-  (per-connection handlers).
+- C10. Failure policy is explicit and testable. The current root
+  spawns child actors but does not yet encode declarative restart
+  policy; the supervision slice must add the policy and a witness for
+  sema-backed actors versus transient per-connection handlers.
 - C11. No `Arc<Mutex<T>>` between actors. State has one owner.
 - C12. No detached `tokio::spawn` in production code. Long-running
   work is a supervised actor or `DelegatedReply<R>` for short reply
