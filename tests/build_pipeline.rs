@@ -6,10 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use horizon_lib::address::{YggAddress, YggSubnet};
 use horizon_lib::disk::{DevicePath, Disk, FsType, MountPath};
 use horizon_lib::magnitude::Magnitude;
-use horizon_lib::name::{
-    ClusterDomain as HorizonClusterDomain, Keygrip, NodeName as HorizonNodeName,
-    UserName as HorizonUserName,
-};
+use horizon_lib::name::{Keygrip, NodeName as HorizonNodeName, UserName as HorizonUserName};
 use horizon_lib::proposal::{
     ClusterProposal, ClusterTrust, Io, Machine, NodePlacement, NodeProposal, NodePubKeys,
     NodeServices, UserProposal, UserPubKeyEntry, YggPubKeyEntry,
@@ -105,7 +102,7 @@ async fn build_only_deployment_pins_output_before_reporting_built() {
     assert!(log.contains("/horizon?narHash="));
     assert!(log.contains("/system?narHash="));
     assert!(log.contains("/deployment?narHash="));
-    assert!(log.contains("github:LiGoldragon/CriomOS/horizon-re-engineering#nixosConfigurations.target.config.system.build.toplevel"));
+    assert!(log.contains("github:LiGoldragon/CriomOS/horizon-leaner-shape#nixosConfigurations.target.config.system.build.toplevel"));
 }
 
 #[tokio::test]
@@ -202,6 +199,7 @@ struct BuildPipelineFixture {
     root: PathBuf,
     state_directory: PathBuf,
     gc_root_directory: PathBuf,
+    horizon_configuration_path: PathBuf,
     proposal_path: PathBuf,
     log_path: PathBuf,
     process_toolchain: ProcessToolchain,
@@ -225,12 +223,15 @@ impl BuildPipelineFixture {
         FakeTool::new(&rsync_path).write(&fake_rsync_script(&log_path));
 
         let proposal_path = root.join("datom.nota");
+        let horizon_configuration_path = root.join("horizon.nota");
         write_proposal(&proposal_path);
+        write_horizon_configuration(&horizon_configuration_path);
 
         Self {
             root,
             state_directory,
             gc_root_directory,
+            horizon_configuration_path,
             proposal_path,
             log_path,
             process_toolchain: ProcessToolchain::new(
@@ -246,6 +247,7 @@ impl BuildPipelineFixture {
             RuntimeConfiguration::for_in_process_tests()
                 .with_state_directory(self.state_directory.clone())
                 .with_gc_root_directory(self.gc_root_directory.clone())
+                .with_horizon_configuration_source(self.horizon_configuration_path.clone())
                 .with_process_toolchain(self.process_toolchain.clone()),
         ))
     }
@@ -256,7 +258,7 @@ impl BuildPipelineFixture {
             node: NodeName::from_text("zeus").expect("node name"),
             source: ProposalSource::from_text(self.proposal_path.display().to_string())
                 .expect("proposal source"),
-            flake: FlakeReference::from_text("github:LiGoldragon/CriomOS/horizon-re-engineering")
+            flake: FlakeReference::from_text("github:LiGoldragon/CriomOS/horizon-leaner-shape")
                 .expect("flake reference"),
             plan: DeploymentPlan::FullOsDeployment(FullOsDeployment {
                 action: SystemAction::Build,
@@ -400,6 +402,20 @@ fn write_proposal(path: &Path) {
     std::fs::write(path, encoder.into_string()).expect("write horizon proposal");
 }
 
+fn write_horizon_configuration(path: &Path) {
+    std::fs::write(
+        path,
+        r#"(HorizonProposal
+  TestOperator
+  (DomainSuffixes "criome" "criome.net")
+  (LanPool "10.18.0.0/16" 24 "test-lan-v1")
+  [tailnet]
+  [])
+"#,
+    )
+    .expect("write horizon configuration");
+}
+
 fn cluster_proposal() -> ClusterProposal {
     let mut nodes = BTreeMap::new();
     nodes.insert(
@@ -435,13 +451,9 @@ fn cluster_proposal() -> ClusterProposal {
             users: user_trust,
         },
         secret_bindings: Vec::new(),
-        lan: None,
-        resolver: None,
         tailnet: None,
         ai_providers: Vec::new(),
         vpn_profiles: Vec::new(),
-        domain: HorizonClusterDomain::try_new("criome").unwrap(),
-        public_domain: "criome.net".to_string(),
     }
 }
 

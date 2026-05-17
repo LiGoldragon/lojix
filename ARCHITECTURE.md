@@ -5,7 +5,7 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 (`lojix`) that speaks the daemon over a Unix socket.
 
 > **Status (2026-05-16):** in-development — repo recently renamed from
-> `lojix-daemon`. The `horizon-re-engineering` branch now has the first
+> `lojix-daemon`. The `horizon-leaner-shape` branch now has the first
 > socket/client/runtime slice against the current `signal-core` streaming
 > channel macro, typed daemon/CLI configuration, and the first
 > build-only deploy actor slice. Deployment IDs, deployment-observation
@@ -257,7 +257,7 @@ end-to-end smoke against a controller-hosting node.
   / `Failed` observations. `DeploymentBuilt` is emitted only after the
   build-output root exists and the built generation is in sema.
   While this branch is under construction, deploy-facing examples and
-  tests target the matching `horizon-re-engineering` branches of
+  tests target the matching `horizon-leaner-shape` branches of
   `CriomOS`, `goldragon`, and `horizon-rs`; default-branch examples are
   not valid witnesses for this arc.
 - C17. Each pipeline phase emits a `DeploymentObservation` event
@@ -305,7 +305,7 @@ end-to-end smoke against a controller-hosting node.
   `CriomOS-home/flake.lock` and `CriomOS/flake.lock` no longer
   pin `lojix-cli`; `lojix` and `lojix-daemon` are the only
   cluster-deploy surfaces; the legacy `horizon-rs` `main` branch
-  closes the gap with `horizon-re-engineering`.
+  closes the gap with `horizon-leaner-shape`.
 
 ## 7 · Cross-cutting context
 

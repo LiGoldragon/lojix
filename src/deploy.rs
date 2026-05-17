@@ -12,7 +12,7 @@ use horizon_lib::name::{
 };
 use horizon_lib::species::System;
 use horizon_lib::view::Node;
-use horizon_lib::{ClusterProposal, Horizon, Viewpoint};
+use horizon_lib::{ClusterProposal, Horizon, HorizonProposal, Viewpoint};
 use horizon_nota_codec::NotaDecode as HorizonNotaDecode;
 use kameo::Actor;
 use kameo::actor::{ActorRef, Spawn};
@@ -965,6 +965,7 @@ pub struct BuildOnlyRequest {
     generation_kind: wire::GenerationKind,
     horizon_cluster: HorizonClusterName,
     horizon_node: HorizonNodeName,
+    horizon_configuration_source: HorizonConfigurationSource,
     source: ProposalSource,
     flake: FlakeReference,
     plan: BuildOnlyPlan,
@@ -1002,6 +1003,9 @@ impl BuildOnlyRequest {
             generation_kind: plan.generation_kind(),
             horizon_cluster: horizon_cluster_name(&submission.cluster)?,
             horizon_node: horizon_node_name(&submission.node)?,
+            horizon_configuration_source: HorizonConfigurationSource::new(
+                configuration.horizon_configuration_source(),
+            ),
             source: ProposalSource::new(submission.source.as_str()),
             flake: FlakeReference::new(submission.flake.as_str()),
             plan,
@@ -1048,12 +1052,13 @@ impl BuildOnlyRequest {
     }
 
     pub async fn run(&self) -> Result<wire::BuildResult> {
+        let horizon_proposal = self.horizon_configuration_source.load()?;
         let proposal = self.source.load()?;
         let viewpoint = Viewpoint {
             cluster: self.horizon_cluster.clone(),
             node: self.horizon_node.clone(),
         };
-        let horizon = proposal.project(&viewpoint)?;
+        let horizon = proposal.project(&horizon_proposal, &viewpoint)?;
         self.plan.validate_home_user(&horizon)?;
         let builder = BuilderPolicy::new(&horizon).resolve(&self.builder)?;
         let extra_substituters =
@@ -1329,6 +1334,21 @@ impl ProposalSource {
         let text = std::fs::read_to_string(&self.0)?;
         let mut decoder = horizon_nota_codec::Decoder::new(&text);
         Ok(ClusterProposal::decode(&mut decoder)?)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HorizonConfigurationSource(PathBuf);
+
+impl HorizonConfigurationSource {
+    fn new(path: impl Into<PathBuf>) -> Self {
+        Self(path.into())
+    }
+
+    fn load(&self) -> Result<HorizonProposal> {
+        let text = std::fs::read_to_string(&self.0)?;
+        let mut decoder = horizon_nota_codec::Decoder::new(&text);
+        Ok(HorizonProposal::decode(&mut decoder)?)
     }
 }
 

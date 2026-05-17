@@ -14,7 +14,7 @@ The new deploy stack — one crate, two binaries:
 Storage lives in `sema-engine` (the typed database engine library);
 wire framing is `signal-core`. The contract repo is `signal-lojix`.
 
-**Status: in development.** The `horizon-re-engineering` branch has
+**Status: in development.** The `horizon-leaner-shape` branch has
 the first socket/client/runtime slice plus typed `nota-config`
 configuration for both binaries. The build-only deployment path is
 active: it projects Horizon, builds through Nix, pins realized outputs
@@ -24,7 +24,7 @@ deployment-observation subscribers receive pushed stream-event frames
 for subsequent events.
 Deploy-facing examples and
 witness data on this branch target the matching
-`horizon-re-engineering` branches of `CriomOS`, `goldragon`, and
+`horizon-leaner-shape` branches of `CriomOS`, `goldragon`, and
 `horizon-rs`. See `ARCHITECTURE.md` for the full constraint set and
 `~/primary/protocols/active-repositories.md` for the broader context.
 

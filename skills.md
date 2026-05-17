@@ -1,8 +1,8 @@
 # lojix — skills
 
 The new deploy stack: one crate, two binaries (`lojix-daemon` long-lived
-orchestrator + `lojix` thin CLI client). Implementation lands on the
-`horizon-re-engineering` feature branch.
+orchestrator + `lojix` thin CLI client). Current implementation lands
+on the `horizon-leaner-shape` feature branch.
 
 ---
 
@@ -37,7 +37,7 @@ these):
 - `~/primary/skills/testing.md` — Nix-backed pure / stateful / chained
   test surfaces.
 - `~/primary/skills/feature-development.md` — worktree-based feature
-  branches; this repo's first arc lands on `horizon-re-engineering`.
+  branches; this repo's current arc lands on `horizon-leaner-shape`.
 
 ## Storage and wire defaults
 
@@ -68,7 +68,7 @@ these):
 
 - Repo recently renamed from `lojix-daemon`. GitHub redirect from old
   name in place.
-- Active implementation branch: `horizon-re-engineering` (see
+- Active implementation branch: `horizon-leaner-shape` (see
   `~/primary/skills/feature-development.md` for the worktree-based
   branch convention).
 - The first runtime slice is present: `lojix-daemon` binds a Unix

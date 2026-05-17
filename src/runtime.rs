@@ -20,10 +20,14 @@ pub struct RuntimeConfiguration {
     operator_identity: wire::OperatorIdentity,
     owned_cluster: wire::ClusterName,
     peer_daemons: Vec<wire::PeerDaemonBinding>,
+    horizon_configuration_source: PathBuf,
     state_directory: PathBuf,
     gc_root_directory: PathBuf,
     process_toolchain: ProcessToolchain,
 }
+
+const DEFAULT_HORIZON_CONFIGURATION_SOURCE: &str =
+    "/git/github.com/LiGoldragon/criomos-horizon-config/horizon.nota";
 
 impl RuntimeConfiguration {
     pub fn from_daemon_configuration(configuration: &wire::LojixDaemonConfiguration) -> Self {
@@ -31,6 +35,7 @@ impl RuntimeConfiguration {
             operator_identity: configuration.operator_identity.clone(),
             owned_cluster: configuration.owned_cluster.clone(),
             peer_daemons: configuration.peer_daemons.clone(),
+            horizon_configuration_source: PathBuf::from(DEFAULT_HORIZON_CONFIGURATION_SOURCE),
             state_directory: PathBuf::from(configuration.state_directory.as_str()),
             gc_root_directory: PathBuf::from(configuration.gc_root_directory.as_str()),
             process_toolchain: ProcessToolchain::production(),
@@ -45,10 +50,16 @@ impl RuntimeConfiguration {
             owned_cluster: wire::ClusterName::from_text("test_cluster")
                 .expect("static cluster name"),
             peer_daemons: Vec::new(),
+            horizon_configuration_source: PathBuf::from(DEFAULT_HORIZON_CONFIGURATION_SOURCE),
             state_directory: root.join("state"),
             gc_root_directory: root.join("gcroots"),
             process_toolchain: ProcessToolchain::production(),
         }
+    }
+
+    pub fn with_horizon_configuration_source(mut self, path: impl Into<PathBuf>) -> Self {
+        self.horizon_configuration_source = path.into();
+        self
     }
 
     pub fn with_process_toolchain(mut self, process_toolchain: ProcessToolchain) -> Self {
@@ -76,6 +87,10 @@ impl RuntimeConfiguration {
 
     pub fn peer_daemons(&self) -> &[wire::PeerDaemonBinding] {
         &self.peer_daemons
+    }
+
+    pub fn horizon_configuration_source(&self) -> &Path {
+        &self.horizon_configuration_source
     }
 
     pub fn state_directory(&self) -> &Path {

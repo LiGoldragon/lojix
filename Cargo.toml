@@ -34,7 +34,7 @@ sema-engine  = { git = "https://github.com/LiGoldragon/sema-engine.git", branch 
 sema         = { git = "https://github.com/LiGoldragon/sema.git" }
 
 # Horizon projection library — projects cluster proposals before build.
-horizon-lib  = { git = "https://github.com/LiGoldragon/horizon-rs.git", branch = "horizon-re-engineering", package = "horizon-lib" }
+horizon-lib  = { git = "https://github.com/LiGoldragon/horizon-rs.git", branch = "horizon-leaner-shape", package = "horizon-lib" }
 horizon-nota-codec = { package = "nota-codec", git = "https://github.com/LiGoldragon/nota-codec.git" }
 
 # Text codec for the CLI's nota-in / nota-out boundary.

@@ -186,7 +186,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "horizon-lib"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/horizon-rs.git?branch=horizon-re-engineering#ed78fab6f1f0696608427b251c3079154c704ad8"
+source = "git+https://github.com/LiGoldragon/horizon-rs.git?branch=horizon-leaner-shape#45056dc48f862f205b080b6bf4487d10e9ba4aff"
 dependencies = [
  "ipnet",
  "nota-codec 0.1.0 (git+https://github.com/LiGoldragon/nota-codec.git)",
