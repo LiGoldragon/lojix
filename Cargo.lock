@@ -267,7 +267,7 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 [[package]]
 name = "horizon-lib"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/horizon-rs.git?branch=horizon-leaner-shape#28dbca890b8d420d97c4af304ea8067d67b7c4cb"
+source = "git+https://github.com/LiGoldragon/horizon-rs.git?branch=horizon-leaner-shape#189bfd046b4423f13d8c4fbf7db74166194e80e3"
 dependencies = [
  "ipnet",
  "nota-codec 0.1.0 (git+https://github.com/LiGoldragon/nota-codec.git)",
@@ -436,7 +436,7 @@ dependencies = [
 [[package]]
 name = "nota-codec"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/nota-codec.git#2618adbfc140d856723a729c316203d006af8207"
+source = "git+https://github.com/LiGoldragon/nota-codec.git#97c1f4969a1c79d5d79be780cdc8ec8356883b84"
 dependencies = [
  "nota-derive",
  "thiserror",

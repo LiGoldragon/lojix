@@ -9,7 +9,7 @@ use horizon_lib::magnitude::Magnitude;
 use horizon_lib::name::{Keygrip, NodeName as HorizonNodeName, UserName as HorizonUserName};
 use horizon_lib::proposal::{
     ClusterProposal, ClusterTrust, Io, Machine, NodePlacement, NodeProposal, NodePubKeys,
-    NodeServices, UserProposal, UserPubKeyEntry, YggPubKeyEntry,
+    NodeService, UserProposal, UserPubKeyEntry, YggPubKeyEntry,
 };
 use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
 use horizon_lib::species::{Arch, Bootloader, Keyboard, NodeSpecies, Style, UserSpecies};
@@ -455,10 +455,11 @@ fn write_horizon_configuration(path: &Path) {
 
 fn cluster_proposal() -> ClusterProposal {
     let mut nodes = BTreeMap::new();
-    nodes.insert(
-        HorizonNodeName::try_new("ouranos").unwrap(),
-        node_proposal(NodeSpecies::EdgeTesting, Magnitude::Large, true),
-    );
+    let mut builder = node_proposal(NodeSpecies::EdgeTesting, Magnitude::Large, true);
+    builder
+        .services
+        .push(NodeService::NixBuilder { maximum_jobs: None });
+    nodes.insert(HorizonNodeName::try_new("ouranos").unwrap(), builder);
     nodes.insert(
         HorizonNodeName::try_new("zeus").unwrap(),
         node_proposal(NodeSpecies::Edge, Magnitude::Min, false),
@@ -532,8 +533,7 @@ fn node_proposal(species: NodeSpecies, size: Magnitude, full_keys: bool) -> Node
         wants_hw_video_accel: false,
         router_interfaces: None,
         online: None,
-        number_of_build_cores: None,
-        services: NodeServices::default(),
+        services: Vec::new(),
         placement: NodePlacement::Metal {},
     }
 }
