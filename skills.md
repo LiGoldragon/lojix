@@ -4,8 +4,6 @@ The new deploy stack: one crate, two binaries (`lojix-daemon` long-lived
 orchestrator + `lojix` thin CLI client). Current implementation lands
 on the `horizon-leaner-shape` feature branch.
 
----
-
 ## Repo intent
 
 This repo is the **implementation home** for the new deploy stack. The

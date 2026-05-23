@@ -2,7 +2,7 @@ You MUST read [~/primary/repos/lore/AGENTS.md](../../../lore/AGENTS.md) — the 
 
 # lojix — agent carve-outs
 
-- **Status: active horizon-re-engineering implementation (2026-05-16).**
+- **Status: active horizon-leaner-shape implementation (2026-05-23).**
   This repo now has a Rust crate, flake, `lojix-daemon` binary, thin
   `lojix` CLI binary, socket/runtime tests, and binary-level Nix
   integration witnesses. The user has explicitly green-lit continued
