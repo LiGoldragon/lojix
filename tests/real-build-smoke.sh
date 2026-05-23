@@ -67,20 +67,20 @@ run_lojix() {
 trap cleanup EXIT
 
 mkdir -p "$root_directory"
-printf '(LojixDaemonConfiguration "%s" 384 None "%s" "%s" "%s" [] operator %s)\n' \
+printf '(LojixDaemonConfiguration [%s] 384 None [%s] [%s] [%s] [] operator %s)\n' \
   "$socket_path" \
   "$LOJIX_SMOKE_HORIZON_CONFIGURATION_SOURCE" \
   "$state_directory" \
   "$gc_root_directory" \
   "$LOJIX_SMOKE_CLUSTER" \
   > "$daemon_configuration_path"
-printf '(LojixCliConfiguration "%s" Compact)\n' "$socket_path" > "$cli_configuration_path"
+printf '(LojixCliConfiguration [%s] Compact)\n' "$socket_path" > "$cli_configuration_path"
 
 lojix-daemon "$daemon_configuration_path" >"$daemon_log_path" 2>&1 &
 daemon_process_identifier="$!"
 wait_for_socket
 
-request="$(printf '(DeploymentSubmission %s %s "%s" "%s" (FullOsDeployment Build) (NamedBuilder %s) [])' \
+request="$(printf '(DeploymentSubmission %s %s [%s] [%s] (FullOsDeployment Build) (NamedBuilder %s) [])' \
   "$LOJIX_SMOKE_CLUSTER" \
   "$LOJIX_SMOKE_NODE" \
   "$LOJIX_SMOKE_PROPOSAL_SOURCE" \

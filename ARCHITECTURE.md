@@ -377,3 +377,19 @@ end-to-end smoke against a controller-hosting node.
 - `horizon-rs` at `github:LiGoldragon/horizon-rs` is the projection
   of cluster proposals; this stack reads horizon per request, never
   edits it.
+
+## Pending schema-engine upgrade
+
+**Status:** scheduled for migration to schema-language-based contract per `reports/designer/326-v13-spirit-complete-schema-vision.md` + `reports/designer/324-migration-mvp-spirit-handover-re-specification.md`.
+
+**Target:** this component's hand-written `signal_channel!` invocation + Layer 2 Command/Effect + storage types convert to a single `lojix/lojix.schema` file. The brilliant macro library (`primary-ezqx.1`) reads the schema + emits all the wire types + ShortHeader projection + dispatcher + VersionProjection + storage descriptors.
+
+**Sequence:** per `primary-9up1` migration to current foundation. Spirit is the MVP pilot landing first via `primary-ezqx.1`; lojix's schema cutover coordinates with that foundation migration. The architecture file's reference to deprecated `signal-core` (above) confirms lojix is still mid-migration off the old wire kernel; the schema cutover lands after that migration completes so the schema-engine pipeline emits against the current `signal-frame` kernel from day one.
+
+**Per-component concerns:** Per `primary-9up1` migration to current foundation; schema cutover coordinates with that migration. Lojix is the deploy stack — its operations have wide blast radius across the cluster, so schema cutover must coordinate with cluster-operator lane's deploy windows. The CLI binary (`lojix-cli`) is currently a separate repo per the transitional state; schema cutover may consolidate or keep them split per `primary-9up1`.
+
+**References:**
+- `reports/designer/326-v13-spirit-complete-schema-vision.md` — uniform header form + schema-language design
+- `reports/designer/324-migration-mvp-spirit-handover-re-specification.md` — migration MVP + handover state
+- `reports/designer/322-spirit-mvp-positional-schema-worked-example.md` — Spirit MVP worked example
+- `reports/operator/174-schema-import-header-design-critique-2026-05-24.md` — header/body/feature separation + lowering rules

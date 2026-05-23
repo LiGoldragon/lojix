@@ -439,14 +439,14 @@ fn write_proposal(path: &Path) {
 fn write_horizon_configuration(path: &Path) {
     std::fs::write(
         path,
-        r#"(HorizonProposal
-  TestOperator
-  (DomainSuffixes "criome" "criome.net")
-  (TransitionalIpv4Lan
-    "10.18.0.0/24"
-    "10.18.0.1"
-    (DhcpPool "10.18.0.100" "10.18.0.240")
-    "TEMPORARY: single-router IPv4 LAN until IPv6-first networking lands")
+        r#"(
+  [TestOperator]
+  (criome [criome.net])
+  (
+    [10.18.0.0/24]
+    [10.18.0.1]
+    ([10.18.0.100] [10.18.0.240])
+    [TEMPORARY: single-router IPv4 LAN until IPv6-first networking lands])
   [])
 "#,
     )
