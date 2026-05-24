@@ -1,0 +1,31 @@
+{}
+
+[
+  (Plan [Deployment])
+  (Build [System])
+  (Activate [System])
+  (Query [Status])
+]
+
+[]
+
+[]
+
+{
+  Plan [(Deployment Deployment)]
+  Build [(System System)]
+  Activate [(System System)]
+  Query [(Status Status)]
+  Deployment (Text)
+  System (Text)
+  Status (Text)
+  Text (String)
+  Identifier (u64)
+  Name (String)
+  Path (String)
+}
+
+[
+  (Version 0 1)
+  (Status Concept)
+]
