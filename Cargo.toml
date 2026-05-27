@@ -1,0 +1,41 @@
+[package]
+name         = "lojix-next"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.85"
+license      = "MIT OR Apache-2.0"
+repository   = "https://github.com/LiGoldragon/lojix"
+description  = "Schema-deep lojix pilot: schema-emitted nouns drive deploy pipeline through Kameo actor topology."
+publish      = false
+
+[lib]
+name = "lojix_next"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lojix-next"
+path = "src/bin/lojix-next.rs"
+
+[[bin]]
+name = "lojix-next-daemon"
+path = "src/bin/lojix-next-daemon.rs"
+
+[dependencies]
+nota-next = { git = "https://github.com/LiGoldragon/nota-next.git", branch = "main" }
+rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
+kameo = "0.20"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "net", "time", "process"] }
+thiserror = "2"
+
+[build-dependencies]
+schema-next = { git = "https://github.com/LiGoldragon/schema-next.git", branch = "main" }
+schema-rust-next = { git = "https://github.com/LiGoldragon/schema-rust-next.git", branch = "main" }
+
+[dev-dependencies]
+tempfile = "3"
+schema-next = { git = "https://github.com/LiGoldragon/schema-next.git", branch = "main" }
+
+[lints.rust]
+unsafe_code = "forbid"
+unused      = { level = "warn", priority = -1 }
+dead_code   = "warn"

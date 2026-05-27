@@ -1,0 +1,80 @@
+{}
+(Input (
+  (Submit DeploymentRequest)
+  (Cancel DeploymentIdentifier)
+  (Query GenerationSelector)
+  (Help HelpQuery)
+))
+(Output (
+  (Accepted DeploymentIdentifier)
+  (Rejected RejectionReason)
+  (Observation ObservationRecord)
+  (Snapshot GenerationRecord)
+  (HelpAnswer HelpReply)
+))
+{
+  DeploymentIdentifier [Integer]
+  GenerationIdentifier [Integer]
+  SemaCommandIdentifier [Integer]
+  ObservationIdentifier [Integer]
+  ClosurePath [Text]
+  TargetNode [Text]
+  BuildLog [Text]
+  Detail [Text]
+  HelpReply [Text]
+  HorizonView [Text]
+  SocketPath [Text]
+  StateDirectory [Text]
+  GcRootDirectory [Text]
+  BuildCommand [Text]
+  CopyCommand [Text]
+  ActivationCommand [Text]
+  Toolchain [BuildCommand CopyCommand ActivationCommand]
+  DaemonConfiguration [SocketPath StateDirectory GcRootDirectory Toolchain]
+  DeploymentRequest [HorizonView TargetNode CriomeAuthorization]
+  GenerationSelector [DeploymentIdentifier]
+  HelpQuery [Detail]
+  PlanRecord [DeploymentIdentifier HorizonView TargetNode]
+  BuildRecord [GenerationIdentifier ClosurePath BuildLog]
+  CopyRecord [GenerationIdentifier TargetNode ClosurePath]
+  ActivationRecord [GenerationIdentifier TargetNode ActivationKind]
+  GenerationRecord [GenerationIdentifier DeploymentIdentifier TargetNode ClosurePath ActivationKind]
+  ObservationRecord [DeploymentIdentifier Phase Status Detail]
+  Phase (PlanReceived Authorized Building CopyingClosure Activating Observed Failed)
+  Status (Started Progressing Complete Failed)
+  CriomeAuthorization (Bypass OperatorAllowlist Criome)
+  RejectionReason (Unauthorized PolicyViolation MalformedRequest CapacityExhausted)
+  ActivationKind (Switch Boot Test)
+  SemaCommand (
+    (RecordPlan PlanRecord)
+    (RecordBuild BuildRecord)
+    (RecordCopy CopyRecord)
+    (RecordActivation ActivationRecord)
+    (RecordObservation ObservationRecord)
+    (QueryGeneration GenerationSelector)
+  )
+  SemaResponse (
+    (Acknowledged SemaCommandIdentifier)
+    (GenerationLedgerEntry GenerationRecord)
+    (ObservationStreamEntry ObservationRecord)
+    (Missed Detail)
+  )
+  ActorRequest (
+    (AuthorizeDeployment DeploymentRequest)
+    (MaterializePlan DeploymentRequest)
+    (ExecuteBuild PlanRecord)
+    (CopyClosure BuildRecord)
+    (ActivateGeneration CopyRecord)
+    (PinGenerationRoot BuildRecord)
+    (EmitObservation ObservationRecord)
+  )
+  ActorReply (
+    (AuthorizationDecided CriomeAuthorization)
+    (PlanReady PlanRecord)
+    (BuildComplete BuildRecord)
+    (CopyComplete CopyRecord)
+    (ActivationComplete ActivationRecord)
+    (PinReceipt GenerationIdentifier)
+    (ObservationAccepted ObservationIdentifier)
+  )
+}

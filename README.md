@@ -1,36 +1,28 @@
-# lojix
+# lojix-next — schema-deep pilot
 
-The new deploy stack — one crate, two binaries:
+The schema-deep rewrite of the new lojix-horizon logics. One
+authored `schema/lojix.schema` is the source of truth for every
+typed noun the daemon touches; `nota-next` + `schema-next` +
+`schema-rust-next` generate the Rust; hand-written code in
+`src/runtime/` attaches Kameo 0.20 actor topology and methods to
+the schema-emitted types.
 
-- **`lojix-daemon`** — long-lived deploy orchestrator. Owns the live
-  generation set, GC roots tree, deploy event log, and container
-  lifecycle observation. Binds `/run/lojix/daemon.sock`; receives
-  typed `signal-lojix` deploy requests; pushes
-  `DeploymentObservation` + `CacheRetentionObservation` to subscribers.
-- **`lojix`** — thin CLI client. Reads one Nota request, sends it to
-  the daemon as a `signal-lojix` frame, prints one Nota reply.
+## Binaries
 
-Storage lives in `sema-engine` (the typed database engine library);
-wire framing is `signal-core`. The contract repo is `signal-lojix`.
+- **`lojix-next-daemon`** — long-lived deploy daemon. Takes one NOTA
+  argument: a `DaemonConfiguration` record.
+- **`lojix-next`** — thin CLI client. Takes one NOTA argument: an
+  `Input` record. Sends it as a signal-frame over a Unix socket.
 
-**Status: in development.** First implementation lands on the
-`horizon-re-engineering` feature branch alongside the parallel horizon
-schema refactor. See `ARCHITECTURE.md` for the planned shape and
-`~/primary/protocols/active-repositories.md` for the broader context.
+## Run
 
-## Related
+```sh
+nix flake check
+```
 
-- `signal-lojix` — typed wire contract (DeploymentSubmission/Accepted/
-  Rejected/Observation, CacheRetentionRequest/Accepted/Rejected/
-  Observation, GenerationQuery/Listing).
-- `signal-core` — wire kernel that signal-lojix builds on.
-- `sema-engine` — typed database engine library used for durable state.
-- `horizon-rs` — cluster-proposal projection (read-only per request).
-- `lojix-cli` — legacy monolithic orchestrator; parallel build until
-  CriomOS migrates over.
-- `goldragon` — cluster proposal source.
-- `clavifaber` — per-host key material (separate component).
+Runs the full test family (10 tests) including the sandbox-OS
+witnesses.
 
-## License
+## Architecture
 
-License of Non-Authority.
+See `ARCHITECTURE.md`.
