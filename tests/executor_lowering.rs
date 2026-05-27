@@ -6,9 +6,10 @@ use lojix_next::ActivationKind;
 use lojix_next::ClosurePath;
 use lojix_next::runtime::codec::Lowered;
 use lojix_next::{
-    CriomeAuthorization, DeploymentIdentifier, DeploymentRequest, Detail, GenerationIdentifier,
-    GenerationRecord, GenerationSelector, HelpQuery, HorizonView, Input, ObservationRecord, Output,
-    Phase, SemaCommand, SemaCommandIdentifier, SemaResponse, Status, TargetNode,
+    AcceptedReply, CriomeAuthorization, DeploymentIdentifier, DeploymentRequest, Detail,
+    GenerationIdentifier, GenerationRecord, GenerationSelector, HelpQuery, HorizonView, Input,
+    ObservationRecord, Output, Phase, SemaCommand, SemaCommandIdentifier, SemaResponse, Status,
+    TargetNode,
 };
 
 #[test]
@@ -25,7 +26,10 @@ fn lojix_next_input_lowers_to_sema_command_exhaustively() {
 
     let cancel = Input::Cancel(DeploymentIdentifier(7));
     match cancel.lower_to_sema_command() {
-        Lowered::ForwardOnly(Output::Accepted(DeploymentIdentifier(7))) => {}
+        Lowered::ForwardOnly(Output::Accepted(AcceptedReply {
+            deployment_identifier: DeploymentIdentifier(7),
+            ..
+        })) => {}
         other => panic!("Cancel must lower to forward-only Accepted, got {other:?}"),
     }
 

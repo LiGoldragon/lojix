@@ -37,6 +37,12 @@ pub enum Error {
     #[error("actor send: {0}")]
     ActorSend(String),
 
+    #[error("{actor} received unsupported actor request {request}")]
+    UnexpectedActorRequest {
+        actor: &'static str,
+        request: &'static str,
+    },
+
     #[error("daemon shutdown")]
     Shutdown,
 }

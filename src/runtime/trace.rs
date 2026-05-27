@@ -29,6 +29,9 @@ pub enum TraceWitness {
     PlanMaterialized {
         plane: Plane,
     },
+    SourcesStaged {
+        plane: Plane,
+    },
     BuildStarted {
         plane: Plane,
     },
@@ -61,6 +64,7 @@ pub enum Plane {
     SocketListener,
     OperationDispatcher,
     AuthorizationGate,
+    SourceStager,
     Builder,
     ClosureCopier,
     Activator,
@@ -79,6 +83,7 @@ pub enum AuthorizationDecision {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemaCommandTag {
     RecordPlan,
+    RecordSource,
     RecordBuild,
     RecordCopy,
     RecordActivation,
@@ -156,6 +161,7 @@ impl TraceWitness {
             | Self::InputReceived { plane }
             | Self::AuthorizationDecided { plane, .. }
             | Self::PlanMaterialized { plane }
+            | Self::SourcesStaged { plane }
             | Self::BuildStarted { plane }
             | Self::BuildComplete { plane }
             | Self::ClosureCopied { plane }

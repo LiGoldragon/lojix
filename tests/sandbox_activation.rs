@@ -19,11 +19,12 @@ use lojix_next::runtime::observation::Subscribe;
 use lojix_next::runtime::toolchain::ToolchainMode;
 use lojix_next::{
     ActivationCommand, BuildCommand, CopyCommand, CriomeAuthorization, DeploymentRequest,
-    HorizonView, Input, Output, Phase, Status, TargetNode, Toolchain,
+    HorizonView, Input, Output, Phase, StateDirectory, Status, TargetNode, Toolchain,
 };
 
 #[tokio::test(flavor = "current_thread")]
 async fn lojix_next_activation_on_nspawn_sandbox() {
+    let state = tempfile::TempDir::new().expect("state tempdir");
     let toolchain = Toolchain {
         build_command: BuildCommand("nspawn-sandbox-build".to_owned()),
         copy_command: CopyCommand("nspawn-sandbox-copy".to_owned()),
@@ -33,6 +34,7 @@ async fn lojix_next_activation_on_nspawn_sandbox() {
         toolchain,
         ToolchainMode::Sandbox,
         AuthorizationPolicy::AllowAll,
+        StateDirectory(state.path().to_string_lossy().into_owned()),
     )
     .await;
 

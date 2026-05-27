@@ -2,10 +2,12 @@ You MUST read [~/primary/repos/lore/AGENTS.md](../../../lore/AGENTS.md) — the 
 
 # lojix-daemon — agent carve-outs
 
-- **Status: skeleton (2026-05-13).** No `Cargo.toml`, no `src/`, no
-  `flake.nix`, no `skills.md` body beyond a stub. The repo exists to
-  lock the namespace and host the architecture spec. Do not begin
-  implementation here without explicit direction from the user.
+- **Status: schema-deep pilot.** This worktree contains the runnable
+  `lojix-next` prototype: schema-emitted signal types, internal SEMA
+  and actor mailbox nouns, Kameo runtime actors, and Nix-backed
+  witness tests. Continue implementation only through the designed
+  planes described in `ARCHITECTURE.md`; when a plane is missing,
+  develop that plane instead of bypassing it.
 
 - **Future infrastructure.** Per
   `~/primary/protocols/active-repositories.md` §"Replacement Stack

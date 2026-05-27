@@ -16,16 +16,16 @@ use std::convert::Infallible;
 use crate::generated::{
     ActivationKind, BuildRecord, CopyRecord, DeploymentIdentifier, Detail, GenerationIdentifier,
     GenerationRecord, GenerationSelector, ObservationRecord, PlanRecord, SemaCommand,
-    SemaCommandIdentifier, SemaResponse,
+    SemaCommandIdentifier, SemaResponse, SourceRecord,
 };
 
 /// In-memory SEMA writer for the pilot. The `State` field carries
-/// (a) the generation ledger, (b) the observation log, (c) the next
-/// command/generation/observation/deployment identifier counters,
-/// and (d) the per-deployment plan registry. Naming the actor IS
+/// the plan, source, build, copy, generation, and observation
+/// registries plus the identifier counters. Naming the actor IS
 /// naming the noun — this is the Store.
 pub struct Store {
     plans: Vec<PlanRecord>,
+    sources: Vec<SourceRecord>,
     builds: Vec<BuildRecord>,
     copies: Vec<CopyRecord>,
     generations: Vec<GenerationRecord>,
@@ -46,6 +46,7 @@ impl Store {
     pub fn new() -> Self {
         Self {
             plans: Vec::new(),
+            sources: Vec::new(),
             builds: Vec::new(),
             copies: Vec::new(),
             generations: Vec::new(),
@@ -81,6 +82,11 @@ impl Store {
                     activation_kind: ActivationKind::Test,
                 };
                 self.generations.push(record);
+                let acknowledgement = self.allocate_command_identifier();
+                SemaResponse::Acknowledged(acknowledgement)
+            }
+            SemaCommand::RecordSource(source) => {
+                self.sources.push(source);
                 let acknowledgement = self.allocate_command_identifier();
                 SemaResponse::Acknowledged(acknowledgement)
             }
@@ -141,6 +147,10 @@ impl Store {
     /// All stored plans.
     pub fn plans(&self) -> &[PlanRecord] {
         &self.plans
+    }
+
+    pub fn sources(&self) -> &[SourceRecord] {
+        &self.sources
     }
 
     pub fn allocate_generation_identifier(&mut self) -> GenerationIdentifier {
@@ -265,5 +275,20 @@ impl Message<PlansSnapshot> for Store {
         _context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         Ok(self.plans.clone())
+    }
+}
+
+/// Read-only snapshot of staged source records, for tests.
+pub struct SourcesSnapshot;
+
+impl Message<SourcesSnapshot> for Store {
+    type Reply = Result<Vec<SourceRecord>, Infallible>;
+
+    async fn handle(
+        &mut self,
+        _message: SourcesSnapshot,
+        _context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        Ok(self.sources.clone())
     }
 }

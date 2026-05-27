@@ -9,7 +9,7 @@
 use kameo::actor::{ActorRef, Spawn};
 
 use crate::error::{Error, Result};
-use crate::generated::{Input, Output, Toolchain};
+use crate::generated::{Input, Output, StateDirectory, Toolchain};
 use crate::runtime::activator::Activator;
 use crate::runtime::authorization::{AuthorizationGate, AuthorizationPolicy};
 use crate::runtime::builder::Builder;
@@ -18,6 +18,7 @@ use crate::runtime::dispatcher::{ActorReferenceSet, OperationDispatcher};
 use crate::runtime::gc_root::GcRootPinner;
 use crate::runtime::observation::ObservationFan;
 use crate::runtime::root::{DispatchInput, LojixChildSet, LojixRoot};
+use crate::runtime::source_stager::SourceStager;
 use crate::runtime::store::Store;
 use crate::runtime::toolchain::{ProcessToolchain, ToolchainMode};
 use crate::runtime::trace::TraceLog;
@@ -33,12 +34,14 @@ impl Engine {
         toolchain: Toolchain,
         toolchain_mode: ToolchainMode,
         policy: AuthorizationPolicy,
+        state_directory: StateDirectory,
     ) -> Self {
         let process_toolchain = ProcessToolchain::new(toolchain, toolchain_mode);
 
         let trace = TraceLog::spawn(TraceLog::new());
         let store = Store::spawn(Store::new());
         let authorization = AuthorizationGate::spawn(AuthorizationGate::new(policy));
+        let source_stager = SourceStager::spawn(SourceStager::new(state_directory));
         let builder = Builder::spawn(Builder::new(process_toolchain.clone()));
         let copier = ClosureCopier::spawn(ClosureCopier::new(process_toolchain.clone()));
         let activator = Activator::spawn(Activator::new(process_toolchain.clone()));
@@ -47,6 +50,7 @@ impl Engine {
 
         let refs = ActorReferenceSet {
             authorization: authorization.clone(),
+            source_stager: source_stager.clone(),
             builder: builder.clone(),
             copier: copier.clone(),
             activator: activator.clone(),
@@ -59,6 +63,7 @@ impl Engine {
 
         let children = LojixChildSet {
             authorization,
+            source_stager,
             builder,
             copier,
             activator,

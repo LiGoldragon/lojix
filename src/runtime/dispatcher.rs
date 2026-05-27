@@ -1,10 +1,11 @@
 //! OperationDispatcher — the executor.
 //!
-//! Owns ActorRefs to every downstream plane (Authorization, Builder,
-//! Copier, Activator, GcRootPinner, Store, ObservationFan, TraceLog)
-//! and drives an Input through the full deploy pipeline, emitting the
-//! corresponding Output. State carries the ActorRef set — the actor
-//! IS the dispatcher; the refs ARE the topology it dispatches across.
+//! Owns ActorRefs to every downstream plane (Authorization,
+//! SourceStager, Builder, Copier, Activator, GcRootPinner, Store,
+//! ObservationFan, TraceLog) and drives an Input through the full
+//! deploy pipeline, emitting the corresponding Output. State carries
+//! the ActorRef set — the actor IS the dispatcher; the refs ARE the
+//! topology it dispatches across.
 
 use kameo::Actor;
 use kameo::actor::ActorRef;
@@ -13,8 +14,9 @@ use kameo::message::{Context, Message};
 
 use crate::error::{Error, Result};
 use crate::generated::{
-    ActivationKind, BuildRecord, CopyRecord, Detail, Input, ObservationRecord, Output, Phase,
-    RejectionReason, SemaCommand, Status,
+    ActivationKind, ActorReply, ActorRequest, BuildRecord, CopyRecord, Detail, Input,
+    ObservationRecord, Output, Phase, RejectedReply, RejectionReason, SemaCommand, SourceRecord,
+    Status,
 };
 use crate::runtime::activator::{Activator, DriveActivation};
 use crate::runtime::authorization::{AuthorizationGate, AuthorizeMessage};
@@ -23,6 +25,7 @@ use crate::runtime::codec::Lowered;
 use crate::runtime::copier::{ClosureCopier, DriveCopy};
 use crate::runtime::gc_root::{DrivePin, GcRootPinner};
 use crate::runtime::observation::{BroadcastObservation, ObservationFan};
+use crate::runtime::source_stager::SourceStager;
 use crate::runtime::store::{AllocateGeneration, Apply, Store};
 use crate::runtime::trace::{
     AuthorizationDecision, Plane, RecordWitness, SemaCommandTag, TraceLog, TraceWitness,
@@ -31,6 +34,7 @@ use crate::runtime::trace::{
 #[derive(Clone)]
 pub struct ActorReferenceSet {
     pub authorization: ActorRef<AuthorizationGate>,
+    pub source_stager: ActorRef<SourceStager>,
     pub builder: ActorRef<Builder>,
     pub copier: ActorRef<ClosureCopier>,
     pub activator: ActorRef<Activator>,
@@ -99,7 +103,9 @@ impl OperationDispatcher {
             }))
             .await;
         if !granted {
-            return Ok(Output::Rejected(RejectionReason::Unauthorized));
+            return Ok(Output::Rejected(RejectedReply::new(
+                RejectionReason::Unauthorized,
+            )));
         }
 
         // Plan materialization
@@ -142,6 +148,37 @@ impl OperationDispatcher {
             .ok_or_else(|| Error::ActorSend("store has no plans after RecordPlan".to_owned()))?;
         let deployment = stored.deployment_identifier.clone();
 
+        // Source staging
+        self.broadcast_observation(
+            deployment.clone(),
+            Phase::StagingSources,
+            Status::Started,
+            "source staging start",
+        )
+        .await?;
+        let source = self.stage_sources(stored.clone()).await?;
+        let _ = self
+            .refs
+            .store
+            .ask(Apply(SemaCommand::RecordSource(source.clone())))
+            .await
+            .map_err(|error| Error::ActorSend(format!("store/RecordSource: {error}")))?;
+        let _ = self
+            .refs
+            .trace
+            .ask(RecordWitness(TraceWitness::SemaApplied {
+                plane: Plane::Store,
+                command: SemaCommandTag::RecordSource,
+            }))
+            .await;
+        self.broadcast_observation(
+            deployment.clone(),
+            Phase::StagingSources,
+            Status::Complete,
+            "source staging complete",
+        )
+        .await?;
+
         // Build
         let generation = self
             .refs
@@ -166,10 +203,7 @@ impl OperationDispatcher {
         let build = self
             .refs
             .builder
-            .ask(DriveBuild {
-                plan: stored.clone(),
-                generation,
-            })
+            .ask(DriveBuild { source, generation })
             .await
             .map_err(|error| Error::ActorSend(format!("builder: {error}")))?;
         let _ = self
@@ -269,7 +303,9 @@ impl OperationDispatcher {
                 plane: Plane::OperationDispatcher,
             }))
             .await;
-        Ok(Output::Accepted(deployment))
+        Ok(Output::Accepted(crate::generated::AcceptedReply::new(
+            deployment,
+        )))
     }
 
     async fn drive_copy(
@@ -294,6 +330,31 @@ impl OperationDispatcher {
             }))
             .await;
         Ok(copy)
+    }
+
+    async fn stage_sources(&self, plan: crate::generated::PlanRecord) -> Result<SourceRecord> {
+        let reply = self
+            .refs
+            .source_stager
+            .ask(ActorRequest::StageSources(plan))
+            .await
+            .map_err(|error| Error::ActorSend(format!("source_stager: {error}")))?;
+        match reply {
+            ActorReply::SourcesReady(source) => {
+                let _ = self
+                    .refs
+                    .trace
+                    .ask(RecordWitness(TraceWitness::SourcesStaged {
+                        plane: Plane::SourceStager,
+                    }))
+                    .await;
+                Ok(source)
+            }
+            other => Err(Error::UnexpectedActorRequest {
+                actor: "OperationDispatcher",
+                request: other.variant_name(),
+            }),
+        }
     }
 
     async fn drive_activation(
@@ -362,6 +423,7 @@ impl OperationDispatcher {
             Lowered::StateInvolving(command) => {
                 let tag = match &command {
                     SemaCommand::RecordPlan(_) => SemaCommandTag::RecordPlan,
+                    SemaCommand::RecordSource(_) => SemaCommandTag::RecordSource,
                     SemaCommand::RecordBuild(_) => SemaCommandTag::RecordBuild,
                     SemaCommand::RecordCopy(_) => SemaCommandTag::RecordCopy,
                     SemaCommand::RecordActivation(_) => SemaCommandTag::RecordActivation,

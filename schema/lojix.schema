@@ -6,11 +6,11 @@
   (Help HelpQuery)
 ))
 (Output (
-  (Accepted DeploymentIdentifier)
-  (Rejected RejectionReason)
-  (Observation ObservationRecord)
-  (Snapshot GenerationRecord)
-  (HelpAnswer HelpReply)
+  (Accepted AcceptedReply)
+  (Rejected RejectedReply)
+  (Observation ObservedReply)
+  (Snapshot SnapshotReply)
+  (HelpAnswer HelpAnswerReply)
 ))
 {
   DeploymentIdentifier [Integer]
@@ -23,30 +23,43 @@
   Detail [Text]
   HelpReply [Text]
   HorizonView [Text]
+  SourceDigest [Text]
   SocketPath [Text]
   StateDirectory [Text]
   GcRootDirectory [Text]
+  SemaDatabasePath [Text]
   BuildCommand [Text]
   CopyCommand [Text]
   ActivationCommand [Text]
+  TransactionCounter [Integer]
+  StateHash [Text]
+  DatabaseMarker [TransactionCounter StateHash]
+  AcceptedReply [DeploymentIdentifier DatabaseMarker]
+  RejectedReply [RejectionReason DatabaseMarker]
+  ObservedReply [ObservationRecord DatabaseMarker]
+  SnapshotReply [GenerationRecord DatabaseMarker]
+  HelpAnswerReply [HelpReply DatabaseMarker]
   Toolchain [BuildCommand CopyCommand ActivationCommand]
-  DaemonConfiguration [SocketPath StateDirectory GcRootDirectory Toolchain]
+  DaemonConfiguration [SocketPath StateDirectory GcRootDirectory SemaDatabasePath Toolchain]
   DeploymentRequest [HorizonView TargetNode CriomeAuthorization]
   GenerationSelector [DeploymentIdentifier]
   HelpQuery [Detail]
   PlanRecord [DeploymentIdentifier HorizonView TargetNode]
-  BuildRecord [GenerationIdentifier ClosurePath BuildLog]
+  SourceRecord [DeploymentIdentifier HorizonView TargetNode SourceDigest]
+  BuildRecord [GenerationIdentifier SourceDigest ClosurePath BuildLog]
   CopyRecord [GenerationIdentifier TargetNode ClosurePath]
   ActivationRecord [GenerationIdentifier TargetNode ActivationKind]
   GenerationRecord [GenerationIdentifier DeploymentIdentifier TargetNode ClosurePath ActivationKind]
   ObservationRecord [DeploymentIdentifier Phase Status Detail]
-  Phase (PlanReceived Authorized Building CopyingClosure Activating Observed Failed)
+  Phase (PlanReceived Authorized StagingSources Building CopyingClosure Activating Observed Failed)
   Status (Started Progressing Complete Failed)
   CriomeAuthorization (Bypass OperatorAllowlist Criome)
   RejectionReason (Unauthorized PolicyViolation MalformedRequest CapacityExhausted)
   ActivationKind (Switch Boot Test)
+  MailLifecycle (Sent Queued Processing Replied Failed)
   SemaCommand (
     (RecordPlan PlanRecord)
+    (RecordSource SourceRecord)
     (RecordBuild BuildRecord)
     (RecordCopy CopyRecord)
     (RecordActivation ActivationRecord)
@@ -62,7 +75,8 @@
   ActorRequest (
     (AuthorizeDeployment DeploymentRequest)
     (MaterializePlan DeploymentRequest)
-    (ExecuteBuild PlanRecord)
+    (StageSources PlanRecord)
+    (ExecuteBuild SourceRecord)
     (CopyClosure BuildRecord)
     (ActivateGeneration CopyRecord)
     (PinGenerationRoot BuildRecord)
@@ -71,6 +85,7 @@
   ActorReply (
     (AuthorizationDecided CriomeAuthorization)
     (PlanReady PlanRecord)
+    (SourcesReady SourceRecord)
     (BuildComplete BuildRecord)
     (CopyComplete CopyRecord)
     (ActivationComplete ActivationRecord)

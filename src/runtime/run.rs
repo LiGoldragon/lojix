@@ -41,6 +41,7 @@ impl RunDaemon {
             self.configuration.toolchain.clone(),
             ToolchainMode::Sandbox,
             AuthorizationPolicy::AllowAll,
+            self.configuration.state_directory.clone(),
         )
         .await;
         let socket_path = PathBuf::from(self.configuration.socket_path.0.clone());

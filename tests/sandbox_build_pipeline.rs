@@ -20,9 +20,9 @@ struct DaemonProcess {
 }
 
 impl DaemonProcess {
-    fn spawn(socket: &str, state: &str, gc: &str) -> Self {
+    fn spawn(socket: &str, state: &str, gc: &str, sema: &str) -> Self {
         let configuration = format!(
-            "([{socket}] [{state}] [{gc}] \
+            "([{socket}] [{state}] [{gc}] [{sema}] \
              ([nix-build-sandbox] [nix-copy-sandbox] [nixos-rebuild-sandbox]))"
         );
         let child = Command::new(env!("CARGO_BIN_EXE_lojix-next-daemon"))
@@ -70,11 +70,13 @@ fn lojix_next_build_only_pipeline_on_sandbox() {
     let socket_text = socket_path.to_string_lossy().into_owned();
     let state_directory = temp.path().join("state");
     let gc_root_directory = temp.path().join("gcroots");
+    let sema_database_path = temp.path().join("lojix.redb");
 
     let _daemon = DaemonProcess::spawn(
         &socket_text,
         &state_directory.to_string_lossy(),
         &gc_root_directory.to_string_lossy(),
+        &sema_database_path.to_string_lossy(),
     );
     SocketWaiter::new(socket_path.clone()).block_until_present();
 

@@ -53,7 +53,7 @@ Per `~/primary/skills/component-triad.md` §"Runtime triad":
 ### Executor layer
 
 - **`LojixRoot` actor** (`src/runtime/root.rs`) — runtime root; State
-  carries the typed `LojixChildSet` (9 child actor refs).
+  carries the typed `LojixChildSet` (10 child actor refs).
 - **`OperationDispatcher` actor** (`src/runtime/dispatcher.rs`) — the
   executor; drives `Input` through the full deploy pipeline by
   asking downstream actors in sequence. Emits `TraceWitness` events
@@ -65,6 +65,11 @@ Per `~/primary/skills/component-triad.md` §"Runtime triad":
   - `HelpQuery::into_help_reply(self) -> HelpReply`
   - `SemaResponse::into_output(self) -> Output`
   - `GenerationSelector::target_deployment(&self) -> &DeploymentIdentifier`
+- **Method placement** on source-staging nouns
+  (`src/runtime/source_stager.rs`):
+  - `PlanRecord::source_digest(&self) -> SourceDigest`
+  - `SourceRecord::from_plan(&PlanRecord) -> SourceRecord`
+  - `SourceRecord::artifact_text(&self) -> String`
 - **Method placement on `DeploymentRequest`**
   (`src/runtime/authorization.rs`):
   - `DeploymentRequest::authorize(&self, policy: &AuthorizationPolicy) -> CriomeAuthorization`
@@ -73,8 +78,9 @@ Per `~/primary/skills/component-triad.md` §"Runtime triad":
 
 - **`Store` actor** (`src/runtime/store.rs`) — single-writer for the
   SEMA layer. State carries the typed registries: plans, builds,
-  copies, generations, observations, and four identifier counters.
-  In-memory for the pilot; redb-backed in the follow-on.
+  staged sources, copies, generations, observations, and four
+  identifier counters. In-memory for the pilot; redb-backed in the
+  follow-on.
 - `Store::apply(SemaCommand) -> SemaResponse` is the single mutator
   path.
 
@@ -86,7 +92,8 @@ Per `~/primary/skills/component-triad.md` §"Runtime triad":
 | Signal accept | `SocketListener` | raw bytes | `Option<UnixListener>` |
 | Input executor | `OperationDispatcher` | `Input` (via `Dispatch`) | `ActorReferenceSet` |
 | Authorization | `AuthorizationGate` | `AuthorizeMessage` | `AuthorizationPolicy` |
-| Build execution | `Builder` | `DriveBuild` | `ProcessToolchain`, `Option<PlanRecord>` |
+| Source staging | `SourceStager` | `ActorRequest::StageSources` | source artifact directory, most recent `SourceRecord` |
+| Build execution | `Builder` | `DriveBuild` | `ProcessToolchain`, `Option<SourceRecord>` |
 | Closure copy | `ClosureCopier` | `DriveCopy` | `ProcessToolchain`, `CopyQueue` |
 | Activation | `Activator` | `DriveActivation` | `ProcessToolchain`, `ActiveGeneration` |
 | GC root pin | `GcRootPinner` | `DrivePin` | `ProcessToolchain`, `PinnedSet` |
@@ -143,6 +150,10 @@ Two tests in the family carry the sandbox-OS witness load:
   witness; the activation command is `nspawn-sandbox-activate` and
   the observation stream is asserted end-to-end (`Activating Complete`
   + `Observed Complete`).
+- `lojix_next_submit_stages_sources_before_build` — in-process
+  source-staging witness; the submit path must ask `SourceStager`,
+  commit `SemaCommand::RecordSource`, and write an inspectable source
+  artifact under the daemon state directory before `Builder` runs.
 
 A real `systemd-nspawn`-against-`nspawn-dune-on-prometheus` test
 requires root + cgroup access which the Nix flake check sandbox
@@ -154,6 +165,9 @@ job when amalgamating per
 
 - Storage is in-memory (a `Vec` per record family in `Store`); the
   redb backend lands next.
+- Source staging writes a local source artifact under the daemon state
+  directory. ARCA-backed content-addressed propagation is still a
+  future designed component, not implemented in this pilot.
 - Schema-next does not yet express vectors. `SemaResponse`
   surfaces one record at a time
   (`GenerationLedgerEntry(GenerationRecord)` not

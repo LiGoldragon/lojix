@@ -16,6 +16,7 @@ use crate::runtime::copier::ClosureCopier;
 use crate::runtime::dispatcher::{Dispatch, OperationDispatcher};
 use crate::runtime::gc_root::GcRootPinner;
 use crate::runtime::observation::ObservationFan;
+use crate::runtime::source_stager::SourceStager;
 use crate::runtime::store::Store;
 use crate::runtime::trace::TraceLog;
 
@@ -25,6 +26,7 @@ use crate::runtime::trace::TraceLog;
 #[derive(Clone)]
 pub struct LojixChildSet {
     pub authorization: ActorRef<AuthorizationGate>,
+    pub source_stager: ActorRef<SourceStager>,
     pub builder: ActorRef<Builder>,
     pub copier: ActorRef<ClosureCopier>,
     pub activator: ActorRef<Activator>,
@@ -37,7 +39,7 @@ pub struct LojixChildSet {
 
 impl LojixChildSet {
     pub fn count(&self) -> usize {
-        9
+        10
     }
 }
 

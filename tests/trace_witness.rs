@@ -7,15 +7,18 @@ use lojix_next::runtime::engine::Engine;
 use lojix_next::runtime::toolchain::ToolchainMode;
 use lojix_next::runtime::trace::{Plane, Snapshot, TraceWitness};
 use lojix_next::{
-    CriomeAuthorization, DeploymentRequest, HorizonView, Input, TargetNode, Toolchain,
+    CriomeAuthorization, DeploymentRequest, HorizonView, Input, StateDirectory, TargetNode,
+    Toolchain,
 };
 
 #[tokio::test(flavor = "current_thread")]
 async fn lojix_next_trace_witnesses_full_pipeline() {
+    let state = tempfile::TempDir::new().expect("state tempdir");
     let engine = Engine::spawn(
         Toolchain::sandbox_default(),
         ToolchainMode::Sandbox,
         AuthorizationPolicy::AllowAll,
+        StateDirectory(state.path().to_string_lossy().into_owned()),
     )
     .await;
     let _ = engine
@@ -39,6 +42,7 @@ async fn lojix_next_trace_witnesses_full_pipeline() {
     let required = [
         Plane::OperationDispatcher,
         Plane::AuthorizationGate,
+        Plane::SourceStager,
         Plane::Builder,
         Plane::GcRootPinner,
         Plane::ClosureCopier,

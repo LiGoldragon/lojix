@@ -17,16 +17,18 @@ pub mod generated {
 
 pub use error::{Error, Result};
 pub use generated::{
-    ActivationCommand, ActivationKind, ActivationRecord, ActorReply, ActorRequest, BuildCommand,
-    BuildLog, BuildRecord, ClosurePath, CopyCommand, CopyRecord, CriomeAuthorization,
-    DaemonConfiguration, DeploymentIdentifier, DeploymentRequest, Detail, GcRootDirectory,
-    GenerationIdentifier, GenerationRecord, GenerationSelector, HelpQuery, HelpReply, HorizonView,
-    Input, InputRoute, NotaDecodeError, ObservationIdentifier, ObservationRecord, Output,
-    OutputRoute, Phase, PlanRecord, RejectionReason, SemaCommand, SemaCommandIdentifier,
-    SemaResponse, SignalFrameError, SocketPath, StateDirectory, Status, TargetNode, Toolchain,
+    AcceptedReply, ActivationCommand, ActivationKind, ActivationRecord, ActorReply, ActorRequest,
+    BuildCommand, BuildLog, BuildRecord, ClosurePath, CopyCommand, CopyRecord, CriomeAuthorization,
+    DaemonConfiguration, DatabaseMarker, DeploymentIdentifier, DeploymentRequest, Detail,
+    GcRootDirectory, GenerationIdentifier, GenerationRecord, GenerationSelector, HelpAnswerReply,
+    HelpQuery, HelpReply, HorizonView, Input, InputRoute, NotaDecodeError, ObservationIdentifier,
+    ObservationRecord, ObservedReply, Output, OutputRoute, Phase, PlanRecord, RejectedReply,
+    RejectionReason, SemaCommand, SemaCommandIdentifier, SemaDatabasePath, SemaResponse,
+    SignalFrameError, SnapshotReply, SocketPath, SourceDigest, SourceRecord, StateDirectory,
+    StateHash, Status, TargetNode, Toolchain, TransactionCounter,
 };
 pub use runtime::{
     Activator, AuthorizationGate, AuthorizationPolicy, Builder, ClosureCopier, Engine,
     GcRootPinner, LojixRoot, ObservationFan, OperationDispatcher, ProcessToolchain, RunDaemon,
-    SocketListener, Store, TraceLog, TraceWitness,
+    SocketListener, SourceStager, Store, TraceLog, TraceWitness,
 };

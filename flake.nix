@@ -100,6 +100,8 @@
             grep -R "SemaResponse" ${src}/schema/lojix.schema >/dev/null
             grep -R "ActorRequest" ${src}/schema/lojix.schema >/dev/null
             grep -R "ActorReply" ${src}/schema/lojix.schema >/dev/null
+            grep -R "SourceRecord" ${src}/schema/lojix.schema >/dev/null
+            grep -R "StageSources" ${src}/schema/lojix.schema >/dev/null
             grep -R "DaemonConfiguration" ${src}/schema/lojix.schema >/dev/null
             touch $out
           '';

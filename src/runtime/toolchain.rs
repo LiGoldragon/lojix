@@ -8,7 +8,7 @@ use tokio::process::Command;
 use crate::error::{Error, Result};
 use crate::generated::{
     ActivationKind, ActivationRecord, BuildLog, BuildRecord, ClosurePath, CopyRecord,
-    GenerationIdentifier, PlanRecord, TargetNode, Toolchain,
+    GenerationIdentifier, SourceRecord, TargetNode, Toolchain,
 };
 
 /// Process toolchain — owns the three external commands the deploy
@@ -43,19 +43,20 @@ impl ProcessToolchain {
         self.mode
     }
 
-    /// Execute the build step for a plan, producing a typed BuildRecord.
+    /// Execute the build step for a staged source, producing a typed BuildRecord.
     pub async fn execute_build(
         &self,
-        plan: &PlanRecord,
+        source: &SourceRecord,
         generation: GenerationIdentifier,
     ) -> Result<BuildRecord> {
         let command_text = self.toolchain.build_command.0.clone();
         let (closure_path, log_text) = self
-            .run_command(&command_text, plan.horizon_view.0.as_str())
+            .run_command(&command_text, source.source_digest.0.as_str())
             .await
             .map_err(|error| Error::BuildFailed(format!("{command_text}: {error}")))?;
         Ok(BuildRecord {
             generation_identifier: generation,
+            source_digest: source.source_digest.clone(),
             closure_path: ClosurePath(closure_path),
             build_log: BuildLog(log_text),
         })

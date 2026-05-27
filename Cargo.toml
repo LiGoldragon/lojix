@@ -24,8 +24,9 @@ path = "src/bin/lojix-next-daemon.rs"
 nota-next = { git = "https://github.com/LiGoldragon/nota-next.git", branch = "main" }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 kameo = "0.20"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "net", "time", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "net", "time", "process", "fs"] }
 thiserror = "2"
+blake3 = "1"
 
 [build-dependencies]
 schema-next = { git = "https://github.com/LiGoldragon/schema-next.git", branch = "main" }

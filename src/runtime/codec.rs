@@ -2,8 +2,10 @@
 //! `Input -> SemaCommand -> SemaResponse -> Output`.
 
 use crate::generated::{
-    DeploymentRequest, GenerationSelector, HelpQuery, HelpReply, Input, Output, PlanRecord,
-    SemaCommand, SemaResponse,
+    AcceptedReply, DatabaseMarker, DeploymentIdentifier, DeploymentRequest, GenerationRecord,
+    GenerationSelector, HelpAnswerReply, HelpQuery, HelpReply, Input, ObservationRecord,
+    ObservedReply, Output, PlanRecord, RejectedReply, RejectionReason, SemaCommand, SemaResponse,
+    SnapshotReply, StateHash, TransactionCounter,
 };
 
 /// Result of lowering an `Input` to executor work.
@@ -26,11 +28,15 @@ impl Input {
             Self::Submit(request) => {
                 Lowered::StateInvolving(SemaCommand::RecordPlan(request.into_plan_record()))
             }
-            Self::Cancel(identifier) => Lowered::ForwardOnly(Output::Accepted(identifier)),
+            Self::Cancel(identifier) => {
+                Lowered::ForwardOnly(Output::Accepted(AcceptedReply::new(identifier)))
+            }
             Self::Query(selector) => {
                 Lowered::StateInvolving(SemaCommand::QueryGeneration(selector))
             }
-            Self::Help(query) => Lowered::ForwardOnly(Output::HelpAnswer(query.into_help_reply())),
+            Self::Help(query) => Lowered::ForwardOnly(Output::HelpAnswer(HelpAnswerReply::new(
+                query.into_help_reply(),
+            ))),
         }
     }
 }
@@ -75,10 +81,10 @@ impl SemaResponse {
                 // the acknowledgement with the assigned deployment id.
                 // For other Acks not paired with a richer reply, we
                 // surface a synthetic Accepted with deployment id 0.
-                Output::Accepted(crate::generated::DeploymentIdentifier(0))
+                Output::Accepted(AcceptedReply::new(DeploymentIdentifier(0)))
             }
-            Self::GenerationLedgerEntry(record) => Output::Snapshot(record),
-            Self::ObservationStreamEntry(record) => Output::Observation(record),
+            Self::GenerationLedgerEntry(record) => Output::Snapshot(SnapshotReply::new(record)),
+            Self::ObservationStreamEntry(record) => Output::Observation(ObservedReply::new(record)),
             Self::Missed(detail) => {
                 // Map Missed (lookup not found / state error) to a
                 // typed rejection; the detail string is dropped by the
@@ -87,7 +93,7 @@ impl SemaResponse {
                 // with a richer mapping when a follow-on schema grows
                 // a `Rejected (RejectionReason Detail)` variant.
                 let _ = detail;
-                Output::Rejected(crate::generated::RejectionReason::MalformedRequest)
+                Output::Rejected(RejectedReply::new(RejectionReason::MalformedRequest))
             }
         }
     }
@@ -97,5 +103,59 @@ impl GenerationSelector {
     /// Read the underlying deployment-identifier this selector targets.
     pub fn target_deployment(&self) -> &crate::generated::DeploymentIdentifier {
         &self.0
+    }
+}
+
+impl DatabaseMarker {
+    pub fn memory() -> Self {
+        Self {
+            transaction_counter: TransactionCounter(0),
+            state_hash: StateHash("memory".to_owned()),
+        }
+    }
+}
+
+impl AcceptedReply {
+    pub fn new(deployment_identifier: DeploymentIdentifier) -> Self {
+        Self {
+            deployment_identifier,
+            database_marker: DatabaseMarker::memory(),
+        }
+    }
+}
+
+impl RejectedReply {
+    pub fn new(rejection_reason: RejectionReason) -> Self {
+        Self {
+            rejection_reason,
+            database_marker: DatabaseMarker::memory(),
+        }
+    }
+}
+
+impl ObservedReply {
+    pub fn new(observation_record: ObservationRecord) -> Self {
+        Self {
+            observation_record,
+            database_marker: DatabaseMarker::memory(),
+        }
+    }
+}
+
+impl SnapshotReply {
+    pub fn new(generation_record: GenerationRecord) -> Self {
+        Self {
+            generation_record,
+            database_marker: DatabaseMarker::memory(),
+        }
+    }
+}
+
+impl HelpAnswerReply {
+    pub fn new(help_reply: HelpReply) -> Self {
+        Self {
+            help_reply,
+            database_marker: DatabaseMarker::memory(),
+        }
     }
 }
