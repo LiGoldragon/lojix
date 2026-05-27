@@ -37,12 +37,14 @@ impl RunDaemon {
     }
 
     pub async fn start(&mut self) -> Result<()> {
+        let database_path = PathBuf::from(self.configuration.sema_database_path.0.clone());
         let engine = Engine::spawn(
+            database_path,
             self.configuration.toolchain.clone(),
             ToolchainMode::Sandbox,
             AuthorizationPolicy::AllowAll,
         )
-        .await;
+        .await?;
         let socket_path = PathBuf::from(self.configuration.socket_path.0.clone());
         std::fs::create_dir_all(PathBuf::from(self.configuration.state_directory.0.clone()))?;
         std::fs::create_dir_all(PathBuf::from(

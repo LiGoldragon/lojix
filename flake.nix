@@ -101,6 +101,34 @@
             grep -R "ActorRequest" ${src}/schema/lojix.schema >/dev/null
             grep -R "ActorReply" ${src}/schema/lojix.schema >/dev/null
             grep -R "DaemonConfiguration" ${src}/schema/lojix.schema >/dev/null
+            grep -R "DatabaseMarker" ${src}/schema/lojix.schema >/dev/null
+            grep -R "MailLifecycle" ${src}/schema/lojix.schema >/dev/null
+            grep -R "AcceptedReply" ${src}/schema/lojix.schema >/dev/null
+            grep -R "SemaDatabasePath" ${src}/schema/lojix.schema >/dev/null
+            touch $out
+          '';
+          schema-deep-nexus-mail-keeper = pkgs.runCommand "lojix-next-nexus-mail-keeper-shape" { } ''
+            grep -R "NexusMailKeeper" ${src}/src/runtime/nexus.rs >/dev/null
+            grep -R "MailEntry" ${src}/src/runtime/nexus.rs >/dev/null
+            grep -R "MailLifecycle::Sent" ${src}/src/runtime/nexus.rs >/dev/null
+            grep -R "MailLifecycle::Queued" ${src}/src/runtime/nexus.rs >/dev/null
+            grep -R "MailLifecycle::Processing" ${src}/src/runtime/nexus.rs >/dev/null
+            grep -R "MailLifecycle::Replied" ${src}/src/runtime/nexus.rs >/dev/null
+            ! grep -R "OperationDispatcher" ${src}/src/runtime
+            ! grep -R "OperationDispatcher" ${src}/tests
+            touch $out
+          '';
+          schema-deep-sema-engine-backed = pkgs.runCommand "lojix-next-sema-engine-backing" { } ''
+            grep -R "sema_engine::Engine" ${src}/src/runtime/store.rs >/dev/null
+            grep -R "EngineRecord for PlanRecord" ${src}/src/runtime/store.rs >/dev/null
+            grep -R "current_commit_sequence" ${src}/src/runtime/store.rs >/dev/null
+            grep -R "blake3::Hasher" ${src}/src/runtime/store.rs >/dev/null
+            touch $out
+          '';
+          schema-deep-communicate-trait = pkgs.runCommand "lojix-next-communicate-trait" { } ''
+            grep -R "pub trait Communicate" ${src}/src/runtime/communicate.rs >/dev/null
+            grep -R "send_request" ${src}/src/runtime/communicate.rs >/dev/null
+            grep -R "UnixSocketCommunicate" ${src}/src/runtime/communicate.rs >/dev/null
             touch $out
           '';
           binary-boundary-test = pkgs.runCommand "lojix-next-binary-boundary-test" { } ''

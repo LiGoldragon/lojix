@@ -8,9 +8,9 @@ use lojix_next::runtime::activator::Activator;
 use lojix_next::runtime::authorization::{AuthorizationGate, AuthorizationPolicy};
 use lojix_next::runtime::builder::Builder;
 use lojix_next::runtime::copier::ClosureCopier;
-use lojix_next::runtime::dispatcher::OperationDispatcher;
 use lojix_next::runtime::engine::Engine;
 use lojix_next::runtime::gc_root::GcRootPinner;
+use lojix_next::runtime::nexus::NexusMailKeeper;
 use lojix_next::runtime::observation::ObservationFan;
 use lojix_next::runtime::root::LojixRoot;
 use lojix_next::runtime::socket::SocketListener;
@@ -21,7 +21,7 @@ use lojix_next::runtime::trace::TraceLog;
 #[test]
 fn lojix_next_no_zst_actors() {
     assert!(size_of::<LojixRoot>() > 0, "LojixRoot must carry data");
-    assert!(size_of::<OperationDispatcher>() > 0);
+    assert!(size_of::<NexusMailKeeper>() > 0);
     assert!(size_of::<AuthorizationGate>() > 0);
     assert!(size_of::<Builder>() > 0);
     assert!(size_of::<ClosureCopier>() > 0);
@@ -35,12 +35,16 @@ fn lojix_next_no_zst_actors() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn lojix_next_actor_topology_includes_every_plane() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let database_path = temp.path().join("sema.redb");
     let engine = Engine::spawn(
+        database_path,
         Toolchain::sandbox_default(),
         ToolchainMode::Sandbox,
         AuthorizationPolicy::AllowAll,
     )
-    .await;
+    .await
+    .expect("engine spawn");
     let children = engine.children();
     assert_eq!(children.count(), 9);
 
@@ -53,5 +57,5 @@ async fn lojix_next_actor_topology_includes_every_plane() {
     assert!(children.fan.is_alive());
     assert!(children.store.is_alive());
     assert!(children.trace.is_alive());
-    assert!(children.dispatcher.is_alive());
+    assert!(children.nexus.is_alive());
 }

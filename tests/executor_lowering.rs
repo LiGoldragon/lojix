@@ -1,15 +1,27 @@
 //! Executor lowering tests — assert that `Input::lower_to_sema_command`
 //! exhaustively covers every `Input` variant, and
 //! `SemaResponse::into_output` exhaustively covers every `SemaResponse`.
+//!
+//! Iteration 2: forward-only lowerings now yield a typed `ForwardOnlyReply`
+//! that Nexus stamps with a DatabaseMarker. The SemaResponse round-trip
+//! takes a DatabaseMarker as input to model the same Nexus-stamping step.
 
 use lojix_next::ActivationKind;
 use lojix_next::ClosurePath;
-use lojix_next::runtime::codec::Lowered;
+use lojix_next::runtime::codec::{ForwardOnlyReply, Lowered};
 use lojix_next::{
-    CriomeAuthorization, DeploymentIdentifier, DeploymentRequest, Detail, GenerationIdentifier,
-    GenerationRecord, GenerationSelector, HelpQuery, HorizonView, Input, ObservationRecord, Output,
-    Phase, SemaCommand, SemaCommandIdentifier, SemaResponse, Status, TargetNode,
+    CriomeAuthorization, DatabaseMarker, DeploymentIdentifier, DeploymentRequest, Detail,
+    GenerationIdentifier, GenerationRecord, GenerationSelector, HelpQuery, HorizonView, Input,
+    ObservationRecord, Output, Phase, SemaCommand, SemaCommandIdentifier, SemaResponse, StateHash,
+    Status, TargetNode, TransactionCounter,
 };
+
+fn fixture_marker() -> DatabaseMarker {
+    DatabaseMarker {
+        transaction_counter: TransactionCounter(42),
+        state_hash: StateHash("test-fixture".to_owned()),
+    }
+}
 
 #[test]
 fn lojix_next_input_lowers_to_sema_command_exhaustively() {
@@ -25,7 +37,7 @@ fn lojix_next_input_lowers_to_sema_command_exhaustively() {
 
     let cancel = Input::Cancel(DeploymentIdentifier(7));
     match cancel.lower_to_sema_command() {
-        Lowered::ForwardOnly(Output::Accepted(DeploymentIdentifier(7))) => {}
+        Lowered::ForwardOnly(ForwardOnlyReply::Accepted(DeploymentIdentifier(7))) => {}
         other => panic!("Cancel must lower to forward-only Accepted, got {other:?}"),
     }
 
@@ -39,15 +51,16 @@ fn lojix_next_input_lowers_to_sema_command_exhaustively() {
 
     let help = Input::Help(HelpQuery(Detail("topic".to_owned())));
     match help.lower_to_sema_command() {
-        Lowered::ForwardOnly(Output::HelpAnswer(_)) => {}
+        Lowered::ForwardOnly(ForwardOnlyReply::HelpAnswer(_)) => {}
         other => panic!("Help must lower to forward-only HelpAnswer, got {other:?}"),
     }
 }
 
 #[test]
 fn lojix_next_sema_response_maps_back_to_output_exhaustively() {
-    let acknowledged = SemaResponse::Acknowledged(SemaCommandIdentifier(1)).into_output();
-    matches!(acknowledged, Output::Accepted(_));
+    let acknowledged =
+        SemaResponse::Acknowledged(SemaCommandIdentifier(1)).into_output(fixture_marker());
+    assert!(matches!(acknowledged, Output::Accepted(_)));
 
     let snapshot = SemaResponse::GenerationLedgerEntry(GenerationRecord {
         generation_identifier: GenerationIdentifier(1),
@@ -56,8 +69,8 @@ fn lojix_next_sema_response_maps_back_to_output_exhaustively() {
         closure_path: ClosurePath("/nix/store/x".to_owned()),
         activation_kind: ActivationKind::Test,
     })
-    .into_output();
-    matches!(snapshot, Output::Snapshot(_));
+    .into_output(fixture_marker());
+    assert!(matches!(snapshot, Output::Snapshot(_)));
 
     let observation = SemaResponse::ObservationStreamEntry(ObservationRecord {
         deployment_identifier: DeploymentIdentifier(1),
@@ -65,9 +78,9 @@ fn lojix_next_sema_response_maps_back_to_output_exhaustively() {
         status: Status::Started,
         detail: Detail("d".to_owned()),
     })
-    .into_output();
-    matches!(observation, Output::Observation(_));
+    .into_output(fixture_marker());
+    assert!(matches!(observation, Output::Observation(_)));
 
-    let missed = SemaResponse::Missed(Detail("nope".to_owned())).into_output();
-    matches!(missed, Output::Rejected(_));
+    let missed = SemaResponse::Missed(Detail("nope".to_owned())).into_output(fixture_marker());
+    assert!(matches!(missed, Output::Rejected(_)));
 }

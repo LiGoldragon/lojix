@@ -12,12 +12,16 @@ use lojix_next::{
 
 #[tokio::test(flavor = "current_thread")]
 async fn lojix_next_trace_witnesses_full_pipeline() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let database_path = temp.path().join("sema.redb");
     let engine = Engine::spawn(
+        database_path,
         Toolchain::sandbox_default(),
         ToolchainMode::Sandbox,
         AuthorizationPolicy::AllowAll,
     )
-    .await;
+    .await
+    .expect("engine spawn");
     let _ = engine
         .handle(Input::Submit(DeploymentRequest {
             horizon_view: HorizonView("horizon: trace".to_owned()),
@@ -37,7 +41,7 @@ async fn lojix_next_trace_witnesses_full_pipeline() {
     let planes: Vec<Plane> = trace.iter().map(TraceWitness::plane).collect();
 
     let required = [
-        Plane::OperationDispatcher,
+        Plane::NexusMailKeeper,
         Plane::AuthorizationGate,
         Plane::Builder,
         Plane::GcRootPinner,

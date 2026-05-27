@@ -3,6 +3,10 @@
 //! Per `skills/actor-systems.md` §"Traces are required": every named
 //! plane that runs emits a trace event. The trace IS the testable
 //! claim that the pipeline ran through every plane.
+//!
+//! Iteration 2 adds mail-lifecycle witnesses (Sent / Queued /
+//! Processing / Replied) tagged by `MessageIdentifier` so tests can
+//! assert the Nexus mail keeper transitioned each mail correctly.
 
 use std::convert::Infallible as StdInfallible;
 
@@ -11,9 +15,13 @@ use kameo::actor::ActorRef;
 use kameo::error::Infallible;
 use kameo::message::{Context, Message};
 
+use crate::generated::MessageIdentifier;
+
 /// A single trace event — names which plane fired and what data it
 /// observed. The Plane enum names every actor in the topology, so a
-/// test can assert the trace contains a specific path.
+/// test can assert the trace contains a specific path. Mail-lifecycle
+/// witnesses carry the MessageIdentifier so tests can match the
+/// specific in-flight mail.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TraceWitness {
     PlaneStarted {
@@ -54,12 +62,28 @@ pub enum TraceWitness {
     OutputEmitted {
         plane: Plane,
     },
+    MailSent {
+        plane: Plane,
+        identifier: MessageIdentifier,
+    },
+    MailQueued {
+        plane: Plane,
+        identifier: MessageIdentifier,
+    },
+    MailProcessing {
+        plane: Plane,
+        identifier: MessageIdentifier,
+    },
+    MailReplied {
+        plane: Plane,
+        identifier: MessageIdentifier,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plane {
     SocketListener,
-    OperationDispatcher,
+    NexusMailKeeper,
     AuthorizationGate,
     Builder,
     ClosureCopier,
@@ -163,7 +187,11 @@ impl TraceWitness {
             | Self::GcPinned { plane }
             | Self::ObservationFanned { plane }
             | Self::SemaApplied { plane, .. }
-            | Self::OutputEmitted { plane } => *plane,
+            | Self::OutputEmitted { plane }
+            | Self::MailSent { plane, .. }
+            | Self::MailQueued { plane, .. }
+            | Self::MailProcessing { plane, .. }
+            | Self::MailReplied { plane, .. } => *plane,
         }
     }
 }

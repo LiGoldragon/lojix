@@ -37,6 +37,9 @@ pub enum Error {
     #[error("actor send: {0}")]
     ActorSend(String),
 
+    #[error("sema-engine error: {0}")]
+    Sema(#[from] sema_engine::Error),
+
     #[error("daemon shutdown")]
     Shutdown,
 }

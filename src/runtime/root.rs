@@ -13,15 +13,15 @@ use crate::runtime::activator::Activator;
 use crate::runtime::authorization::AuthorizationGate;
 use crate::runtime::builder::Builder;
 use crate::runtime::copier::ClosureCopier;
-use crate::runtime::dispatcher::{Dispatch, OperationDispatcher};
 use crate::runtime::gc_root::GcRootPinner;
+use crate::runtime::nexus::{DispatchMail, NexusMailKeeper};
 use crate::runtime::observation::ObservationFan;
 use crate::runtime::store::Store;
 use crate::runtime::trace::TraceLog;
 
 /// Typed child set the LojixRoot owns. This IS the noun — the root
 /// actor's job is to keep these refs alive, route Dispatch through
-/// the dispatcher, and tear them down on shutdown.
+/// the Nexus mail keeper, and tear them down on shutdown.
 #[derive(Clone)]
 pub struct LojixChildSet {
     pub authorization: ActorRef<AuthorizationGate>,
@@ -32,7 +32,7 @@ pub struct LojixChildSet {
     pub store: ActorRef<Store>,
     pub fan: ActorRef<ObservationFan>,
     pub trace: ActorRef<TraceLog>,
-    pub dispatcher: ActorRef<OperationDispatcher>,
+    pub nexus: ActorRef<NexusMailKeeper>,
 }
 
 impl LojixChildSet {
@@ -54,8 +54,8 @@ impl LojixRoot {
         &self.children
     }
 
-    pub fn dispatcher(&self) -> ActorRef<OperationDispatcher> {
-        self.children.dispatcher.clone()
+    pub fn nexus(&self) -> ActorRef<NexusMailKeeper> {
+        self.children.nexus.clone()
     }
 
     pub fn trace(&self) -> ActorRef<TraceLog> {
@@ -83,7 +83,8 @@ impl Actor for LojixRoot {
     }
 }
 
-/// Dispatch an Input through the root. Returns the Output.
+/// Dispatch an Input through the root. Returns the Output (already
+/// stamped with the DatabaseMarker by Nexus).
 pub struct DispatchInput(pub crate::generated::Input);
 
 impl Message<DispatchInput> for LojixRoot {
@@ -96,8 +97,8 @@ impl Message<DispatchInput> for LojixRoot {
     ) -> Self::Reply {
         let output = self
             .children
-            .dispatcher
-            .ask(Dispatch(message.0))
+            .nexus
+            .ask(DispatchMail(message.0))
             .await
             .map_err(|error| crate::error::Error::ActorSend(format!("root dispatch: {error}")))?;
         Ok(output)

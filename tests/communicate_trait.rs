@@ -1,18 +1,18 @@
-//! Sandbox-OS witness — build-only pipeline test.
+//! Communicate trait round-trip (iteration 2, test #4 of 6).
 //!
-//! Spawns the daemon binary in sandbox mode, the CLI binary sends a
-//! NOTA Submit input, the daemon drives the full pipeline (auth →
-//! plan → build → gc-pin → copy → activate), writes a GenerationRecord
-//! to its in-memory store, and the test asserts on the printed output
-//! and the daemon's recorded generations via a follow-up Query input.
-//!
-//! Runs entirely on `echo`-based sandbox commands so it executes
-//! cleanly under `nix flake check` without any external nix install.
+//! Asserts: `UnixSocketCommunicate` (concrete impl of the
+//! `Communicate` trait) does a full Input -> Output round trip
+//! through the daemon's socket surface. The test spawns the
+//! daemon binary, then drives a Submit through the trait, and
+//! asserts the returned Output is an Accepted reply with a
+//! DatabaseMarker.
 
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use lojix_next::runtime::communicate::{Communicate, UnixSocketCommunicate};
+use lojix_next::{CriomeAuthorization, DeploymentRequest, HorizonView, Input, Output, TargetNode};
 use tempfile::TempDir;
 
 struct DaemonProcess {
@@ -63,8 +63,8 @@ impl SocketWaiter {
     }
 }
 
-#[test]
-fn lojix_next_build_only_pipeline_on_sandbox() {
+#[tokio::test(flavor = "current_thread")]
+async fn lojix_next_communicate_trait_round_trip() {
     let temp = TempDir::new().expect("tempdir");
     let socket_path = temp.path().join("lojix-next.sock");
     let socket_text = socket_path.to_string_lossy().into_owned();
@@ -80,39 +80,35 @@ fn lojix_next_build_only_pipeline_on_sandbox() {
     );
     SocketWaiter::new(socket_path.clone()).block_until_present();
 
-    let submit_output = Command::new(env!("CARGO_BIN_EXE_lojix-next"))
-        .env("LOJIX_NEXT_SOCKET", &socket_path)
-        .arg("(Submit ([horizon: sandbox] [nspawn-dune] OperatorAllowlist))")
-        .output()
-        .expect("run submit cli");
+    let mut communicate = UnixSocketCommunicate::new(socket_path);
+
+    let output = communicate
+        .send_request(Input::Submit(DeploymentRequest {
+            horizon_view: HorizonView("horizon: communicate-trait".to_owned()),
+            target_node: TargetNode("nspawn-dune".to_owned()),
+            criome_authorization: CriomeAuthorization::OperatorAllowlist,
+        }))
+        .await
+        .expect("communicate round trip");
+
+    let accepted = matches!(output, Output::Accepted(_));
     assert!(
-        submit_output.status.success(),
-        "submit stderr: {}",
-        String::from_utf8_lossy(&submit_output.stderr)
-    );
-    let submit_text = String::from_utf8_lossy(&submit_output.stdout)
-        .trim()
-        .to_owned();
-    assert!(
-        submit_text.starts_with("(Accepted"),
-        "expected Accepted output, got {submit_text}"
+        accepted,
+        "Submit through Communicate must yield Accepted, got {output:?}"
     );
 
-    let query_output = Command::new(env!("CARGO_BIN_EXE_lojix-next"))
-        .env("LOJIX_NEXT_SOCKET", &socket_path)
-        .arg("(Query 1)")
-        .output()
-        .expect("run query cli");
+    let marker = output.database_marker();
+    // The marker should be a non-zero counter — the Submit triggered
+    // several sema-engine writes (plan, build record, generation
+    // record, copy, activation), so the transaction counter is
+    // strictly positive.
     assert!(
-        query_output.status.success(),
-        "query stderr: {}",
-        String::from_utf8_lossy(&query_output.stderr)
+        marker.transaction_counter.0 > 0,
+        "DatabaseMarker counter must be positive, got {}",
+        marker.transaction_counter.0
     );
-    let query_text = String::from_utf8_lossy(&query_output.stdout)
-        .trim()
-        .to_owned();
     assert!(
-        query_text.starts_with("(Snapshot"),
-        "expected Snapshot output, got {query_text}"
+        !marker.state_hash.0.is_empty(),
+        "DatabaseMarker state hash must be non-empty"
     );
 }

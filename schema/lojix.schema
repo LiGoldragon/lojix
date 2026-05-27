@@ -6,17 +6,19 @@
   (Help HelpQuery)
 ))
 (Output (
-  (Accepted DeploymentIdentifier)
-  (Rejected RejectionReason)
-  (Observation ObservationRecord)
-  (Snapshot GenerationRecord)
-  (HelpAnswer HelpReply)
+  (Accepted AcceptedReply)
+  (Rejected RejectedReply)
+  (Observation ObservedReply)
+  (Snapshot SnapshotReply)
+  (HelpAnswer HelpAnswerReply)
 ))
 {
   DeploymentIdentifier [Integer]
   GenerationIdentifier [Integer]
   SemaCommandIdentifier [Integer]
   ObservationIdentifier [Integer]
+  MessageCounter [Integer]
+  TransactionCounter [Integer]
   ClosurePath [Text]
   TargetNode [Text]
   BuildLog [Text]
@@ -26,11 +28,19 @@
   SocketPath [Text]
   StateDirectory [Text]
   GcRootDirectory [Text]
+  SemaDatabasePath [Text]
   BuildCommand [Text]
   CopyCommand [Text]
   ActivationCommand [Text]
+  StateHash [Text]
+  DatabaseMarker [TransactionCounter StateHash]
+  AcceptedReply [DeploymentIdentifier DatabaseMarker]
+  RejectedReply [RejectionReason DatabaseMarker]
+  ObservedReply [ObservationRecord DatabaseMarker]
+  SnapshotReply [GenerationRecord DatabaseMarker]
+  HelpAnswerReply [HelpReply DatabaseMarker]
   Toolchain [BuildCommand CopyCommand ActivationCommand]
-  DaemonConfiguration [SocketPath StateDirectory GcRootDirectory Toolchain]
+  DaemonConfiguration [SocketPath StateDirectory GcRootDirectory SemaDatabasePath Toolchain]
   DeploymentRequest [HorizonView TargetNode CriomeAuthorization]
   GenerationSelector [DeploymentIdentifier]
   HelpQuery [Detail]
@@ -45,6 +55,7 @@
   CriomeAuthorization (Bypass OperatorAllowlist Criome)
   RejectionReason (Unauthorized PolicyViolation MalformedRequest CapacityExhausted)
   ActivationKind (Switch Boot Test)
+  MailLifecycle (Sent Queued Processing Replied Failed)
   SemaCommand (
     (RecordPlan PlanRecord)
     (RecordBuild BuildRecord)

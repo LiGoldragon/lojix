@@ -29,12 +29,16 @@ async fn lojix_next_activation_on_nspawn_sandbox() {
         copy_command: CopyCommand("nspawn-sandbox-copy".to_owned()),
         activation_command: ActivationCommand("nspawn-sandbox-activate".to_owned()),
     };
+    let temp = tempfile::tempdir().expect("temp dir");
+    let database_path = temp.path().join("sema.redb");
     let engine = Engine::spawn(
+        database_path,
         toolchain,
         ToolchainMode::Sandbox,
         AuthorizationPolicy::AllowAll,
     )
-    .await;
+    .await
+    .expect("engine spawn");
 
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     engine

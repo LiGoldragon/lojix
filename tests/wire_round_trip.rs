@@ -1,8 +1,8 @@
 //! Wire-frame symmetry over the schema-emitted root types.
 
 use lojix_next::{
-    CriomeAuthorization, DeploymentIdentifier, DeploymentRequest, HorizonView, Input, Output,
-    TargetNode,
+    AcceptedReply, CriomeAuthorization, DatabaseMarker, DeploymentIdentifier, DeploymentRequest,
+    HorizonView, Input, Output, StateHash, TargetNode, TransactionCounter,
 };
 
 #[test]
@@ -17,7 +17,13 @@ fn lojix_next_input_output_round_trip_rkyv() {
     assert_eq!(route, input.route());
     assert_eq!(decoded, input);
 
-    let output = Output::Accepted(DeploymentIdentifier(42));
+    let output = Output::Accepted(AcceptedReply {
+        deployment_identifier: DeploymentIdentifier(42),
+        database_marker: DatabaseMarker {
+            transaction_counter: TransactionCounter(1),
+            state_hash: StateHash("round-trip-fixture".to_owned()),
+        },
+    });
     let frame = output.encode_signal_frame().expect("encode output frame");
     let (route, decoded) = Output::decode_signal_frame(&frame).expect("decode output frame");
     assert_eq!(route, output.route());

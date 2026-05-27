@@ -26,6 +26,10 @@ rkyv = { version = "0.8", default-features = false, features = ["std", "bytechec
 kameo = "0.20"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "net", "time", "process"] }
 thiserror = "2"
+blake3 = "1"
+sema-engine = { git = "https://github.com/LiGoldragon/sema-engine.git" }
+sema = { git = "https://github.com/LiGoldragon/sema.git" }
+signal-sema = { git = "https://github.com/LiGoldragon/signal-sema.git", branch = "main" }
 
 [build-dependencies]
 schema-next = { git = "https://github.com/LiGoldragon/schema-next.git", branch = "main" }
