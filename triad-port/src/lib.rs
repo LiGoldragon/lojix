@@ -54,6 +54,12 @@ pub enum Error {
     #[error("flag-style arguments are not part of component binaries: {0}")]
     FlagArgument(String),
 
+    #[error("inline NOTA request decoding requires the nota-text feature")]
+    InlineNotaUnsupported,
+
+    #[error("owner socket mode {0:#o} grants other-access; refusing to expose the privileged surface")]
+    InsecureOwnerSocketMode(u32),
+
     #[error("unexpected signal frame for this socket")]
     UnexpectedFrame,
 
@@ -65,9 +71,6 @@ pub enum Error {
 
     #[error("lojix state mutex was poisoned")]
     StorePoisoned,
-
-    #[error("deploy effect failed at stage {stage}: {detail}")]
-    EffectFailed { stage: String, detail: String },
 }
 
 impl From<signal_lojix::schema::lib::SignalFrameError> for Error {

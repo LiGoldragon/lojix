@@ -70,16 +70,17 @@ impl Client {
         match argument {
             ComponentArgument::SignalFile(file) => Self::decode_signal_file(file.as_path()),
             ComponentArgument::NotaFile(file) => Self::decode_signal_file(file.as_path()),
-            ComponentArgument::InlineNota(_) => Err(Error::FlagArgument(
-                "inline NOTA request decoding requires the nota-text feature".to_string(),
-            )),
+            ComponentArgument::InlineNota(_) => Err(Error::InlineNotaUnsupported),
         }
     }
 
     fn decode_signal_file(path: &std::path::Path) -> Result<ClientRequest> {
         let bytes = std::fs::read(path)?;
-        // Try the owner contract first (its short headers are distinct), then
-        // the ordinary contract; the rkyv frame's short header self-identifies.
+        // Try the owner contract first, then the ordinary contract. NOTE
+        // (audit R7): the two contracts' short-header ordinals currently COLLIDE
+        // (meta `Deploy` == ordinary `Query` == 0x0), so this disambiguation
+        // relies on rkyv layout divergence, not a structural tier discriminator.
+        // A tier bit in the short header is the proper fix (upstream of lojix).
         if let Ok((_, input)) =
             meta_signal_lojix::schema::lib::Input::decode_signal_frame(&bytes)
         {

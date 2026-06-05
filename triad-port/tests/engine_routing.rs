@@ -114,3 +114,80 @@ fn retire_unknown_generation_is_rejected() {
         other => panic!("expected RetireRejected for unknown generation, got {other:?}"),
     }
 }
+
+/// A System deploy submission with the given `build_attribute` and action.
+fn system_deployment(
+    build_attribute: Option<&str>,
+    action: ordinary::SystemAction,
+) -> meta::SystemDeployment {
+    meta::SystemDeployment {
+        cluster_name: "alpha".to_string(),
+        node_name: "node-1".to_string(),
+        deployment_kind: ordinary::DeploymentKind::OsOnly,
+        source: "/dev/null".to_string(),
+        flake: "github:owner/repo".to_string(),
+        system_action: action,
+        builder: None,
+        substituters: Vec::new(),
+        build_attribute: build_attribute.map(str::to_string),
+    }
+}
+
+fn deploy_rejection_reason(output: nexus::SignalOutput) -> meta::DeployRejectionReason {
+    match meta_reply(output) {
+        meta::Output::DeployRejected(rejected) => rejected.deploy_rejection_reason,
+        other => panic!("expected DeployRejected, got {other:?}"),
+    }
+}
+
+// ---- M1 reject-guard (audit C1): the daemon must reject — never falsely
+// accept — a deploy shape it does not yet implement, so the durable live-set
+// never records a generation that was not actually deployed. These run without
+// `nix` because the guard rejects before any effect.
+
+#[test]
+fn activating_deploy_is_rejected_until_activate_lands() {
+    let mut engine = SchemaRuntime::new();
+    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::DeployRequest::System(
+        system_deployment(Some("dune-nspawn-toplevel"), ordinary::SystemAction::Switch),
+    )));
+    assert_eq!(
+        deploy_rejection_reason(run(&mut engine, input)),
+        meta::DeployRejectionReason::UnsupportedDeployAction,
+    );
+}
+
+#[test]
+fn production_deploy_without_build_attribute_is_rejected() {
+    // No `build_attribute` means the production `nixosConfigurations.target`
+    // path, which needs horizon `--override-input` materialization (M3).
+    let mut engine = SchemaRuntime::new();
+    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::DeployRequest::System(
+        system_deployment(None, ordinary::SystemAction::Build),
+    )));
+    assert_eq!(
+        deploy_rejection_reason(run(&mut engine, input)),
+        meta::DeployRejectionReason::UnsupportedDeployAction,
+    );
+}
+
+#[test]
+fn home_deploy_is_rejected_until_materialization_lands() {
+    let mut engine = SchemaRuntime::new();
+    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::DeployRequest::Home(
+        meta::HomeDeployment {
+            cluster_name: "alpha".to_string(),
+            node_name: "node-1".to_string(),
+            user_name: "li".to_string(),
+            source: "/dev/null".to_string(),
+            flake: "github:owner/repo".to_string(),
+            home_mode: meta::HomeMode::Build,
+            builder: None,
+            substituters: Vec::new(),
+        },
+    )));
+    assert_eq!(
+        deploy_rejection_reason(run(&mut engine, input)),
+        meta::DeployRejectionReason::UnsupportedDeployAction,
+    );
+}

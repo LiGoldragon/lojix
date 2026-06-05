@@ -156,3 +156,119 @@ fn daemon_binary_socket_roundtrip_eval() {
         other => panic!("daemon socket roundtrip did not reach Deployed: {other:?}"),
     }
 }
+
+/// The owner socket carries the privileged Deploy/Pin/Unpin/Retire surface, so
+/// a configuration whose owner-socket mode would grant "other" access must be
+/// refused at startup (audit R3) — the daemon exits instead of binding it.
+#[test]
+#[ignore = "spawns the lojix-daemon binary; run with --ignored"]
+fn permissive_owner_socket_mode_is_refused() {
+    use std::process::Command;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ordinary_socket = dir.path().join("ordinary.sock");
+    let owner_socket = dir.path().join("owner.sock");
+    // owner mode 0o666 == 438 grants other read+write — must be refused.
+    let config = format!(
+        "([{}] 432 [{}] 438)",
+        ordinary_socket.display(),
+        owner_socket.display(),
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_lojix-daemon"))
+        .arg(&config)
+        .output()
+        .expect("run lojix-daemon");
+
+    assert!(
+        !output.status.success(),
+        "the daemon must refuse a permissive owner-socket mode",
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("other-access"),
+        "expected an owner-mode rejection on stderr, got: {stderr}",
+    );
+}
+
+/// A hostile oversized length prefix must be bounded-rejected (no ~4 GiB
+/// allocation) AND must not take the daemon down — a subsequent valid request
+/// still succeeds (audit R1).
+#[test]
+#[ignore = "spawns the lojix-daemon binary, sends a hostile frame; run with --ignored"]
+fn oversized_frame_is_bounded_and_daemon_survives() {
+    use std::io::{ErrorKind, Write};
+    use std::os::unix::net::UnixStream;
+    use std::path::Path;
+    use std::process::{Child, Command};
+    use std::thread::sleep;
+    use std::time::{Duration, Instant};
+
+    use triad_runtime::{FrameBody, LengthPrefixedCodec};
+
+    fn connect(path: &Path, daemon: &mut Child, deadline: Instant) -> UnixStream {
+        loop {
+            match UnixStream::connect(path) {
+                Ok(stream) => return stream,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    if Instant::now() > deadline {
+                        daemon.kill().ok();
+                        panic!("socket never became connectable: {}", path.display());
+                    }
+                    sleep(Duration::from_millis(50));
+                }
+                Err(error) => {
+                    daemon.kill().ok();
+                    panic!("connect failed: {error}");
+                }
+            }
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ordinary_socket = dir.path().join("ordinary.sock");
+    let owner_socket = dir.path().join("owner.sock");
+    let config = format!(
+        "([{}] 432 [{}] 432)",
+        ordinary_socket.display(),
+        owner_socket.display(),
+    );
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_lojix-daemon"))
+        .arg(&config)
+        .spawn()
+        .expect("spawn lojix-daemon");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+
+    // Hostile frame: a 4-byte 0xFFFFFFFF length prefix (declaring ~4 GiB) and no
+    // body. The bounded cap rejects it before any allocation; the daemon drops
+    // the connection and stays up.
+    {
+        let mut hostile = connect(&owner_socket, &mut daemon, deadline);
+        hostile.write_all(&[0xFF, 0xFF, 0xFF, 0xFF]).ok();
+        // dropping `hostile` here closes the connection
+    }
+
+    // The daemon must still serve a valid request afterwards.
+    let mut stream = connect(&owner_socket, &mut daemon, deadline);
+    let codec = LengthPrefixedCodec::default();
+    let input = dune_system_deploy(ordinary::SystemAction::Eval);
+    let frame = FrameBody::new(input.encode_signal_frame().expect("encode request"));
+    codec.write_body(&mut stream, &frame).expect("write request");
+    let reply = codec
+        .read_body(&mut stream)
+        .expect("read reply — daemon survived the hostile frame");
+    let (_, output) = meta::Output::decode_signal_frame(reply.bytes()).expect("decode reply");
+
+    daemon.kill().ok();
+    daemon.wait().ok();
+
+    assert!(
+        matches!(output, meta::Output::Deployed(_)),
+        "daemon should serve a valid request after a hostile frame, got {output:?}",
+    );
+}

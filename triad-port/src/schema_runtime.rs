@@ -385,6 +385,18 @@ impl SchemaRuntime {
     fn decide_meta_input(&mut self, input: meta::Input) -> nexus::NexusAction {
         match input {
             meta::Input::Deploy(request) => {
+                // M1 reject-guard (audit C1): only a self-contained
+                // `build_attribute` System deploy with a non-activating action
+                // (Eval/Build) is actually implemented. Production builds (need
+                // the horizon `--override-input` materialization, M3) and
+                // activating actions (need real copy/activate, M2) are NOT —
+                // reject them honestly rather than run a broken activate and
+                // write a live-set entry that lies about what is deployed.
+                if let Some(reason) = Self::unsupported_deploy_reason(&request) {
+                    return Self::reply_meta(meta::Output::DeployRejected(
+                        self.deploy_rejection(reason),
+                    ));
+                }
                 self.active_operation = Some(MetaOperation::Deploy);
                 let submission = match request {
                     meta::DeployRequest::System(deployment) => {
@@ -409,6 +421,32 @@ impl SchemaRuntime {
             meta::Input::Retire(request) => {
                 self.active_operation = Some(MetaOperation::Retire);
                 nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RetireGeneration(request))
+            }
+        }
+    }
+
+    /// The M1 reject-guard. Returns `Some(reason)` when the daemon does not yet
+    /// implement this deploy shape. Supported today: a System deploy with a
+    /// `build_attribute` override (a self-contained flake output) and a
+    /// non-activating action (`Eval`/`Build`). Rejected: production System
+    /// deploys (no `build_attribute` — need horizon `--override-input`
+    /// materialization, M3), activating actions (Boot/Switch/Test/BootOnce —
+    /// need real copy/activate addressing, M2), and all Home deploys (need
+    /// `homeConfigurations` materialization, M3).
+    fn unsupported_deploy_reason(
+        request: &meta::DeployRequest,
+    ) -> Option<meta::DeployRejectionReason> {
+        match request {
+            meta::DeployRequest::System(deployment) => {
+                let supported = deployment.build_attribute.is_some()
+                    && matches!(
+                        deployment.system_action,
+                        ordinary::SystemAction::Eval | ordinary::SystemAction::Build
+                    );
+                (!supported).then_some(meta::DeployRejectionReason::UnsupportedDeployAction)
+            }
+            meta::DeployRequest::Home(_) => {
+                Some(meta::DeployRejectionReason::UnsupportedDeployAction)
             }
         }
     }
@@ -574,7 +612,7 @@ impl SchemaRuntime {
             sema::RejectionReason::GenerationUnknown => meta::PinRejectionReason::GenerationUnknown,
             sema::RejectionReason::NodeUnknown => meta::PinRejectionReason::NodeUnknown,
             sema::RejectionReason::PinLabelInUse => meta::PinRejectionReason::PinLabelInUse,
-            _ => meta::PinRejectionReason::PinSlotExhausted,
+            _ => meta::PinRejectionReason::InternalError,
         }
     }
 
@@ -594,7 +632,7 @@ impl SchemaRuntime {
             sema::RejectionReason::NodeUnknown => meta::RetireRejectionReason::NodeUnknown,
             sema::RejectionReason::GenerationActive => meta::RetireRejectionReason::GenerationActive,
             sema::RejectionReason::GenerationPinned => meta::RetireRejectionReason::GenerationPinned,
-            _ => meta::RetireRejectionReason::GenerationUnknown,
+            _ => meta::RetireRejectionReason::InternalError,
         }
     }
 
@@ -605,7 +643,10 @@ impl SchemaRuntime {
             sema::RejectionReason::ProposalSourceUnreachable => {
                 meta::DeployRejectionReason::ProposalSourceUnreachable
             }
-            _ => meta::DeployRejectionReason::DeploymentInFlight,
+            // A sema reason with no deploy-domain mapping is an internal
+            // invariant failure (e.g. a poisoned lock), not "already deploying"
+            // (audit C4).
+            _ => meta::DeployRejectionReason::InternalError,
         }
     }
 
@@ -712,7 +753,10 @@ impl SchemaRuntime {
     }
 
     fn fail_pipeline(&mut self, failure: nexus::EffectFailure) -> nexus::NexusAction {
+        // Clear BOTH in-flight slots symmetrically with the finish path (audit
+        // R5) — a mid-pipeline effect failure must not leak `active_operation`.
         self.active_deploy = None;
+        self.active_operation = None;
         let reason = match failure.stage {
             nexus::EffectStage::FlakeAuth => {
                 meta::DeployRejectionReason::ProposalSourceUnreachable
@@ -1125,10 +1169,14 @@ impl SchemaRuntime {
         // dispatch the build to the named builder node. Both run the same
         // `nix build` invocation here; the remote dispatch wraps it in ssh.
         let invocation = match &command.target {
-            nexus::BuildTarget::Local => NixCommand::build_closure(&command.closure_path),
-            nexus::BuildTarget::Remote(builder) => {
-                NixCommand::build_closure_remote(builder.payload(), &command.closure_path)
+            nexus::BuildTarget::Local => {
+                NixCommand::build_closure(&command.closure_path, &command.substituters)
             }
+            nexus::BuildTarget::Remote(builder) => NixCommand::build_closure_remote(
+                builder.payload(),
+                &command.closure_path,
+                &command.substituters,
+            ),
         };
         match invocation.run() {
             Ok(output) => nexus::EffectResult::ClosureBuilt(nexus::BuiltClosure {
@@ -1232,30 +1280,60 @@ impl NixCommand {
         )
     }
 
-    fn build_closure(closure_path: &str) -> Self {
-        Self::new(
-            "nix",
-            vec![
-                "build".to_string(),
-                "--no-link".to_string(),
-                "--print-out-paths".to_string(),
-                closure_path.to_string(),
-            ],
-        )
+    fn build_closure(closure_path: &str, substituters: &[nexus::ExtraSubstituter]) -> Self {
+        let mut arguments = vec![
+            "build".to_string(),
+            "--no-link".to_string(),
+            "--print-out-paths".to_string(),
+            closure_path.to_string(),
+        ];
+        arguments.extend(Self::substituter_options(substituters));
+        Self::new("nix", arguments)
     }
 
-    fn build_closure_remote(builder: &str, closure_path: &str) -> Self {
-        Self::new(
-            "nix",
-            vec![
-                "build".to_string(),
-                "--no-link".to_string(),
-                "--print-out-paths".to_string(),
-                "--builders".to_string(),
-                format!("ssh-ng://{builder}"),
-                closure_path.to_string(),
-            ],
-        )
+    fn build_closure_remote(
+        builder: &str,
+        closure_path: &str,
+        substituters: &[nexus::ExtraSubstituter],
+    ) -> Self {
+        let mut arguments = vec![
+            "build".to_string(),
+            "--no-link".to_string(),
+            "--print-out-paths".to_string(),
+            "--builders".to_string(),
+            format!("ssh-ng://{builder}"),
+            closure_path.to_string(),
+        ];
+        arguments.extend(Self::substituter_options(substituters));
+        Self::new("nix", arguments)
+    }
+
+    /// The `--option extra-substituters / extra-trusted-public-keys` arguments
+    /// for the deploy's extra substituters (audit C2 — `NixBuildCommand`
+    /// carries them but the build previously ignored them, so it could not pull
+    /// from the configured cache). Empty when there are none.
+    fn substituter_options(substituters: &[nexus::ExtraSubstituter]) -> Vec<String> {
+        if substituters.is_empty() {
+            return Vec::new();
+        }
+        let urls = substituters
+            .iter()
+            .map(|substituter| substituter.url.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let public_keys = substituters
+            .iter()
+            .map(|substituter| substituter.public_key.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        vec![
+            "--option".to_string(),
+            "extra-substituters".to_string(),
+            urls,
+            "--option".to_string(),
+            "extra-trusted-public-keys".to_string(),
+            public_keys,
+        ]
     }
 
     fn copy_closure(node_name: &str, closure_path: &str) -> Self {
