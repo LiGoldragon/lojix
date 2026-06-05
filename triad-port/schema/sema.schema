@@ -1,0 +1,83 @@
+;; lojix SEMA plane schema — daemon-owned.
+;;
+;; Runtime implementation schema, not a Signal contract. It names lojix daemon
+;; durable state reads, writes, and table identity. Shape follows
+;; cloud/schema/sema.schema exactly: imports block, [SemaReadInput
+;; SemaWriteInput] / [SemaReadOutput SemaWriteOutput] operation roots, then a
+;; record body declaring the read/write operation variants, the typed reply
+;; unions, the StateMarker, and the durable table records.
+;;
+;; The four durable tables are the lojix state plane: the live generation set,
+;; the GC-roots retention tree, the append-only event log, and the
+;; container-lifecycle mirror (lojix/ARCHITECTURE.md:44-65). Each is declared
+;; here as a table record; the daemon registers each family with sema-engine
+;; at startup.
+
+{
+  Selection signal-lojix:lib:Selection
+  GenerationListing signal-lojix:lib:GenerationListing
+  Generation signal-lojix:lib:Generation
+  KeyMaterialQuery signal-lojix:lib:KeyMaterialQuery
+  KeyMaterialReport signal-lojix:lib:KeyMaterialReport
+  EventLogRange signal-lojix:lib:EventLogRange
+  EventLogPosition signal-lojix:lib:EventLogPosition
+  DeploymentPhaseEvent signal-lojix:lib:DeploymentPhaseEvent
+  CacheRetentionTransitionEvent signal-lojix:lib:CacheRetentionTransitionEvent
+  ClusterName signal-lojix:lib:ClusterName
+  NodeName signal-lojix:lib:NodeName
+  PinLabel signal-lojix:lib:PinLabel
+  ClosurePath signal-lojix:lib:ClosurePath
+  DeploymentIdentifier signal-lojix:lib:DeploymentIdentifier
+  GenerationIdentifier signal-lojix:lib:GenerationIdentifier
+  DeploymentKind signal-lojix:lib:DeploymentKind
+  ActivationKind signal-lojix:lib:ActivationKind
+  GenerationSlot signal-lojix:lib:GenerationSlot
+  SystemDeployment meta-signal-lojix:lib:SystemDeployment
+  HomeDeployment meta-signal-lojix:lib:HomeDeployment
+  PinRequest meta-signal-lojix:lib:PinRequest
+  UnpinRequest meta-signal-lojix:lib:UnpinRequest
+  RetireRequest meta-signal-lojix:lib:RetireRequest
+  AcceptedDeploy meta-signal-lojix:lib:AcceptedDeploy
+  AppliedPin meta-signal-lojix:lib:AppliedPin
+  AppliedUnpin meta-signal-lojix:lib:AppliedUnpin
+  AppliedRetire meta-signal-lojix:lib:AppliedRetire
+}
+[SemaReadInput SemaWriteInput]
+[SemaReadOutput SemaWriteOutput]
+{
+  SemaReadInput [(QueryGenerations Selection) (ReadEventLog EventLogRange) (CheckKeyMaterial KeyMaterialQuery)]
+
+  SemaReadOutput [(GenerationsQueried GenerationListing) (EventLogRead EventLogPage) (KeyMaterialChecked KeyMaterialReport) (ReadMissed RejectionReport)]
+  EventLogPage { deployment_events (Vec DeploymentPhaseEvent) retention_events (Vec CacheRetentionTransitionEvent) StateMarker * }
+
+  SemaWriteInput [(RecordDeploySubmitted DeploySubmission) (RecordPhaseTransition DeploymentPhaseEvent) (RecordGenerationActivated ActivationCommit) (PinGeneration PinRequest) (UnpinGeneration UnpinRequest) (RetireGeneration RetireRequest) (RecordContainerTransition ContainerTransition)]
+  DeploySubmission [(System SystemDeployment) (Home HomeDeployment)]
+  ActivationCommit { GenerationIdentifier * ClusterName * NodeName * GenerationSlot * ClosurePath * }
+  ContainerTransition { ClusterName * NodeName * container ContainerName state ContainerState }
+  ContainerName String
+  ContainerState [Starting Started Stopping Stopped Failed]
+
+  SemaWriteOutput [(DeploySubmitted AcceptedDeploy) (PhaseRecorded PhaseReceipt) (GenerationActivated AppliedActivation) (GenerationPinned AppliedPin) (GenerationUnpinned AppliedUnpin) (GenerationRetired AppliedRetire) (ContainerRecorded ContainerReceipt) (WriteRejected RejectionReport)]
+  PhaseReceipt { EventLogPosition * StateMarker * }
+  AppliedActivation { GenerationIdentifier * GenerationSlot * StateMarker * }
+  ContainerReceipt { EventLogPosition * StateMarker * }
+
+  RejectionReport { reason RejectionReason marker StateMarker }
+  RejectionReason [GenerationUnknown NodeUnknown ClusterUnknown PlanNotApproved PinLabelInUse PinLabelUnknown GenerationActive GenerationPinned EventLogPositionOutOfRange ProposalSourceUnreachable]
+  StateMarker { CommitSequence * StateDigest * }
+  CommitSequence Integer
+  StateDigest Integer
+
+  LiveSetTable { entries (Vec LiveGeneration) }
+  LiveGeneration { DeploymentIdentifier * GenerationIdentifier * ClusterName * NodeName * DeploymentKind * ActivationKind * GenerationSlot * ClosurePath * }
+
+  GcRootsTable { roots (Vec GcRoot) }
+  GcRoot { GenerationIdentifier * ClusterName * NodeName * GenerationSlot * ClosurePath * label (Optional PinLabel) }
+
+  EventLogTable { entries (Vec EventLogEntry) }
+  EventLogEntry { EventLogPosition * record LoggedEvent }
+  LoggedEvent [(Deployment DeploymentPhaseEvent) (CacheRetention CacheRetentionTransitionEvent) (Container ContainerLifecycleRecord)]
+
+  ContainerLifecycleTable { records (Vec ContainerLifecycleRecord) }
+  ContainerLifecycleRecord { ClusterName * NodeName * container ContainerName state ContainerState EventLogPosition * }
+}

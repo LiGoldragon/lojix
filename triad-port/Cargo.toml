@@ -1,0 +1,45 @@
+[package]
+name         = "lojix"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.85"
+license      = "MIT OR Apache-2.0"
+description  = "lojix deploy orchestrator daemon and thin CLI."
+publish      = false
+
+[lib]
+name = "lojix"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lojix-daemon"
+path = "src/bin/lojix-daemon.rs"
+
+[[bin]]
+name = "lojix"
+path = "src/bin/lojix.rs"
+
+[features]
+default   = []
+nota-text = ["dep:nota-next"]
+
+[dependencies]
+nota-codec        = { git = "https://github.com/LiGoldragon/nota-codec.git", branch = "main" }
+nota-config       = { git = "https://github.com/LiGoldragon/nota-config.git", branch = "main" }
+nota-next         = { git = "https://github.com/LiGoldragon/nota-next.git", branch = "main", optional = true }
+meta-signal-lojix = { path = "../../meta-signal-lojix/triad-port" }
+signal-lojix      = { path = "../../signal-lojix/triad-port" }
+rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
+thiserror         = "2"
+triad-runtime     = { git = "https://github.com/LiGoldragon/triad-runtime.git", branch = "main" }
+
+[build-dependencies]
+schema-rust-next = { git = "https://github.com/LiGoldragon/schema-rust-next.git", branch = "main" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+unused      = { level = "warn", priority = -1 }
+dead_code   = "warn"
