@@ -11,12 +11,12 @@
 
 use std::fmt::{Display, Formatter};
 use std::os::unix::net::UnixStream;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use triad_runtime::{
-    FrameBody, LengthPrefixedCodec, ListenerSocket, MaximumFrameLength, MultiListenerDaemon,
-    MultiListenerDaemonError, MultiListenerRuntime, RequestErrorLog, SocketMode,
+    BoundedWorkers, FrameBody, LengthPrefixedCodec, ListenerSocket, MaximumFrameLength,
+    MultiListenerDaemon, MultiListenerDaemonError, MultiListenerRuntime, RequestErrorLog, SocketMode,
 };
 
 /// Maximum inbound request-frame body the daemon accepts (8 MiB). A lojix
@@ -112,15 +112,16 @@ const MAXIMUM_CONCURRENT_REQUESTS: usize = 64;
 
 /// The `MultiListenerRuntime` realization. Owns the SHARED durable `Store` (the
 /// concurrency point — locked only briefly per sema operation), the frame
-/// codec, and the connection-permit pool. `handle_stream` acquires a permit and
-/// spawns a [`RequestWorker`] thread, then returns immediately so the accept
-/// loop stays responsive on BOTH sockets while deploys run (intent 2alg,
-/// resolving audit 29's serial-model question). Per-request in-flight state
+/// codec, and the shared bounded worker pool. `handle_stream` offloads each
+/// request onto the pool and returns immediately, so the accept loop stays
+/// responsive on BOTH sockets while deploys run (intent 2alg, resolving audit
+/// 29's serial-model question). The concurrency primitive is reused from
+/// triad-runtime's `BoundedWorkers` (intent k6w1). Per-request in-flight state
 /// lives on the worker's own `SchemaRuntime`, never shared.
 struct LojixRuntime {
     store: Arc<Store>,
     codec: LengthPrefixedCodec,
-    permits: Arc<ConnectionPermits>,
+    workers: BoundedWorkers,
 }
 
 impl LojixRuntime {
@@ -128,7 +129,7 @@ impl LojixRuntime {
         Self {
             store: Arc::new(Store::new()),
             codec: LengthPrefixedCodec::new(MaximumFrameLength::new(MAXIMUM_REQUEST_FRAME_BYTES)),
-            permits: Arc::new(ConnectionPermits::new(MAXIMUM_CONCURRENT_REQUESTS)),
+            workers: BoundedWorkers::new(MAXIMUM_CONCURRENT_REQUESTS),
         }
     }
 }
@@ -148,20 +149,18 @@ impl MultiListenerRuntime for LojixRuntime {
     }
 
     fn handle_stream(&mut self, listener: Self::Listener, stream: UnixStream) -> Result<()> {
-        // Acquire a concurrency permit (backpressure on the accept loop if at
-        // the cap), then serve the request on its own thread and return
-        // immediately. The accept loop is freed to poll both sockets while this
-        // request — possibly a multi-minute `nix` build — runs (intent 2alg).
-        let permit = self.permits.clone().acquire();
+        // Offload the request onto the shared bounded worker pool (backpressure
+        // on the accept loop at the cap) and return immediately, so the accept
+        // loop stays free to poll both sockets while this request — possibly a
+        // multi-minute `nix` build — runs (intent 2alg). The concurrency
+        // primitive itself is reused from triad-runtime's `BoundedWorkers`
+        // (intent k6w1).
         let worker = RequestWorker {
             store: self.store.clone(),
             codec: self.codec,
         };
-        std::thread::spawn(move || {
-            // `_permit` is released when this worker thread exits.
-            let _permit = permit;
-            worker.serve(listener, stream);
-        });
+        self.workers
+            .dispatch(move || worker.serve(listener, stream));
         Ok(())
     }
 }
@@ -272,58 +271,5 @@ impl RequestWorker {
             nexus::SignalOutput::MetaOutput(output) => Ok(output),
             nexus::SignalOutput::OrdinaryOutput(_) => Err(Error::UnexpectedFrame),
         }
-    }
-}
-
-/// A bounded pool of connection permits — a counting semaphore (`Mutex` +
-/// `Condvar`) capping concurrently-served requests. `acquire` blocks (applying
-/// backpressure to the accept loop) when the cap is reached; the returned
-/// [`ConnectionPermit`] releases its slot on drop, when the worker thread exits.
-struct ConnectionPermits {
-    available: Mutex<usize>,
-    released: Condvar,
-}
-
-impl ConnectionPermits {
-    fn new(count: usize) -> Self {
-        Self {
-            available: Mutex::new(count),
-            released: Condvar::new(),
-        }
-    }
-
-    fn acquire(self: Arc<Self>) -> ConnectionPermit {
-        let mut available = self
-            .available
-            .lock()
-            .expect("connection-permit mutex poisoned");
-        while *available == 0 {
-            available = self
-                .released
-                .wait(available)
-                .expect("connection-permit condvar poisoned");
-        }
-        *available -= 1;
-        drop(available);
-        ConnectionPermit { permits: self }
-    }
-
-    fn release(&self) {
-        let mut available = self
-            .available
-            .lock()
-            .expect("connection-permit mutex poisoned");
-        *available += 1;
-        self.released.notify_one();
-    }
-}
-
-struct ConnectionPermit {
-    permits: Arc<ConnectionPermits>,
-}
-
-impl Drop for ConnectionPermit {
-    fn drop(&mut self) {
-        self.permits.release();
     }
 }
