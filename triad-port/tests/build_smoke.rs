@@ -272,3 +272,103 @@ fn oversized_frame_is_bounded_and_daemon_survives() {
         "daemon should serve a valid request after a hostile frame, got {output:?}",
     );
 }
+
+/// The deployer must serve connections concurrently (intent 2alg): while a real
+/// owner deploy (a multi-second `nix` eval) is in flight, an ordinary read on
+/// the other socket must be answered promptly, not queued behind the deploy.
+#[test]
+#[ignore = "spawns the daemon, runs a real deploy concurrently with a query; run with --ignored"]
+fn concurrent_requests_are_served_in_parallel() {
+    use std::io::ErrorKind;
+    use std::os::unix::net::UnixStream;
+    use std::path::Path;
+    use std::process::Command;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use triad_runtime::{FrameBody, LengthPrefixedCodec};
+
+    fn connect(path: &Path, deadline: Instant) -> UnixStream {
+        loop {
+            match UnixStream::connect(path) {
+                Ok(stream) => return stream,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    if Instant::now() > deadline {
+                        panic!("socket never became connectable: {}", path.display());
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => panic!("connect failed: {error}"),
+            }
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ordinary_socket = dir.path().join("ordinary.sock");
+    let owner_socket = dir.path().join("owner.sock");
+    let config = format!(
+        "([{}] 432 [{}] 432)",
+        ordinary_socket.display(),
+        owner_socket.display(),
+    );
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_lojix-daemon"))
+        .arg(&config)
+        .spawn()
+        .expect("spawn lojix-daemon");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+
+    // Start a real owner deploy (Eval of the dune fixture — multiple seconds of
+    // `nix`) on its own thread; it occupies a worker for its whole duration.
+    let owner_socket_path = owner_socket.clone();
+    let deploy = thread::spawn(move || {
+        let mut stream = connect(&owner_socket_path, deadline);
+        let codec = LengthPrefixedCodec::default();
+        let input = dune_system_deploy(ordinary::SystemAction::Eval);
+        let frame = FrameBody::new(input.encode_signal_frame().expect("encode deploy"));
+        codec.write_body(&mut stream, &frame).expect("write deploy");
+        let reply = codec.read_body(&mut stream).expect("read deploy reply");
+        let (_, output) = meta::Output::decode_signal_frame(reply.bytes()).expect("decode deploy");
+        matches!(output, meta::Output::Deployed(_))
+    });
+
+    // Let the deploy reach its `nix` work, then time an ordinary query: if the
+    // daemon is concurrent it returns promptly; if serial it would block until
+    // the deploy finishes.
+    thread::sleep(Duration::from_millis(1500));
+    let query_started = Instant::now();
+    let mut query_stream = connect(&ordinary_socket, deadline);
+    let codec = LengthPrefixedCodec::default();
+    let query = ordinary::Input::Query(ordinary::Selection::ByNode(ordinary::NodeSelector {
+        cluster_name: "alpha".to_string(),
+        node_name: "node-1".to_string(),
+        kind: None,
+    }));
+    let frame = FrameBody::new(query.encode_signal_frame().expect("encode query"));
+    codec.write_body(&mut query_stream, &frame).expect("write query");
+    let reply = codec.read_body(&mut query_stream).expect("read query reply");
+    let query_latency = query_started.elapsed();
+    let (_, query_output) =
+        ordinary::Output::decode_signal_frame(reply.bytes()).expect("decode query");
+
+    let deployed = deploy.join().expect("deploy thread");
+    daemon.kill().ok();
+    daemon.wait().ok();
+
+    assert!(
+        matches!(query_output, ordinary::Output::Queried(_)),
+        "expected a Queried reply, got {query_output:?}",
+    );
+    assert!(deployed, "the owner deploy should still reach Deployed");
+    assert!(
+        query_latency < Duration::from_secs(4),
+        "the ordinary query must be served concurrently with the in-flight deploy, \
+         but took {query_latency:?} (serial behaviour)",
+    );
+    eprintln!("CONCURRENT: ordinary query answered in {query_latency:?} while a deploy ran");
+}

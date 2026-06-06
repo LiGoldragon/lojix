@@ -10,6 +10,7 @@
 //! `Deployed`. `run_effect` does real `nix` IO through `std::process::Command`.
 
 use std::process::Command;
+use std::sync::Arc;
 
 use meta_signal_lojix::schema::lib as meta;
 use signal_lojix::schema::lib as ordinary;
@@ -23,7 +24,11 @@ use crate::Store;
 /// generated `NexusEngine::execute` drives the `Runner` over it.
 #[derive(Debug, Default)]
 pub struct SchemaRuntime {
-    store: Store,
+    /// The shared durable state. Each request is served by its OWN
+    /// `SchemaRuntime` over a clone of this `Arc`, so the in-flight deploy
+    /// cursor below is per-request while the durable tables are shared across
+    /// concurrent connections (intent 2alg).
+    store: Arc<Store>,
     active_deploy: Option<DeployPipeline>,
     active_operation: Option<MetaOperation>,
 }
@@ -310,15 +315,22 @@ impl DeployPipeline {
 
 impl SchemaRuntime {
     pub fn new() -> Self {
+        Self::with_store(Arc::new(Store::new()))
+    }
+
+    /// Build an engine over a SHARED `Store`. The daemon constructs one per
+    /// request from a single shared `Arc<Store>`, so concurrent requests share
+    /// the durable tables but each owns its in-flight deploy cursor (intent 2alg).
+    pub fn with_store(store: Arc<Store>) -> Self {
         Self {
-            store: Store::new(),
+            store,
             active_deploy: None,
             active_operation: None,
         }
     }
 
     pub fn store(&self) -> &Store {
-        &self.store
+        self.store.as_ref()
     }
 
     fn marker(commit_sequence: u64) -> ordinary::DatabaseMarker {

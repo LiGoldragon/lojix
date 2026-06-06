@@ -11,6 +11,7 @@
 
 use std::fmt::{Display, Formatter};
 use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use triad_runtime::{
@@ -30,7 +31,7 @@ const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 use crate::schema::nexus::{self, NexusEngine};
 use crate::schema_runtime::SchemaRuntime;
-use crate::{DaemonConfiguration, Error, Result};
+use crate::{DaemonConfiguration, Error, Result, Store};
 
 /// Which authority-tiered socket an arriving stream belongs to. Ordinary is the
 /// peer-callable `signal-lojix` surface; Owner is the `meta-signal-lojix`
@@ -103,79 +104,133 @@ impl Daemon {
     }
 }
 
-/// The `MultiListenerRuntime` realization: holds the schema engine and the
-/// length-prefixed frame codec. Each arriving stream is decoded, executed
-/// through the engine, and replied to.
-///
-/// INVARIANT (audit R6/P3): the `MultiListenerDaemon` accept loop is serial and
-/// each `handle_stream` drives the engine to completion before the next request
-/// is accepted — there is exactly one in-flight request at a time. The engine's
-/// single-slot `active_deploy`/`active_operation` fields are safe ONLY under
-/// this invariant; introducing concurrency (a worker pool / async effect plane)
-/// requires replacing them with a keyed in-flight map first. The cost of this
-/// model is that a long `nix` build blocks the OTHER socket for its duration —
-/// the open concurrency-model decision in cloud-designer report 29.
+/// Maximum number of requests served concurrently. Each accepted connection is
+/// handled on its own worker thread so a long `nix` build never blocks the
+/// accept loop or other connections (intent 2alg); this caps the live worker
+/// count so a flood cannot exhaust resources.
+const MAXIMUM_CONCURRENT_REQUESTS: usize = 64;
+
+/// The `MultiListenerRuntime` realization. Owns the SHARED durable `Store` (the
+/// concurrency point — locked only briefly per sema operation), the frame
+/// codec, and the connection-permit pool. `handle_stream` acquires a permit and
+/// spawns a [`RequestWorker`] thread, then returns immediately so the accept
+/// loop stays responsive on BOTH sockets while deploys run (intent 2alg,
+/// resolving audit 29's serial-model question). Per-request in-flight state
+/// lives on the worker's own `SchemaRuntime`, never shared.
 struct LojixRuntime {
-    engine: SchemaRuntime,
+    store: Arc<Store>,
     codec: LengthPrefixedCodec,
+    permits: Arc<ConnectionPermits>,
 }
 
 impl LojixRuntime {
     fn new() -> Self {
         Self {
-            engine: SchemaRuntime::new(),
+            store: Arc::new(Store::new()),
             codec: LengthPrefixedCodec::new(MaximumFrameLength::new(MAXIMUM_REQUEST_FRAME_BYTES)),
+            permits: Arc::new(ConnectionPermits::new(MAXIMUM_CONCURRENT_REQUESTS)),
+        }
+    }
+}
+
+impl MultiListenerRuntime for LojixRuntime {
+    type Listener = ListenerRole;
+    type StartError = Error;
+    type StopError = Error;
+    type RequestError = Error;
+
+    fn start(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn handle_stream(&mut self, listener: Self::Listener, stream: UnixStream) -> Result<()> {
+        // Acquire a concurrency permit (backpressure on the accept loop if at
+        // the cap), then serve the request on its own thread and return
+        // immediately. The accept loop is freed to poll both sockets while this
+        // request — possibly a multi-minute `nix` build — runs (intent 2alg).
+        let permit = self.permits.clone().acquire();
+        let worker = RequestWorker {
+            store: self.store.clone(),
+            codec: self.codec,
+        };
+        std::thread::spawn(move || {
+            // `_permit` is released when this worker thread exits.
+            let _permit = permit;
+            worker.serve(listener, stream);
+        });
+        Ok(())
+    }
+}
+
+/// One request, served on its own thread. Builds a fresh per-request
+/// `SchemaRuntime` over a clone of the shared `Store`, so the in-flight deploy
+/// cursor is never shared across concurrent connections (intent 2alg).
+struct RequestWorker {
+    store: Arc<Store>,
+    codec: LengthPrefixedCodec,
+}
+
+impl RequestWorker {
+    fn serve(self, listener: ListenerRole, mut stream: UnixStream) {
+        let result = match listener {
+            ListenerRole::Ordinary => self.serve_ordinary(&mut stream),
+            ListenerRole::Owner => self.serve_owner(&mut stream),
+        };
+        if let Err(error) = result {
+            // In-band rejections are already written as typed replies; this
+            // covers only IO / decode failures where no reply is possible.
+            eprintln!("(RequestFailed [{listener} {error}])");
         }
     }
 
-    fn handle_ordinary(&mut self, stream: &mut UnixStream) -> Result<()> {
+    fn serve_ordinary(&self, stream: &mut UnixStream) -> Result<()> {
         stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT))?;
         let body = self.codec.read_body(stream)?;
-        let (_, input) =
-            signal_lojix::schema::lib::Input::decode_signal_frame(body.bytes())?;
-        let signal_input = nexus::SignalInput::OrdinaryInput(input);
-        let output = self.execute(ListenerRole::Ordinary, signal_input);
+        let (_, input) = signal_lojix::schema::lib::Input::decode_signal_frame(body.bytes())?;
+        let output =
+            self.execute(ListenerRole::Ordinary, nexus::SignalInput::OrdinaryInput(input));
         let reply = Self::ordinary_reply(output)?;
-        let reply_body = FrameBody::new(reply.encode_signal_frame()?);
-        self.codec.write_body(stream, &reply_body)?;
+        self.codec
+            .write_body(stream, &FrameBody::new(reply.encode_signal_frame()?))?;
         Ok(())
     }
 
-    fn handle_owner(&mut self, stream: &mut UnixStream) -> Result<()> {
+    fn serve_owner(&self, stream: &mut UnixStream) -> Result<()> {
         stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT))?;
         let body = self.codec.read_body(stream)?;
-        let (_, input) =
-            meta_signal_lojix::schema::lib::Input::decode_signal_frame(body.bytes())?;
-        let signal_input = nexus::SignalInput::MetaInput(input);
-        let output = self.execute(ListenerRole::Owner, signal_input);
+        let (_, input) = meta_signal_lojix::schema::lib::Input::decode_signal_frame(body.bytes())?;
+        let output = self.execute(ListenerRole::Owner, nexus::SignalInput::MetaInput(input));
         let reply = Self::meta_reply(output)?;
-        let reply_body = FrameBody::new(reply.encode_signal_frame()?);
-        self.codec.write_body(stream, &reply_body)?;
+        self.codec
+            .write_body(stream, &FrameBody::new(reply.encode_signal_frame()?))?;
         Ok(())
     }
 
+    /// Build a per-request engine over the shared `Store` and drive it. The
+    /// engine's in-flight cursor is local to this call, so concurrent requests
+    /// never corrupt each other's deploy state (intent 2alg).
     fn execute(
-        &mut self,
+        &self,
         listener: ListenerRole,
         signal_input: nexus::SignalInput,
     ) -> nexus::SignalOutput {
-        let origin_route = nexus::OriginRoute(0);
-        let work = nexus::NexusWork::SignalArrived(signal_input).with_origin_route(origin_route);
-        match self.engine.execute(work).into_root() {
+        let mut engine = SchemaRuntime::with_store(self.store.clone());
+        let work =
+            nexus::NexusWork::SignalArrived(signal_input).with_origin_route(nexus::OriginRoute(0));
+        match engine.execute(work).into_root() {
             nexus::NexusAction::ReplyToSignal(output) => output,
             // `execute` always terminates the runner with a reply; any other
-            // action escaping the runner is a runtime invariant violation. Reply
-            // with a typed rejection on the SAME authority tier the request
-            // arrived on (audit R4), so the client decodes a real reply rather
-            // than an EOF mid-exchange.
+            // action escaping is a runtime invariant violation. Reply with a
+            // typed rejection on the SAME authority tier the request arrived on
+            // (audit R4), so the client decodes a real reply, not an EOF.
             _ => Self::invariant_rejection(listener),
         }
     }
 
-    /// A tier-correct typed rejection for the should-never-happen case where the
-    /// runner ends on a non-reply action. Owner requests get a meta
-    /// `DeployRejected(InternalError)`; ordinary requests an ordinary
-    /// `QueryRejected` — never a cross-tier output the client cannot decode.
     fn invariant_rejection(listener: ListenerRole) -> nexus::SignalOutput {
         match listener {
             ListenerRole::Owner => nexus::SignalOutput::MetaOutput(
@@ -205,18 +260,14 @@ impl LojixRuntime {
         }
     }
 
-    fn ordinary_reply(
-        output: nexus::SignalOutput,
-    ) -> Result<signal_lojix::schema::lib::Output> {
+    fn ordinary_reply(output: nexus::SignalOutput) -> Result<signal_lojix::schema::lib::Output> {
         match output {
             nexus::SignalOutput::OrdinaryOutput(output) => Ok(output),
             nexus::SignalOutput::MetaOutput(_) => Err(Error::UnexpectedFrame),
         }
     }
 
-    fn meta_reply(
-        output: nexus::SignalOutput,
-    ) -> Result<meta_signal_lojix::schema::lib::Output> {
+    fn meta_reply(output: nexus::SignalOutput) -> Result<meta_signal_lojix::schema::lib::Output> {
         match output {
             nexus::SignalOutput::MetaOutput(output) => Ok(output),
             nexus::SignalOutput::OrdinaryOutput(_) => Err(Error::UnexpectedFrame),
@@ -224,28 +275,55 @@ impl LojixRuntime {
     }
 }
 
-impl MultiListenerRuntime for LojixRuntime {
-    type Listener = ListenerRole;
-    type StartError = Error;
-    type StopError = Error;
-    type RequestError = Error;
+/// A bounded pool of connection permits — a counting semaphore (`Mutex` +
+/// `Condvar`) capping concurrently-served requests. `acquire` blocks (applying
+/// backpressure to the accept loop) when the cap is reached; the returned
+/// [`ConnectionPermit`] releases its slot on drop, when the worker thread exits.
+struct ConnectionPermits {
+    available: Mutex<usize>,
+    released: Condvar,
+}
 
-    fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    fn handle_stream(
-        &mut self,
-        listener: Self::Listener,
-        mut stream: UnixStream,
-    ) -> Result<()> {
-        match listener {
-            ListenerRole::Ordinary => self.handle_ordinary(&mut stream),
-            ListenerRole::Owner => self.handle_owner(&mut stream),
+impl ConnectionPermits {
+    fn new(count: usize) -> Self {
+        Self {
+            available: Mutex::new(count),
+            released: Condvar::new(),
         }
+    }
+
+    fn acquire(self: Arc<Self>) -> ConnectionPermit {
+        let mut available = self
+            .available
+            .lock()
+            .expect("connection-permit mutex poisoned");
+        while *available == 0 {
+            available = self
+                .released
+                .wait(available)
+                .expect("connection-permit condvar poisoned");
+        }
+        *available -= 1;
+        drop(available);
+        ConnectionPermit { permits: self }
+    }
+
+    fn release(&self) {
+        let mut available = self
+            .available
+            .lock()
+            .expect("connection-permit mutex poisoned");
+        *available += 1;
+        self.released.notify_one();
+    }
+}
+
+struct ConnectionPermit {
+    permits: Arc<ConnectionPermits>,
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.permits.release();
     }
 }
