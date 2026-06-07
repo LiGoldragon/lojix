@@ -2,7 +2,7 @@
 //! generated Nexus runner.
 //!
 //! Resolves the port-plan §4.4 blocker by binding two `ListenerSocket`s on one
-//! `MultiListenerDaemon` (the runtime's two-socket primitive), each tagged by
+//! `ActorMultiListenerDaemon` (the runtime's two-socket primitive), each tagged by
 //! its authority role. `handle_stream` decodes the length-prefixed wire frame
 //! for the arriving role into a `SignalInput`, drives it through
 //! `NexusEngine::execute` (which runs the `Runner` continuation loop — the
@@ -10,13 +10,13 @@
 //! the single source of routing truth; there is no inline request `Store`.
 
 use std::fmt::{Display, Formatter};
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Duration;
 
 use triad_runtime::{
-    BoundedWorkers, FrameBody, LengthPrefixedCodec, ListenerSocket, MaximumFrameLength,
-    MultiListenerDaemon, MultiListenerDaemonError, MultiListenerRuntime, RequestErrorLog, SocketMode,
+    AcceptedConnection, ActorListenerSocket, ActorMultiConnectionRuntime, ActorMultiListenerDaemon,
+    ActorMultiListenerDaemonError, FrameBody, LengthPrefixedCodec, MaximumFrameLength,
+    RequestConcurrencyLimit, RequestErrorLog, SocketMode,
 };
 
 /// Maximum inbound request-frame body the daemon accepts (8 MiB). A lojix
@@ -65,29 +65,40 @@ impl Daemon {
     }
 
     pub fn run(self) -> Result<()> {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(self.run_async())
+    }
+
+    async fn run_async(self) -> Result<()> {
         let configuration = self.configuration;
         Self::validate_owner_socket_mode(configuration.owner_socket_mode)?;
         let sockets = vec![
-            ListenerSocket::new(ListenerRole::Ordinary, configuration.ordinary_socket_path.clone())
-                .with_socket_mode(SocketMode::new(configuration.ordinary_socket_mode)),
-            ListenerSocket::new(ListenerRole::Owner, configuration.owner_socket_path.clone())
+            ActorListenerSocket::new(
+                ListenerRole::Ordinary,
+                configuration.ordinary_socket_path.clone(),
+            )
+            .with_socket_mode(SocketMode::new(configuration.ordinary_socket_mode)),
+            ActorListenerSocket::new(ListenerRole::Owner, configuration.owner_socket_path.clone())
                 .with_socket_mode(SocketMode::new(configuration.owner_socket_mode)),
         ];
         let runtime = LojixRuntime::new();
         let request_error_log = RequestErrorLog::new("lojix-daemon");
-        MultiListenerDaemon::new(sockets, runtime, request_error_log)
+        ActorMultiListenerDaemon::new(sockets, runtime, request_error_log)
+            .with_concurrency_limit(RequestConcurrencyLimit::new(MAXIMUM_CONCURRENT_REQUESTS))
             .run()
+            .await
             .map_err(Self::map_daemon_error)
     }
 
-    fn map_daemon_error(error: MultiListenerDaemonError<Error, Error>) -> Error {
+    fn map_daemon_error(error: ActorMultiListenerDaemonError<Error>) -> Error {
         match error {
-            MultiListenerDaemonError::Listener(listener_error) => {
-                Error::SignalFrame(triad_runtime::FrameError::Io(std::io::Error::other(
-                    listener_error.to_string(),
-                )))
-            }
-            MultiListenerDaemonError::Start(error) | MultiListenerDaemonError::Stop(error) => error,
+            ActorMultiListenerDaemonError::Listener(listener_error) => Error::SignalFrame(
+                triad_runtime::FrameError::Io(std::io::Error::other(listener_error.to_string())),
+            ),
+            ActorMultiListenerDaemonError::Start(error)
+            | ActorMultiListenerDaemonError::Stop(error) => error,
         }
     }
 
@@ -104,24 +115,22 @@ impl Daemon {
     }
 }
 
-/// Maximum number of requests served concurrently. Each accepted connection is
-/// handled on its own worker thread so a long `nix` build never blocks the
-/// accept loop or other connections (intent 2alg); this caps the live worker
-/// count so a flood cannot exhaust resources.
+/// Maximum number of requests served concurrently per listener. Each accepted
+/// connection is handled in an actor-runtime Tokio task, so a long owner deploy
+/// never blocks ordinary socket admission (intent 2alg); this caps live work so
+/// a flood cannot exhaust resources.
 const MAXIMUM_CONCURRENT_REQUESTS: usize = 64;
 
-/// The `MultiListenerRuntime` realization. Owns the SHARED durable `Store` (the
+/// The `ActorMultiConnectionRuntime` realization. Owns the SHARED durable `Store` (the
 /// concurrency point — locked only briefly per sema operation), the frame
-/// codec, and the shared bounded worker pool. `handle_stream` offloads each
-/// request onto the pool and returns immediately, so the accept loop stays
-/// responsive on BOTH sockets while deploys run (intent 2alg, resolving audit
-/// 29's serial-model question). The concurrency primitive is reused from
-/// triad-runtime's `BoundedWorkers` (intent k6w1). Per-request in-flight state
-/// lives on the worker's own `SchemaRuntime`, never shared.
+/// codec, and no local listener/thread machinery. The actor runtime admits
+/// requests through per-listener gates and spawns each connection task, so BOTH
+/// sockets remain responsive while deploys run (intent 2alg, resolving audit
+/// 29's serial-model question). Per-request in-flight state lives on the
+/// connection's own `SchemaRuntime`, never shared.
 struct LojixRuntime {
     store: Arc<Store>,
     codec: LengthPrefixedCodec,
-    workers: BoundedWorkers,
 }
 
 impl LojixRuntime {
@@ -129,43 +138,36 @@ impl LojixRuntime {
         Self {
             store: Arc::new(Store::new()),
             codec: LengthPrefixedCodec::new(MaximumFrameLength::new(MAXIMUM_REQUEST_FRAME_BYTES)),
-            workers: BoundedWorkers::new(MAXIMUM_CONCURRENT_REQUESTS),
         }
     }
 }
 
-impl MultiListenerRuntime for LojixRuntime {
+impl ActorMultiConnectionRuntime for LojixRuntime {
     type Listener = ListenerRole;
-    type StartError = Error;
-    type StopError = Error;
-    type RequestError = Error;
+    type Error = Error;
 
-    fn start(&mut self) -> Result<()> {
+    async fn start(&self) -> Result<()> {
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<()> {
+    async fn stop(&self) -> Result<()> {
         Ok(())
     }
 
-    fn handle_stream(&mut self, listener: Self::Listener, stream: UnixStream) -> Result<()> {
-        // Offload the request onto the shared bounded worker pool (backpressure
-        // on the accept loop at the cap) and return immediately, so the accept
-        // loop stays free to poll both sockets while this request — possibly a
-        // multi-minute `nix` build — runs (intent 2alg). The concurrency
-        // primitive itself is reused from triad-runtime's `BoundedWorkers`
-        // (intent k6w1).
+    async fn handle_connection(
+        &self,
+        listener: Self::Listener,
+        connection: AcceptedConnection,
+    ) -> Result<()> {
         let worker = RequestWorker {
             store: self.store.clone(),
             codec: self.codec,
         };
-        self.workers
-            .dispatch(move || worker.serve(listener, stream));
-        Ok(())
+        worker.serve(listener, connection).await
     }
 }
 
-/// One request, served on its own thread. Builds a fresh per-request
+/// One request, served on its own actor-runtime task. Builds a fresh per-request
 /// `SchemaRuntime` over a clone of the shared `Store`, so the in-flight deploy
 /// cursor is never shared across concurrent connections (intent 2alg).
 struct RequestWorker {
@@ -174,50 +176,85 @@ struct RequestWorker {
 }
 
 impl RequestWorker {
-    fn serve(self, listener: ListenerRole, mut stream: UnixStream) {
-        let result = match listener {
-            ListenerRole::Ordinary => self.serve_ordinary(&mut stream),
-            ListenerRole::Owner => self.serve_owner(&mut stream),
-        };
-        if let Err(error) = result {
-            // In-band rejections are already written as typed replies; this
-            // covers only IO / decode failures where no reply is possible.
-            eprintln!("(RequestFailed [{listener} {error}])");
+    async fn serve(self, listener: ListenerRole, mut connection: AcceptedConnection) -> Result<()> {
+        match listener {
+            ListenerRole::Ordinary => self.serve_ordinary(&mut connection).await,
+            ListenerRole::Owner => self.serve_owner(&mut connection).await,
         }
     }
 
-    fn serve_ordinary(&self, stream: &mut UnixStream) -> Result<()> {
-        stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT))?;
-        let body = self.codec.read_body(stream)?;
+    async fn serve_ordinary(&self, connection: &mut AcceptedConnection) -> Result<()> {
+        let body = self.read_body(connection).await?;
         let (_, input) = signal_lojix::schema::lib::Input::decode_signal_frame(body.bytes())?;
-        let output =
-            self.execute(ListenerRole::Ordinary, nexus::SignalInput::OrdinaryInput(input));
+        let output = self
+            .execute_off_runtime(
+                ListenerRole::Ordinary,
+                nexus::SignalInput::OrdinaryInput(input),
+            )
+            .await;
         let reply = Self::ordinary_reply(output)?;
         self.codec
-            .write_body(stream, &FrameBody::new(reply.encode_signal_frame()?))?;
+            .write_body_async(
+                connection.stream_mut(),
+                &FrameBody::new(reply.encode_signal_frame()?),
+            )
+            .await?;
         Ok(())
     }
 
-    fn serve_owner(&self, stream: &mut UnixStream) -> Result<()> {
-        stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT))?;
-        let body = self.codec.read_body(stream)?;
+    async fn serve_owner(&self, connection: &mut AcceptedConnection) -> Result<()> {
+        let body = self.read_body(connection).await?;
         let (_, input) = meta_signal_lojix::schema::lib::Input::decode_signal_frame(body.bytes())?;
-        let output = self.execute(ListenerRole::Owner, nexus::SignalInput::MetaInput(input));
+        let output = self
+            .execute_off_runtime(ListenerRole::Owner, nexus::SignalInput::MetaInput(input))
+            .await;
         let reply = Self::meta_reply(output)?;
         self.codec
-            .write_body(stream, &FrameBody::new(reply.encode_signal_frame()?))?;
+            .write_body_async(
+                connection.stream_mut(),
+                &FrameBody::new(reply.encode_signal_frame()?),
+            )
+            .await?;
         Ok(())
     }
 
-    /// Build a per-request engine over the shared `Store` and drive it. The
-    /// engine's in-flight cursor is local to this call, so concurrent requests
-    /// never corrupt each other's deploy state (intent 2alg).
-    fn execute(
+    async fn read_body(&self, connection: &mut AcceptedConnection) -> Result<FrameBody> {
+        tokio::time::timeout(
+            REQUEST_READ_TIMEOUT,
+            self.codec.read_body_async(connection.stream_mut()),
+        )
+        .await
+        .map_err(|_| Error::RequestReadTimedOut)?
+        .map_err(Error::SignalFrame)
+    }
+
+    async fn execute_off_runtime(
         &self,
         listener: ListenerRole,
         signal_input: nexus::SignalInput,
     ) -> nexus::SignalOutput {
-        let mut engine = SchemaRuntime::with_store(self.store.clone());
+        let store = self.store.clone();
+        match tokio::task::spawn_blocking(move || {
+            Self::execute_with_store(store, listener, signal_input)
+        })
+        .await
+        {
+            Ok(output) => output,
+            Err(_) => Self::invariant_rejection(listener),
+        }
+    }
+
+    /// Build a per-request engine over the shared `Store` and drive it. The
+    /// generated runner is still synchronous, so callers run this on Tokio's
+    /// blocking pool. The engine's in-flight cursor is local to this call, so
+    /// concurrent requests never corrupt each other's deploy state (intent
+    /// 2alg).
+    fn execute_with_store(
+        store: Arc<Store>,
+        listener: ListenerRole,
+        signal_input: nexus::SignalInput,
+    ) -> nexus::SignalOutput {
+        let mut engine = SchemaRuntime::with_store(store);
         let work =
             nexus::NexusWork::SignalArrived(signal_input).with_origin_route(nexus::OriginRoute(0));
         match engine.execute(work).into_root() {

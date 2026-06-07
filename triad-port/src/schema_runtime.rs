@@ -7,7 +7,9 @@
 //! pipeline (port plan §4.3): the write completion drives a chain of
 //! `RunEffect` continuations — resolve flake auth, eval, build, copy, activate
 //! — recording a phase transition between stages and finally replying
-//! `Deployed`. `run_effect` does real `nix` IO through `std::process::Command`.
+//! `Deployed`. `run_effect` does real `nix` IO through `std::process::Command`;
+//! the actor-native socket shell runs the synchronous generated runner on
+//! Tokio's blocking pool so it does not occupy the async accept path.
 
 use std::process::Command;
 use std::sync::Arc;
@@ -15,8 +17,8 @@ use std::sync::Arc;
 use meta_signal_lojix::schema::lib as meta;
 use signal_lojix::schema::lib as ordinary;
 
-use crate::schema::{nexus, sema};
 use crate::Store;
+use crate::schema::{nexus, sema};
 
 /// The lojix engine noun. Carries the durable `Store` (the four sema tables)
 /// and, while a deploy is in flight, the pipeline cursor that threads the
@@ -432,7 +434,9 @@ impl SchemaRuntime {
             }
             meta::Input::Retire(request) => {
                 self.active_operation = Some(MetaOperation::Retire);
-                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RetireGeneration(request))
+                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RetireGeneration(
+                    request,
+                ))
             }
         }
     }
@@ -467,29 +471,24 @@ impl SchemaRuntime {
 
     fn decide_read_completion(&mut self, output: sema::SemaReadOutput) -> nexus::NexusAction {
         let reply = match output {
-            sema::SemaReadOutput::GenerationsQueried(listing) => {
-                ordinary::Output::Queried(listing)
-            }
+            sema::SemaReadOutput::GenerationsQueried(listing) => ordinary::Output::Queried(listing),
             sema::SemaReadOutput::KeyMaterialChecked(report) => {
                 ordinary::Output::KeyMaterialChecked(report)
             }
             sema::SemaReadOutput::EventLogRead(_) => ordinary::Output::QueryRejected(
                 self.query_rejection(ordinary::QueryRejectionReason::MalformedSelector),
             ),
-            sema::SemaReadOutput::ReadMissed(report) => ordinary::Output::QueryRejected(
-                ordinary::RejectedQuery {
+            sema::SemaReadOutput::ReadMissed(report) => {
+                ordinary::Output::QueryRejected(ordinary::RejectedQuery {
                     query_rejection_reason: ordinary::QueryRejectionReason::GenerationUnknown,
                     database_marker: Self::marker(report.marker.commit_sequence),
-                },
-            ),
+                })
+            }
         };
         nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
     }
 
-    fn query_rejection(
-        &self,
-        reason: ordinary::QueryRejectionReason,
-    ) -> ordinary::RejectedQuery {
+    fn query_rejection(&self, reason: ordinary::QueryRejectionReason) -> ordinary::RejectedQuery {
         let commit_sequence = self.store.commit_sequence().unwrap_or(0);
         ordinary::RejectedQuery {
             query_rejection_reason: reason,
@@ -596,7 +595,10 @@ impl SchemaRuntime {
         // meta rejection for the operation in flight, carrying the rejection
         // reason and current marker.
         self.active_deploy = None;
-        let operation = self.active_operation.take().unwrap_or(MetaOperation::Deploy);
+        let operation = self
+            .active_operation
+            .take()
+            .unwrap_or(MetaOperation::Deploy);
         let marker = Self::marker(report.marker.commit_sequence);
         let output = match operation {
             MetaOperation::Deploy => meta::Output::DeployRejected(meta::RejectedDeploy {
@@ -642,8 +644,12 @@ impl SchemaRuntime {
                 meta::RetireRejectionReason::GenerationUnknown
             }
             sema::RejectionReason::NodeUnknown => meta::RetireRejectionReason::NodeUnknown,
-            sema::RejectionReason::GenerationActive => meta::RetireRejectionReason::GenerationActive,
-            sema::RejectionReason::GenerationPinned => meta::RetireRejectionReason::GenerationPinned,
+            sema::RejectionReason::GenerationActive => {
+                meta::RetireRejectionReason::GenerationActive
+            }
+            sema::RejectionReason::GenerationPinned => {
+                meta::RetireRejectionReason::GenerationPinned
+            }
             _ => meta::RetireRejectionReason::InternalError,
         }
     }
@@ -662,10 +668,7 @@ impl SchemaRuntime {
         }
     }
 
-    fn deploy_rejection(
-        &self,
-        reason: meta::DeployRejectionReason,
-    ) -> meta::RejectedDeploy {
+    fn deploy_rejection(&self, reason: meta::DeployRejectionReason) -> meta::RejectedDeploy {
         meta::RejectedDeploy {
             deploy_rejection_reason: reason,
             database_marker: Self::marker(self.store.commit_sequence().unwrap_or(0)),
@@ -752,7 +755,10 @@ impl SchemaRuntime {
     ) -> nexus::NexusAction {
         let event = match self.active_deploy.as_ref() {
             Some(pipeline) => {
-                let position = self.store.lock().map(|state| state.next_event_log_position());
+                let position = self
+                    .store
+                    .lock()
+                    .map(|state| state.next_event_log_position());
                 pipeline.phase_event(phase, position.unwrap_or(0), detail)
             }
             None => {
@@ -770,9 +776,7 @@ impl SchemaRuntime {
         self.active_deploy = None;
         self.active_operation = None;
         let reason = match failure.stage {
-            nexus::EffectStage::FlakeAuth => {
-                meta::DeployRejectionReason::ProposalSourceUnreachable
-            }
+            nexus::EffectStage::FlakeAuth => meta::DeployRejectionReason::ProposalSourceUnreachable,
             nexus::EffectStage::Eval => meta::DeployRejectionReason::FlakeReferenceMalformed,
             nexus::EffectStage::Build => meta::DeployRejectionReason::FlakeReferenceMalformed,
             nexus::EffectStage::CopyClosure => meta::DeployRejectionReason::BuilderUnreachable,
@@ -812,7 +816,11 @@ impl SchemaRuntime {
             let commit_sequence = state.next_commit_sequence();
             let deployment_identifier = state.next_deployment_identifier();
             let generation_identifier = state.next_generation_identifier();
-            (commit_sequence, deployment_identifier, generation_identifier)
+            (
+                commit_sequence,
+                deployment_identifier,
+                generation_identifier,
+            )
         });
         match result {
             Ok((commit_sequence, deployment_identifier, generation_identifier)) => {
@@ -861,8 +869,10 @@ impl SchemaRuntime {
             Ok(mut state) => {
                 let commit_sequence = state.next_commit_sequence();
                 let pipeline = self.active_deploy.clone();
-                let deployment_identifier =
-                    pipeline.as_ref().map(|p| p.deployment_identifier).unwrap_or(0);
+                let deployment_identifier = pipeline
+                    .as_ref()
+                    .map(|p| p.deployment_identifier)
+                    .unwrap_or(0);
                 let deployment_kind = pipeline
                     .as_ref()
                     .map(|p| p.deployment_kind.clone())
@@ -1069,10 +1079,7 @@ impl SchemaRuntime {
         })
     }
 
-    fn generation_matches(
-        selection: &ordinary::Selection,
-        live: &sema::LiveGeneration,
-    ) -> bool {
+    fn generation_matches(selection: &ordinary::Selection, live: &sema::LiveGeneration) -> bool {
         match selection {
             ordinary::Selection::ByNode(selector) => {
                 selector.cluster_name == live.cluster_name
@@ -1149,10 +1156,7 @@ impl SchemaRuntime {
 
     // ---- real nix IO (port plan §4.3) -----------------------------------
 
-    fn resolve_flake_auth(
-        &self,
-        request: nexus::FlakeAuthRequest,
-    ) -> nexus::EffectResult {
+    fn resolve_flake_auth(&self, request: nexus::FlakeAuthRequest) -> nexus::EffectResult {
         // Resolve the flake metadata to a locked revision through the proposal
         // source. `nix flake metadata --json <flake>` reports the resolved ref.
         match NixCommand::flake_metadata(&request.flake).run() {
@@ -1253,7 +1257,8 @@ impl SchemaRuntime {
 /// A typed `nix` / `nix-store` invocation. Holds the program name and its
 /// argument vector so the same value can be inspected before it runs; `run`
 /// spawns it via `std::process::Command` and returns captured stdout or a
-/// failure detail string. Constructors model the lojix-cli invocations.
+/// failure detail string. The daemon runs the synchronous generated engine on
+/// Tokio's blocking pool. Constructors model the lojix-cli invocations.
 #[derive(Debug, Clone)]
 struct NixCommand {
     program: String,
@@ -1411,7 +1416,10 @@ impl NixCommand {
     }
 
     fn count_lines(output: &str) -> u64 {
-        output.lines().filter(|line| !line.trim().is_empty()).count() as u64
+        output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count() as u64
     }
 }
 

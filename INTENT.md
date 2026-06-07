@@ -24,20 +24,20 @@ after CriomOS migrates to consume this daemon's projection.
   per invocation, forwards it as a `signal-lojix` frame, and prints
   one reply or streams events. Per `primary/skills/component-triad.md`
   and `primary/AGENTS.md` §"Binary naming".
-- **The wire vocabulary is `signal-lojix`; the wire kernel is
-  `signal-core`/`signal-frame`.** Every external operation is a
-  typed `signal-lojix` variant — no untyped escape hatch on the
-  wire. This crate consumes the `signal_channel!` output; it does
-  not invent parallel framing.
-- **Durable state is owned through `sema-engine`.** The live
-  generation set, GC roots, event log, and container-lifecycle
-  records are registered table families on one redb file the daemon
-  opens at startup; closure introspection uses `nix path-info`,
-  never a reimplementation of Nix's reachability graph. Per
-  `primary/skills/rust/storage-and-wire.md`.
-- **The daemon binds exactly one Unix socket** at
-  `/run/lojix/daemon.sock` (mode 0660, cluster-operator group) and
-  registers every table family before serving requests.
+- **The wire vocabularies are `signal-lojix` and
+  `meta-signal-lojix`; the wire kernel is `signal-frame`.** Every
+  external operation is a typed Signal variant — no untyped escape
+  hatch on the wire. This crate consumes schema-derived contract
+  output; it does not invent parallel framing.
+- **SEMA tables are daemon-owned.** The live generation set, GC
+  roots, event log, and container-lifecycle records are modeled as
+  schema-derived SEMA tables. The current implementation is
+  in-memory behind a shared store; durable redb/sema-engine backing
+  remains the next storage cutover.
+- **The daemon binds two authority-tiered Unix sockets.** The
+  ordinary socket serves peer-callable reads/subscriptions; the
+  owner/meta socket serves deploy and retention mutations. The
+  owner socket mode must not grant other-access.
 - **Push, never poll.** Subscribers register; the daemon pushes
   `DeploymentObservation` and `CacheRetentionObservation` events as
   they occur, bridged downstream of the commit so delta delivery
@@ -53,18 +53,18 @@ after CriomOS migrates to consume this daemon's projection.
 
 ## Stack discipline
 
-- Kameo actors are data-bearing nouns; no zero-state holders;
-  daemon-internal actor messages stay inside the crate. Per
+- Actor-native runtime surfaces are data-bearing nouns; no zero-state
+  holders; daemon-internal actor messages stay inside the crate. Per
   `primary/skills/actor-systems.md`.
 - Full English words; no crate-name prefix on types. Per
   `primary/skills/naming.md`.
 
 ## Scope — today, not eventually
 
-lojix sits on today's substrate (Rust on Linux, signal over a Unix
-socket, `sema-engine` for state, direct nix invocations). It is a
-realization step toward the Sema-on-Sema future, built rightly for
-today's deploy need. Per `primary/ESSENCE.md` §"Today and
+lojix sits on today's substrate (Rust on Linux, Signal over Unix
+sockets, schema-derived Nexus/SEMA tables, direct Nix invocations).
+It is a realization step toward the Sema-on-Sema future, built
+rightly for today's deploy need. Per `primary/ESSENCE.md` §"Today and
 eventually".
 
 *Source statements live in Spirit intent records and the project's

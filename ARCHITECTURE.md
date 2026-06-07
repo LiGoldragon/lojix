@@ -4,12 +4,10 @@
 deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 (`lojix`) that speaks the daemon over a Unix socket.
 
-> **Status (2026-05-15):** in-development — repo recently renamed
-> from `lojix-daemon` (2026-05-14). First implementation lands on
-> the `horizon-re-engineering` feature branch alongside the parallel
-> horizon schema refactor. Today's `lojix-cli` (separate repo) stays
-> at the current schema for the duration; retires after CriomOS
-> migrates to consume this daemon's projection.
+> **Status (2026-06-07):** implemented Rust crate under `triad-port/`.
+> The daemon uses the actor-native `triad-runtime` multi-listener for
+> two authority-tiered sockets. Today's `lojix-cli` (separate repo)
+> stays at the current schema until CriomOS migrates to this daemon.
 
 > **Scope (today vs eventually).** This stack sits on today's
 > substrate — Rust on Linux, `signal-core` over a Unix socket,
@@ -38,9 +36,11 @@ streams subscription events.
 
 ## 1 · Owned surface
 
-- **`/run/lojix/daemon.sock`** — Unix socket binding (mode `0660`,
-  cluster-operator group). Receives `signal-lojix` requests; emits
-  `signal-lojix` replies and observation events.
+- **Ordinary Unix socket** — peer-callable `signal-lojix` reads,
+  watches, and unwatch calls.
+- **Owner/meta Unix socket** — `meta-signal-lojix` deploy and
+  retention mutations. Owner socket modes granting any "other" access
+  are refused at startup.
 - **Live generation set** — `BTreeMap<(ClusterName, NodeName, Kind),
   Generation>` persisted via `sema-engine`. Source of truth for
   "what's running on every node right now."
@@ -94,26 +94,18 @@ streams subscription events.
   public material; a separate runtime distributes that public
   material across the cluster.
 
-## 3 · Code map (planned)
+## 3 · Code map
 
 ```
-src/
-  lib.rs                # module entry; types + handlers
+triad-port/src/
+  lib.rs                # shared state, configuration, error type
+  daemon.rs             # actor-native two-socket daemon shell
+  client.rs             # thin CLI socket exchange
+  schema_runtime.rs     # hand-written engine over generated schema nouns
+  schema/               # checked-in generated Nexus/SEMA artifacts
   bin/
-    lojix-daemon.rs     # daemon entry: socket bind, supervisor root
-    lojix.rs            # CLI: read one NOTA, send, print one NOTA
-  daemon/
-    live_set.rs         # LiveSetActor: BTreeMap<...> via sema-engine
-    gc_roots.rs         # GcRootActor: /nix/var/nix/gcroots/criomos/...
-    events.rs           # EventLogActor: append-only typed events
-    container.rs        # ContainerLifecycleActor: systemd dbus observer
-    subscriptions.rs    # SubscriptionSink bridge: sema-engine deltas
-                        # → signal-lojix DeploymentObservation /
-                        # CacheRetentionObservation events on the wire
-    socket.rs           # accept loop; signal-core frame decode/encode
-    supervisor.rs       # Kameo supervisor wiring
-  client/
-    mod.rs              # CLI's request/reply handling
+    lojix-daemon.rs     # daemon entry
+    lojix.rs            # CLI entry
 ```
 
 Each daemon actor is a Kameo actor per
@@ -121,21 +113,17 @@ Each daemon actor is a Kameo actor per
 
 ## 4 · Storage and wire
 
-- **Storage:** `sema-engine` (the typed database engine library;
-  see `~/primary/skills/rust/storage-and-wire.md` §"The sema-engine
-  pattern"). One redb file owned by the daemon. Tables for live
-  set, GC roots, event log, and container-lifecycle records are
-  registered through `Engine::register_table` at startup.
-- **Wire:** `signal-core` frames carrying `signal-lojix` records.
-  Length-prefixed rkyv archives over the Unix socket. Because the
-  daemon emits subscription events, the channel uses
-  `StreamingFrame` / `StreamingFrameBody`.
+- **Storage:** schema-derived SEMA tables over an in-memory shared
+  store today. Redb/sema-engine durability is the next storage cutover.
+- **Wire:** `signal-frame` records carrying `signal-lojix` on the
+  ordinary socket and `meta-signal-lojix` on the owner/meta socket.
+  Length-prefixed rkyv archives over Unix sockets.
 
 ## 5 · Constraints
 
-- The daemon binds exactly one Unix socket at
-  `/run/lojix/daemon.sock` with mode `0660` and the
-  cluster-operator group.
+- The daemon binds two Unix sockets from its NOTA configuration:
+  ordinary and owner/meta. The owner/meta socket refuses any mode with
+  "other" access.
 - The CLI sends one NOTA-encoded `signal-lojix` request per
   invocation and prints one NOTA-encoded reply (or streams events
   until the subscription closes).

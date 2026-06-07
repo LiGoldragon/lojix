@@ -8,10 +8,8 @@
 //! text-to-Signal adapter for this daemon.
 //!
 //! In-memory `Mutex`-backed state backs the `SemaEngine` for this build,
-//! mirroring the `cloud` `Store` shape; sema-engine / redb persistence is a
-//! noted follow-on.
-
-extern crate self as lojix;
+//! while the daemon socket shell is actor-native. Sema-engine / redb
+//! persistence is a noted follow-on.
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -57,7 +55,9 @@ pub enum Error {
     #[error("inline NOTA request decoding requires the nota-text feature")]
     InlineNotaUnsupported,
 
-    #[error("owner socket mode {0:#o} grants other-access; refusing to expose the privileged surface")]
+    #[error(
+        "owner socket mode {0:#o} grants other-access; refusing to expose the privileged surface"
+    )]
     InsecureOwnerSocketMode(u32),
 
     #[error("unexpected signal frame for this socket")]
@@ -65,6 +65,9 @@ pub enum Error {
 
     #[error("connection closed before a complete frame arrived")]
     ConnectionClosed,
+
+    #[error("request frame read timed out")]
+    RequestReadTimedOut,
 
     #[error("signal request was rejected before execution")]
     SignalRequestRejected,

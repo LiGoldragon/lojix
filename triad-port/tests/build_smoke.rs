@@ -118,14 +118,20 @@ fn daemon_binary_socket_roundtrip_eval() {
         match UnixStream::connect(&owner_socket) {
             Ok(stream) => break stream,
             Err(error)
-                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) =>
+                if matches!(
+                    error.kind(),
+                    ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                ) =>
             {
                 if let Ok(Some(status)) = daemon.try_wait() {
                     panic!("daemon exited early with {status}");
                 }
                 if Instant::now() > deadline {
                     daemon.kill().ok();
-                    panic!("owner socket never became connectable at {}", owner_socket.display());
+                    panic!(
+                        "owner socket never became connectable at {}",
+                        owner_socket.display()
+                    );
                 }
                 sleep(Duration::from_millis(50));
             }
@@ -139,7 +145,9 @@ fn daemon_binary_socket_roundtrip_eval() {
     let codec = LengthPrefixedCodec::default();
     let input = dune_system_deploy(ordinary::SystemAction::Eval);
     let frame = FrameBody::new(input.encode_signal_frame().expect("encode request"));
-    codec.write_body(&mut stream, &frame).expect("write request frame");
+    codec
+        .write_body(&mut stream, &frame)
+        .expect("write request frame");
     let reply = codec.read_body(&mut stream).expect("read reply frame");
     let (_, output) = meta::Output::decode_signal_frame(reply.bytes()).expect("decode reply");
 
@@ -258,7 +266,9 @@ fn oversized_frame_is_bounded_and_daemon_survives() {
     let codec = LengthPrefixedCodec::default();
     let input = dune_system_deploy(ordinary::SystemAction::Eval);
     let frame = FrameBody::new(input.encode_signal_frame().expect("encode request"));
-    codec.write_body(&mut stream, &frame).expect("write request");
+    codec
+        .write_body(&mut stream, &frame)
+        .expect("write request");
     let reply = codec
         .read_body(&mut stream)
         .expect("read reply — daemon survived the hostile frame");
@@ -324,7 +334,8 @@ fn concurrent_requests_are_served_in_parallel() {
     let deadline = Instant::now() + Duration::from_secs(15);
 
     // Start a real owner deploy (Eval of the dune fixture — multiple seconds of
-    // `nix`) on its own thread; it occupies a worker for its whole duration.
+    // `nix`) on its own client thread; the daemon keeps the ordinary socket
+    // responsive while the owner request is isolated behind its listener gate.
     let owner_socket_path = owner_socket.clone();
     let deploy = thread::spawn(move || {
         let mut stream = connect(&owner_socket_path, deadline);
@@ -350,8 +361,12 @@ fn concurrent_requests_are_served_in_parallel() {
         kind: None,
     }));
     let frame = FrameBody::new(query.encode_signal_frame().expect("encode query"));
-    codec.write_body(&mut query_stream, &frame).expect("write query");
-    let reply = codec.read_body(&mut query_stream).expect("read query reply");
+    codec
+        .write_body(&mut query_stream, &frame)
+        .expect("write query");
+    let reply = codec
+        .read_body(&mut query_stream)
+        .expect("read query reply");
     let query_latency = query_started.elapsed();
     let (_, query_output) =
         ordinary::Output::decode_signal_frame(reply.bytes()).expect("decode query");

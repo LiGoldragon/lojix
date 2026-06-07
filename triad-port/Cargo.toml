@@ -1,8 +1,8 @@
 [package]
 name         = "lojix"
-version      = "0.1.0"
+version      = "0.2.0"
 edition      = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license      = "MIT OR Apache-2.0"
 description  = "lojix deploy orchestrator daemon and thin CLI."
 publish      = false
@@ -21,7 +21,7 @@ path = "src/bin/lojix.rs"
 
 [features]
 default   = []
-nota-text = ["dep:nota-next"]
+nota-text = ["dep:nota-next", "signal-lojix/nota-text", "meta-signal-lojix/nota-text"]
 
 [dependencies]
 nota-codec        = { git = "https://github.com/LiGoldragon/nota-codec.git", branch = "main" }
@@ -31,6 +31,7 @@ meta-signal-lojix = { path = "../../meta-signal-lojix/triad-port" }
 signal-lojix      = { path = "../../signal-lojix/triad-port" }
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 thiserror         = "2"
+tokio             = { version = "1", features = ["rt-multi-thread", "time"] }
 triad-runtime     = { git = "https://github.com/LiGoldragon/triad-runtime.git", branch = "main" }
 
 [build-dependencies]

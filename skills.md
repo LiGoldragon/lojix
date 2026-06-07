@@ -1,10 +1,8 @@
 # lojix — skills
 
 The new deploy stack: one crate, two binaries (`lojix-daemon` long-lived
-orchestrator + `lojix` thin CLI client). Implementation lands on the
-`horizon-re-engineering` feature branch.
-
----
+orchestrator + `lojix` thin CLI client). The live crate is under
+`triad-port/`.
 
 ## Repo intent
 
@@ -12,9 +10,10 @@ This repo is the **implementation home** for the new deploy stack that
 replaces today's monolithic `lojix-cli`. The architectural decisions
 are settled (per `ARCHITECTURE.md`); what remains is implementation.
 
-The library half (`lojix`) holds shared types, Kameo actor
-implementations, and request/reply plumbing. The two binaries
-(`lojix-daemon`, `lojix`) are thin entry points.
+The library half (`lojix`) holds shared types, schema-derived
+Nexus/SEMA runtime code, the actor-native socket shell, and
+request/reply plumbing. The two binaries (`lojix-daemon`, `lojix`) are
+thin entry points.
 
 ## Required reading when implementation starts
 
@@ -30,29 +29,28 @@ these):
 - `~/primary/skills/rust/storage-and-wire.md` — sema-engine + signal-core
   defaults; rkyv archives between Rust components; redb tables for
   durable state.
-- `~/primary/skills/contract-repo.md` — how to consume `signal-lojix`.
-- `~/primary/skills/nix-discipline.md` — flake-input forms,
-  `nix flake check` as canonical pre-commit runner.
+- `~/primary/skills/contract-repo.md` — how to consume
+  `signal-lojix` and `meta-signal-lojix`.
+- `~/primary/skills/nix-discipline.md` — flake-input forms and
+  remote-build-safe Nix smoke testing. This repo does not yet have a
+  flake check surface.
 - `~/primary/skills/testing.md` — Nix-backed pure / stateful / chained
   test surfaces.
-- `~/primary/skills/feature-development.md` — worktree-based feature
-  branches; this repo's first arc lands on `horizon-re-engineering`.
 
 ## Storage and wire defaults
 
-- **Storage:** `sema-engine` (the full typed database engine library
-  over `sema` and `signal-core`). One redb file owned by the
-  `lojix-daemon` binary. Don't reach for `sema` directly unless the
-  engine doesn't expose the surface you need (rare).
-- **Wire:** `signal-core` frames carrying `signal-lojix` records.
-  Length-prefixed rkyv archives over the Unix socket. Don't invent
-  parallel framing or envelope mechanisms.
+- **Storage:** schema-derived SEMA table nouns over an in-memory
+  shared store today. Redb/sema-engine durability is the next storage
+  cutover.
+- **Wire:** `signal-frame` records from `signal-lojix` and
+  `meta-signal-lojix`. Length-prefixed rkyv archives over two Unix
+  sockets. Don't invent parallel framing or envelope mechanisms.
 
 ## Related repos
 
-- `signal-lojix` — typed wire contract (records this stack
-  produces/consumes).
-- `signal-core` — wire kernel; the substrate signal-lojix builds on.
+- `signal-lojix` — ordinary peer-callable wire contract.
+- `meta-signal-lojix` — owner/meta policy wire contract.
+- `signal-frame` — wire kernel; the substrate both contracts build on.
 - `sema-engine` — typed database engine; depend on this rather than
   `sema` directly.
 - `horizon-rs` — cluster proposal projection; read-only per request.
@@ -63,12 +61,9 @@ these):
   schema for the duration of the horizon re-engineering arc; retires
   after CriomOS migrates to consume this daemon's projection.
 
-## Status (2026-05-14)
+## Status (2026-06-07)
 
-- Repo recently renamed from `lojix-daemon`. GitHub redirect from old
-  name in place.
-- First commits land on the `horizon-re-engineering` branch (see
-  `~/primary/skills/feature-development.md` for the worktree-based
-  branch convention).
-- The `signal-lojix` contract crate (`github:LiGoldragon/signal-lojix`)
-  evolves in parallel.
+- The actor-native daemon socket shell is implemented in `triad-port/`.
+- Live Nix smoke tests exercise a self-contained CriomOS test-cluster
+  build with `max-jobs = 0` to avoid local laptop builds.
+- There is no Nix flake check surface yet.

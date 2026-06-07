@@ -81,9 +81,7 @@ impl Client {
         // (meta `Deploy` == ordinary `Query` == 0x0), so this disambiguation
         // relies on rkyv layout divergence, not a structural tier discriminator.
         // A tier bit in the short header is the proper fix (upstream of lojix).
-        if let Ok((_, input)) =
-            meta_signal_lojix::schema::lib::Input::decode_signal_frame(&bytes)
-        {
+        if let Ok((_, input)) = meta_signal_lojix::schema::lib::Input::decode_signal_frame(&bytes) {
             return Ok(ClientRequest::Owner(input));
         }
         let (_, input) = signal_lojix::schema::lib::Input::decode_signal_frame(&bytes)?;
@@ -108,8 +106,9 @@ impl Client {
                 let frame = FrameBody::new(input.encode_signal_frame()?);
                 self.codec.write_body(&mut stream, &frame)?;
                 let reply_body = self.codec.read_body(&mut stream)?;
-                let (_, output) =
-                    meta_signal_lojix::schema::lib::Output::decode_signal_frame(reply_body.bytes())?;
+                let (_, output) = meta_signal_lojix::schema::lib::Output::decode_signal_frame(
+                    reply_body.bytes(),
+                )?;
                 Ok(ClientReply::Owner(output))
             }
         }
