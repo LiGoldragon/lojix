@@ -1242,7 +1242,7 @@ impl triad_runtime::NexusAction for NexusAction {
 }
 
 #[rustfmt::skip]
-pub trait NexusEngine {
+pub trait NexusEngine: Send {
     fn on_start(&mut self) -> Result<(), ActorStartFailure> {
         Ok(())
     }
@@ -1263,13 +1263,16 @@ pub trait NexusEngine {
         &mut self,
         origin_route: OriginRoute,
         input: SemaWriteInput,
-    ) -> SemaWriteOutput;
+    ) -> impl std::future::Future<Output = SemaWriteOutput> + Send + '_;
     fn observe_sema_read(
-        &self,
+        &mut self,
         origin_route: OriginRoute,
         input: SemaReadInput,
-    ) -> SemaReadOutput;
-    fn run_effect(&mut self, input: EffectCommand) -> EffectResult;
+    ) -> impl std::future::Future<Output = SemaReadOutput> + Send + '_;
+    fn run_effect(
+        &mut self,
+        input: EffectCommand,
+    ) -> impl std::future::Future<Output = EffectResult> + Send + '_;
     fn budget_exhausted_reply(
         &self,
         exhausted: triad_runtime::ContinuationExhausted,
@@ -1281,19 +1284,22 @@ pub trait NexusEngine {
     fn execute(
         &mut self,
         input: nexus::Nexus<nexus::Work>,
-    ) -> nexus::Nexus<nexus::Action>
+    ) -> impl std::future::Future<Output = nexus::Nexus<nexus::Action>> + Send + '_
     where
         Self: Sized,
     {
-        self.trace_nexus_entered();
-        let origin_route = input.origin_route();
-        let first_work = input.into_root();
-        let runner = triad_runtime::Runner::new(self.continuation_limit());
-        let mut runner_adapter = NexusRunnerAdapter::new(self, origin_route);
-        let reply = runner.drive(&mut runner_adapter, first_work);
-        let output = NexusAction::reply_to_signal(reply).with_origin_route(origin_route);
-        self.trace_nexus_decided();
-        output
+        async move {
+            self.trace_nexus_entered();
+            let origin_route = input.origin_route();
+            let first_work = input.into_root();
+            let runner = triad_runtime::Runner::new(self.continuation_limit());
+            let mut runner_adapter = NexusRunnerAdapter::new(self, origin_route);
+            let reply = runner.drive(&mut runner_adapter, first_work).await;
+            let output = NexusAction::reply_to_signal(reply)
+                .with_origin_route(origin_route);
+            self.trace_nexus_decided();
+            output
+        }
     }
 }
 
@@ -1330,24 +1336,26 @@ where
             .into_root();
         triad_runtime::NexusAction::into_next_step(action)
     }
-    fn apply_sema_write(&mut self, write: Self::SemaWrite) -> Self::Work {
+    async fn apply_sema_write(&mut self, write: Self::SemaWrite) -> Self::Work {
         let output: SemaWriteOutput = NexusEngine::apply_sema_write(
-            self.engine,
-            self.origin_route,
-            write,
-        );
+                self.engine,
+                self.origin_route,
+                write,
+            )
+            .await;
         NexusWork::sema_write_completed(output)
     }
-    fn observe_sema_read(&self, read: Self::SemaRead) -> Self::Work {
+    async fn observe_sema_read(&mut self, read: Self::SemaRead) -> Self::Work {
         let output: SemaReadOutput = NexusEngine::observe_sema_read(
-            self.engine,
-            self.origin_route,
-            read,
-        );
+                self.engine,
+                self.origin_route,
+                read,
+            )
+            .await;
         NexusWork::sema_read_completed(output)
     }
-    fn run_effect(&mut self, effect: Self::Effect) -> Self::Work {
-        let output: EffectResult = NexusEngine::run_effect(self.engine, effect);
+    async fn run_effect(&mut self, effect: Self::Effect) -> Self::Work {
+        let output: EffectResult = NexusEngine::run_effect(self.engine, effect).await;
         NexusWork::effect_completed(output)
     }
     fn budget_exhausted_reply(

@@ -54,8 +54,9 @@ after CriomOS migrates to consume this daemon's projection.
 ## Stack discipline
 
 - Actor-native runtime surfaces are data-bearing nouns; no zero-state
-  holders; daemon-internal actor messages stay inside the crate. Per
-  `primary/skills/actor-systems.md`.
+  holders; daemon-internal actor messages stay inside the crate.
+  Generated Nexus execution and child-process effects are async, not
+  isolated behind blocking-pool bridges. Per `primary/skills/actor-systems.md`.
 - Full English words; no crate-name prefix on types. Per
   `primary/skills/naming.md`.
 

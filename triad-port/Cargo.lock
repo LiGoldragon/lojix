@@ -312,7 +312,7 @@ checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
 name = "lojix"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "meta-signal-lojix",
  "nota-codec",
@@ -575,8 +575,8 @@ dependencies = [
 
 [[package]]
 name = "schema-rust-next"
-version = "0.3.0"
-source = "git+https://github.com/LiGoldragon/schema-rust-next.git?branch=main#a35eff74419d03e36720765e09c9e53fe87a3089"
+version = "0.4.0"
+source = "git+https://github.com/LiGoldragon/schema-rust-next.git?branch=main#5cadd2579cb8f74d92efedd5909e22e2d9e60844"
 dependencies = [
  "prettyplease",
  "proc-macro2",
@@ -655,6 +655,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
 ]
 
 [[package]]
@@ -759,6 +769,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "tracing",
@@ -809,8 +820,8 @@ dependencies = [
 
 [[package]]
 name = "triad-runtime"
-version = "0.5.0"
-source = "git+https://github.com/LiGoldragon/triad-runtime.git?branch=main#0b1746d47b4f569413e41772eae3aefe6981385b"
+version = "0.6.0"
+source = "git+https://github.com/LiGoldragon/triad-runtime.git?branch=main#069ba8ed31e1f52219fbb6837d57820a1e611f95"
 dependencies = [
  "kameo",
  "rustix",

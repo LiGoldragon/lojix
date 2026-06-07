@@ -1494,7 +1494,7 @@ impl std::fmt::Display for ActorStopFailure {
 impl std::error::Error for ActorStopFailure {}
 
 #[rustfmt::skip]
-pub trait SemaEngine {
+pub trait SemaEngine: Send {
     fn on_start(&mut self) -> Result<(), ActorStartFailure> {
         Ok(())
     }

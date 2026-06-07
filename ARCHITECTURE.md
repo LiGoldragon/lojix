@@ -6,8 +6,10 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 
 > **Status (2026-06-07):** implemented Rust crate under `triad-port/`.
 > The daemon uses the actor-native `triad-runtime` multi-listener for
-> two authority-tiered sockets. Today's `lojix-cli` (separate repo)
-> stays at the current schema until CriomOS migrates to this daemon.
+> two authority-tiered sockets and awaits the generated async Nexus
+> runner directly; child-process effects use `tokio::process`. Today's
+> `lojix-cli` (separate repo) stays at the current schema until CriomOS
+> migrates to this daemon.
 
 > **Scope (today vs eventually).** This stack sits on today's
 > substrate — Rust on Linux, `signal-core` over a Unix socket,
@@ -101,7 +103,7 @@ triad-port/src/
   lib.rs                # shared state, configuration, error type
   daemon.rs             # actor-native two-socket daemon shell
   client.rs             # thin CLI socket exchange
-  schema_runtime.rs     # hand-written engine over generated schema nouns
+  schema_runtime.rs     # async hand-written engine over generated schema nouns
   schema/               # checked-in generated Nexus/SEMA artifacts
   bin/
     lojix-daemon.rs     # daemon entry

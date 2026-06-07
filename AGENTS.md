@@ -17,9 +17,10 @@ You MUST read [~/primary/repos/lore/AGENTS.md](../../../lore/AGENTS.md) — the 
   `signal-lojix` and `meta-signal-lojix` for the two wire contracts.
 
 - **Actor discipline.** The daemon socket shell uses
-  `triad-runtime`'s actor-native multi-listener. Long synchronous
-  engine/effect work must not occupy the async accept path. No
-  zero-state holders per `~/primary/skills/actor-systems.md`
+  `triad-runtime`'s actor-native multi-listener. Generated Nexus
+  execution and effect hooks are async; do not reintroduce
+  blocking-pool bridges around the engine. No zero-state holders per
+  `~/primary/skills/actor-systems.md`
   §"Zero-sized actors are not actors".
 
 - **Push, not poll.** Per `~/primary/skills/push-not-pull.md`. The

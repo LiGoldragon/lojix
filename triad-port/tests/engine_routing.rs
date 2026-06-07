@@ -10,7 +10,11 @@ use signal_lojix::schema::lib as ordinary;
 
 fn run(engine: &mut SchemaRuntime, input: nexus::SignalInput) -> nexus::SignalOutput {
     let work = nexus::NexusWork::SignalArrived(input).with_origin_route(nexus::OriginRoute(0));
-    match engine.execute(work).into_root() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    match runtime.block_on(async { engine.execute(work).await.into_root() }) {
         nexus::NexusAction::ReplyToSignal(output) => output,
         other => panic!("expected ReplyToSignal, got {other:?}"),
     }

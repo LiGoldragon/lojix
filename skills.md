@@ -64,6 +64,9 @@ these):
 ## Status (2026-06-07)
 
 - The actor-native daemon socket shell is implemented in `triad-port/`.
+- The generated Nexus runner and handwritten effect hooks are async;
+  the daemon awaits `NexusEngine::execute` directly and does not wrap
+  engine execution in `spawn_blocking`.
 - Live Nix smoke tests exercise a self-contained CriomOS test-cluster
   build with `max-jobs = 0` to avoid local laptop builds.
 - There is no Nix flake check surface yet.

@@ -7,15 +7,15 @@
 //! pipeline (port plan §4.3): the write completion drives a chain of
 //! `RunEffect` continuations — resolve flake auth, eval, build, copy, activate
 //! — recording a phase transition between stages and finally replying
-//! `Deployed`. `run_effect` does real `nix` IO through `std::process::Command`;
-//! the actor-native socket shell runs the synchronous generated runner on
-//! Tokio's blocking pool so it does not occupy the async accept path.
+//! `Deployed`. `run_effect` does real `nix` IO through `tokio::process::Command`
+//! so actor-native request tasks await child processes directly instead of
+//! routing generated Nexus execution through a blocking-pool bridge.
 
-use std::process::Command;
 use std::sync::Arc;
 
 use meta_signal_lojix::schema::lib as meta;
 use signal_lojix::schema::lib as ordinary;
+use tokio::process::Command;
 
 use crate::Store;
 use crate::schema::{nexus, sema};
@@ -1156,10 +1156,10 @@ impl SchemaRuntime {
 
     // ---- real nix IO (port plan §4.3) -----------------------------------
 
-    fn resolve_flake_auth(&self, request: nexus::FlakeAuthRequest) -> nexus::EffectResult {
+    async fn resolve_flake_auth(&self, request: nexus::FlakeAuthRequest) -> nexus::EffectResult {
         // Resolve the flake metadata to a locked revision through the proposal
         // source. `nix flake metadata --json <flake>` reports the resolved ref.
-        match NixCommand::flake_metadata(&request.flake).run() {
+        match NixCommand::flake_metadata(&request.flake).run().await {
             Ok(output) => nexus::EffectResult::FlakeResolved(nexus::ResolvedFlake {
                 flake: request.flake,
                 revision: NixCommand::first_line(&output),
@@ -1168,9 +1168,9 @@ impl SchemaRuntime {
         }
     }
 
-    fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> nexus::EffectResult {
+    async fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> nexus::EffectResult {
         let attribute = format!("{}#{}", command.flake, command.attribute);
-        match NixCommand::eval_drv_path(&attribute).run() {
+        match NixCommand::eval_drv_path(&attribute).run().await {
             Ok(output) => nexus::EffectResult::ClosureEvaluated(nexus::EvaluatedClosure {
                 generation_identifier: 0,
                 closure_path: NixCommand::first_line(&output),
@@ -1179,7 +1179,7 @@ impl SchemaRuntime {
         }
     }
 
-    fn run_nix_build(&self, command: nexus::NixBuildCommand) -> nexus::EffectResult {
+    async fn run_nix_build(&self, command: nexus::NixBuildCommand) -> nexus::EffectResult {
         // Honoring the dropped local-build guard `783n`: a `BuildTarget::Local`
         // builds on the local dispatcher (no remote builder); `Remote` would
         // dispatch the build to the named builder node. Both run the same
@@ -1194,7 +1194,7 @@ impl SchemaRuntime {
                 &command.substituters,
             ),
         };
-        match invocation.run() {
+        match invocation.run().await {
             Ok(output) => nexus::EffectResult::ClosureBuilt(nexus::BuiltClosure {
                 generation_identifier: command.generation_identifier,
                 closure_path: NixCommand::first_line_or(&output, &command.closure_path),
@@ -1203,8 +1203,11 @@ impl SchemaRuntime {
         }
     }
 
-    fn run_copy_closure(&self, command: nexus::CopyClosureCommand) -> nexus::EffectResult {
-        match NixCommand::copy_closure(&command.node_name, &command.closure_path).run() {
+    async fn run_copy_closure(&self, command: nexus::CopyClosureCommand) -> nexus::EffectResult {
+        match NixCommand::copy_closure(&command.node_name, &command.closure_path)
+            .run()
+            .await
+        {
             Ok(_) => nexus::EffectResult::ClosureCopied(nexus::CopiedClosure {
                 generation_identifier: command.generation_identifier,
                 node_name: command.node_name,
@@ -1214,12 +1217,12 @@ impl SchemaRuntime {
         }
     }
 
-    fn run_activate_generation(
+    async fn run_activate_generation(
         &self,
         command: nexus::ActivateGenerationCommand,
     ) -> nexus::EffectResult {
         let slot = Self::activation_slot(&command.activation_kind);
-        match NixCommand::activate_system(&command.node_name).run() {
+        match NixCommand::activate_system(&command.node_name).run().await {
             Ok(_) => nexus::EffectResult::GenerationActivated(nexus::ActivatedGeneration {
                 generation_identifier: command.generation_identifier,
                 node_name: command.node_name,
@@ -1238,8 +1241,8 @@ impl SchemaRuntime {
         }
     }
 
-    fn run_path_info_gc(&self, command: nexus::PathInfoGcCommand) -> nexus::EffectResult {
-        match NixCommand::collect_garbage(&command.node_name).run() {
+    async fn run_path_info_gc(&self, command: nexus::PathInfoGcCommand) -> nexus::EffectResult {
+        match NixCommand::collect_garbage(&command.node_name).run().await {
             Ok(output) => nexus::EffectResult::PathsCollected(nexus::GarbageCollected {
                 cluster_name: command.cluster_name,
                 node_name: command.node_name,
@@ -1256,9 +1259,8 @@ impl SchemaRuntime {
 
 /// A typed `nix` / `nix-store` invocation. Holds the program name and its
 /// argument vector so the same value can be inspected before it runs; `run`
-/// spawns it via `std::process::Command` and returns captured stdout or a
-/// failure detail string. The daemon runs the synchronous generated engine on
-/// Tokio's blocking pool. Constructors model the lojix-cli invocations.
+/// spawns it via `tokio::process::Command` and returns captured stdout or a
+/// failure detail string. Constructors model the lojix-cli invocations.
 #[derive(Debug, Clone)]
 struct NixCommand {
     program: String,
@@ -1384,10 +1386,11 @@ impl NixCommand {
         )
     }
 
-    fn run(&self) -> std::result::Result<String, String> {
+    async fn run(&self) -> std::result::Result<String, String> {
         let output = Command::new(&self.program)
             .args(&self.arguments)
             .output()
+            .await
             .map_err(|error| format!("failed to spawn {}: {error}", self.program))?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -1424,7 +1427,7 @@ impl NixCommand {
 }
 
 impl nexus::NexusEngine for SchemaRuntime {
-    fn apply_sema_write(
+    async fn apply_sema_write(
         &mut self,
         _origin_route: nexus::OriginRoute,
         input: sema::SemaWriteInput,
@@ -1432,24 +1435,26 @@ impl nexus::NexusEngine for SchemaRuntime {
         self.apply_sema(input)
     }
 
-    fn observe_sema_read(
-        &self,
+    async fn observe_sema_read(
+        &mut self,
         _origin_route: nexus::OriginRoute,
         input: sema::SemaReadInput,
     ) -> sema::SemaReadOutput {
         self.observe_sema(input)
     }
 
-    fn run_effect(&mut self, input: nexus::EffectCommand) -> nexus::EffectResult {
+    async fn run_effect(&mut self, input: nexus::EffectCommand) -> nexus::EffectResult {
         match input {
-            nexus::EffectCommand::ResolveFlakeAuth(request) => self.resolve_flake_auth(request),
-            nexus::EffectCommand::NixEval(command) => self.run_nix_eval(command),
-            nexus::EffectCommand::NixBuild(command) => self.run_nix_build(command),
-            nexus::EffectCommand::CopyClosure(command) => self.run_copy_closure(command),
-            nexus::EffectCommand::ActivateGeneration(command) => {
-                self.run_activate_generation(command)
+            nexus::EffectCommand::ResolveFlakeAuth(request) => {
+                self.resolve_flake_auth(request).await
             }
-            nexus::EffectCommand::PathInfoGc(command) => self.run_path_info_gc(command),
+            nexus::EffectCommand::NixEval(command) => self.run_nix_eval(command).await,
+            nexus::EffectCommand::NixBuild(command) => self.run_nix_build(command).await,
+            nexus::EffectCommand::CopyClosure(command) => self.run_copy_closure(command).await,
+            nexus::EffectCommand::ActivateGeneration(command) => {
+                self.run_activate_generation(command).await
+            }
+            nexus::EffectCommand::PathInfoGc(command) => self.run_path_info_gc(command).await,
         }
     }
 

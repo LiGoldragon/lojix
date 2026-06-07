@@ -3,7 +3,7 @@
 //! Drives a real `Deploy` through the engine's full Nexus pipeline
 //! (SignalArrived -> RecordDeploySubmitted -> ResolveFlakeAuth -> Building ->
 //! NixEval -> [NixBuild] -> Deployed) with REAL `nix` IO via
-//! `std::process::Command`. The target is the self-contained fixture
+//! `tokio::process::Command`. The target is the self-contained fixture
 //! `github:LiGoldragon/CriomOS-test-cluster#dune-nspawn-toplevel` (a
 //! `fixtureSystem "dune"` toplevel with its fixture horizon baked in), so it
 //! needs no `--override-input` materialization — that is the deferred M3
@@ -44,7 +44,11 @@ fn drive(input: meta::Input) -> meta::Output {
     let mut engine = SchemaRuntime::new();
     let work = nexus::NexusWork::SignalArrived(nexus::SignalInput::MetaInput(input))
         .with_origin_route(nexus::OriginRoute(0));
-    match engine.execute(work).into_root() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    match runtime.block_on(async { engine.execute(work).await.into_root() }) {
         nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => output,
         other => panic!("expected a meta reply from the engine, got {other:?}"),
     }

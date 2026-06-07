@@ -5,9 +5,9 @@
 //! `ActorMultiListenerDaemon` (the runtime's two-socket primitive), each tagged by
 //! its authority role. `handle_stream` decodes the length-prefixed wire frame
 //! for the arriving role into a `SignalInput`, drives it through
-//! `NexusEngine::execute` (which runs the `Runner` continuation loop — the
-//! deploy pipeline included), and encodes the reply back. The schema engine is
-//! the single source of routing truth; there is no inline request `Store`.
+//! awaits `NexusEngine::execute` (which runs the `Runner` continuation loop —
+//! the deploy pipeline included), and encodes the reply back. The schema engine
+//! is the single source of routing truth; there is no inline request `Store`.
 
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
@@ -187,7 +187,7 @@ impl RequestWorker {
         let body = self.read_body(connection).await?;
         let (_, input) = signal_lojix::schema::lib::Input::decode_signal_frame(body.bytes())?;
         let output = self
-            .execute_off_runtime(
+            .execute_request(
                 ListenerRole::Ordinary,
                 nexus::SignalInput::OrdinaryInput(input),
             )
@@ -206,7 +206,7 @@ impl RequestWorker {
         let body = self.read_body(connection).await?;
         let (_, input) = meta_signal_lojix::schema::lib::Input::decode_signal_frame(body.bytes())?;
         let output = self
-            .execute_off_runtime(ListenerRole::Owner, nexus::SignalInput::MetaInput(input))
+            .execute_request(ListenerRole::Owner, nexus::SignalInput::MetaInput(input))
             .await;
         let reply = Self::meta_reply(output)?;
         self.codec
@@ -228,28 +228,20 @@ impl RequestWorker {
         .map_err(Error::SignalFrame)
     }
 
-    async fn execute_off_runtime(
+    async fn execute_request(
         &self,
         listener: ListenerRole,
         signal_input: nexus::SignalInput,
     ) -> nexus::SignalOutput {
-        let store = self.store.clone();
-        match tokio::task::spawn_blocking(move || {
-            Self::execute_with_store(store, listener, signal_input)
-        })
-        .await
-        {
-            Ok(output) => output,
-            Err(_) => Self::invariant_rejection(listener),
-        }
+        Self::execute_with_store(self.store.clone(), listener, signal_input).await
     }
 
     /// Build a per-request engine over the shared `Store` and drive it. The
-    /// generated runner is still synchronous, so callers run this on Tokio's
-    /// blocking pool. The engine's in-flight cursor is local to this call, so
-    /// concurrent requests never corrupt each other's deploy state (intent
-    /// 2alg).
-    fn execute_with_store(
+    /// generated runner is async, and child-process effects are awaited through
+    /// Tokio process handles rather than hidden behind a blocking-pool bridge.
+    /// The engine's in-flight cursor is local to this call, so concurrent
+    /// requests never corrupt each other's deploy state (intent 2alg).
+    async fn execute_with_store(
         store: Arc<Store>,
         listener: ListenerRole,
         signal_input: nexus::SignalInput,
@@ -257,7 +249,7 @@ impl RequestWorker {
         let mut engine = SchemaRuntime::with_store(store);
         let work =
             nexus::NexusWork::SignalArrived(signal_input).with_origin_route(nexus::OriginRoute(0));
-        match engine.execute(work).into_root() {
+        match engine.execute(work).await.into_root() {
             nexus::NexusAction::ReplyToSignal(output) => output,
             // `execute` always terminates the runner with a reply; any other
             // action escaping is a runtime invariant violation. Reply with a
