@@ -2,10 +2,13 @@ You MUST read [~/primary/repos/lore/AGENTS.md](../../../lore/AGENTS.md) — the 
 
 # lojix — agent carve-outs
 
-- **Status: implemented triad-port crate (2026-06-07).** The live
+- **Status: implemented triad-port crate (2026-06-10).** The live
   Rust crate is under `triad-port/` and ships `lojix-daemon` plus the
-  thin `lojix` CLI. There is no repo flake yet; use the cargo suite
-  under `triad-port/` until a Nix check surface lands.
+  thin `lojix` CLI. Production System/Home build requests without
+  `build_attribute` materialize Horizon-derived flake inputs before
+  `nix eval`; activating deploys still reject until copy/activate is
+  target-safe. There is no repo flake yet; use the cargo suite under
+  `triad-port/` until a Nix check surface lands.
 
 - **Future infrastructure.** Per
   `~/primary/protocols/active-repositories.md` §"Replacement Stack

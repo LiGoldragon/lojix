@@ -45,6 +45,12 @@ these):
 - **Wire:** `signal-frame` records from `signal-lojix` and
   `meta-signal-lojix`. Length-prefixed rkyv archives over two Unix
   sockets. Don't invent parallel framing or envelope mechanisms.
+- **Horizon materialization:** absent `build_attribute` means production
+  deploy shape. The daemon projects the request's cluster proposal
+  through `horizon-rs`, writes generated flake inputs under its state
+  directory, hashes them with Nix, and passes typed override inputs to
+  eval. This is a Nexus `MaterializeHorizon` effect, not inline
+  side-channel logic.
 
 ## Related repos
 
@@ -61,12 +67,14 @@ these):
   schema for the duration of the horizon re-engineering arc; retires
   after CriomOS migrates to consume this daemon's projection.
 
-## Status (2026-06-07)
+## Status (2026-06-10)
 
 - The actor-native daemon socket shell is implemented in `triad-port/`.
 - The generated Nexus runner and handwritten effect hooks are async;
   the daemon awaits `NexusEngine::execute` directly and does not wrap
   engine execution in `spawn_blocking`.
-- Live Nix smoke tests exercise a self-contained CriomOS test-cluster
-  build with `max-jobs = 0` to avoid local laptop builds.
+- Production System/Home build requests enter the materialization path;
+  activating deploys still reject.
+- A live ignored smoke exercises local `nix flake metadata` + `nix eval`
+  through generated Horizon inputs without building a closure.
 - There is no Nix flake check surface yet.

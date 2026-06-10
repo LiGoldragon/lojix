@@ -30,7 +30,7 @@ const MAXIMUM_REQUEST_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 use crate::schema::nexus::{self, NexusEngine};
-use crate::schema_runtime::SchemaRuntime;
+use crate::schema_runtime::{RuntimeConfiguration, SchemaRuntime};
 use crate::{DaemonConfiguration, Error, Result, Store};
 
 /// Which authority-tiered socket an arriving stream belongs to. Ordinary is the
@@ -83,7 +83,9 @@ impl Daemon {
             ActorListenerSocket::new(ListenerRole::Owner, configuration.owner_socket_path.clone())
                 .with_socket_mode(SocketMode::new(configuration.owner_socket_mode)),
         ];
-        let runtime = LojixRuntime::new();
+        let runtime = LojixRuntime::new(RuntimeConfiguration::from_daemon_configuration(
+            &configuration,
+        ));
         let request_error_log = RequestErrorLog::new("lojix-daemon");
         ActorMultiListenerDaemon::new(sockets, runtime, request_error_log)
             .with_concurrency_limit(RequestConcurrencyLimit::new(MAXIMUM_CONCURRENT_REQUESTS))
@@ -130,13 +132,15 @@ const MAXIMUM_CONCURRENT_REQUESTS: usize = 64;
 /// connection's own `SchemaRuntime`, never shared.
 struct LojixRuntime {
     store: Arc<Store>,
+    configuration: Arc<RuntimeConfiguration>,
     codec: LengthPrefixedCodec,
 }
 
 impl LojixRuntime {
-    fn new() -> Self {
+    fn new(configuration: RuntimeConfiguration) -> Self {
         Self {
             store: Arc::new(Store::new()),
+            configuration: Arc::new(configuration),
             codec: LengthPrefixedCodec::new(MaximumFrameLength::new(MAXIMUM_REQUEST_FRAME_BYTES)),
         }
     }
@@ -161,6 +165,7 @@ impl ActorMultiConnectionRuntime for LojixRuntime {
     ) -> Result<()> {
         let worker = RequestWorker {
             store: self.store.clone(),
+            configuration: self.configuration.clone(),
             codec: self.codec,
         };
         worker.serve(listener, connection).await
@@ -172,6 +177,7 @@ impl ActorMultiConnectionRuntime for LojixRuntime {
 /// cursor is never shared across concurrent connections (intent 2alg).
 struct RequestWorker {
     store: Arc<Store>,
+    configuration: Arc<RuntimeConfiguration>,
     codec: LengthPrefixedCodec,
 }
 
@@ -233,7 +239,13 @@ impl RequestWorker {
         listener: ListenerRole,
         signal_input: nexus::SignalInput,
     ) -> nexus::SignalOutput {
-        Self::execute_with_store(self.store.clone(), listener, signal_input).await
+        Self::execute_with_store(
+            self.store.clone(),
+            self.configuration.clone(),
+            listener,
+            signal_input,
+        )
+        .await
     }
 
     /// Build a per-request engine over the shared `Store` and drive it. The
@@ -243,10 +255,11 @@ impl RequestWorker {
     /// requests never corrupt each other's deploy state (intent 2alg).
     async fn execute_with_store(
         store: Arc<Store>,
+        configuration: Arc<RuntimeConfiguration>,
         listener: ListenerRole,
         signal_input: nexus::SignalInput,
     ) -> nexus::SignalOutput {
-        let mut engine = SchemaRuntime::with_store(store);
+        let mut engine = SchemaRuntime::with_store_and_configuration(store, configuration);
         let work =
             nexus::NexusWork::SignalArrived(signal_input).with_origin_route(nexus::OriginRoute(0));
         match engine.execute(work).await.into_root() {

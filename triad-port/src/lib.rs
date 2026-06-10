@@ -74,6 +74,15 @@ pub enum Error {
 
     #[error("lojix state mutex was poisoned")]
     StorePoisoned,
+
+    #[error("horizon projection error: {0}")]
+    Horizon(#[from] horizon_lib::Error),
+
+    #[error("horizon nota decode error: {0}")]
+    HorizonNota(#[from] nota_next::NotaDecodeError),
+
+    #[error("horizon json encode error: {0}")]
+    HorizonJson(#[from] serde_json::Error),
 }
 
 impl From<signal_lojix::schema::lib::SignalFrameError> for Error {
@@ -100,6 +109,7 @@ pub struct DaemonConfiguration {
     pub ordinary_socket_mode: u32,
     pub owner_socket_path: String,
     pub owner_socket_mode: u32,
+    pub state_directory_path: String,
 }
 
 nota_config::impl_rkyv_configuration!(DaemonConfiguration);

@@ -11,28 +11,42 @@
 //! so actor-native request tasks await child processes directly instead of
 //! routing generated Nexus execution through a blocking-pool bridge.
 
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use horizon_lib::name::{ClusterName as HorizonClusterName, NodeName as HorizonNodeName};
+use horizon_lib::{ClusterProposal, Horizon, Viewpoint};
 use meta_signal_lojix::schema::lib as meta;
+use nota_next::NotaSource;
 use signal_lojix::schema::lib as ordinary;
 use tokio::process::Command;
 
-use crate::Store;
 use crate::schema::{nexus, sema};
+use crate::{DaemonConfiguration, Result, Store};
 
 /// The lojix engine noun. Carries the durable `Store` (the four sema tables)
 /// and, while a deploy is in flight, the pipeline cursor that threads the
 /// effect chain across continuation hops. Implements both engine traits; the
 /// generated `NexusEngine::execute` drives the `Runner` over it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SchemaRuntime {
     /// The shared durable state. Each request is served by its OWN
     /// `SchemaRuntime` over a clone of this `Arc`, so the in-flight deploy
     /// cursor below is per-request while the durable tables are shared across
     /// concurrent connections (intent 2alg).
     store: Arc<Store>,
+    configuration: Arc<RuntimeConfiguration>,
     active_deploy: Option<DeployPipeline>,
     active_operation: Option<MetaOperation>,
+}
+
+/// Runtime paths the daemon needs for production deploy materialization.
+/// These are decoded once from the daemon's binary startup configuration and
+/// then shared across per-request engine values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeConfiguration {
+    generated_inputs_directory: PathBuf,
 }
 
 /// Which single-write meta mutation is in flight, so a `WriteRejected` from the
@@ -45,6 +59,38 @@ enum MetaOperation {
     Pin,
     Unpin,
     Retire,
+}
+
+impl RuntimeConfiguration {
+    pub fn from_daemon_configuration(configuration: &DaemonConfiguration) -> Self {
+        Self {
+            generated_inputs_directory: PathBuf::from(&configuration.state_directory_path)
+                .join("generated-inputs"),
+        }
+    }
+
+    pub fn test_default() -> Self {
+        Self {
+            generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
+        }
+    }
+
+    fn materialization_root(&self, command: &nexus::HorizonMaterializationCommand) -> PathBuf {
+        let cluster = command.cluster_name.as_str();
+        let node = command.node_name.as_str();
+        self.generated_inputs_directory
+            .join(cluster)
+            .join(node)
+            .join(Self::shape_name(&command.shape))
+    }
+
+    fn shape_name(shape: &nexus::MaterializationShape) -> &'static str {
+        match shape {
+            nexus::MaterializationShape::FullOs => "full-os",
+            nexus::MaterializationShape::OsOnly => "os-only",
+            nexus::MaterializationShape::Home(_) => "home",
+        }
+    }
 }
 
 /// The in-flight deploy cursor. A single `Deploy` signal becomes a chain of
@@ -71,6 +117,7 @@ struct DeployPipeline {
     action: DeployAction,
     builder: Option<ordinary::NodeName>,
     substituters: Vec<nexus::ExtraSubstituter>,
+    input_overrides: Vec<nexus::FlakeInputOverride>,
     closure_path: Option<ordinary::ClosurePath>,
     accepted_marker: ordinary::DatabaseMarker,
     stage: DeployStage,
@@ -171,6 +218,7 @@ impl DeployPipeline {
                 action: DeployAction::System(deployment.system_action),
                 builder: deployment.builder.map(meta::Builder::into_payload),
                 substituters: Self::convert_substituters(deployment.substituters),
+                input_overrides: Vec::new(),
                 closure_path: None,
                 accepted_marker,
                 stage: DeployStage::Submitted,
@@ -191,6 +239,7 @@ impl DeployPipeline {
                 },
                 builder: deployment.builder.map(meta::Builder::into_payload),
                 substituters: Self::convert_substituters(deployment.substituters),
+                input_overrides: Vec::new(),
                 closure_path: None,
                 accepted_marker,
                 stage: DeployStage::Submitted,
@@ -235,6 +284,32 @@ impl DeployPipeline {
         }
     }
 
+    fn needs_horizon_materialization(&self) -> bool {
+        self.build_attribute.is_none()
+    }
+
+    fn horizon_materialization_command(&self) -> nexus::HorizonMaterializationCommand {
+        nexus::HorizonMaterializationCommand {
+            cluster_name: self.cluster_name.clone(),
+            node_name: self.node_name.clone(),
+            source: self.source.clone(),
+            shape: self.materialization_shape(),
+        }
+    }
+
+    fn materialization_shape(&self) -> nexus::MaterializationShape {
+        match &self.action {
+            DeployAction::System(_) => match &self.deployment_kind {
+                ordinary::DeploymentKind::FullOs => nexus::MaterializationShape::FullOs,
+                ordinary::DeploymentKind::OsOnly => nexus::MaterializationShape::OsOnly,
+                ordinary::DeploymentKind::HomeOnly => nexus::MaterializationShape::OsOnly,
+            },
+            DeployAction::Home { user, .. } => {
+                nexus::MaterializationShape::Home(nexus::HomeMaterialization(user.clone()))
+            }
+        }
+    }
+
     fn nix_eval_command(&self) -> nexus::NixEvalCommand {
         nexus::NixEvalCommand {
             cluster_name: self.cluster_name.clone(),
@@ -242,6 +317,7 @@ impl DeployPipeline {
             deployment_kind: self.deployment_kind.clone(),
             flake: self.flake.clone(),
             attribute: self.target_attribute(),
+            overrides: self.input_overrides.clone(),
         }
     }
 
@@ -324,8 +400,16 @@ impl SchemaRuntime {
     /// request from a single shared `Arc<Store>`, so concurrent requests share
     /// the durable tables but each owns its in-flight deploy cursor (intent 2alg).
     pub fn with_store(store: Arc<Store>) -> Self {
+        Self::with_store_and_configuration(store, Arc::new(RuntimeConfiguration::test_default()))
+    }
+
+    pub fn with_store_and_configuration(
+        store: Arc<Store>,
+        configuration: Arc<RuntimeConfiguration>,
+    ) -> Self {
         Self {
             store,
+            configuration,
             active_deploy: None,
             active_operation: None,
         }
@@ -399,13 +483,6 @@ impl SchemaRuntime {
     fn decide_meta_input(&mut self, input: meta::Input) -> nexus::NexusAction {
         match input {
             meta::Input::Deploy(request) => {
-                // M1 reject-guard (audit C1): only a self-contained
-                // `build_attribute` System deploy with a non-activating action
-                // (Eval/Build) is actually implemented. Production builds (need
-                // the horizon `--override-input` materialization, M3) and
-                // activating actions (need real copy/activate, M2) are NOT —
-                // reject them honestly rather than run a broken activate and
-                // write a live-set entry that lies about what is deployed.
                 if let Some(reason) = Self::unsupported_deploy_reason(&request) {
                     return Self::reply_meta(meta::Output::DeployRejected(
                         self.deploy_rejection(reason),
@@ -441,28 +518,24 @@ impl SchemaRuntime {
         }
     }
 
-    /// The M1 reject-guard. Returns `Some(reason)` when the daemon does not yet
-    /// implement this deploy shape. Supported today: a System deploy with a
-    /// `build_attribute` override (a self-contained flake output) and a
-    /// non-activating action (`Eval`/`Build`). Rejected: production System
-    /// deploys (no `build_attribute` — need horizon `--override-input`
-    /// materialization, M3), activating actions (Boot/Switch/Test/BootOnce —
-    /// need real copy/activate addressing, M2), and all Home deploys (need
-    /// `homeConfigurations` materialization, M3).
+    /// The deploy reject-guard. Production System/Home eval/build are
+    /// implemented through Horizon materialization. Activating actions remain
+    /// rejected because copy/activate is not yet target-safe; accepting them
+    /// would write false live-set state.
     fn unsupported_deploy_reason(
         request: &meta::DeployRequest,
     ) -> Option<meta::DeployRejectionReason> {
         match request {
             meta::DeployRequest::System(deployment) => {
-                let supported = deployment.build_attribute.is_some()
-                    && matches!(
-                        deployment.system_action,
-                        ordinary::SystemAction::Eval | ordinary::SystemAction::Build
-                    );
+                let supported = matches!(
+                    deployment.system_action,
+                    ordinary::SystemAction::Eval | ordinary::SystemAction::Build
+                );
                 (!supported).then_some(meta::DeployRejectionReason::UnsupportedDeployAction)
             }
-            meta::DeployRequest::Home(_) => {
-                Some(meta::DeployRejectionReason::UnsupportedDeployAction)
+            meta::DeployRequest::Home(deployment) => {
+                let supported = matches!(deployment.home_mode, meta::HomeMode::Build);
+                (!supported).then_some(meta::DeployRejectionReason::UnsupportedDeployAction)
             }
         }
     }
@@ -697,8 +770,18 @@ impl SchemaRuntime {
         };
         match result {
             nexus::EffectResult::FlakeResolved(_) => {
-                // Record Building (stage still Submitted). The phase write hops
-                // back through advance_after_phase, which fires NixEval.
+                if pipeline.needs_horizon_materialization() {
+                    nexus::NexusAction::CommandEffect(nexus::EffectCommand::MaterializeHorizon(
+                        pipeline.horizon_materialization_command(),
+                    ))
+                } else {
+                    // Record Building (stage still Submitted). The phase write
+                    // hops back through advance_after_phase, which fires NixEval.
+                    self.record_phase(ordinary::DeploymentPhase::Building, None)
+                }
+            }
+            nexus::EffectResult::HorizonMaterialized(inputs) => {
+                self.set_input_overrides(inputs.0);
                 self.record_phase(ordinary::DeploymentPhase::Building, None)
             }
             nexus::EffectResult::ClosureEvaluated(evaluated) => {
@@ -748,6 +831,12 @@ impl SchemaRuntime {
         }
     }
 
+    fn set_input_overrides(&mut self, overrides: Vec<nexus::FlakeInputOverride>) {
+        if let Some(pipeline) = self.active_deploy.as_mut() {
+            pipeline.input_overrides = overrides;
+        }
+    }
+
     fn record_phase(
         &mut self,
         phase: ordinary::DeploymentPhase,
@@ -777,6 +866,9 @@ impl SchemaRuntime {
         self.active_operation = None;
         let reason = match failure.stage {
             nexus::EffectStage::FlakeAuth => meta::DeployRejectionReason::ProposalSourceUnreachable,
+            nexus::EffectStage::MaterializeHorizon => {
+                meta::DeployRejectionReason::ProposalSourceUnreachable
+            }
             nexus::EffectStage::Eval => meta::DeployRejectionReason::FlakeReferenceMalformed,
             nexus::EffectStage::Build => meta::DeployRejectionReason::FlakeReferenceMalformed,
             nexus::EffectStage::CopyClosure => meta::DeployRejectionReason::BuilderUnreachable,
@@ -1168,9 +1260,24 @@ impl SchemaRuntime {
         }
     }
 
+    async fn run_horizon_materialization(
+        &self,
+        command: nexus::HorizonMaterializationCommand,
+    ) -> nexus::EffectResult {
+        let materialization =
+            HorizonMaterialization::new(self.configuration.as_ref().clone(), command);
+        match materialization.run().await {
+            Ok(inputs) => nexus::EffectResult::HorizonMaterialized(inputs),
+            Err(detail) => Self::effect_failed(nexus::EffectStage::MaterializeHorizon, detail),
+        }
+    }
+
     async fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> nexus::EffectResult {
         let attribute = format!("{}#{}", command.flake, command.attribute);
-        match NixCommand::eval_drv_path(&attribute).run().await {
+        match NixCommand::eval_drv_path(&attribute, &command.overrides)
+            .run()
+            .await
+        {
             Ok(output) => nexus::EffectResult::ClosureEvaluated(nexus::EvaluatedClosure {
                 generation_identifier: 0,
                 closure_path: NixCommand::first_line(&output),
@@ -1257,6 +1364,322 @@ impl SchemaRuntime {
     }
 }
 
+/// One Horizon materialization request. It owns the decoded Nexus command and
+/// immutable daemon paths, projects cluster data through horizon-rs, and emits
+/// flake input overrides for the subsequent Nix eval.
+#[derive(Debug, Clone)]
+struct HorizonMaterialization {
+    configuration: RuntimeConfiguration,
+    command: nexus::HorizonMaterializationCommand,
+}
+
+impl HorizonMaterialization {
+    fn new(
+        configuration: RuntimeConfiguration,
+        command: nexus::HorizonMaterializationCommand,
+    ) -> Self {
+        Self {
+            configuration,
+            command,
+        }
+    }
+
+    async fn run(&self) -> std::result::Result<nexus::MaterializedInputs, String> {
+        self.run_inner().await.map_err(|error| error.to_string())
+    }
+
+    async fn run_inner(&self) -> Result<nexus::MaterializedInputs> {
+        let proposal = ProjectableProposal::from(ProposalFile::new(&self.command.source).load()?);
+        let viewpoint = HorizonViewpoint::from_command(&self.command)?;
+        let horizon = proposal.project(&viewpoint)?;
+        let root = MaterializationRoot::new(self.configuration.materialization_root(&self.command));
+        root.prepare()?;
+        MaterializedInputSet::new(root, horizon, self.command.shape.clone())
+            .write()
+            .await
+    }
+}
+
+/// The cluster proposal file path carried by `signal-lojix::ProposalSource`.
+#[derive(Debug, Clone)]
+struct ProposalFile {
+    path: PathBuf,
+}
+
+impl ProposalFile {
+    fn new(source: &ordinary::ProposalSource) -> Self {
+        Self {
+            path: PathBuf::from(source.as_str()),
+        }
+    }
+
+    fn load(&self) -> Result<ClusterProposal> {
+        let text = fs::read_to_string(&self.path)?;
+        Ok(NotaSource::new(&text).parse()?)
+    }
+}
+
+/// Typed Horizon viewpoint derived from the deploy command.
+#[derive(Debug, Clone)]
+struct HorizonViewpoint {
+    cluster: HorizonClusterName,
+    node: HorizonNodeName,
+}
+
+impl HorizonViewpoint {
+    fn from_command(command: &nexus::HorizonMaterializationCommand) -> Result<Self> {
+        Ok(Self {
+            cluster: HorizonClusterName::try_new(command.cluster_name.clone())?,
+            node: HorizonNodeName::try_new(command.node_name.clone())?,
+        })
+    }
+
+    fn as_horizon_viewpoint(&self) -> Viewpoint {
+        Viewpoint {
+            cluster: self.cluster.clone(),
+            node: self.node.clone(),
+        }
+    }
+}
+
+/// Projection wrapper: today's production Horizon shape still has separate
+/// pan-Horizon and cluster proposals to match the old deploy stack.
+#[derive(Debug, Clone)]
+struct ProjectableProposal {
+    cluster: ClusterProposal,
+}
+
+impl ProjectableProposal {
+    fn project(&self, viewpoint: &HorizonViewpoint) -> Result<Horizon> {
+        Ok(self.cluster.project(&viewpoint.as_horizon_viewpoint())?)
+    }
+}
+
+impl From<ClusterProposal> for ProjectableProposal {
+    fn from(cluster: ClusterProposal) -> Self {
+        Self { cluster }
+    }
+}
+
+/// Root directory for one materialization result.
+#[derive(Debug, Clone)]
+struct MaterializationRoot {
+    path: PathBuf,
+}
+
+impl MaterializationRoot {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn prepare(&self) -> Result<()> {
+        fs::create_dir_all(&self.path)?;
+        Ok(())
+    }
+
+    fn input_directory(&self, name: GeneratedInputName) -> GeneratedInputDirectory {
+        GeneratedInputDirectory::new(self.path.join(name.as_str()))
+    }
+}
+
+/// The generated inputs for one deploy.
+#[derive(Debug, Clone)]
+struct MaterializedInputSet {
+    root: MaterializationRoot,
+    horizon: Horizon,
+    shape: nexus::MaterializationShape,
+}
+
+impl MaterializedInputSet {
+    fn new(
+        root: MaterializationRoot,
+        horizon: Horizon,
+        shape: nexus::MaterializationShape,
+    ) -> Self {
+        Self {
+            root,
+            horizon,
+            shape,
+        }
+    }
+
+    async fn write(&self) -> Result<nexus::MaterializedInputs> {
+        let mut inputs = Vec::new();
+        inputs.push(
+            self.root
+                .input_directory(GeneratedInputName::Horizon)
+                .write_horizon(&self.horizon)?
+                .to_override(GeneratedInputName::Horizon)
+                .await?,
+        );
+        inputs.push(
+            self.root
+                .input_directory(GeneratedInputName::System)
+                .write_system(&self.horizon.node.system)?
+                .to_override(GeneratedInputName::System)
+                .await?,
+        );
+        if let Some(deployment) = DeploymentInput::from_shape(&self.shape) {
+            inputs.push(
+                self.root
+                    .input_directory(GeneratedInputName::Deployment)
+                    .write_deployment(&deployment)?
+                    .to_override(GeneratedInputName::Deployment)
+                    .await?,
+            );
+        }
+        Ok(nexus::MaterializedInputs(inputs))
+    }
+}
+
+/// One generated input directory containing a tiny flake.
+#[derive(Debug, Clone)]
+struct GeneratedInputDirectory {
+    path: PathBuf,
+}
+
+impl GeneratedInputDirectory {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn prepare(&self) -> Result<()> {
+        fs::create_dir_all(&self.path)?;
+        Ok(())
+    }
+
+    fn write_horizon(&self, horizon: &Horizon) -> Result<Self> {
+        self.prepare()?;
+        fs::write(
+            self.path.join("horizon.json"),
+            serde_json::to_string_pretty(horizon)?,
+        )?;
+        fs::write(
+            self.path.join("flake.nix"),
+            "{ outputs = _: { horizon = builtins.fromJSON (builtins.readFile ./horizon.json); }; }\n",
+        )?;
+        Ok(self.clone())
+    }
+
+    fn write_system(&self, system: &horizon_lib::species::System) -> Result<Self> {
+        self.prepare()?;
+        fs::write(
+            self.path.join("flake.nix"),
+            format!(
+                "{{ outputs = _: {{ system = \"{}\"; }}; }}\n",
+                NixSystemName::from_horizon_system(system).as_str()
+            ),
+        )?;
+        Ok(self.clone())
+    }
+
+    fn write_deployment(&self, deployment: &DeploymentInput) -> Result<Self> {
+        self.prepare()?;
+        fs::write(self.path.join("flake.nix"), deployment.flake_text())?;
+        Ok(self.clone())
+    }
+
+    async fn to_override(&self, name: GeneratedInputName) -> Result<nexus::FlakeInputOverride> {
+        let hash = NarHash::from_path(&self.path).await?;
+        Ok(nexus::FlakeInputOverride {
+            name: name.as_str().to_string(),
+            reference: nexus::FlakeInputReference {
+                url: format!("path:{}", self.path.display()),
+                nix_archive_hash: hash.as_url_query_value(),
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneratedInputName {
+    Horizon,
+    System,
+    Deployment,
+}
+
+impl GeneratedInputName {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Horizon => "horizon",
+            Self::System => "system",
+            Self::Deployment => "deployment",
+        }
+    }
+}
+
+/// Deployment-shape flake contents for CriomOS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeploymentInput {
+    include_home: bool,
+    include_all_firmware: bool,
+}
+
+impl DeploymentInput {
+    fn from_shape(shape: &nexus::MaterializationShape) -> Option<Self> {
+        match shape {
+            nexus::MaterializationShape::FullOs => Some(Self {
+                include_home: true,
+                include_all_firmware: true,
+            }),
+            nexus::MaterializationShape::OsOnly => Some(Self {
+                include_home: false,
+                include_all_firmware: true,
+            }),
+            nexus::MaterializationShape::Home(_) => None,
+        }
+    }
+
+    fn flake_text(&self) -> String {
+        format!(
+            "{{ outputs = _: {{ deployment = {{ includeHome = {}; includeAllFirmware = {}; }}; }}; }}\n",
+            self.include_home, self.include_all_firmware
+        )
+    }
+}
+
+/// Nix platform string derived from Horizon's typed system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NixSystemName(&'static str);
+
+impl NixSystemName {
+    fn from_horizon_system(system: &horizon_lib::species::System) -> Self {
+        match system {
+            horizon_lib::species::System::X86_64Linux => Self("x86_64-linux"),
+            horizon_lib::species::System::Aarch64Linux => Self("aarch64-linux"),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+/// SRI NAR hash for a generated input directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NarHash(String);
+
+impl NarHash {
+    async fn from_path(path: &Path) -> Result<Self> {
+        let output = NixCommand::hash_path(path).run().await.map_err(|detail| {
+            std::io::Error::other(format!("failed to hash generated input: {detail}"))
+        })?;
+        Ok(Self(NixCommand::first_line(&output)))
+    }
+
+    fn as_url_query_value(&self) -> String {
+        self.0
+            .chars()
+            .flat_map(|character| match character {
+                '+' => "%2B".chars().collect::<Vec<_>>(),
+                '/' => "%2F".chars().collect::<Vec<_>>(),
+                '=' => "%3D".chars().collect::<Vec<_>>(),
+                other => vec![other],
+            })
+            .collect()
+    }
+}
+
 /// A typed `nix` / `nix-store` invocation. Holds the program name and its
 /// argument vector so the same value can be inspected before it runs; `run`
 /// spawns it via `tokio::process::Command` and returns captured stdout or a
@@ -1287,14 +1710,27 @@ impl NixCommand {
         )
     }
 
-    fn eval_drv_path(attribute: &str) -> Self {
+    fn eval_drv_path(attribute: &str, overrides: &[nexus::FlakeInputOverride]) -> Self {
+        let mut arguments = vec![
+            "eval".to_string(),
+            "--refresh".to_string(),
+            "--raw".to_string(),
+        ];
+        arguments.extend(Self::override_input_options(overrides));
+        arguments.push(format!("{attribute}.drvPath"));
+        Self::new("nix", arguments)
+    }
+
+    fn hash_path(path: &Path) -> Self {
         Self::new(
             "nix",
             vec![
-                "eval".to_string(),
-                "--refresh".to_string(),
-                "--raw".to_string(),
-                format!("{attribute}.drvPath"),
+                "hash".to_string(),
+                "path".to_string(),
+                "--type".to_string(),
+                "sha256".to_string(),
+                "--sri".to_string(),
+                path.display().to_string(),
             ],
         )
     }
@@ -1353,6 +1789,19 @@ impl NixCommand {
             "extra-trusted-public-keys".to_string(),
             public_keys,
         ]
+    }
+
+    fn override_input_options(overrides: &[nexus::FlakeInputOverride]) -> Vec<String> {
+        let mut arguments = Vec::new();
+        for override_input in overrides {
+            arguments.push("--override-input".to_string());
+            arguments.push(override_input.name.clone());
+            arguments.push(format!(
+                "{}?narHash={}",
+                override_input.reference.url, override_input.reference.nix_archive_hash
+            ));
+        }
+        arguments
     }
 
     fn copy_closure(node_name: &str, closure_path: &str) -> Self {
@@ -1447,6 +1896,9 @@ impl nexus::NexusEngine for SchemaRuntime {
         match input {
             nexus::EffectCommand::ResolveFlakeAuth(request) => {
                 self.resolve_flake_auth(request).await
+            }
+            nexus::EffectCommand::MaterializeHorizon(command) => {
+                self.run_horizon_materialization(command).await
             }
             nexus::EffectCommand::NixEval(command) => self.run_nix_eval(command).await,
             nexus::EffectCommand::NixBuild(command) => self.run_nix_build(command).await,

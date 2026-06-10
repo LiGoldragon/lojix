@@ -36,6 +36,8 @@ pub use signal_lojix::schema::lib::FlakeReference as FlakeReference;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::ProposalSource as ProposalSource;
 #[rustfmt::skip]
+pub use signal_lojix::schema::lib::UserName as UserName;
+#[rustfmt::skip]
 pub use signal_lojix::schema::lib::GenerationIdentifier as GenerationIdentifier;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::DeploymentIdentifier as DeploymentIdentifier;
@@ -106,12 +108,58 @@ pub struct ResolvedFlake {
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct HomeMaterialization(pub UserName);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum MaterializationShape {
+    FullOs,
+    OsOnly,
+    Home(HomeMaterialization),
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct HorizonMaterializationCommand {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub source: ProposalSource,
+    pub shape: MaterializationShape,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FlakeInputReference {
+    pub url: String,
+    pub nix_archive_hash: String,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FlakeInputOverride {
+    pub name: String,
+    pub reference: FlakeInputReference,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MaterializedInputs(pub Vec<FlakeInputOverride>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct NixEvalCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub deployment_kind: DeploymentKind,
     pub flake: FlakeReference,
     pub attribute: String,
+    pub overrides: Vec<FlakeInputOverride>,
 }
 
 #[rustfmt::skip]
@@ -157,6 +205,7 @@ pub struct PathInfoGcCommand {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum EffectCommand {
     ResolveFlakeAuth(FlakeAuthRequest),
+    MaterializeHorizon(HorizonMaterializationCommand),
     NixEval(NixEvalCommand),
     NixBuild(NixBuildCommand),
     CopyClosure(CopyClosureCommand),
@@ -220,6 +269,7 @@ pub struct EffectFailure {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum EffectStage {
     FlakeAuth,
+    MaterializeHorizon,
     Eval,
     Build,
     CopyClosure,
@@ -232,6 +282,7 @@ pub enum EffectStage {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum EffectResult {
     FlakeResolved(ResolvedFlake),
+    HorizonMaterialized(MaterializedInputs),
     ClosureEvaluated(EvaluatedClosure),
     ClosureBuilt(BuiltClosure),
     ClosureCopied(CopiedClosure),
@@ -295,6 +346,44 @@ impl From<NodeName> for BuilderNode {
 }
 
 #[rustfmt::skip]
+impl HomeMaterialization {
+    pub fn new(payload: UserName) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &UserName {
+        &self.0
+    }
+    pub fn into_payload(self) -> UserName {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<UserName> for HomeMaterialization {
+    fn from(payload: UserName) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl MaterializedInputs {
+    pub fn new(payload: Vec<FlakeInputOverride>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Vec<FlakeInputOverride> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Vec<FlakeInputOverride> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Vec<FlakeInputOverride>> for MaterializedInputs {
+    fn from(payload: Vec<FlakeInputOverride>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl SignalInput {
     pub fn ordinary_input(payload: OrdinaryInput) -> Self {
         Self::OrdinaryInput(payload)
@@ -322,9 +411,19 @@ impl BuildTarget {
 }
 
 #[rustfmt::skip]
+impl MaterializationShape {
+    pub fn home(payload: UserName) -> Self {
+        Self::Home(HomeMaterialization::new(payload))
+    }
+}
+
+#[rustfmt::skip]
 impl EffectCommand {
     pub fn resolve_flake_auth(payload: FlakeAuthRequest) -> Self {
         Self::ResolveFlakeAuth(payload)
+    }
+    pub fn materialize_horizon(payload: HorizonMaterializationCommand) -> Self {
+        Self::MaterializeHorizon(payload)
     }
     pub fn nix_eval(payload: NixEvalCommand) -> Self {
         Self::NixEval(payload)
@@ -347,6 +446,9 @@ impl EffectCommand {
 impl EffectResult {
     pub fn flake_resolved(payload: ResolvedFlake) -> Self {
         Self::FlakeResolved(payload)
+    }
+    pub fn horizon_materialized(payload: Vec<FlakeInputOverride>) -> Self {
+        Self::HorizonMaterialized(MaterializedInputs::new(payload))
     }
     pub fn closure_evaluated(payload: EvaluatedClosure) -> Self {
         Self::ClosureEvaluated(payload)
@@ -453,9 +555,23 @@ impl From<BuilderNode> for BuildTarget {
 }
 
 #[rustfmt::skip]
+impl From<HomeMaterialization> for MaterializationShape {
+    fn from(payload: HomeMaterialization) -> Self {
+        Self::Home(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl From<FlakeAuthRequest> for EffectCommand {
     fn from(payload: FlakeAuthRequest) -> Self {
         Self::ResolveFlakeAuth(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<HorizonMaterializationCommand> for EffectCommand {
+    fn from(payload: HorizonMaterializationCommand) -> Self {
+        Self::MaterializeHorizon(payload)
     }
 }
 
@@ -498,6 +614,13 @@ impl From<PathInfoGcCommand> for EffectCommand {
 impl From<ResolvedFlake> for EffectResult {
     fn from(payload: ResolvedFlake) -> Self {
         Self::FlakeResolved(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<MaterializedInputs> for EffectResult {
+    fn from(payload: MaterializedInputs) -> Self {
+        Self::HorizonMaterialized(payload)
     }
 }
 
@@ -689,6 +812,72 @@ impl FlakeAuthRequest {
 #[rustfmt::skip]
 #[cfg(feature = "nota-text")]
 impl ResolvedFlake {
+    pub fn from_nota_block(block: &nota_next::Block) -> Result<Self, NotaDecodeError> {
+        <Self as NotaDecode>::from_nota_block(block)
+    }
+    pub fn to_nota(&self) -> String {
+        <Self as NotaEncode>::to_nota(self)
+    }
+}
+
+#[rustfmt::skip]
+#[cfg(feature = "nota-text")]
+impl HomeMaterialization {
+    pub fn from_nota_block(block: &nota_next::Block) -> Result<Self, NotaDecodeError> {
+        <Self as NotaDecode>::from_nota_block(block)
+    }
+    pub fn to_nota(&self) -> String {
+        <Self as NotaEncode>::to_nota(self)
+    }
+}
+
+#[rustfmt::skip]
+#[cfg(feature = "nota-text")]
+impl MaterializationShape {
+    pub fn from_nota_block(block: &nota_next::Block) -> Result<Self, NotaDecodeError> {
+        <Self as NotaDecode>::from_nota_block(block)
+    }
+    pub fn to_nota(&self) -> String {
+        <Self as NotaEncode>::to_nota(self)
+    }
+}
+
+#[rustfmt::skip]
+#[cfg(feature = "nota-text")]
+impl HorizonMaterializationCommand {
+    pub fn from_nota_block(block: &nota_next::Block) -> Result<Self, NotaDecodeError> {
+        <Self as NotaDecode>::from_nota_block(block)
+    }
+    pub fn to_nota(&self) -> String {
+        <Self as NotaEncode>::to_nota(self)
+    }
+}
+
+#[rustfmt::skip]
+#[cfg(feature = "nota-text")]
+impl FlakeInputReference {
+    pub fn from_nota_block(block: &nota_next::Block) -> Result<Self, NotaDecodeError> {
+        <Self as NotaDecode>::from_nota_block(block)
+    }
+    pub fn to_nota(&self) -> String {
+        <Self as NotaEncode>::to_nota(self)
+    }
+}
+
+#[rustfmt::skip]
+#[cfg(feature = "nota-text")]
+impl FlakeInputOverride {
+    pub fn from_nota_block(block: &nota_next::Block) -> Result<Self, NotaDecodeError> {
+        <Self as NotaDecode>::from_nota_block(block)
+    }
+    pub fn to_nota(&self) -> String {
+        <Self as NotaEncode>::to_nota(self)
+    }
+}
+
+#[rustfmt::skip]
+#[cfg(feature = "nota-text")]
+impl MaterializedInputs {
     pub fn from_nota_block(block: &nota_next::Block) -> Result<Self, NotaDecodeError> {
         <Self as NotaDecode>::from_nota_block(block)
     }

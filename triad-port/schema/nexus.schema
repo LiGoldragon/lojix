@@ -36,6 +36,7 @@
   ClosurePath signal-lojix:lib:ClosurePath
   FlakeReference signal-lojix:lib:FlakeReference
   ProposalSource signal-lojix:lib:ProposalSource
+  UserName signal-lojix:lib:UserName
   GenerationIdentifier signal-lojix:lib:GenerationIdentifier
   DeploymentIdentifier signal-lojix:lib:DeploymentIdentifier
   GenerationSlot signal-lojix:lib:GenerationSlot
@@ -54,13 +55,19 @@
 
   FlakeAuthRequest { source ProposalSource flake FlakeReference }
   ResolvedFlake { flake FlakeReference revision String }
-  NixEvalCommand { ClusterName * NodeName * DeploymentKind * flake FlakeReference attribute String }
+  HomeMaterialization { UserName * }
+  MaterializationShape [FullOs OsOnly (Home HomeMaterialization)]
+  HorizonMaterializationCommand { ClusterName * NodeName * source ProposalSource shape MaterializationShape }
+  FlakeInputReference { url String nix_archive_hash String }
+  FlakeInputOverride { name String reference FlakeInputReference }
+  MaterializedInputs { overrides (Vec FlakeInputOverride) }
+  NixEvalCommand { ClusterName * NodeName * DeploymentKind * flake FlakeReference attribute String overrides (Vec FlakeInputOverride) }
   NixBuildCommand { GenerationIdentifier * ClosurePath * target BuildTarget substituters (Vec ExtraSubstituter) }
   CopyClosureCommand { GenerationIdentifier * ClusterName * NodeName * ClosurePath * }
   ActivateGenerationCommand { GenerationIdentifier * ClusterName * NodeName * ActivationKind * }
   PathInfoGcCommand { ClusterName * NodeName * }
 
-  EffectCommand [(ResolveFlakeAuth FlakeAuthRequest) (NixEval NixEvalCommand) (NixBuild NixBuildCommand) (CopyClosure CopyClosureCommand) (ActivateGeneration ActivateGenerationCommand) (PathInfoGc PathInfoGcCommand)]
+  EffectCommand [(ResolveFlakeAuth FlakeAuthRequest) (MaterializeHorizon HorizonMaterializationCommand) (NixEval NixEvalCommand) (NixBuild NixBuildCommand) (CopyClosure CopyClosureCommand) (ActivateGeneration ActivateGenerationCommand) (PathInfoGc PathInfoGcCommand)]
 
   EvaluatedClosure { GenerationIdentifier * ClosurePath * }
   BuiltClosure { GenerationIdentifier * ClosurePath * }
@@ -68,9 +75,9 @@
   ActivatedGeneration { GenerationIdentifier * NodeName * GenerationSlot * }
   GarbageCollected { ClusterName * NodeName * reclaimed_paths Integer }
   EffectFailure { stage EffectStage detail String }
-  EffectStage [FlakeAuth Eval Build CopyClosure Activate Gc]
+  EffectStage [FlakeAuth MaterializeHorizon Eval Build CopyClosure Activate Gc]
 
-  EffectResult [(FlakeResolved ResolvedFlake) (ClosureEvaluated EvaluatedClosure) (ClosureBuilt BuiltClosure) (ClosureCopied CopiedClosure) (GenerationActivated ActivatedGeneration) (PathsCollected GarbageCollected) (EffectFailed EffectFailure)]
+  EffectResult [(FlakeResolved ResolvedFlake) (HorizonMaterialized MaterializedInputs) (ClosureEvaluated EvaluatedClosure) (ClosureBuilt BuiltClosure) (ClosureCopied CopiedClosure) (GenerationActivated ActivatedGeneration) (PathsCollected GarbageCollected) (EffectFailed EffectFailure)]
 
   NexusWork [(SignalArrived SignalInput) (SemaReadCompleted SemaReadOutput) (SemaWriteCompleted SemaWriteOutput) (EffectCompleted EffectResult)]
   NexusAction [(CommandSemaRead SemaReadInput) (CommandSemaWrite SemaWriteInput) (CommandEffect EffectCommand) (ReplyToSignal SignalOutput) (Continue NexusWork)]

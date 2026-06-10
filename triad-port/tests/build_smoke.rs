@@ -101,14 +101,16 @@ fn daemon_binary_socket_roundtrip_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ordinary_socket = dir.path().join("ordinary.sock");
     let owner_socket = dir.path().join("owner.sock");
+    let state_directory = dir.path().join("state");
     // Mode 432 == 0o660 (cluster-operator group), per the daemon's owned
     // surface. A top-level NOTA record decodes as a parenthesized positional
     // field list with NO type-name head (nota-config decodes the known type),
-    // so: `([ordinary] mode [owner] mode)`.
+    // so: `([ordinary] mode [owner] mode [state])`.
     let config = format!(
-        "([{}] 432 [{}] 432)",
+        "([{}] 432 [{}] 432 [{}])",
         ordinary_socket.display(),
         owner_socket.display(),
+        state_directory.display(),
     );
 
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_lojix-daemon"))
@@ -180,11 +182,13 @@ fn permissive_owner_socket_mode_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ordinary_socket = dir.path().join("ordinary.sock");
     let owner_socket = dir.path().join("owner.sock");
+    let state_directory = dir.path().join("state");
     // owner mode 0o666 == 438 grants other read+write — must be refused.
     let config = format!(
-        "([{}] 432 [{}] 438)",
+        "([{}] 432 [{}] 438 [{}])",
         ordinary_socket.display(),
         owner_socket.display(),
+        state_directory.display(),
     );
     let output = Command::new(env!("CARGO_BIN_EXE_lojix-daemon"))
         .arg(&config)
@@ -244,10 +248,12 @@ fn oversized_frame_is_bounded_and_daemon_survives() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ordinary_socket = dir.path().join("ordinary.sock");
     let owner_socket = dir.path().join("owner.sock");
+    let state_directory = dir.path().join("state");
     let config = format!(
-        "([{}] 432 [{}] 432)",
+        "([{}] 432 [{}] 432 [{}])",
         ordinary_socket.display(),
         owner_socket.display(),
+        state_directory.display(),
     );
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_lojix-daemon"))
         .arg(&config)
@@ -325,10 +331,12 @@ fn concurrent_requests_are_served_in_parallel() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ordinary_socket = dir.path().join("ordinary.sock");
     let owner_socket = dir.path().join("owner.sock");
+    let state_directory = dir.path().join("state");
     let config = format!(
-        "([{}] 432 [{}] 432)",
+        "([{}] 432 [{}] 432 [{}])",
         ordinary_socket.display(),
         owner_socket.display(),
+        state_directory.display(),
     );
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_lojix-daemon"))
         .arg(&config)

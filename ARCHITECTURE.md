@@ -4,12 +4,16 @@
 deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 (`lojix`) that speaks the daemon over a Unix socket.
 
-> **Status (2026-06-07):** implemented Rust crate under `triad-port/`.
+> **Status (2026-06-10):** implemented Rust crate under `triad-port/`.
 > The daemon uses the actor-native `triad-runtime` multi-listener for
 > two authority-tiered sockets and awaits the generated async Nexus
-> runner directly; child-process effects use `tokio::process`. Today's
-> `lojix-cli` (separate repo) stays at the current schema until CriomOS
-> migrates to this daemon.
+> runner directly; child-process effects use `tokio::process`. Production
+> System/Home build requests without `build_attribute` now enter a
+> Horizon materialization effect that projects the cluster proposal with
+> `horizon-rs`, writes generated `horizon` / `system` / `deployment`
+> flake inputs under daemon state, and passes content-addressed
+> `--override-input` values into `nix eval`. Activating deploys still
+> reject until copy/activate is target-safe.
 
 > **Scope (today vs eventually).** This stack sits on today's
 > substrate — Rust on Linux, `signal-core` over a Unix socket,
@@ -120,6 +124,11 @@ Each daemon actor is a Kameo actor per
 - **Wire:** `signal-frame` records carrying `signal-lojix` on the
   ordinary socket and `meta-signal-lojix` on the owner/meta socket.
   Length-prefixed rkyv archives over Unix sockets.
+- **Generated Nix inputs:** production deploys materialize projected
+  Horizon data into tiny flake inputs under
+  `<state-directory>/generated-inputs/<cluster>/<node>/<shape>/`.
+  `nix hash path --type sha256 --sri` supplies the narHash for each
+  override.
 
 ## 5 · Constraints
 
@@ -133,9 +142,8 @@ Each daemon actor is a Kameo actor per
   there is no untyped escape hatch on the wire.
 - The daemon never initiates deploys on its own — every deploy
   starts from a received `DeploymentSubmission`.
-- The daemon opens its `sema-engine` handle through
-  `Engine::open(EngineOpen::new(path, SchemaVersion))` at startup
-  and registers every table family before serving requests.
+- The daemon still uses an in-memory shared store; replacing that with
+  `sema-engine` / redb durability remains the next storage cutover.
 - Subscription events ride on the acceptor's outbound lane via
   `StreamingFrameBody::SubscriptionEvent`; the daemon mints each
   event's `StreamEventIdentifier` from the lane's monotonic

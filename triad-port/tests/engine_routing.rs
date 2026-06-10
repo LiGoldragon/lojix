@@ -3,9 +3,20 @@
 //! and the GC-roots mutations). The deploy pipeline shells out to real `nix`,
 //! so it is exercised only in a live environment, not here.
 
+use std::collections::BTreeMap;
+
+use horizon_lib::address::{YggAddress, YggSubnet};
+use horizon_lib::io::Io;
+use horizon_lib::machine::Machine;
+use horizon_lib::magnitude::Magnitude;
+use horizon_lib::name::NodeName;
+use horizon_lib::proposal::{ClusterProposal, ClusterTrust, NodeProposal, NodePubKeys};
+use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
+use horizon_lib::species::{Arch, Bootloader, Keyboard, MachineSpecies, NodeSpecies};
 use lojix::schema::nexus::{self, NexusEngine};
 use lojix::schema_runtime::SchemaRuntime;
 use meta_signal_lojix::schema::lib as meta;
+use nota_next::NotaEncode;
 use signal_lojix::schema::lib as ordinary;
 
 fn run(engine: &mut SchemaRuntime, input: nexus::SignalInput) -> nexus::SignalOutput {
@@ -144,10 +155,10 @@ fn deploy_rejection_reason(output: nexus::SignalOutput) -> meta::DeployRejection
     }
 }
 
-// ---- M1 reject-guard (audit C1): the daemon must reject — never falsely
-// accept — a deploy shape it does not yet implement, so the durable live-set
-// never records a generation that was not actually deployed. These run without
-// `nix` because the guard rejects before any effect.
+// ---- Deploy guard: activating actions remain rejected because copy/activate
+// is not target-safe yet. Production System/Home build paths are no longer
+// rejected as unsupported; they proceed into the effect pipeline and fail here
+// only because these tests use intentionally bogus proposal sources.
 
 #[test]
 fn activating_deploy_is_rejected_until_activate_lands() {
@@ -162,21 +173,19 @@ fn activating_deploy_is_rejected_until_activate_lands() {
 }
 
 #[test]
-fn production_deploy_without_build_attribute_is_rejected() {
-    // No `build_attribute` means the production `nixosConfigurations.target`
-    // path, which needs horizon `--override-input` materialization (M3).
+fn production_deploy_without_build_attribute_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::DeployRequest::System(
         system_deployment(None, ordinary::SystemAction::Build),
     )));
     assert_eq!(
         deploy_rejection_reason(run(&mut engine, input)),
-        meta::DeployRejectionReason::UnsupportedDeployAction,
+        meta::DeployRejectionReason::ProposalSourceUnreachable,
     );
 }
 
 #[test]
-fn home_deploy_is_rejected_until_materialization_lands() {
+fn home_build_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::DeployRequest::Home(
         meta::HomeDeployment {
@@ -192,6 +201,142 @@ fn home_deploy_is_rejected_until_materialization_lands() {
     )));
     assert_eq!(
         deploy_rejection_reason(run(&mut engine, input)),
-        meta::DeployRejectionReason::UnsupportedDeployAction,
+        meta::DeployRejectionReason::ProposalSourceUnreachable,
     );
+}
+
+#[test]
+#[ignore = "runs real `nix flake metadata` and `nix eval`; cheap but external"]
+fn production_eval_materializes_horizon_inputs_and_returns_deployed() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let cluster_path = directory.path().join("cluster.nota");
+    std::fs::write(&cluster_path, fixture_cluster_proposal().to_nota()).expect("write cluster");
+    let flake_directory = directory.path().join("flake");
+    FixtureFlake::new(flake_directory).write();
+
+    let mut engine = SchemaRuntime::new();
+    let mut deployment = system_deployment(None, ordinary::SystemAction::Eval);
+    deployment.source = cluster_path.display().to_string();
+    deployment.flake = format!("path:{}", directory.path().join("flake").display());
+    let input =
+        nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::DeployRequest::System(deployment)));
+
+    match meta_reply(run(&mut engine, input)) {
+        meta::Output::Deployed(accepted) => {
+            assert_eq!(accepted.deployment_identifier, 1);
+            assert_eq!(accepted.database_marker.commit_sequence, 1);
+        }
+        other => panic!("expected Deployed, got {other:?}"),
+    }
+}
+
+struct FixtureFlake {
+    directory: std::path::PathBuf,
+}
+
+impl FixtureFlake {
+    fn new(directory: std::path::PathBuf) -> Self {
+        Self { directory }
+    }
+
+    fn write(&self) {
+        self.write_stub_input("horizon", "horizon = { node = { name = \"stub\"; }; };");
+        self.write_stub_input("system", "system = \"x86_64-linux\";");
+        self.write_stub_input(
+            "deployment",
+            "deployment = { includeHome = false; includeAllFirmware = true; };",
+        );
+        std::fs::create_dir_all(&self.directory).expect("flake dir");
+        std::fs::write(
+            self.directory.join("flake.nix"),
+            r#"{
+  inputs.horizon.url = "path:./horizon";
+  inputs.system.url = "path:./system";
+  inputs.deployment.url = "path:./deployment";
+  outputs = inputs: {
+    nixosConfigurations.target.config.system.build.toplevel = derivation {
+      name = "lojix-materialization-eval";
+      system = inputs.system.system;
+      builder = "/bin/sh";
+      args = [ "-c" "echo ok > $out" ];
+    };
+  };
+}
+"#,
+        )
+        .expect("fixture flake");
+    }
+
+    fn write_stub_input(&self, name: &str, output: &str) {
+        let directory = self.directory.join(name);
+        std::fs::create_dir_all(&directory).expect("stub dir");
+        std::fs::write(
+            directory.join("flake.nix"),
+            format!("{{ outputs = _: {{ {output} }}; }}\n"),
+        )
+        .expect("stub flake");
+    }
+}
+
+fn fixture_cluster_proposal() -> ClusterProposal {
+    let mut nodes = BTreeMap::new();
+    nodes.insert(
+        NodeName::try_new("node-1").unwrap(),
+        NodeProposal {
+            species: NodeSpecies::EdgeTesting,
+            size: Magnitude::Large,
+            trust: Magnitude::Max,
+            machine: Machine {
+                species: MachineSpecies::Metal,
+                arch: Some(Arch::X86_64),
+                cores: 4,
+                model: None,
+                mother_board: None,
+                super_node: None,
+                super_user: None,
+                chip_gen: None,
+                ram_gb: None,
+            },
+            io: Io {
+                keyboard: Keyboard::Qwerty,
+                bootloader: Bootloader::Uefi,
+                disks: BTreeMap::new(),
+                swap_devices: Vec::new(),
+                compressed_swap: None,
+            },
+            pub_keys: NodePubKeys {
+                ssh: SshPubKey::try_new("AAA=").unwrap(),
+                nix: Some(
+                    NixPubKey::try_new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap(),
+                ),
+                yggdrasil: Some(horizon_lib::proposal::YggPubKeyEntry {
+                    pub_key: YggPubKey::try_new("a".repeat(64)).unwrap(),
+                    address: YggAddress::try_new("200::1").unwrap(),
+                    subnet: YggSubnet::try_new("300:ca41:6b12:fba").unwrap(),
+                }),
+            },
+            link_local_ips: Vec::new(),
+            node_ip: None,
+            wireguard_pub_key: None,
+            nordvpn: false,
+            wifi_cert: false,
+            wireguard_untrusted_proxies: Vec::new(),
+            wants_printing: false,
+            wants_hw_video_accel: false,
+            router_interfaces: None,
+            online: None,
+            services: Vec::new(),
+        },
+    );
+    ClusterProposal {
+        nodes,
+        users: BTreeMap::new(),
+        domains: BTreeMap::new(),
+        trust: ClusterTrust {
+            cluster: Magnitude::Max,
+            clusters: BTreeMap::new(),
+            nodes: BTreeMap::new(),
+            users: BTreeMap::new(),
+        },
+    }
 }
