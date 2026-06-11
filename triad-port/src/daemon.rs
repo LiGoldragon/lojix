@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use triad_runtime::{
     AcceptedConnection, AsyncListenerSocket, AsyncMultiConnectionRuntime, AsyncMultiListenerDaemon,
-    AsyncMultiListenerDaemonError, FrameBody, LengthPrefixedCodec, MaximumFrameLength,
-    RequestConcurrencyLimit, RequestErrorLog, SocketMode,
+    AsyncMultiListenerDaemonError, ConnectionContext, FrameBody, LengthPrefixedCodec,
+    MaximumFrameLength, RequestConcurrencyLimit, RequestErrorLog, SocketMode,
 };
 
 /// Maximum inbound request-frame body the daemon accepts (8 MiB). A lojix
@@ -106,10 +106,9 @@ impl Daemon {
     }
 
     /// Refuse an owner-socket mode that grants any "other" access. The owner
-    /// socket carries the privileged Deploy/Pin/Unpin/Retire surface and its
-    /// authority rests entirely on the socket file mode (no peer-credential
-    /// check yet — audit R3); a permissive mode from config would silently make
-    /// that surface world-reachable.
+    /// socket carries the privileged Deploy/Pin/Unpin/Retire surface; a
+    /// permissive mode from config would silently make that surface
+    /// world-reachable before the per-connection peer credential check runs.
     fn validate_owner_socket_mode(mode: u32) -> Result<()> {
         if mode & 0o007 != 0 {
             return Err(Error::InsecureOwnerSocketMode(mode));
@@ -135,6 +134,7 @@ struct LojixRuntime {
     store: Arc<Store>,
     configuration: Arc<RuntimeConfiguration>,
     codec: LengthPrefixedCodec,
+    owner_authority: OwnerPeerAuthority,
 }
 
 impl LojixRuntime {
@@ -143,7 +143,46 @@ impl LojixRuntime {
             store: Arc::new(Store::new()),
             configuration: Arc::new(configuration),
             codec: LengthPrefixedCodec::new(MaximumFrameLength::new(MAXIMUM_REQUEST_FRAME_BYTES)),
+            owner_authority: OwnerPeerAuthority::current_process(),
         }
+    }
+}
+
+/// The uid/gid policy for privileged owner-socket connections.
+///
+/// The kernel supplies each accepted Unix-stream peer credential through
+/// `triad-runtime`; Lojix admits owner-socket requests only from the same
+/// effective uid/gid that launched the daemon. The daemon is
+/// cluster-operator-owned, so deploy authority stays with that operator account
+/// instead of trusting payload claims or socket mode alone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OwnerPeerAuthority {
+    user_id: u32,
+    group_id: u32,
+}
+
+impl OwnerPeerAuthority {
+    pub const fn new(user_id: u32, group_id: u32) -> Self {
+        Self { user_id, group_id }
+    }
+
+    pub fn current_process() -> Self {
+        Self::new(
+            rustix::process::geteuid().as_raw(),
+            rustix::process::getegid().as_raw(),
+        )
+    }
+
+    pub fn authorize(&self, context: &ConnectionContext) -> Result<()> {
+        if context.user_id() == self.user_id && context.group_id() == self.group_id {
+            return Ok(());
+        }
+        Err(Error::UnauthorizedOwnerPeer {
+            peer_user_id: context.user_id(),
+            peer_group_id: context.group_id(),
+            daemon_user_id: self.user_id,
+            daemon_group_id: self.group_id,
+        })
     }
 }
 
@@ -168,6 +207,7 @@ impl AsyncMultiConnectionRuntime for LojixRuntime {
             store: self.store.clone(),
             configuration: self.configuration.clone(),
             codec: self.codec,
+            owner_authority: self.owner_authority,
         };
         worker.serve(listener, connection).await
     }
@@ -180,6 +220,7 @@ struct RequestWorker {
     store: Arc<Store>,
     configuration: Arc<RuntimeConfiguration>,
     codec: LengthPrefixedCodec,
+    owner_authority: OwnerPeerAuthority,
 }
 
 impl RequestWorker {
@@ -210,6 +251,7 @@ impl RequestWorker {
     }
 
     async fn serve_owner(&self, connection: &mut AcceptedConnection) -> Result<()> {
+        self.owner_authority.authorize(connection.context())?;
         let body = self.read_body(connection).await?;
         let (_, input) = meta_signal_lojix::schema::lib::Input::decode_signal_frame(body.bytes())?;
         let output = self

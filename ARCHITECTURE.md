@@ -46,7 +46,8 @@ streams subscription events.
   watches, and unwatch calls.
 - **Owner/meta Unix socket** — `meta-signal-lojix` deploy and
   retention mutations. Owner socket modes granting any "other" access
-  are refused at startup.
+  are refused at startup, and each owner connection must present
+  kernel-vouched peer credentials matching the daemon process uid/gid.
 - **Live generation set** — `BTreeMap<(ClusterName, NodeName, Kind),
   Generation>` persisted via `sema-engine`. Source of truth for
   "what's running on every node right now."
@@ -136,7 +137,7 @@ Each daemon actor is a Kameo actor per
   configuration: ordinary and owner/meta. Inline NOTA and `.nota` files
   are rejected at daemon startup; launch tooling must encode
   configuration before exec. The owner/meta socket refuses any mode with
-  "other" access.
+  "other" access and admits only same-uid/gid owner peers.
 - The CLI sends one NOTA-encoded `signal-lojix` request per
   invocation and prints one NOTA-encoded reply (or streams events
   until the subscription closes).

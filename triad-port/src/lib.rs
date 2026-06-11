@@ -63,6 +63,16 @@ pub enum Error {
     )]
     InsecureOwnerSocketMode(u32),
 
+    #[error(
+        "owner socket peer uid/gid mismatch: peer {peer_user_id}:{peer_group_id}, daemon {daemon_user_id}:{daemon_group_id}"
+    )]
+    UnauthorizedOwnerPeer {
+        peer_user_id: u32,
+        peer_group_id: u32,
+        daemon_user_id: u32,
+        daemon_group_id: u32,
+    },
+
     #[error("unexpected signal frame for this socket")]
     UnexpectedFrame,
 

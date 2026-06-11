@@ -332,6 +332,7 @@ dependencies = [
  "meta-signal-lojix",
  "nota-next",
  "rkyv",
+ "rustix",
  "schema-rust-next",
  "serde_json",
  "signal-lojix",
