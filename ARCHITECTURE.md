@@ -4,7 +4,7 @@
 deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 (`lojix`) that speaks the daemon over a Unix socket.
 
-> **Status (2026-06-10):** implemented Rust crate under `triad-port/`.
+> **Status (2026-06-10):** implemented Rust crate at the repo root.
 > The daemon uses the actor-native `triad-runtime` multi-listener for
 > two authority-tiered sockets and awaits the generated async Nexus
 > runner directly; child-process effects use `tokio::process`. Production
@@ -104,7 +104,7 @@ streams subscription events.
 ## 3 · Code map
 
 ```
-triad-port/src/
+src/
   lib.rs                # shared state, configuration, error type
   daemon.rs             # actor-native two-socket daemon shell
   client.rs             # thin CLI socket exchange

@@ -1,8 +1,8 @@
 # lojix — skills
 
 The new deploy stack: one crate, two binaries (`lojix-daemon` long-lived
-orchestrator + `lojix` thin CLI client). The live crate is under
-`triad-port/`.
+orchestrator + `lojix` thin CLI client). The live crate is at the
+repo root.
 
 ## Repo intent
 
@@ -69,7 +69,7 @@ these):
 
 ## Status (2026-06-10)
 
-- The actor-native daemon socket shell is implemented in `triad-port/`.
+- The actor-native daemon socket shell is implemented at the repo root.
 - The generated Nexus runner and handwritten effect hooks are async;
   the daemon awaits `NexusEngine::execute` directly and does not wrap
   engine execution in `spawn_blocking`.
