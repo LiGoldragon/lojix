@@ -1,9 +1,9 @@
 //! The lojix daemon loop — two authority-tiered unix sockets driving the
 //! generated Nexus runner.
 //!
-//! Resolves the port-plan §4.4 blocker by binding two `ListenerSocket`s on one
-//! `ActorMultiListenerDaemon` (the runtime's two-socket primitive), each tagged by
-//! its authority role. `handle_stream` decodes the length-prefixed wire frame
+//! Resolves the port-plan §4.4 blocker by binding two `AsyncListenerSocket`s on
+//! one `AsyncMultiListenerDaemon` (the runtime's two-socket primitive), each
+//! tagged by its authority role. `handle_stream` decodes the length-prefixed wire frame
 //! for the arriving role into a `SignalInput`, drives it through
 //! awaits `NexusEngine::execute` (which runs the `Runner` continuation loop —
 //! the deploy pipeline included), and encodes the reply back. The schema engine
@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use triad_runtime::{
-    AcceptedConnection, ActorListenerSocket, ActorMultiConnectionRuntime, ActorMultiListenerDaemon,
-    ActorMultiListenerDaemonError, FrameBody, LengthPrefixedCodec, MaximumFrameLength,
+    AcceptedConnection, AsyncListenerSocket, AsyncMultiConnectionRuntime, AsyncMultiListenerDaemon,
+    AsyncMultiListenerDaemonError, FrameBody, LengthPrefixedCodec, MaximumFrameLength,
     RequestConcurrencyLimit, RequestErrorLog, SocketMode,
 };
 
@@ -35,8 +35,9 @@ use crate::{DaemonConfiguration, Error, Result, Store};
 
 /// Which authority-tiered socket an arriving stream belongs to. Ordinary is the
 /// peer-callable `signal-lojix` surface; Owner is the `meta-signal-lojix`
-/// Deploy/Pin/Unpin/Retire surface. Used as the `MultiListenerRuntime::Listener`
-/// tag so `handle_stream` decodes the correct contract.
+/// Deploy/Pin/Unpin/Retire surface. Used as the
+/// `AsyncMultiConnectionRuntime::Listener` tag so `handle_stream` decodes the
+/// correct contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ListenerRole {
     Ordinary,
@@ -75,32 +76,32 @@ impl Daemon {
         let configuration = self.configuration;
         Self::validate_owner_socket_mode(configuration.owner_socket_mode)?;
         let sockets = vec![
-            ActorListenerSocket::new(
+            AsyncListenerSocket::new(
                 ListenerRole::Ordinary,
                 configuration.ordinary_socket_path.clone(),
             )
             .with_socket_mode(SocketMode::new(configuration.ordinary_socket_mode)),
-            ActorListenerSocket::new(ListenerRole::Owner, configuration.owner_socket_path.clone())
+            AsyncListenerSocket::new(ListenerRole::Owner, configuration.owner_socket_path.clone())
                 .with_socket_mode(SocketMode::new(configuration.owner_socket_mode)),
         ];
         let runtime = LojixRuntime::new(RuntimeConfiguration::from_daemon_configuration(
             &configuration,
         ));
         let request_error_log = RequestErrorLog::new("lojix-daemon");
-        ActorMultiListenerDaemon::new(sockets, runtime, request_error_log)
+        AsyncMultiListenerDaemon::new(sockets, runtime, request_error_log)
             .with_concurrency_limit(RequestConcurrencyLimit::new(MAXIMUM_CONCURRENT_REQUESTS))
             .run()
             .await
             .map_err(Self::map_daemon_error)
     }
 
-    fn map_daemon_error(error: ActorMultiListenerDaemonError<Error>) -> Error {
+    fn map_daemon_error(error: AsyncMultiListenerDaemonError<Error>) -> Error {
         match error {
-            ActorMultiListenerDaemonError::Listener(listener_error) => Error::SignalFrame(
+            AsyncMultiListenerDaemonError::Listener(listener_error) => Error::SignalFrame(
                 triad_runtime::FrameError::Io(std::io::Error::other(listener_error.to_string())),
             ),
-            ActorMultiListenerDaemonError::Start(error)
-            | ActorMultiListenerDaemonError::Stop(error) => error,
+            AsyncMultiListenerDaemonError::Start(error)
+            | AsyncMultiListenerDaemonError::Stop(error) => error,
         }
     }
 
@@ -123,8 +124,8 @@ impl Daemon {
 /// a flood cannot exhaust resources.
 const MAXIMUM_CONCURRENT_REQUESTS: usize = 64;
 
-/// The `ActorMultiConnectionRuntime` realization. Owns the SHARED durable `Store` (the
-/// concurrency point — locked only briefly per sema operation), the frame
+/// The `AsyncMultiConnectionRuntime` realization. Owns the SHARED durable
+/// `Store` (the concurrency point — locked only briefly per sema operation), the frame
 /// codec, and no local listener/thread machinery. The actor runtime admits
 /// requests through per-listener gates and spawns each connection task, so BOTH
 /// sockets remain responsive while deploys run (intent 2alg, resolving audit
@@ -146,7 +147,7 @@ impl LojixRuntime {
     }
 }
 
-impl ActorMultiConnectionRuntime for LojixRuntime {
+impl AsyncMultiConnectionRuntime for LojixRuntime {
     type Listener = ListenerRole;
     type Error = Error;
 
@@ -260,8 +261,8 @@ impl RequestWorker {
         signal_input: nexus::SignalInput,
     ) -> nexus::SignalOutput {
         let mut engine = SchemaRuntime::with_store_and_configuration(store, configuration);
-        let work =
-            nexus::NexusWork::SignalArrived(signal_input).with_origin_route(nexus::OriginRoute(0));
+        let work = nexus::NexusWork::SignalArrived(signal_input)
+            .with_origin_route(nexus::OriginRoute::new(0));
         match engine.execute(work).await.into_root() {
             nexus::NexusAction::ReplyToSignal(output) => output,
             // `execute` always terminates the runner with a reply; any other
@@ -276,26 +277,30 @@ impl RequestWorker {
         match listener {
             ListenerRole::Owner => nexus::SignalOutput::MetaOutput(
                 meta_signal_lojix::schema::lib::Output::DeployRejected(
-                    meta_signal_lojix::schema::lib::RejectedDeploy {
-                        deploy_rejection_reason:
-                            meta_signal_lojix::schema::lib::DeployRejectionReason::InternalError,
-                        database_marker: meta_signal_lojix::schema::lib::DatabaseMarker {
-                            commit_sequence: 0,
-                            state_digest: 0,
+                    meta_signal_lojix::schema::lib::DeployRejected::new(
+                        meta_signal_lojix::schema::lib::RejectedDeploy {
+                            deploy_rejection_reason:
+                                meta_signal_lojix::schema::lib::DeployRejectionReason::InternalError,
+                            database_marker: meta_signal_lojix::schema::lib::DatabaseMarker {
+                                commit_sequence: signal_lojix::schema::lib::CommitSequence::new(0),
+                                state_digest: signal_lojix::schema::lib::StateDigest::new(0),
+                            },
                         },
-                    },
+                    ),
                 ),
             ),
             ListenerRole::Ordinary => nexus::SignalOutput::OrdinaryOutput(
                 signal_lojix::schema::lib::Output::QueryRejected(
-                    signal_lojix::schema::lib::RejectedQuery {
-                        query_rejection_reason:
-                            signal_lojix::schema::lib::QueryRejectionReason::MalformedSelector,
-                        database_marker: signal_lojix::schema::lib::DatabaseMarker {
-                            commit_sequence: 0,
-                            state_digest: 0,
+                    signal_lojix::schema::lib::QueryRejected::new(
+                        signal_lojix::schema::lib::RejectedQuery {
+                            query_rejection_reason:
+                                signal_lojix::schema::lib::QueryRejectionReason::MalformedSelector,
+                            database_marker: signal_lojix::schema::lib::DatabaseMarker {
+                                commit_sequence: signal_lojix::schema::lib::CommitSequence::new(0),
+                                state_digest: signal_lojix::schema::lib::StateDigest::new(0),
+                            },
                         },
-                    },
+                    ),
                 ),
             ),
         }

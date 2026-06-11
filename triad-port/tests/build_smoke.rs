@@ -26,24 +26,26 @@ const FIXTURE_ATTRIBUTE: &str = "dune-nspawn-toplevel";
 /// horizon materialization). The proposal source is unused on this path
 /// (no projection), so it is a placeholder.
 fn dune_system_deploy(action: ordinary::SystemAction) -> meta::Input {
-    meta::Input::Deploy(meta::DeployRequest::System(meta::SystemDeployment {
-        cluster_name: "goldragon".to_string(),
-        node_name: "dune".to_string(),
-        deployment_kind: ordinary::DeploymentKind::OsOnly,
-        source: "/dev/null".to_string(),
-        flake: FIXTURE_FLAKE.to_string(),
-        system_action: action,
-        builder: None,
-        substituters: Vec::new(),
-        build_attribute: Some(FIXTURE_ATTRIBUTE.to_string()),
-    }))
+    meta::Input::Deploy(meta::Deploy::new(meta::DeployRequest::System(
+        meta::SystemDeployment {
+            cluster_name: ordinary::ClusterName::new("goldragon"),
+            node_name: ordinary::NodeName::new("dune"),
+            deployment_kind: ordinary::DeploymentKind::OsOnly,
+            source: ordinary::ProposalSource::new("/dev/null"),
+            flake: ordinary::FlakeReference::new(FIXTURE_FLAKE),
+            system_action: action,
+            builder: None,
+            substituters: Vec::new(),
+            build_attribute: Some(meta::FlakeAttribute::new(FIXTURE_ATTRIBUTE)),
+        },
+    )))
 }
 
 /// Drive one meta `Input` through a fresh engine and return the meta reply.
 fn drive(input: meta::Input) -> meta::Output {
     let mut engine = SchemaRuntime::new();
     let work = nexus::NexusWork::SignalArrived(nexus::SignalInput::MetaInput(input))
-        .with_origin_route(nexus::OriginRoute(0));
+        .with_origin_route(nexus::OriginRoute::new(0));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -61,7 +63,8 @@ fn eval_dune_fixture_through_the_engine() {
         meta::Output::Deployed(accepted) => {
             eprintln!(
                 "EVAL reached Deployed: deployment {} at commit {}",
-                accepted.deployment_identifier, accepted.database_marker.commit_sequence,
+                accepted.payload().deployment_identifier.payload(),
+                accepted.payload().database_marker.commit_sequence.payload(),
             );
         }
         other => panic!("eval did not reach Deployed: {other:?}"),
@@ -75,7 +78,8 @@ fn build_dune_fixture_through_the_engine() {
         meta::Output::Deployed(accepted) => {
             eprintln!(
                 "BUILD reached Deployed: deployment {} realised at commit {}",
-                accepted.deployment_identifier, accepted.database_marker.commit_sequence,
+                accepted.payload().deployment_identifier.payload(),
+                accepted.payload().database_marker.commit_sequence.payload(),
             );
         }
         other => panic!("build did not reach Deployed: {other:?}"),
@@ -164,7 +168,7 @@ fn daemon_binary_socket_roundtrip_eval() {
         meta::Output::Deployed(accepted) => {
             eprintln!(
                 "DAEMON SOCKET roundtrip reached Deployed: deployment {}",
-                accepted.deployment_identifier,
+                accepted.payload().deployment_identifier.payload(),
             );
         }
         other => panic!("daemon socket roundtrip did not reach Deployed: {other:?}"),
@@ -367,11 +371,13 @@ fn concurrent_requests_are_served_in_parallel() {
     let query_started = Instant::now();
     let mut query_stream = connect(&ordinary_socket, deadline);
     let codec = LengthPrefixedCodec::default();
-    let query = ordinary::Input::Query(ordinary::Selection::ByNode(ordinary::NodeSelector {
-        cluster_name: "alpha".to_string(),
-        node_name: "node-1".to_string(),
-        kind: None,
-    }));
+    let query = ordinary::Input::Query(ordinary::Query::new(ordinary::Selection::ByNode(
+        ordinary::NodeSelector {
+            cluster_name: ordinary::ClusterName::new("alpha"),
+            node_name: ordinary::NodeName::new("node-1"),
+            kind: None,
+        },
+    )));
     let frame = FrameBody::new(query.encode_signal_frame().expect("encode query"));
     codec
         .write_body(&mut query_stream, &frame)

@@ -10,6 +10,9 @@ fn daemon_uses_actor_native_listener_runtime() {
         "std::os::unix::net::UnixStream",
         "BoundedWorkers",
         "impl MultiListenerRuntime",
+        "ActorListenerSocket",
+        "ActorMultiListenerDaemon",
+        "ActorMultiConnectionRuntime",
         ".dispatch(",
         "set_read_timeout",
         "spawn_blocking",
@@ -26,8 +29,9 @@ fn daemon_uses_actor_native_listener_runtime() {
     );
 
     for required in [
-        "ActorMultiListenerDaemon",
-        "ActorMultiConnectionRuntime",
+        "AsyncListenerSocket",
+        "AsyncMultiListenerDaemon",
+        "AsyncMultiConnectionRuntime",
         "AcceptedConnection",
         "read_body_async",
         "write_body_async",

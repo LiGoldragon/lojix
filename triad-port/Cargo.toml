@@ -28,8 +28,8 @@ horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", bra
 nota-codec        = { git = "https://github.com/LiGoldragon/nota-codec.git", branch = "main" }
 nota-config       = { git = "https://github.com/LiGoldragon/nota-config.git", branch = "main" }
 nota-next         = { git = "https://github.com/LiGoldragon/nota-next.git", branch = "main" }
-meta-signal-lojix = { path = "../../meta-signal-lojix/triad-port" }
-signal-lojix      = { path = "../../signal-lojix/triad-port" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix.git", branch = "main" }
+signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix.git", branch = "main" }
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 serde_json        = "1"
 thiserror         = "2"

@@ -20,7 +20,7 @@ use nota_next::NotaEncode;
 use signal_lojix::schema::lib as ordinary;
 
 fn run(engine: &mut SchemaRuntime, input: nexus::SignalInput) -> nexus::SignalOutput {
-    let work = nexus::NexusWork::SignalArrived(input).with_origin_route(nexus::OriginRoute(0));
+    let work = nexus::NexusWork::SignalArrived(input).with_origin_route(nexus::OriginRoute::new(0));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -48,16 +48,16 @@ fn meta_reply(output: nexus::SignalOutput) -> meta::Output {
 #[test]
 fn query_empty_live_set_returns_empty_listing() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::Query(
+    let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::Query(ordinary::Query::new(
         ordinary::Selection::ByNode(ordinary::NodeSelector {
-            cluster_name: "alpha".to_string(),
-            node_name: "node-1".to_string(),
+            cluster_name: ordinary::ClusterName::new("alpha"),
+            node_name: ordinary::NodeName::new("node-1"),
             kind: None,
         }),
-    ));
+    )));
     let output = ordinary_reply(run(&mut engine, input));
     match output {
-        ordinary::Output::Queried(listing) => assert!(listing.generations.is_empty()),
+        ordinary::Output::Queried(listing) => assert!(listing.payload().generations.is_empty()),
         other => panic!("expected Queried, got {other:?}"),
     }
 }
@@ -66,15 +66,17 @@ fn query_empty_live_set_returns_empty_listing() {
 fn watch_deployments_mints_subscription_token() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::WatchDeployments(
-        ordinary::DeploymentWatch {
+        ordinary::WatchDeployments::new(ordinary::DeploymentWatch {
             deployment: None,
             cluster: None,
             node: None,
-        },
+        }),
     ));
     let output = ordinary_reply(run(&mut engine, input));
     match output {
-        ordinary::Output::Watching(opened) => assert_eq!(opened.subscription_token, 1),
+        ordinary::Output::Watching(opened) => {
+            assert_eq!(*opened.payload().subscription_token.payload(), 1)
+        }
         other => panic!("expected Watching, got {other:?}"),
     }
 }
@@ -83,17 +85,17 @@ fn watch_deployments_mints_subscription_token() {
 fn check_host_key_material_reports_no_mismatches() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::CheckHostKeyMaterial(
-        ordinary::KeyMaterialQuery {
-            cluster_name: "alpha".to_string(),
-            node_name: "node-1".to_string(),
-            source: "github:owner/repo".to_string(),
-        },
+        ordinary::CheckHostKeyMaterial::new(ordinary::KeyMaterialQuery {
+            cluster_name: ordinary::ClusterName::new("alpha"),
+            node_name: ordinary::NodeName::new("node-1"),
+            source: ordinary::ProposalSource::new("github:owner/repo"),
+        }),
     ));
     let output = ordinary_reply(run(&mut engine, input));
     match output {
         ordinary::Output::KeyMaterialChecked(report) => {
-            assert_eq!(report.node_name, "node-1");
-            assert!(report.mismatches.is_empty());
+            assert_eq!(report.payload().node_name.payload(), "node-1");
+            assert!(report.payload().mismatches.is_empty());
         }
         other => panic!("expected KeyMaterialChecked, got {other:?}"),
     }
@@ -102,12 +104,12 @@ fn check_host_key_material_reports_no_mismatches() {
 #[test]
 fn pin_unknown_generation_is_rejected() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Pin(meta::PinRequest {
-        cluster_name: "alpha".to_string(),
-        node_name: "node-1".to_string(),
-        generation_identifier: 42,
-        pin_label: "keep".to_string(),
-    }));
+    let input = nexus::SignalInput::MetaInput(meta::Input::Pin(meta::Pin::new(meta::PinRequest {
+        cluster_name: ordinary::ClusterName::new("alpha"),
+        node_name: ordinary::NodeName::new("node-1"),
+        generation_identifier: ordinary::GenerationIdentifier::new(42),
+        pin_label: ordinary::PinLabel::new("keep"),
+    })));
     let output = meta_reply(run(&mut engine, input));
     match output {
         meta::Output::PinRejected(_) => {}
@@ -118,11 +120,13 @@ fn pin_unknown_generation_is_rejected() {
 #[test]
 fn retire_unknown_generation_is_rejected() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Retire(meta::RetireRequest {
-        cluster_name: "alpha".to_string(),
-        node_name: "node-1".to_string(),
-        generation_identifier: 7,
-    }));
+    let input = nexus::SignalInput::MetaInput(meta::Input::Retire(meta::Retire::new(
+        meta::RetireRequest {
+            cluster_name: ordinary::ClusterName::new("alpha"),
+            node_name: ordinary::NodeName::new("node-1"),
+            generation_identifier: ordinary::GenerationIdentifier::new(7),
+        },
+    )));
     let output = meta_reply(run(&mut engine, input));
     match output {
         meta::Output::RetireRejected(_) => {}
@@ -136,21 +140,21 @@ fn system_deployment(
     action: ordinary::SystemAction,
 ) -> meta::SystemDeployment {
     meta::SystemDeployment {
-        cluster_name: "alpha".to_string(),
-        node_name: "node-1".to_string(),
+        cluster_name: ordinary::ClusterName::new("alpha"),
+        node_name: ordinary::NodeName::new("node-1"),
         deployment_kind: ordinary::DeploymentKind::OsOnly,
-        source: "/dev/null".to_string(),
-        flake: "github:owner/repo".to_string(),
+        source: ordinary::ProposalSource::new("/dev/null"),
+        flake: ordinary::FlakeReference::new("github:owner/repo"),
         system_action: action,
         builder: None,
         substituters: Vec::new(),
-        build_attribute: build_attribute.map(str::to_string),
+        build_attribute: build_attribute.map(meta::FlakeAttribute::new),
     }
 }
 
 fn deploy_rejection_reason(output: nexus::SignalOutput) -> meta::DeployRejectionReason {
     match meta_reply(output) {
-        meta::Output::DeployRejected(rejected) => rejected.deploy_rejection_reason,
+        meta::Output::DeployRejected(rejected) => rejected.payload().deploy_rejection_reason,
         other => panic!("expected DeployRejected, got {other:?}"),
     }
 }
@@ -163,8 +167,11 @@ fn deploy_rejection_reason(output: nexus::SignalOutput) -> meta::DeployRejection
 #[test]
 fn activating_deploy_is_rejected_until_activate_lands() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::DeployRequest::System(
-        system_deployment(Some("dune-nspawn-toplevel"), ordinary::SystemAction::Switch),
+    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
+        meta::DeployRequest::System(system_deployment(
+            Some("dune-nspawn-toplevel"),
+            ordinary::SystemAction::Switch,
+        )),
     )));
     assert_eq!(
         deploy_rejection_reason(run(&mut engine, input)),
@@ -175,8 +182,8 @@ fn activating_deploy_is_rejected_until_activate_lands() {
 #[test]
 fn production_deploy_without_build_attribute_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::DeployRequest::System(
-        system_deployment(None, ordinary::SystemAction::Build),
+    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
+        meta::DeployRequest::System(system_deployment(None, ordinary::SystemAction::Build)),
     )));
     assert_eq!(
         deploy_rejection_reason(run(&mut engine, input)),
@@ -187,17 +194,17 @@ fn production_deploy_without_build_attribute_enters_effect_pipeline() {
 #[test]
 fn home_build_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::DeployRequest::Home(
-        meta::HomeDeployment {
-            cluster_name: "alpha".to_string(),
-            node_name: "node-1".to_string(),
-            user_name: "li".to_string(),
-            source: "/dev/null".to_string(),
-            flake: "github:owner/repo".to_string(),
+    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
+        meta::DeployRequest::Home(meta::HomeDeployment {
+            cluster_name: ordinary::ClusterName::new("alpha"),
+            node_name: ordinary::NodeName::new("node-1"),
+            user_name: ordinary::UserName::new("li"),
+            source: ordinary::ProposalSource::new("/dev/null"),
+            flake: ordinary::FlakeReference::new("github:owner/repo"),
             home_mode: meta::HomeMode::Build,
             builder: None,
             substituters: Vec::new(),
-        },
+        }),
     )));
     assert_eq!(
         deploy_rejection_reason(run(&mut engine, input)),
@@ -216,15 +223,20 @@ fn production_eval_materializes_horizon_inputs_and_returns_deployed() {
 
     let mut engine = SchemaRuntime::new();
     let mut deployment = system_deployment(None, ordinary::SystemAction::Eval);
-    deployment.source = cluster_path.display().to_string();
-    deployment.flake = format!("path:{}", directory.path().join("flake").display());
-    let input =
-        nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::DeployRequest::System(deployment)));
+    deployment.source = ordinary::ProposalSource::new(cluster_path.display().to_string());
+    deployment.flake =
+        ordinary::FlakeReference::new(format!("path:{}", directory.path().join("flake").display()));
+    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
+        meta::DeployRequest::System(deployment),
+    )));
 
     match meta_reply(run(&mut engine, input)) {
         meta::Output::Deployed(accepted) => {
-            assert_eq!(accepted.deployment_identifier, 1);
-            assert_eq!(accepted.database_marker.commit_sequence, 1);
+            assert_eq!(*accepted.payload().deployment_identifier.payload(), 1);
+            assert_eq!(
+                *accepted.payload().database_marker.commit_sequence.payload(),
+                1
+            );
         }
         other => panic!("expected Deployed, got {other:?}"),
     }

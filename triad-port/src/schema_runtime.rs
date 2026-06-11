@@ -76,8 +76,8 @@ impl RuntimeConfiguration {
     }
 
     fn materialization_root(&self, command: &nexus::HorizonMaterializationCommand) -> PathBuf {
-        let cluster = command.cluster_name.as_str();
-        let node = command.node_name.as_str();
+        let cluster = command.cluster_name.payload();
+        let node = command.node_name.payload();
         self.generated_inputs_directory
             .join(cluster)
             .join(node)
@@ -191,7 +191,7 @@ impl DeployAction {
                 "nixosConfigurations.target.config.system.build.toplevel".to_string()
             }
             Self::Home { user, .. } => {
-                format!("homeConfigurations.{user}.activationPackage")
+                format!("homeConfigurations.{}.activationPackage", user.payload())
             }
         }
     }
@@ -305,7 +305,7 @@ impl DeployPipeline {
                 ordinary::DeploymentKind::HomeOnly => nexus::MaterializationShape::OsOnly,
             },
             DeployAction::Home { user, .. } => {
-                nexus::MaterializationShape::Home(nexus::HomeMaterialization(user.clone()))
+                nexus::MaterializationShape::Home(nexus::HomeMaterialization::new(user.clone()))
             }
         }
     }
@@ -328,14 +328,14 @@ impl DeployPipeline {
         // `homeConfigurations.<user>...`). The old `{cluster}.{node}` form
         // resolved to no real flake attribute and every deploy failed at eval.
         match &self.build_attribute {
-            Some(attribute) => attribute.clone(),
+            Some(attribute) => attribute.payload().clone(),
             None => self.action.target_attribute(),
         }
     }
 
     fn nix_build_command(&self, closure_path: ordinary::ClosurePath) -> nexus::NixBuildCommand {
         nexus::NixBuildCommand {
-            generation_identifier: self.generation_identifier,
+            generation_identifier: self.generation_identifier.clone(),
             closure_path,
             target: self.build_target(),
             substituters: self.substituters.clone(),
@@ -347,7 +347,7 @@ impl DeployPipeline {
         closure_path: ordinary::ClosurePath,
     ) -> nexus::CopyClosureCommand {
         nexus::CopyClosureCommand {
-            generation_identifier: self.generation_identifier,
+            generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             closure_path,
@@ -356,7 +356,7 @@ impl DeployPipeline {
 
     fn activate_generation_command(&self) -> nexus::ActivateGenerationCommand {
         nexus::ActivateGenerationCommand {
-            generation_identifier: self.generation_identifier,
+            generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             activation_kind: self.activation_kind.clone(),
@@ -365,11 +365,14 @@ impl DeployPipeline {
 
     fn activation_commit(&self) -> sema::ActivationCommit {
         sema::ActivationCommit {
-            generation_identifier: self.generation_identifier,
+            generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             generation_slot: ordinary::GenerationSlot::Current,
-            closure_path: self.closure_path.clone().unwrap_or_default(),
+            closure_path: self
+                .closure_path
+                .clone()
+                .unwrap_or_else(|| ordinary::ClosurePath::new("")),
         }
     }
 
@@ -380,8 +383,8 @@ impl DeployPipeline {
         detail: Option<ordinary::PhaseDetail>,
     ) -> ordinary::DeploymentPhaseEvent {
         ordinary::DeploymentPhaseEvent {
-            deployment_identifier: self.deployment_identifier,
-            generation_identifier: self.generation_identifier,
+            deployment_identifier: self.deployment_identifier.clone(),
+            generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             deployment_phase: phase,
@@ -421,15 +424,15 @@ impl SchemaRuntime {
 
     fn marker(commit_sequence: u64) -> ordinary::DatabaseMarker {
         ordinary::DatabaseMarker {
-            commit_sequence,
-            state_digest: commit_sequence,
+            commit_sequence: ordinary::CommitSequence::new(commit_sequence),
+            state_digest: ordinary::StateDigest::new(commit_sequence),
         }
     }
 
     fn sema_marker(commit_sequence: u64) -> sema::StateMarker {
         sema::StateMarker {
-            commit_sequence,
-            state_digest: commit_sequence,
+            commit_sequence: sema::CommitSequence::new(commit_sequence),
+            state_digest: sema::StateDigest::new(commit_sequence),
         }
     }
 
@@ -445,15 +448,15 @@ impl SchemaRuntime {
     fn decide_ordinary_input(&mut self, input: ordinary::Input) -> nexus::NexusAction {
         match input {
             ordinary::Input::Query(selection) => nexus::NexusAction::CommandSemaRead(
-                sema::SemaReadInput::QueryGenerations(selection),
+                sema::SemaReadInput::QueryGenerations(selection.into_payload()),
             ),
-            ordinary::Input::CheckHostKeyMaterial(query) => {
-                nexus::NexusAction::CommandSemaRead(sema::SemaReadInput::CheckKeyMaterial(query))
-            }
+            ordinary::Input::CheckHostKeyMaterial(query) => nexus::NexusAction::CommandSemaRead(
+                sema::SemaReadInput::CheckKeyMaterial(query.into_payload()),
+            ),
             ordinary::Input::WatchDeployments(_) | ordinary::Input::WatchCacheRetention(_) => {
                 self.open_subscription()
             }
-            ordinary::Input::Unwatch(close) => self.close_subscription(close),
+            ordinary::Input::Unwatch(close) => self.close_subscription(close.into_payload()),
         }
     }
 
@@ -462,30 +465,32 @@ impl SchemaRuntime {
             Ok(mut state) => {
                 let subscription_token = state.next_subscription_token();
                 let commit_sequence = state.commit_sequence;
-                ordinary::Output::Watching(ordinary::SubscriptionOpened {
-                    subscription_token,
-                    commit_sequence,
-                })
+                ordinary::Output::Watching(ordinary::Watching::new(ordinary::SubscriptionOpened {
+                    subscription_token: ordinary::SubscriptionToken::new(subscription_token),
+                    commit_sequence: ordinary::CommitSequence::new(commit_sequence),
+                }))
             }
-            Err(_) => ordinary::Output::WatchRejected(ordinary::RejectedWatch(
-                ordinary::WatchRejectionReason::StreamUnavailable,
+            Err(_) => ordinary::Output::WatchRejected(ordinary::WatchRejected::new(
+                ordinary::RejectedWatch::new(ordinary::WatchRejectionReason::StreamUnavailable),
             )),
         };
         nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
     }
 
     fn close_subscription(&mut self, close: ordinary::SubscriptionClose) -> nexus::NexusAction {
-        let reply =
-            ordinary::Output::Unwatched(ordinary::SubscriptionClosed::new(close.into_payload()));
+        let reply = ordinary::Output::Unwatched(ordinary::Unwatched::new(
+            ordinary::SubscriptionClosed::new(close.into_payload()),
+        ));
         nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
     }
 
     fn decide_meta_input(&mut self, input: meta::Input) -> nexus::NexusAction {
         match input {
             meta::Input::Deploy(request) => {
+                let request = request.into_payload();
                 if let Some(reason) = Self::unsupported_deploy_reason(&request) {
                     return Self::reply_meta(meta::Output::DeployRejected(
-                        self.deploy_rejection(reason),
+                        meta::DeployRejected::new(self.deploy_rejection(reason)),
                     ));
                 }
                 self.active_operation = Some(MetaOperation::Deploy);
@@ -503,16 +508,20 @@ impl SchemaRuntime {
             }
             meta::Input::Pin(request) => {
                 self.active_operation = Some(MetaOperation::Pin);
-                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::PinGeneration(request))
+                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::PinGeneration(
+                    request.into_payload(),
+                ))
             }
             meta::Input::Unpin(request) => {
                 self.active_operation = Some(MetaOperation::Unpin);
-                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::UnpinGeneration(request))
+                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::UnpinGeneration(
+                    request.into_payload(),
+                ))
             }
             meta::Input::Retire(request) => {
                 self.active_operation = Some(MetaOperation::Retire);
                 nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RetireGeneration(
-                    request,
+                    request.into_payload(),
                 ))
             }
         }
@@ -544,19 +553,23 @@ impl SchemaRuntime {
 
     fn decide_read_completion(&mut self, output: sema::SemaReadOutput) -> nexus::NexusAction {
         let reply = match output {
-            sema::SemaReadOutput::GenerationsQueried(listing) => ordinary::Output::Queried(listing),
+            sema::SemaReadOutput::GenerationsQueried(listing) => {
+                ordinary::Output::Queried(ordinary::Queried::new(listing))
+            }
             sema::SemaReadOutput::KeyMaterialChecked(report) => {
-                ordinary::Output::KeyMaterialChecked(report)
+                ordinary::Output::KeyMaterialChecked(ordinary::KeyMaterialChecked::new(report))
             }
-            sema::SemaReadOutput::EventLogRead(_) => ordinary::Output::QueryRejected(
-                self.query_rejection(ordinary::QueryRejectionReason::MalformedSelector),
-            ),
-            sema::SemaReadOutput::ReadMissed(report) => {
-                ordinary::Output::QueryRejected(ordinary::RejectedQuery {
+            sema::SemaReadOutput::EventLogRead(_) => {
+                ordinary::Output::QueryRejected(ordinary::QueryRejected::new(
+                    self.query_rejection(ordinary::QueryRejectionReason::MalformedSelector),
+                ))
+            }
+            sema::SemaReadOutput::ReadMissed(report) => ordinary::Output::QueryRejected(
+                ordinary::QueryRejected::new(ordinary::RejectedQuery {
                     query_rejection_reason: ordinary::QueryRejectionReason::GenerationUnknown,
-                    database_marker: Self::marker(report.marker.commit_sequence),
-                })
-            }
+                    database_marker: Self::marker(report.marker.commit_sequence.into_payload()),
+                }),
+            ),
         };
         nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
     }
@@ -580,15 +593,15 @@ impl SchemaRuntime {
             sema::SemaWriteOutput::GenerationActivated(_) => self.finish_deploy_pipeline(),
             sema::SemaWriteOutput::GenerationPinned(applied) => {
                 self.active_operation = None;
-                Self::reply_meta(meta::Output::Pinned(applied))
+                Self::reply_meta(meta::Output::Pinned(meta::Pinned::new(applied)))
             }
             sema::SemaWriteOutput::GenerationUnpinned(applied) => {
                 self.active_operation = None;
-                Self::reply_meta(meta::Output::Unpinned(applied))
+                Self::reply_meta(meta::Output::Unpinned(meta::Unpinned::new(applied)))
             }
             sema::SemaWriteOutput::GenerationRetired(applied) => {
                 self.active_operation = None;
-                Self::reply_meta(meta::Output::Retired(applied))
+                Self::reply_meta(meta::Output::Retired(meta::Retired::new(applied)))
             }
             sema::SemaWriteOutput::ContainerRecorded(_) => self.advance_after_phase(),
             sema::SemaWriteOutput::WriteRejected(report) => self.reject_active_or_meta(report),
@@ -598,7 +611,7 @@ impl SchemaRuntime {
     fn begin_deploy_pipeline(&mut self, accepted: meta::AcceptedDeploy) -> nexus::NexusAction {
         let pipeline = match self.active_deploy.as_ref() {
             Some(pipeline) => pipeline.clone(),
-            None => return Self::reply_meta(meta::Output::Deployed(accepted)),
+            None => return Self::reply_meta(meta::Output::Deployed(meta::Deployed::new(accepted))),
         };
         // First effect of the chain: resolve the flake against the proposal
         // source. Subsequent effects are emitted from `decide_effect_completion`.
@@ -614,9 +627,9 @@ impl SchemaRuntime {
         let pipeline = match self.active_deploy.clone() {
             Some(pipeline) => pipeline,
             None => {
-                return Self::reply_meta(meta::Output::DeployRejected(
+                return Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
                     self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-                ));
+                )));
             }
         };
         match pipeline.stage {
@@ -656,11 +669,11 @@ impl SchemaRuntime {
                 database_marker: pipeline.accepted_marker,
             },
             None => meta::AcceptedDeploy {
-                deployment_identifier: 0,
+                deployment_identifier: ordinary::DeploymentIdentifier::new(0),
                 database_marker: Self::marker(self.store.commit_sequence().unwrap_or(0)),
             },
         };
-        Self::reply_meta(meta::Output::Deployed(accepted))
+        Self::reply_meta(meta::Output::Deployed(meta::Deployed::new(accepted)))
     }
 
     fn reject_active_or_meta(&mut self, report: sema::RejectionReport) -> nexus::NexusAction {
@@ -672,24 +685,32 @@ impl SchemaRuntime {
             .active_operation
             .take()
             .unwrap_or(MetaOperation::Deploy);
-        let marker = Self::marker(report.marker.commit_sequence);
+        let marker = Self::marker(report.marker.commit_sequence.into_payload());
         let output = match operation {
-            MetaOperation::Deploy => meta::Output::DeployRejected(meta::RejectedDeploy {
-                deploy_rejection_reason: Self::deploy_reason(report.reason),
-                database_marker: marker,
-            }),
-            MetaOperation::Pin => meta::Output::PinRejected(meta::RejectedPin {
-                pin_rejection_reason: Self::pin_reason(report.reason),
-                database_marker: marker,
-            }),
-            MetaOperation::Unpin => meta::Output::UnpinRejected(meta::RejectedUnpin {
-                unpin_rejection_reason: Self::unpin_reason(report.reason),
-                database_marker: marker,
-            }),
-            MetaOperation::Retire => meta::Output::RetireRejected(meta::RejectedRetire {
-                retire_rejection_reason: Self::retire_reason(report.reason),
-                database_marker: marker,
-            }),
+            MetaOperation::Deploy => {
+                meta::Output::DeployRejected(meta::DeployRejected::new(meta::RejectedDeploy {
+                    deploy_rejection_reason: Self::deploy_reason(report.reason),
+                    database_marker: marker,
+                }))
+            }
+            MetaOperation::Pin => {
+                meta::Output::PinRejected(meta::PinRejected::new(meta::RejectedPin {
+                    pin_rejection_reason: Self::pin_reason(report.reason),
+                    database_marker: marker,
+                }))
+            }
+            MetaOperation::Unpin => {
+                meta::Output::UnpinRejected(meta::UnpinRejected::new(meta::RejectedUnpin {
+                    unpin_rejection_reason: Self::unpin_reason(report.reason),
+                    database_marker: marker,
+                }))
+            }
+            MetaOperation::Retire => {
+                meta::Output::RetireRejected(meta::RetireRejected::new(meta::RejectedRetire {
+                    retire_rejection_reason: Self::retire_reason(report.reason),
+                    database_marker: marker,
+                }))
+            }
         };
         Self::reply_meta(output)
     }
@@ -762,9 +783,9 @@ impl SchemaRuntime {
                 // an unexpected effect completion replies a rejection.
                 return match result {
                     nexus::EffectResult::EffectFailed(failure) => self.fail_pipeline(failure),
-                    _ => Self::reply_meta(meta::Output::DeployRejected(
+                    _ => Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
                         self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-                    )),
+                    ))),
                 };
             }
         };
@@ -781,7 +802,7 @@ impl SchemaRuntime {
                 }
             }
             nexus::EffectResult::HorizonMaterialized(inputs) => {
-                self.set_input_overrides(inputs.0);
+                self.set_input_overrides(inputs.into_payload());
                 self.record_phase(ordinary::DeploymentPhase::Building, None)
             }
             nexus::EffectResult::ClosureEvaluated(evaluated) => {
@@ -848,12 +869,16 @@ impl SchemaRuntime {
                     .store
                     .lock()
                     .map(|state| state.next_event_log_position());
-                pipeline.phase_event(phase, position.unwrap_or(0), detail)
+                pipeline.phase_event(
+                    phase,
+                    ordinary::EventLogPosition::new(position.unwrap_or(0)),
+                    detail,
+                )
             }
             None => {
-                return Self::reply_meta(meta::Output::DeployRejected(
+                return Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
                     self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-                ));
+                )));
             }
         };
         nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordPhaseTransition(event))
@@ -875,7 +900,9 @@ impl SchemaRuntime {
             nexus::EffectStage::Activate => meta::DeployRejectionReason::BuilderUnreachable,
             nexus::EffectStage::Gc => meta::DeployRejectionReason::DeploymentInFlight,
         };
-        Self::reply_meta(meta::Output::DeployRejected(self.deploy_rejection(reason)))
+        Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
+            self.deploy_rejection(reason),
+        )))
     }
 
     // ---- sema apply / observe (the four tables) -------------------------
@@ -918,13 +945,13 @@ impl SchemaRuntime {
             Ok((commit_sequence, deployment_identifier, generation_identifier)) => {
                 let accepted_marker = Self::marker(commit_sequence);
                 self.active_deploy = Some(DeployPipeline::from_submission(
-                    deployment_identifier,
-                    generation_identifier,
+                    deployment_identifier.into(),
+                    generation_identifier.into(),
                     accepted_marker.clone(),
                     submission,
                 ));
                 sema::SemaWriteOutput::DeploySubmitted(meta::AcceptedDeploy {
-                    deployment_identifier,
+                    deployment_identifier: deployment_identifier.into(),
                     database_marker: accepted_marker,
                 })
             }
@@ -940,12 +967,12 @@ impl SchemaRuntime {
             Ok(mut state) => {
                 let commit_sequence = state.next_commit_sequence();
                 let event_log_position = state.next_event_log_position();
-                state.event_log.0.push(sema::EventLogEntry {
-                    event_log_position,
+                state.push_event_log_entry(sema::EventLogEntry {
+                    event_log_position: ordinary::EventLogPosition::new(event_log_position),
                     record: sema::LoggedEvent::Deployment(event),
                 });
                 sema::SemaWriteOutput::PhaseRecorded(sema::PhaseReceipt {
-                    event_log_position,
+                    event_log_position: ordinary::EventLogPosition::new(event_log_position),
                     state_marker: Self::sema_marker(commit_sequence),
                 })
             }
@@ -963,8 +990,8 @@ impl SchemaRuntime {
                 let pipeline = self.active_deploy.clone();
                 let deployment_identifier = pipeline
                     .as_ref()
-                    .map(|p| p.deployment_identifier)
-                    .unwrap_or(0);
+                    .map(|p| p.deployment_identifier.clone())
+                    .unwrap_or_else(|| ordinary::DeploymentIdentifier::new(0));
                 let deployment_kind = pipeline
                     .as_ref()
                     .map(|p| p.deployment_kind.clone())
@@ -973,9 +1000,9 @@ impl SchemaRuntime {
                     .as_ref()
                     .map(|p| p.activation_kind.clone())
                     .unwrap_or(ordinary::ActivationKind::Switch);
-                state.live_set.0.push(sema::LiveGeneration {
+                state.push_live_generation(sema::LiveGeneration {
                     deployment_identifier,
-                    generation_identifier: commit.generation_identifier,
+                    generation_identifier: commit.generation_identifier.clone(),
                     cluster_name: commit.cluster_name.clone(),
                     node_name: commit.node_name.clone(),
                     deployment_kind,
@@ -983,8 +1010,8 @@ impl SchemaRuntime {
                     generation_slot: commit.generation_slot.clone(),
                     closure_path: commit.closure_path.clone(),
                 });
-                state.gc_roots.0.push(sema::GcRoot {
-                    generation_identifier: commit.generation_identifier,
+                state.push_gc_root(sema::GcRoot {
+                    generation_identifier: commit.generation_identifier.clone(),
                     cluster_name: commit.cluster_name,
                     node_name: commit.node_name,
                     generation_slot: commit.generation_slot.clone(),
@@ -1005,18 +1032,17 @@ impl SchemaRuntime {
         match self.store.lock() {
             Ok(mut state) => {
                 let commit_sequence = state.next_commit_sequence();
-                let already_used = state
-                    .gc_roots
-                    .0
+                let mut roots = state.gc_roots.clone().into_payload();
+                let already_used = roots
                     .iter()
-                    .any(|root| root.label.as_deref() == Some(request.pin_label.as_str()));
+                    .any(|root| root.label.as_ref() == Some(&request.pin_label));
                 if already_used {
                     return Self::write_rejected(
                         commit_sequence,
                         sema::RejectionReason::PinLabelInUse,
                     );
                 }
-                if let Some(root) = state.gc_roots.0.iter_mut().find(|root| {
+                if let Some(root) = roots.iter_mut().find(|root| {
                     root.generation_identifier == request.generation_identifier
                         && root.cluster_name == request.cluster_name
                         && root.node_name == request.node_name
@@ -1024,6 +1050,7 @@ impl SchemaRuntime {
                     let from_slot = root.generation_slot.clone();
                     root.generation_slot = ordinary::GenerationSlot::Pinned;
                     root.label = Some(request.pin_label.clone());
+                    state.replace_gc_roots(roots);
                     sema::SemaWriteOutput::GenerationPinned(meta::AppliedPin {
                         generation_identifier: request.generation_identifier,
                         pin_label: request.pin_label,
@@ -1043,15 +1070,17 @@ impl SchemaRuntime {
         match self.store.lock() {
             Ok(mut state) => {
                 let commit_sequence = state.next_commit_sequence();
-                if let Some(root) = state.gc_roots.0.iter_mut().find(|root| {
-                    root.label.as_deref() == Some(request.pin_label.as_str())
+                let mut roots = state.gc_roots.clone().into_payload();
+                if let Some(root) = roots.iter_mut().find(|root| {
+                    root.label.as_ref() == Some(&request.pin_label)
                         && root.cluster_name == request.cluster_name
                         && root.node_name == request.node_name
                 }) {
-                    let generation_identifier = root.generation_identifier;
+                    let generation_identifier = root.generation_identifier.clone();
                     let from_slot = root.generation_slot.clone();
                     root.generation_slot = ordinary::GenerationSlot::Recent;
                     root.label = None;
+                    state.replace_gc_roots(roots);
                     sema::SemaWriteOutput::GenerationUnpinned(meta::AppliedUnpin {
                         generation_identifier,
                         pin_label: request.pin_label,
@@ -1071,21 +1100,22 @@ impl SchemaRuntime {
         match self.store.lock() {
             Ok(mut state) => {
                 let commit_sequence = state.next_commit_sequence();
-                let found = state.gc_roots.0.iter().position(|root| {
+                let mut roots = state.gc_roots.clone().into_payload();
+                let found = roots.iter().position(|root| {
                     root.generation_identifier == request.generation_identifier
                         && root.cluster_name == request.cluster_name
                         && root.node_name == request.node_name
                 });
                 match found {
                     Some(index) => {
-                        let root = state.gc_roots.0.remove(index);
+                        let root = roots.remove(index);
                         if matches!(root.generation_slot, ordinary::GenerationSlot::Pinned) {
-                            state.gc_roots.0.insert(index, root);
                             return Self::write_rejected(
                                 commit_sequence,
                                 sema::RejectionReason::GenerationPinned,
                             );
                         }
+                        state.replace_gc_roots(roots);
                         sema::SemaWriteOutput::GenerationRetired(meta::AppliedRetire {
                             generation_identifier: request.generation_identifier,
                             from_slot: root.generation_slot,
@@ -1115,15 +1145,15 @@ impl SchemaRuntime {
                     node_name: transition.node_name,
                     container: transition.container,
                     state: transition.state,
-                    event_log_position,
+                    event_log_position: ordinary::EventLogPosition::new(event_log_position),
                 };
-                state.containers.0.push(record.clone());
-                state.event_log.0.push(sema::EventLogEntry {
-                    event_log_position,
+                state.push_container_record(record.clone());
+                state.push_event_log_entry(sema::EventLogEntry {
+                    event_log_position: ordinary::EventLogPosition::new(event_log_position),
                     record: sema::LoggedEvent::Container(record),
                 });
                 sema::SemaWriteOutput::ContainerRecorded(sema::ContainerReceipt {
-                    event_log_position,
+                    event_log_position: ordinary::EventLogPosition::new(event_log_position),
                     state_marker: Self::sema_marker(commit_sequence),
                 })
             }
@@ -1160,7 +1190,7 @@ impl SchemaRuntime {
         let commit_sequence = state.commit_sequence;
         let generations: Vec<ordinary::Generation> = state
             .live_set
-            .0
+            .payload()
             .iter()
             .filter(|live| Self::generation_matches(&selection, live))
             .map(Self::project_generation)
@@ -1190,8 +1220,8 @@ impl SchemaRuntime {
 
     fn project_generation(live: &sema::LiveGeneration) -> ordinary::Generation {
         ordinary::Generation {
-            generation_identifier: live.generation_identifier,
-            deployment_identifier: live.deployment_identifier,
+            generation_identifier: live.generation_identifier.clone(),
+            deployment_identifier: live.deployment_identifier.clone(),
             cluster_name: live.cluster_name.clone(),
             node_name: live.node_name.clone(),
             deployment_kind: live.deployment_kind.clone(),
@@ -1211,8 +1241,10 @@ impl SchemaRuntime {
         let commit_sequence = state.commit_sequence;
         let mut deployment_events = Vec::new();
         let mut retention_events = Vec::new();
-        for entry in &state.event_log.0 {
-            if entry.event_log_position < range.from || entry.event_log_position >= range.until {
+        for entry in state.event_log.payload() {
+            if *entry.event_log_position.payload() < *range.from.payload()
+                || *entry.event_log_position.payload() >= *range.until.payload()
+            {
                 continue;
             }
             match &entry.record {
@@ -1251,7 +1283,10 @@ impl SchemaRuntime {
     async fn resolve_flake_auth(&self, request: nexus::FlakeAuthRequest) -> nexus::EffectResult {
         // Resolve the flake metadata to a locked revision through the proposal
         // source. `nix flake metadata --json <flake>` reports the resolved ref.
-        match NixCommand::flake_metadata(&request.flake).run().await {
+        match NixCommand::flake_metadata(request.flake.payload())
+            .run()
+            .await
+        {
             Ok(output) => nexus::EffectResult::FlakeResolved(nexus::ResolvedFlake {
                 flake: request.flake,
                 revision: NixCommand::first_line(&output),
@@ -1273,14 +1308,14 @@ impl SchemaRuntime {
     }
 
     async fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> nexus::EffectResult {
-        let attribute = format!("{}#{}", command.flake, command.attribute);
+        let attribute = format!("{}#{}", command.flake.payload(), command.attribute);
         match NixCommand::eval_drv_path(&attribute, &command.overrides)
             .run()
             .await
         {
             Ok(output) => nexus::EffectResult::ClosureEvaluated(nexus::EvaluatedClosure {
-                generation_identifier: 0,
-                closure_path: NixCommand::first_line(&output),
+                generation_identifier: ordinary::GenerationIdentifier::new(0),
+                closure_path: ordinary::ClosurePath::new(NixCommand::first_line(&output)),
             }),
             Err(detail) => Self::effect_failed(nexus::EffectStage::Eval, detail),
         }
@@ -1293,25 +1328,28 @@ impl SchemaRuntime {
         // `nix build` invocation here; the remote dispatch wraps it in ssh.
         let invocation = match &command.target {
             nexus::BuildTarget::Local => {
-                NixCommand::build_closure(&command.closure_path, &command.substituters)
+                NixCommand::build_closure(command.closure_path.payload(), &command.substituters)
             }
             nexus::BuildTarget::Remote(builder) => NixCommand::build_closure_remote(
-                builder.payload(),
-                &command.closure_path,
+                builder.payload().payload(),
+                command.closure_path.payload(),
                 &command.substituters,
             ),
         };
         match invocation.run().await {
             Ok(output) => nexus::EffectResult::ClosureBuilt(nexus::BuiltClosure {
                 generation_identifier: command.generation_identifier,
-                closure_path: NixCommand::first_line_or(&output, &command.closure_path),
+                closure_path: ordinary::ClosurePath::new(NixCommand::first_line_or(
+                    &output,
+                    command.closure_path.payload(),
+                )),
             }),
             Err(detail) => Self::effect_failed(nexus::EffectStage::Build, detail),
         }
     }
 
     async fn run_copy_closure(&self, command: nexus::CopyClosureCommand) -> nexus::EffectResult {
-        match NixCommand::copy_closure(&command.node_name, &command.closure_path)
+        match NixCommand::copy_closure(command.node_name.payload(), command.closure_path.payload())
             .run()
             .await
         {
@@ -1329,7 +1367,10 @@ impl SchemaRuntime {
         command: nexus::ActivateGenerationCommand,
     ) -> nexus::EffectResult {
         let slot = Self::activation_slot(&command.activation_kind);
-        match NixCommand::activate_system(&command.node_name).run().await {
+        match NixCommand::activate_system(command.node_name.payload())
+            .run()
+            .await
+        {
             Ok(_) => nexus::EffectResult::GenerationActivated(nexus::ActivatedGeneration {
                 generation_identifier: command.generation_identifier,
                 node_name: command.node_name,
@@ -1349,7 +1390,10 @@ impl SchemaRuntime {
     }
 
     async fn run_path_info_gc(&self, command: nexus::PathInfoGcCommand) -> nexus::EffectResult {
-        match NixCommand::collect_garbage(&command.node_name).run().await {
+        match NixCommand::collect_garbage(command.node_name.payload())
+            .run()
+            .await
+        {
             Ok(output) => nexus::EffectResult::PathsCollected(nexus::GarbageCollected {
                 cluster_name: command.cluster_name,
                 node_name: command.node_name,
@@ -1409,7 +1453,7 @@ struct ProposalFile {
 impl ProposalFile {
     fn new(source: &ordinary::ProposalSource) -> Self {
         Self {
-            path: PathBuf::from(source.as_str()),
+            path: PathBuf::from(source.payload()),
         }
     }
 
@@ -1429,8 +1473,8 @@ struct HorizonViewpoint {
 impl HorizonViewpoint {
     fn from_command(command: &nexus::HorizonMaterializationCommand) -> Result<Self> {
         Ok(Self {
-            cluster: HorizonClusterName::try_new(command.cluster_name.clone())?,
-            node: HorizonNodeName::try_new(command.node_name.clone())?,
+            cluster: HorizonClusterName::try_new(command.cluster_name.payload().clone())?,
+            node: HorizonNodeName::try_new(command.node_name.payload().clone())?,
         })
     }
 
@@ -1528,7 +1572,7 @@ impl MaterializedInputSet {
                     .await?,
             );
         }
-        Ok(nexus::MaterializedInputs(inputs))
+        Ok(nexus::MaterializedInputs::new(inputs))
     }
 }
 
@@ -1624,7 +1668,7 @@ impl DeploymentInput {
             }),
             nexus::MaterializationShape::OsOnly => Some(Self {
                 include_home: false,
-                include_all_firmware: true,
+                include_all_firmware: false,
             }),
             nexus::MaterializationShape::Home(_) => None,
         }
@@ -1914,9 +1958,9 @@ impl nexus::NexusEngine for SchemaRuntime {
         &self,
         _exhausted: triad_runtime::ContinuationExhausted,
     ) -> nexus::SignalOutput {
-        nexus::SignalOutput::MetaOutput(meta::Output::DeployRejected(
+        nexus::SignalOutput::MetaOutput(meta::Output::DeployRejected(meta::DeployRejected::new(
             self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-        ))
+        )))
     }
 
     fn decide(

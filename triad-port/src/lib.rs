@@ -16,7 +16,10 @@ use std::sync::{Mutex, MutexGuard};
 use nota_codec::NotaRecord;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
-use crate::schema::sema::{ContainerLifecycleTable, EventLogTable, GcRootsTable, LiveSetTable};
+use crate::schema::sema::{
+    ContainerLifecycleRecord, ContainerLifecycleTable, EventLogEntry, EventLogTable, GcRoot,
+    GcRootsTable, LiveGeneration, LiveSetTable,
+};
 
 pub mod client;
 pub mod daemon;
@@ -132,10 +135,10 @@ pub struct StoreState {
 impl Default for StoreState {
     fn default() -> Self {
         Self {
-            live_set: LiveSetTable(Vec::new()),
-            gc_roots: GcRootsTable(Vec::new()),
-            event_log: EventLogTable(Vec::new()),
-            containers: ContainerLifecycleTable(Vec::new()),
+            live_set: LiveSetTable::new(Vec::new()),
+            gc_roots: GcRootsTable::new(Vec::new()),
+            event_log: EventLogTable::new(Vec::new()),
+            containers: ContainerLifecycleTable::new(Vec::new()),
             commit_sequence: 0,
             deployment_sequence: 0,
             generation_sequence: 0,
@@ -163,7 +166,35 @@ impl StoreState {
     }
 
     pub fn next_event_log_position(&self) -> u64 {
-        self.event_log.0.len() as u64
+        self.event_log.payload().len() as u64
+    }
+
+    pub fn push_event_log_entry(&mut self, entry: EventLogEntry) {
+        let mut entries = self.event_log.clone().into_payload();
+        entries.push(entry);
+        self.event_log = EventLogTable::new(entries);
+    }
+
+    pub fn push_live_generation(&mut self, generation: LiveGeneration) {
+        let mut generations = self.live_set.clone().into_payload();
+        generations.push(generation);
+        self.live_set = LiveSetTable::new(generations);
+    }
+
+    pub fn push_gc_root(&mut self, root: GcRoot) {
+        let mut roots = self.gc_roots.clone().into_payload();
+        roots.push(root);
+        self.gc_roots = GcRootsTable::new(roots);
+    }
+
+    pub fn replace_gc_roots(&mut self, roots: Vec<GcRoot>) {
+        self.gc_roots = GcRootsTable::new(roots);
+    }
+
+    pub fn push_container_record(&mut self, record: ContainerLifecycleRecord) {
+        let mut records = self.containers.clone().into_payload();
+        records.push(record);
+        self.containers = ContainerLifecycleTable::new(records);
     }
 
     pub fn next_subscription_token(&mut self) -> u64 {
