@@ -9,6 +9,7 @@
 //! not flags.
 
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 
 use triad_runtime::{ComponentArgument, ComponentCommand, FrameBody, LengthPrefixedCodec};
 
@@ -21,7 +22,7 @@ const DEFAULT_OWNER_SOCKET: &str = "/run/lojix/owner.sock";
 
 /// A decoded request bound for one authority tier, plus the resolved reply
 /// after the exchange. The request is one of the two contract `Input` unions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientRequest {
     Ordinary(signal_lojix::schema::lib::Input),
     Owner(meta_signal_lojix::schema::lib::Input),
@@ -29,7 +30,7 @@ pub enum ClientRequest {
 
 /// A reply returned by the daemon, carrying its source tier so the CLI can
 /// print the NOTA / debug form of the right contract `Output`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientReply {
     Ordinary(signal_lojix::schema::lib::Output),
     Owner(meta_signal_lojix::schema::lib::Output),
@@ -38,8 +39,26 @@ pub enum ClientReply {
 impl std::fmt::Display for ClientReply {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Ordinary(output) => write!(formatter, "{output:?}"),
-            Self::Owner(output) => write!(formatter, "{output:?}"),
+            Self::Ordinary(output) => {
+                #[cfg(feature = "nota-text")]
+                {
+                    write!(formatter, "{output}")
+                }
+                #[cfg(not(feature = "nota-text"))]
+                {
+                    write!(formatter, "{output:?}")
+                }
+            }
+            Self::Owner(output) => {
+                #[cfg(feature = "nota-text")]
+                {
+                    write!(formatter, "{output}")
+                }
+                #[cfg(not(feature = "nota-text"))]
+                {
+                    write!(formatter, "{output:?}")
+                }
+            }
         }
     }
 }
@@ -51,30 +70,30 @@ pub struct Client {
     codec: LengthPrefixedCodec,
 }
 
-impl Client {
-    pub fn run_from_environment() -> Result<ClientReply> {
-        let command = ComponentCommand::from_environment();
-        let argument = command.nota_argument()?;
-        Self::from_argument(argument)?.exchange()
-    }
-
-    fn from_argument(argument: ComponentArgument) -> Result<Self> {
-        let request = Self::resolve_request(argument)?;
-        Ok(Self {
-            request,
-            codec: LengthPrefixedCodec::default(),
-        })
-    }
-
-    fn resolve_request(argument: ComponentArgument) -> Result<ClientRequest> {
+impl ClientRequest {
+    pub fn from_argument(argument: ComponentArgument) -> Result<Self> {
         match argument {
-            ComponentArgument::SignalFile(file) => Self::decode_signal_file(file.as_path()),
-            ComponentArgument::NotaFile(file) => Self::decode_signal_file(file.as_path()),
-            ComponentArgument::InlineNota(_) => Err(Error::InlineNotaUnsupported),
+            ComponentArgument::SignalFile(file) => Self::from_signal_file(file.as_path()),
+            ComponentArgument::NotaFile(file) => Self::from_file_argument(file.as_path()),
+            ComponentArgument::InlineNota(inline) => Self::from_nota_text(inline.as_str()),
         }
     }
 
-    fn decode_signal_file(path: &std::path::Path) -> Result<ClientRequest> {
+    fn from_file_argument(path: &Path) -> Result<Self> {
+        if Self::path_is_nota_file(path) {
+            let text = std::fs::read_to_string(path)?;
+            return Self::from_nota_text(&text);
+        }
+        Self::from_signal_file(path)
+    }
+
+    fn path_is_nota_file(path: &Path) -> bool {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension == "nota")
+    }
+
+    fn from_signal_file(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
         // Try the owner contract first, then the ordinary contract. NOTE
         // (audit R7): the two contracts' short-header ordinals currently COLLIDE
@@ -82,10 +101,45 @@ impl Client {
         // relies on rkyv layout divergence, not a structural tier discriminator.
         // A tier bit in the short header is the proper fix (upstream of lojix).
         if let Ok((_, input)) = meta_signal_lojix::schema::lib::Input::decode_signal_frame(&bytes) {
-            return Ok(ClientRequest::Owner(input));
+            return Ok(Self::Owner(input));
         }
         let (_, input) = signal_lojix::schema::lib::Input::decode_signal_frame(&bytes)?;
-        Ok(ClientRequest::Ordinary(input))
+        Ok(Self::Ordinary(input))
+    }
+
+    #[cfg(feature = "nota-text")]
+    fn from_nota_text(text: &str) -> Result<Self> {
+        match text.parse::<meta_signal_lojix::schema::lib::Input>() {
+            Ok(input) => Ok(Self::Owner(input)),
+            Err(meta_error) => match text.parse::<signal_lojix::schema::lib::Input>() {
+                Ok(input) => Ok(Self::Ordinary(input)),
+                Err(ordinary_error) => Err(Error::NotaRequest {
+                    meta: meta_error.to_string(),
+                    ordinary: ordinary_error.to_string(),
+                }),
+            },
+        }
+    }
+
+    #[cfg(not(feature = "nota-text"))]
+    fn from_nota_text(_text: &str) -> Result<Self> {
+        Err(Error::NotaTextUnsupported)
+    }
+}
+
+impl Client {
+    pub fn run_from_environment() -> Result<ClientReply> {
+        let command = ComponentCommand::from_environment();
+        let argument = command.nota_argument()?;
+        Self::from_argument(argument)?.exchange()
+    }
+
+    pub fn from_argument(argument: ComponentArgument) -> Result<Self> {
+        let request = ClientRequest::from_argument(argument)?;
+        Ok(Self {
+            request,
+            codec: LengthPrefixedCodec::default(),
+        })
     }
 
     fn exchange(self) -> Result<ClientReply> {

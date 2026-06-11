@@ -52,8 +52,11 @@ pub enum Error {
     #[error("flag-style arguments are not part of component binaries: {0}")]
     FlagArgument(String),
 
-    #[error("inline NOTA request decoding requires the nota-text feature")]
-    InlineNotaUnsupported,
+    #[error("NOTA request decoding requires the nota-text feature")]
+    NotaTextUnsupported,
+
+    #[error("NOTA request did not decode as either contract: meta: {meta}; ordinary: {ordinary}")]
+    NotaRequest { meta: String, ordinary: String },
 
     #[error(
         "owner socket mode {0:#o} grants other-access; refusing to expose the privileged surface"
