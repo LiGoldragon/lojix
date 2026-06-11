@@ -130,6 +130,13 @@ impl DaemonConfiguration {
         rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes)
             .map_err(|error| Error::ConfigurationArchive(error.to_string()))
     }
+
+    pub fn write_rkyv_file(&self, path: &Path) -> Result<()> {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(self)
+            .map_err(|error| Error::ConfigurationArchive(error.to_string()))?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
 }
 
 /// The four SEMA tables plus the monotonic sequence counters, held under one

@@ -34,10 +34,10 @@ fn write_daemon_configuration(
         owner_socket_mode,
         state_directory_path: directory.join("state").display().to_string(),
     };
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&configuration)
-        .expect("archive daemon configuration");
     let path = directory.join("daemon-configuration.rkyv");
-    std::fs::write(&path, bytes).expect("write daemon configuration");
+    configuration
+        .write_rkyv_file(&path)
+        .expect("write daemon configuration");
     path
 }
 
