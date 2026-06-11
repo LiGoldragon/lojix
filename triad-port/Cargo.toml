@@ -25,8 +25,6 @@ nota-text = ["signal-lojix/nota-text", "meta-signal-lojix/nota-text"]
 
 [dependencies]
 horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", branch = "main" }
-nota-codec        = { git = "https://github.com/LiGoldragon/nota-codec.git", branch = "main" }
-nota-config       = { git = "https://github.com/LiGoldragon/nota-config.git", branch = "main" }
 nota-next         = { git = "https://github.com/LiGoldragon/nota-next.git", branch = "main" }
 meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix.git", branch = "main" }
 signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix.git", branch = "main" }

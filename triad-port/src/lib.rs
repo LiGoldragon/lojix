@@ -11,9 +11,9 @@
 //! while the daemon socket shell is actor-native. Sema-engine / redb
 //! persistence is a noted follow-on.
 
+use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
-use nota_codec::NotaRecord;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use crate::schema::sema::{
@@ -31,11 +31,8 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("NOTA decode error: {0}")]
-    Nota(#[from] nota_codec::Error),
-
-    #[error("configuration decode error: {0}")]
-    Configuration(#[from] nota_config::Error),
+    #[error("configuration archive decode error: {0}")]
+    ConfigurationArchive(String),
 
     #[error("component argument error: {0}")]
     Argument(#[from] triad_runtime::ArgumentError),
@@ -103,10 +100,9 @@ impl From<meta_signal_lojix::schema::lib::SignalFrameError> for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Daemon configuration: the two authority-tiered socket paths and their unix
-/// permission modes. Decoded from the single NOTA argument the daemon binary
-/// receives (`nota_config::ConfigurationSource`). Mirrors the `cloud`
-/// `DaemonConfiguration` shape.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, NotaRecord, Debug, Clone, PartialEq, Eq)]
+/// permission modes. Decoded only from the single rkyv startup file the daemon
+/// binary receives. Mirrors the `cloud` `DaemonConfiguration` shape.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DaemonConfiguration {
     pub ordinary_socket_path: String,
     pub ordinary_socket_mode: u32,
@@ -115,7 +111,13 @@ pub struct DaemonConfiguration {
     pub state_directory_path: String,
 }
 
-nota_config::impl_rkyv_configuration!(DaemonConfiguration);
+impl DaemonConfiguration {
+    pub fn from_rkyv_file(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path)?;
+        rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes)
+            .map_err(|error| Error::ConfigurationArchive(error.to_string()))
+    }
+}
 
 /// The four SEMA tables plus the monotonic sequence counters, held under one
 /// lock so a single write commits atomically across the tables. The

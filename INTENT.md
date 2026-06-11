@@ -34,6 +34,10 @@ after CriomOS migrates to consume this daemon's projection.
   schema-derived SEMA tables. The current implementation is
   in-memory behind a shared store; durable redb/sema-engine backing
   remains the next storage cutover.
+- **The daemon starts from binary rkyv configuration only.** Launch
+  tooling encodes typed configuration before exec; `lojix-daemon`
+  rejects inline NOTA and `.nota` startup files and never parses
+  textual configuration.
 - **The daemon binds two authority-tiered Unix sockets.** The
   ordinary socket serves peer-callable reads/subscriptions; the
   owner/meta socket serves deploy and retention mutations. The

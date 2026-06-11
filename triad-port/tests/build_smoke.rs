@@ -21,6 +21,26 @@ use signal_lojix::schema::lib as ordinary;
 const FIXTURE_FLAKE: &str = "github:LiGoldragon/CriomOS-test-cluster";
 const FIXTURE_ATTRIBUTE: &str = "dune-nspawn-toplevel";
 
+fn write_daemon_configuration(
+    directory: &std::path::Path,
+    ordinary_socket: &std::path::Path,
+    owner_socket: &std::path::Path,
+    owner_socket_mode: u32,
+) -> std::path::PathBuf {
+    let configuration = lojix::DaemonConfiguration {
+        ordinary_socket_path: ordinary_socket.display().to_string(),
+        ordinary_socket_mode: 0o660,
+        owner_socket_path: owner_socket.display().to_string(),
+        owner_socket_mode,
+        state_directory_path: directory.join("state").display().to_string(),
+    };
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&configuration)
+        .expect("archive daemon configuration");
+    let path = directory.join("daemon-configuration.rkyv");
+    std::fs::write(&path, bytes).expect("write daemon configuration");
+    path
+}
+
 /// A System deploy of the self-contained `dune` fixture closure, with the
 /// `build_attribute` override naming the directly-buildable flake output (no
 /// horizon materialization). The proposal source is unused on this path
@@ -89,8 +109,8 @@ fn build_dune_fixture_through_the_engine() {
 /// The fully-online proof: spawn the actual `lojix-daemon` binary, let it bind
 /// its two authority-tiered unix sockets, and round-trip an Eval deploy over
 /// the real owner socket with the length-prefixed frame codec — the same wire
-/// path the CLI uses. Exercises the daemon process, config decode (inline
-/// NOTA), two-socket bind, frame codec, the full pipeline, and real `nix` IO.
+/// path the CLI uses. Exercises the daemon process, rkyv config decode,
+/// two-socket bind, frame codec, the full pipeline, and real `nix` IO.
 #[test]
 #[ignore = "spawns the lojix-daemon binary, binds sockets, runs `nix eval`; run with --ignored"]
 fn daemon_binary_socket_roundtrip_eval() {
@@ -105,20 +125,11 @@ fn daemon_binary_socket_roundtrip_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ordinary_socket = dir.path().join("ordinary.sock");
     let owner_socket = dir.path().join("owner.sock");
-    let state_directory = dir.path().join("state");
-    // Mode 432 == 0o660 (cluster-operator group), per the daemon's owned
-    // surface. A top-level NOTA record decodes as a parenthesized positional
-    // field list with NO type-name head (nota-config decodes the known type),
-    // so: `([ordinary] mode [owner] mode [state])`.
-    let config = format!(
-        "([{}] 432 [{}] 432 [{}])",
-        ordinary_socket.display(),
-        owner_socket.display(),
-        state_directory.display(),
-    );
+    let configuration =
+        write_daemon_configuration(dir.path(), &ordinary_socket, &owner_socket, 0o660);
 
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_lojix-daemon"))
-        .arg(&config)
+        .arg(&configuration)
         .spawn()
         .expect("spawn lojix-daemon");
 
@@ -186,16 +197,11 @@ fn permissive_owner_socket_mode_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ordinary_socket = dir.path().join("ordinary.sock");
     let owner_socket = dir.path().join("owner.sock");
-    let state_directory = dir.path().join("state");
-    // owner mode 0o666 == 438 grants other read+write — must be refused.
-    let config = format!(
-        "([{}] 432 [{}] 438 [{}])",
-        ordinary_socket.display(),
-        owner_socket.display(),
-        state_directory.display(),
-    );
+    // owner mode 0o666 grants other read+write — must be refused.
+    let configuration =
+        write_daemon_configuration(dir.path(), &ordinary_socket, &owner_socket, 0o666);
     let output = Command::new(env!("CARGO_BIN_EXE_lojix-daemon"))
-        .arg(&config)
+        .arg(&configuration)
         .output()
         .expect("run lojix-daemon");
 
@@ -252,15 +258,10 @@ fn oversized_frame_is_bounded_and_daemon_survives() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ordinary_socket = dir.path().join("ordinary.sock");
     let owner_socket = dir.path().join("owner.sock");
-    let state_directory = dir.path().join("state");
-    let config = format!(
-        "([{}] 432 [{}] 432 [{}])",
-        ordinary_socket.display(),
-        owner_socket.display(),
-        state_directory.display(),
-    );
+    let configuration =
+        write_daemon_configuration(dir.path(), &ordinary_socket, &owner_socket, 0o660);
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_lojix-daemon"))
-        .arg(&config)
+        .arg(&configuration)
         .spawn()
         .expect("spawn lojix-daemon");
 
@@ -335,15 +336,10 @@ fn concurrent_requests_are_served_in_parallel() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ordinary_socket = dir.path().join("ordinary.sock");
     let owner_socket = dir.path().join("owner.sock");
-    let state_directory = dir.path().join("state");
-    let config = format!(
-        "([{}] 432 [{}] 432 [{}])",
-        ordinary_socket.display(),
-        owner_socket.display(),
-        state_directory.display(),
-    );
+    let configuration =
+        write_daemon_configuration(dir.path(), &ordinary_socket, &owner_socket, 0o660);
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_lojix-daemon"))
-        .arg(&config)
+        .arg(&configuration)
         .spawn()
         .expect("spawn lojix-daemon");
 

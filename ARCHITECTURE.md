@@ -132,8 +132,10 @@ Each daemon actor is a Kameo actor per
 
 ## 5 · Constraints
 
-- The daemon binds two Unix sockets from its NOTA configuration:
-  ordinary and owner/meta. The owner/meta socket refuses any mode with
+- The daemon binds two Unix sockets from its binary rkyv startup
+  configuration: ordinary and owner/meta. Inline NOTA and `.nota` files
+  are rejected at daemon startup; launch tooling must encode
+  configuration before exec. The owner/meta socket refuses any mode with
   "other" access.
 - The CLI sends one NOTA-encoded `signal-lojix` request per
   invocation and prints one NOTA-encoded reply (or streams events
