@@ -23,6 +23,10 @@ path = "src/bin/lojix.rs"
 name = "meta-lojix"
 path = "src/bin/meta-lojix.rs"
 
+[[bin]]
+name = "lojix-write-configuration"
+path = "src/bin/lojix-write-configuration.rs"
+
 [features]
 default   = []
 nota-text = ["signal-lojix/nota-text", "meta-signal-lojix/nota-text"]
