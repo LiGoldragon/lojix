@@ -351,7 +351,7 @@ checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 [[package]]
 name = "meta-signal-lojix"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?branch=main#2e69371b9cb018e86cc0bf3eaa73930e11dadfaa"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?branch=main#defade0236af47bf211869b6b8aae6791a37e5e2"
 dependencies = [
  "nota-next",
  "rkyv",
@@ -394,7 +394,7 @@ dependencies = [
 [[package]]
 name = "nota-next"
 version = "0.4.0"
-source = "git+https://github.com/LiGoldragon/nota-next.git?branch=main#af6a2080d52b88ef5c6c89755ecfd3e818ffdea4"
+source = "git+https://github.com/LiGoldragon/nota-next.git?branch=main#065fa2ad2fa05bac87677f0bfa826bd92dbd139a"
 dependencies = [
  "nota-next-derive",
  "rkyv",
@@ -403,7 +403,7 @@ dependencies = [
 [[package]]
 name = "nota-next-derive"
 version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/nota-next.git?branch=main#af6a2080d52b88ef5c6c89755ecfd3e818ffdea4"
+source = "git+https://github.com/LiGoldragon/nota-next.git?branch=main#065fa2ad2fa05bac87677f0bfa826bd92dbd139a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -552,7 +552,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 [[package]]
 name = "schema-next"
 version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/schema-next.git?branch=main#ccdf5487f62ceb33e9986a59da227f43d7deb42e"
+source = "git+https://github.com/LiGoldragon/schema-next.git?branch=main#2397d5b2a4a8f35da1ba5957f48337f9a579db00"
 dependencies = [
  "nota-next",
  "rkyv",
@@ -561,7 +561,7 @@ dependencies = [
 [[package]]
 name = "schema-rust-next"
 version = "0.5.3"
-source = "git+https://github.com/LiGoldragon/schema-rust-next.git?branch=main#b252e81e8f77394981e4b13c05c116c0e7bd2b19"
+source = "git+https://github.com/LiGoldragon/schema-rust-next.git?branch=main#cedb2e0652b2d8e3aa24c96a82b6daee6af785ad"
 dependencies = [
  "prettyplease",
  "proc-macro2",
@@ -655,7 +655,7 @@ dependencies = [
 [[package]]
 name = "signal-lojix"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=main#8f6c498a0f90b4394cec02bfc529461654bb4c4b"
+source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=main#c33e2be445bddc8b6bed2cffc9a49eb210513587"
 dependencies = [
  "nota-next",
  "rkyv",
