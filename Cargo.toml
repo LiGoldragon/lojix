@@ -19,6 +19,10 @@ path = "src/bin/lojix-daemon.rs"
 name = "lojix"
 path = "src/bin/lojix.rs"
 
+[[bin]]
+name = "meta-lojix"
+path = "src/bin/meta-lojix.rs"
+
 [features]
 default   = []
 nota-text = ["signal-lojix/nota-text", "meta-signal-lojix/nota-text"]

@@ -55,8 +55,8 @@ pub enum Error {
     #[error("NOTA request decoding requires the nota-text feature")]
     NotaTextUnsupported,
 
-    #[error("NOTA request did not decode as either contract: meta: {meta}; ordinary: {ordinary}")]
-    NotaRequest { meta: String, ordinary: String },
+    #[error("NOTA request did not decode: {0}")]
+    NotaRequestText(String),
 
     #[error(
         "owner socket mode {0:#o} grants other-access; refusing to expose the privileged surface"
