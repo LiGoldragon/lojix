@@ -211,7 +211,7 @@ impl DeployPipeline {
                 cluster_name: deployment.cluster_name,
                 node_name: deployment.node_name,
                 deployment_kind: deployment.deployment_kind,
-                activation_kind: Self::system_activation_kind(deployment.system_action.clone()),
+                activation_kind: Self::system_activation_kind(deployment.system_action),
                 source: deployment.source,
                 flake: deployment.flake,
                 build_attribute: deployment.build_attribute,
@@ -314,7 +314,7 @@ impl DeployPipeline {
         nexus::NixEvalCommand {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
-            deployment_kind: self.deployment_kind.clone(),
+            deployment_kind: self.deployment_kind,
             flake: self.flake.clone(),
             attribute: self.target_attribute(),
             overrides: self.input_overrides.clone(),
@@ -359,7 +359,7 @@ impl DeployPipeline {
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
-            activation_kind: self.activation_kind.clone(),
+            activation_kind: self.activation_kind,
         }
     }
 
@@ -391,6 +391,12 @@ impl DeployPipeline {
             event_log_position,
             detail,
         }
+    }
+}
+
+impl Default for SchemaRuntime {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -994,11 +1000,11 @@ impl SchemaRuntime {
                     .unwrap_or_else(|| ordinary::DeploymentIdentifier::new(0));
                 let deployment_kind = pipeline
                     .as_ref()
-                    .map(|p| p.deployment_kind.clone())
+                    .map(|p| p.deployment_kind)
                     .unwrap_or(ordinary::DeploymentKind::FullOs);
                 let activation_kind = pipeline
                     .as_ref()
-                    .map(|p| p.activation_kind.clone())
+                    .map(|p| p.activation_kind)
                     .unwrap_or(ordinary::ActivationKind::Switch);
                 state.push_live_generation(sema::LiveGeneration {
                     deployment_identifier,
@@ -1007,14 +1013,14 @@ impl SchemaRuntime {
                     node_name: commit.node_name.clone(),
                     deployment_kind,
                     activation_kind,
-                    generation_slot: commit.generation_slot.clone(),
+                    generation_slot: commit.generation_slot,
                     closure_path: commit.closure_path.clone(),
                 });
                 state.push_gc_root(sema::GcRoot {
                     generation_identifier: commit.generation_identifier.clone(),
                     cluster_name: commit.cluster_name,
                     node_name: commit.node_name,
-                    generation_slot: commit.generation_slot.clone(),
+                    generation_slot: commit.generation_slot,
                     closure_path: commit.closure_path,
                     label: None,
                 });
@@ -1047,7 +1053,7 @@ impl SchemaRuntime {
                         && root.cluster_name == request.cluster_name
                         && root.node_name == request.node_name
                 }) {
-                    let from_slot = root.generation_slot.clone();
+                    let from_slot = root.generation_slot;
                     root.generation_slot = ordinary::GenerationSlot::Pinned;
                     root.label = Some(request.pin_label.clone());
                     state.replace_gc_roots(roots);
@@ -1077,7 +1083,7 @@ impl SchemaRuntime {
                         && root.node_name == request.node_name
                 }) {
                     let generation_identifier = root.generation_identifier.clone();
-                    let from_slot = root.generation_slot.clone();
+                    let from_slot = root.generation_slot;
                     root.generation_slot = ordinary::GenerationSlot::Recent;
                     root.label = None;
                     state.replace_gc_roots(roots);
@@ -1224,9 +1230,9 @@ impl SchemaRuntime {
             deployment_identifier: live.deployment_identifier.clone(),
             cluster_name: live.cluster_name.clone(),
             node_name: live.node_name.clone(),
-            deployment_kind: live.deployment_kind.clone(),
-            activation_kind: live.activation_kind.clone(),
-            generation_slot: live.generation_slot.clone(),
+            deployment_kind: live.deployment_kind,
+            activation_kind: live.activation_kind,
+            generation_slot: live.generation_slot,
             closure_path: live.closure_path.clone(),
         }
     }

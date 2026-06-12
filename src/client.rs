@@ -88,7 +88,8 @@ impl OrdinaryClient {
     }
 
     pub fn run(self) -> Result<signal_lojix::schema::lib::Output> {
-        let exchange = SocketExchange::for_environment(ORDINARY_SOCKET_ENV, DEFAULT_ORDINARY_SOCKET);
+        let exchange =
+            SocketExchange::for_environment(ORDINARY_SOCKET_ENV, DEFAULT_ORDINARY_SOCKET);
         let reply = exchange.exchange(self.input.encode_signal_frame()?)?;
         let (_, output) = signal_lojix::schema::lib::Output::decode_signal_frame(&reply)?;
         Ok(output)

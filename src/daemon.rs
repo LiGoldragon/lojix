@@ -16,7 +16,8 @@ use std::time::Duration;
 use triad_runtime::{
     AcceptedConnection, AsyncListenerSocket, AsyncMultiConnectionRuntime, AsyncMultiListenerDaemon,
     AsyncMultiListenerDaemonError, ConnectionContext, FrameBody, LengthPrefixedCodec,
-    MaximumFrameLength, RequestConcurrencyLimit, RequestErrorLog, SocketMode,
+    MaximumFrameLength, PeerIdentity, RequestConcurrencyLimit, RequestErrorLog, SocketMode,
+    UnixCredentials,
 };
 
 /// Maximum inbound request-frame body the daemon accepts (8 MiB). A lojix
@@ -152,7 +153,8 @@ impl LojixRuntime {
 ///
 /// The kernel supplies each accepted Unix-stream peer credential through
 /// `triad-runtime`; Lojix admits owner-socket requests only from the same
-/// effective uid/gid that launched the daemon. The daemon is
+/// effective uid/gid that launched the daemon. TCP peers carry no Unix
+/// credentials and are refused at this privileged surface. The daemon is
 /// cluster-operator-owned, so deploy authority stays with that operator account
 /// instead of trusting payload claims or socket mode alone.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,12 +176,21 @@ impl OwnerPeerAuthority {
     }
 
     pub fn authorize(&self, context: &ConnectionContext) -> Result<()> {
-        if context.user_id() == self.user_id && context.group_id() == self.group_id {
+        match context.peer() {
+            PeerIdentity::Unix(credentials) => self.authorize_unix_credentials(credentials),
+            PeerIdentity::Tcp(address) => Err(Error::UnauthorizedOwnerTcpPeer {
+                peer_address: address.to_string(),
+            }),
+        }
+    }
+
+    fn authorize_unix_credentials(&self, credentials: &UnixCredentials) -> Result<()> {
+        if credentials.user_id() == self.user_id && credentials.group_id() == self.group_id {
             return Ok(());
         }
         Err(Error::UnauthorizedOwnerPeer {
-            peer_user_id: context.user_id(),
-            peer_group_id: context.group_id(),
+            peer_user_id: credentials.user_id(),
+            peer_group_id: credentials.group_id(),
             daemon_user_id: self.user_id,
             daemon_group_id: self.group_id,
         })

@@ -24,7 +24,10 @@ fn write_configuration_round_trips_through_rkyv() {
 
     let configuration =
         DaemonConfiguration::from_rkyv_file(&output).expect("daemon reads back the startup file");
-    assert_eq!(configuration.ordinary_socket_path, "/run/lojix/ordinary.sock");
+    assert_eq!(
+        configuration.ordinary_socket_path,
+        "/run/lojix/ordinary.sock"
+    );
     assert_eq!(configuration.ordinary_socket_mode, 0o660);
     assert_eq!(configuration.owner_socket_path, "/run/lojix/owner.sock");
     assert_eq!(configuration.owner_socket_mode, 0o600);

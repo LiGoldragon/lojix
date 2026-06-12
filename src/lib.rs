@@ -73,6 +73,11 @@ pub enum Error {
         daemon_group_id: u32,
     },
 
+    #[error(
+        "owner socket TCP peer {peer_address} has no Unix credentials; refusing the privileged surface"
+    )]
+    UnauthorizedOwnerTcpPeer { peer_address: String },
+
     #[error("unexpected signal frame for this socket")]
     UnexpectedFrame,
 

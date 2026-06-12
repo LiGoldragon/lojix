@@ -133,7 +133,9 @@ fn meta_client_decodes_signal_frame() {
     let input = owner_pin();
     std::fs::write(
         &path,
-        input.encode_signal_frame().expect("encode meta signal frame"),
+        input
+            .encode_signal_frame()
+            .expect("encode meta signal frame"),
     )
     .expect("write signal frame");
 
