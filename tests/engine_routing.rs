@@ -159,23 +159,43 @@ fn deploy_rejection_reason(output: nexus::SignalOutput) -> meta::DeployRejection
     }
 }
 
-// ---- Deploy guard: activating actions remain rejected because copy/activate
-// is not target-safe yet. Production System/Home build paths are no longer
-// rejected as unsupported; they proceed into the effect pipeline and fail here
-// only because these tests use intentionally bogus proposal sources.
+// ---- Deploy guard: every declared action now enters the effect pipeline
+// (S4a opened the activating actions — System Boot/Switch/Test/BootOnce, Home
+// Profile/Activate — by making copy + activate target-safe). These tests drive
+// the cursor with intentionally bogus proposal sources, so an opened action
+// reaches the pipeline and fails at the IO stage with ProposalSourceUnreachable
+// rather than being rejected up front as UnsupportedDeployAction.
 
 #[test]
-fn activating_deploy_is_rejected_until_activate_lands() {
+fn activating_deploy_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
-        meta::DeployRequest::System(system_deployment(
-            Some("dune-nspawn-toplevel"),
-            ordinary::SystemAction::Switch,
-        )),
+        meta::DeployRequest::System(system_deployment(None, ordinary::SystemAction::Switch)),
     )));
     assert_eq!(
         deploy_rejection_reason(run(&mut engine, input)),
-        meta::DeployRejectionReason::UnsupportedDeployAction,
+        meta::DeployRejectionReason::ProposalSourceUnreachable,
+    );
+}
+
+#[test]
+fn home_activate_enters_effect_pipeline() {
+    let mut engine = SchemaRuntime::new();
+    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
+        meta::DeployRequest::Home(meta::HomeDeployment {
+            cluster_name: ordinary::ClusterName::new("alpha"),
+            node_name: ordinary::NodeName::new("node-1"),
+            user_name: ordinary::UserName::new("li"),
+            source: ordinary::ProposalSource::new("/dev/null"),
+            flake: ordinary::FlakeReference::new("github:owner/repo"),
+            home_mode: meta::HomeMode::Activate,
+            builder: None,
+            substituters: Vec::new(),
+        }),
+    )));
+    assert_eq!(
+        deploy_rejection_reason(run(&mut engine, input)),
+        meta::DeployRejectionReason::ProposalSourceUnreachable,
     );
 }
 

@@ -46,7 +46,11 @@ pub use signal_lojix::schema::lib::GenerationSlot as GenerationSlot;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::ActivationKind as ActivationKind;
 #[rustfmt::skip]
+pub use signal_lojix::schema::lib::SystemAction as SystemAction;
+#[rustfmt::skip]
 pub use signal_lojix::schema::lib::DeploymentKind as DeploymentKind;
+#[rustfmt::skip]
+pub use meta_signal_lojix::schema::lib::HomeMode as HomeMode;
 
 #[rustfmt::skip]
 #[cfg(feature = "nota-text")]
@@ -180,6 +184,23 @@ pub struct CopyClosureCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub closure_path: ClosurePath,
+    pub source: BuildTarget,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct HomeActivationProfile {
+    pub mode: HomeMode,
+    pub user: UserName,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ActivationProfile {
+    System(SystemAction),
+    Home(HomeActivationProfile),
 }
 
 #[rustfmt::skip]
@@ -189,7 +210,9 @@ pub struct ActivateGenerationCommand {
     pub generation_identifier: GenerationIdentifier,
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
+    pub closure_path: ClosurePath,
     pub activation_kind: ActivationKind,
+    pub profile: ActivationProfile,
 }
 
 #[rustfmt::skip]
@@ -427,6 +450,16 @@ impl MaterializationShape {
 }
 
 #[rustfmt::skip]
+impl ActivationProfile {
+    pub fn system(payload: SystemAction) -> Self {
+        Self::System(payload)
+    }
+    pub fn home(payload: HomeActivationProfile) -> Self {
+        Self::Home(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl EffectCommand {
     pub fn resolve_flake_auth(payload: FlakeAuthRequest) -> Self {
         Self::ResolveFlakeAuth(payload)
@@ -566,6 +599,20 @@ impl From<BuilderNode> for BuildTarget {
 #[rustfmt::skip]
 impl From<HomeMaterialization> for MaterializationShape {
     fn from(payload: HomeMaterialization) -> Self {
+        Self::Home(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<SystemAction> for ActivationProfile {
+    fn from(payload: SystemAction) -> Self {
+        Self::System(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<HomeActivationProfile> for ActivationProfile {
+    fn from(payload: HomeActivationProfile) -> Self {
         Self::Home(payload)
     }
 }

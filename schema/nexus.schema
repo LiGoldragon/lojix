@@ -41,7 +41,9 @@
   DeploymentIdentifier signal-lojix:lib:DeploymentIdentifier
   GenerationSlot signal-lojix:lib:GenerationSlot
   ActivationKind signal-lojix:lib:ActivationKind
+  SystemAction signal-lojix:lib:SystemAction
   DeploymentKind signal-lojix:lib:DeploymentKind
+  HomeMode meta-signal-lojix:lib:HomeMode
 }
 [NexusWork]
 [NexusAction]
@@ -63,8 +65,10 @@
   MaterializedInputs { overrides (Vec FlakeInputOverride) }
   NixEvalCommand { ClusterName * NodeName * DeploymentKind * flake FlakeReference attribute String overrides (Vec FlakeInputOverride) }
   NixBuildCommand { GenerationIdentifier * ClosurePath * target BuildTarget substituters (Vec ExtraSubstituter) }
-  CopyClosureCommand { GenerationIdentifier * ClusterName * NodeName * ClosurePath * }
-  ActivateGenerationCommand { GenerationIdentifier * ClusterName * NodeName * ActivationKind * }
+  CopyClosureCommand { GenerationIdentifier * ClusterName * NodeName * ClosurePath * source BuildTarget }
+  HomeActivationProfile { mode HomeMode user UserName }
+  ActivationProfile [(System SystemAction) (Home HomeActivationProfile)]
+  ActivateGenerationCommand { GenerationIdentifier * ClusterName * NodeName * ClosurePath * ActivationKind * profile ActivationProfile }
   PathInfoGcCommand { ClusterName * NodeName * }
 
   EffectCommand [(ResolveFlakeAuth FlakeAuthRequest) (MaterializeHorizon HorizonMaterializationCommand) (NixEval NixEvalCommand) (NixBuild NixBuildCommand) (CopyClosure CopyClosureCommand) (ActivateGeneration ActivateGenerationCommand) (PathInfoGc PathInfoGcCommand)]

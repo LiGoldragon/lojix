@@ -15,7 +15,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use horizon_lib::name::{ClusterName as HorizonClusterName, NodeName as HorizonNodeName};
+use horizon_lib::name::{
+    ClusterName as HorizonClusterName, CriomeDomainName, NodeName as HorizonNodeName,
+    UserName as HorizonUserName,
+};
 use horizon_lib::{ClusterProposal, Horizon, Viewpoint};
 use meta_signal_lojix::schema::lib as meta;
 use nota_next::NotaSource;
@@ -177,6 +180,21 @@ impl DeployAction {
             ),
             Self::Home { mode, .. } => {
                 matches!(mode, meta::HomeMode::Profile | meta::HomeMode::Activate)
+            }
+        }
+    }
+
+    /// The activation profile carried on the activate command — the shape that
+    /// decides which target-side activation runs (System switch-to-configuration
+    /// vs Home home-manager profile/activate).
+    fn activation_profile(&self) -> nexus::ActivationProfile {
+        match self {
+            Self::System(action) => nexus::ActivationProfile::System(*action),
+            Self::Home { mode, user } => {
+                nexus::ActivationProfile::Home(nexus::HomeActivationProfile {
+                    mode: *mode,
+                    user: user.clone(),
+                })
             }
         }
     }
@@ -351,29 +369,37 @@ impl DeployPipeline {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             closure_path,
+            source: self.build_target(),
         }
     }
 
-    fn activate_generation_command(&self) -> nexus::ActivateGenerationCommand {
+    fn activate_generation_command(
+        &self,
+        closure_path: ordinary::ClosurePath,
+    ) -> nexus::ActivateGenerationCommand {
         nexus::ActivateGenerationCommand {
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
+            closure_path,
             activation_kind: self.activation_kind,
+            profile: self.action.activation_profile(),
         }
     }
 
-    fn activation_commit(&self) -> sema::ActivationCommit {
-        sema::ActivationCommit {
+    /// The activation-record write. The closure path is mandatory: by the time
+    /// the pipeline records activation it has been captured on the cursor (the
+    /// activate command already required it, risk R2), so `None` here is an
+    /// internal invariant failure surfaced through `activation_commit` returning
+    /// `None` rather than committing an empty closure into the live set.
+    fn activation_commit(&self) -> Option<sema::ActivationCommit> {
+        Some(sema::ActivationCommit {
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             generation_slot: ordinary::GenerationSlot::Current,
-            closure_path: self
-                .closure_path
-                .clone()
-                .unwrap_or_else(|| ordinary::ClosurePath::new("")),
-        }
+            closure_path: self.closure_path.clone()?,
+        })
     }
 
     fn phase_event(
@@ -553,9 +579,12 @@ impl SchemaRuntime {
     }
 
     /// The deploy reject-guard. Production System/Home eval/build are
-    /// implemented through Horizon materialization. Activating actions remain
-    /// rejected because copy/activate is not yet target-safe; accepting them
-    /// would write false live-set state.
+    /// implemented through Horizon materialization, and the activating actions
+    /// (System Boot/Switch/Test/BootOnce, Home Profile/Activate) now construct
+    /// target-safe copy + activate commands (S4a), so every declared action is
+    /// supported and enters the effect pipeline. `UnsupportedDeployAction`
+    /// stays in the enum for honesty on any future not-yet-implemented shape;
+    /// no current action returns it.
     fn unsupported_deploy_reason(
         request: &meta::DeployRequest,
     ) -> Option<meta::DeployRejectionReason> {
@@ -563,12 +592,20 @@ impl SchemaRuntime {
             meta::DeployRequest::System(deployment) => {
                 let supported = matches!(
                     deployment.system_action,
-                    ordinary::SystemAction::Eval | ordinary::SystemAction::Build
+                    ordinary::SystemAction::Eval
+                        | ordinary::SystemAction::Build
+                        | ordinary::SystemAction::Boot
+                        | ordinary::SystemAction::Switch
+                        | ordinary::SystemAction::Test
+                        | ordinary::SystemAction::BootOnce
                 );
                 (!supported).then_some(meta::DeployRejectionReason::UnsupportedDeployAction)
             }
             meta::DeployRequest::Home(deployment) => {
-                let supported = matches!(deployment.home_mode, meta::HomeMode::Build);
+                let supported = matches!(
+                    deployment.home_mode,
+                    meta::HomeMode::Build | meta::HomeMode::Profile | meta::HomeMode::Activate
+                );
                 (!supported).then_some(meta::DeployRejectionReason::UnsupportedDeployAction)
             }
         }
@@ -665,15 +702,38 @@ impl SchemaRuntime {
                 ))
             }
             DeployStage::BuildingRecorded => {
+                // The closure path is captured on the cursor by `set_closure_path`
+                // during eval/build; an activating pipeline that reached this stage
+                // without a closure is an internal invariant failure, not an empty
+                // activation (risk R2). Fail the pipeline rather than activate "".
+                let closure_path = match pipeline.closure_path.clone() {
+                    Some(closure_path) => closure_path,
+                    None => {
+                        return self.fail_pipeline(nexus::EffectFailure {
+                            stage: nexus::EffectStage::Activate,
+                            detail: "activation reached without a built closure path".to_string(),
+                        });
+                    }
+                };
                 self.set_stage(DeployStage::CopyingRecorded);
                 nexus::NexusAction::CommandEffect(nexus::EffectCommand::ActivateGeneration(
-                    pipeline.activate_generation_command(),
+                    pipeline.activate_generation_command(closure_path),
                 ))
             }
             DeployStage::CopyingRecorded => {
+                let commit = match pipeline.activation_commit() {
+                    Some(commit) => commit,
+                    None => {
+                        return self.fail_pipeline(nexus::EffectFailure {
+                            stage: nexus::EffectStage::Activate,
+                            detail: "activation record reached without a built closure path"
+                                .to_string(),
+                        });
+                    }
+                };
                 self.set_stage(DeployStage::ActivatedRecorded);
                 nexus::NexusAction::CommandSemaWrite(
-                    sema::SemaWriteInput::RecordGenerationActivated(pipeline.activation_commit()),
+                    sema::SemaWriteInput::RecordGenerationActivated(commit),
                 )
             }
             DeployStage::ActivatedRecorded => self.finish_deploy_pipeline(),
@@ -1384,11 +1444,12 @@ impl SchemaRuntime {
     }
 
     async fn run_copy_closure(&self, command: nexus::CopyClosureCommand) -> nexus::EffectResult {
-        match NixCommand::copy_closure(command.node_name.payload(), command.closure_path.payload())
-            .run()
-            .await
-        {
-            Ok(_) => nexus::EffectResult::ClosureCopied(nexus::CopiedClosure {
+        let copy = match ClosureCopy::from_command(&command) {
+            Ok(copy) => copy,
+            Err(detail) => return Self::effect_failed(nexus::EffectStage::CopyClosure, detail),
+        };
+        match copy.run().await {
+            Ok(()) => nexus::EffectResult::ClosureCopied(nexus::CopiedClosure {
                 generation_identifier: command.generation_identifier,
                 node_name: command.node_name,
                 closure_path: command.closure_path,
@@ -1402,11 +1463,12 @@ impl SchemaRuntime {
         command: nexus::ActivateGenerationCommand,
     ) -> nexus::EffectResult {
         let slot = Self::activation_slot(&command.activation_kind);
-        match NixCommand::activate_system(command.node_name.payload())
-            .run()
-            .await
-        {
-            Ok(_) => nexus::EffectResult::GenerationActivated(nexus::ActivatedGeneration {
+        let activation = match Activation::from_command(&command) {
+            Ok(activation) => activation,
+            Err(detail) => return Self::effect_failed(nexus::EffectStage::Activate, detail),
+        };
+        match activation.run().await {
+            Ok(()) => nexus::EffectResult::GenerationActivated(nexus::ActivatedGeneration {
                 generation_identifier: command.generation_identifier,
                 node_name: command.node_name,
                 generation_slot: slot,
@@ -1759,6 +1821,569 @@ impl NarHash {
     }
 }
 
+/// SSH target — `<user>@<node>.<cluster>.criome` — the addressing used by
+/// `ssh`, `nix copy --to ssh-ng://…`, and `--from ssh-ng://…` (ported from
+/// `lojix-cli/src/host.rs`). Activate/copy address `root@<criome_domain>`,
+/// NEVER a bare `NodeName`; the domain is derived from the cluster + node on
+/// the deploy cursor via `CriomeDomainName::for_node` (resolving open question
+/// Q1: the address is computed from cursor fields already present —
+/// `<node>.<cluster>.criome` — not threaded as a new horizon-projection field).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SshTarget {
+    user: String,
+    domain: CriomeDomainName,
+}
+
+impl SshTarget {
+    /// Resolve `root@<node>.<cluster>.criome` from the ordinary cluster + node
+    /// names carried on the cursor. Errors only if the names fail horizon
+    /// validation (empty / quotation mark), which a submitted deploy never has.
+    fn root_at_node(
+        cluster_name: &ordinary::ClusterName,
+        node_name: &ordinary::NodeName,
+    ) -> std::result::Result<Self, String> {
+        Ok(Self {
+            user: "root".to_string(),
+            domain: Self::criome_domain(cluster_name, node_name)?,
+        })
+    }
+
+    fn criome_domain(
+        cluster_name: &ordinary::ClusterName,
+        node_name: &ordinary::NodeName,
+    ) -> std::result::Result<CriomeDomainName, String> {
+        let cluster = HorizonClusterName::try_new(cluster_name.payload().clone())
+            .map_err(|error| format!("invalid cluster name for ssh target: {error}"))?;
+        let node = HorizonNodeName::try_new(node_name.payload().clone())
+            .map_err(|error| format!("invalid node name for ssh target: {error}"))?;
+        Ok(CriomeDomainName::for_node(&node, &cluster))
+    }
+
+    fn with_user(&self, user: &HorizonUserName) -> Self {
+        Self {
+            user: user.as_str().to_string(),
+            domain: self.domain.clone(),
+        }
+    }
+
+    fn ssh_uri(&self) -> String {
+        format!("ssh-ng://{}@{}", self.user, self.domain.as_str())
+    }
+
+    fn as_ssh_arg(&self) -> String {
+        format!("{}@{}", self.user, self.domain.as_str())
+    }
+
+    /// `ssh -o BatchMode=yes <user>@<domain> <remote_command>`.
+    fn remote_invocation(&self, remote_command: ShellCommand) -> NixCommand {
+        NixCommand::new(
+            "ssh",
+            vec![
+                "-o".to_string(),
+                "BatchMode=yes".to_string(),
+                self.as_ssh_arg(),
+                remote_command.into_text(),
+            ],
+        )
+    }
+}
+
+/// A pre-quoted remote shell command body — the single string ssh runs on the
+/// target. Ported from `lojix-cli/src/process.rs::ShellCommand`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellCommand(String);
+
+impl ShellCommand {
+    fn from_raw(script: impl Into<String>) -> Self {
+        Self(script.into())
+    }
+
+    fn into_text(self) -> String {
+        self.0
+    }
+}
+
+/// A single argument rendered safe for a remote `/bin/sh -c` body. Ported from
+/// `lojix-cli/src/process.rs::ShellArgument`: bare when the text is wholly
+/// shell-safe, single-quoted (with `'\''` escaping) otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellArgument {
+    text: String,
+}
+
+impl ShellArgument {
+    fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+
+    fn to_command_text(&self) -> String {
+        let safe = !self.text.is_empty()
+            && self.text.bytes().all(|byte| {
+                matches!(
+                    byte,
+                    b'a'..=b'z'
+                        | b'A'..=b'Z'
+                        | b'0'..=b'9'
+                        | b'-'
+                        | b'_'
+                        | b'.'
+                        | b'/'
+                        | b'='
+                        | b':'
+                        | b'#'
+                        | b'+'
+                        | b','
+                )
+            });
+        if safe {
+            return self.text.clone();
+        }
+        format!("'{}'", self.text.replace('\'', "'\\''"))
+    }
+}
+
+/// Move a closure from wherever the build phase landed it to the activation
+/// target (ported from `lojix-cli/src/copy.rs::ClosureCopy`). Always passes
+/// `--substitute-on-destination` so the target pulls signed paths from the
+/// cluster cache; unsigned daemon-to-daemon transfer is rejected under
+/// `require-sigs` (risk R6). Three cases: dispatcher source -> `--to` only;
+/// builder == target -> skip; builder != target -> `--from`/`--to`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClosureCopy {
+    store_path: String,
+    source: nexus::BuildTarget,
+    builder_target: Option<SshTarget>,
+    target: SshTarget,
+}
+
+impl ClosureCopy {
+    fn from_command(
+        command: &nexus::CopyClosureCommand,
+    ) -> std::result::Result<Self, String> {
+        let target = SshTarget::root_at_node(&command.cluster_name, &command.node_name)?;
+        let builder_target = match &command.source {
+            nexus::BuildTarget::Local => None,
+            nexus::BuildTarget::Remote(builder) => Some(SshTarget::root_at_node(
+                &command.cluster_name,
+                builder.payload(),
+            )?),
+        };
+        Ok(Self {
+            store_path: command.closure_path.payload().clone(),
+            source: command.source.clone(),
+            builder_target,
+            target,
+        })
+    }
+
+    /// `Some(invocation)` if a copy is needed, `None` if the closure already
+    /// lives on the target (builder == target). Pure.
+    fn invocation(&self) -> Option<NixCommand> {
+        if self.source_matches_target() {
+            return None;
+        }
+        let mut arguments: Vec<String> =
+            vec!["copy".to_string(), "--substitute-on-destination".to_string()];
+        if let Some(builder) = &self.builder_target {
+            arguments.push("--from".to_string());
+            arguments.push(builder.ssh_uri());
+        }
+        arguments.push("--to".to_string());
+        arguments.push(self.target.ssh_uri());
+        arguments.push(self.store_path.clone());
+        Some(NixCommand::new("nix", arguments))
+    }
+
+    async fn run(&self) -> std::result::Result<(), String> {
+        let Some(invocation) = self.invocation() else {
+            return Ok(());
+        };
+        invocation.run().await.map(|_| ())
+    }
+
+    fn source_matches_target(&self) -> bool {
+        match (&self.source, &self.builder_target) {
+            (nexus::BuildTarget::Local, _) => false,
+            (nexus::BuildTarget::Remote(_), Some(builder)) => builder == &self.target,
+            (nexus::BuildTarget::Remote(_), None) => false,
+        }
+    }
+}
+
+/// One activation on the target node — System (switch-to-configuration +
+/// optional EFI reconcile / BootOnce transient unit) or Home (home-manager
+/// profile/activate). Decoded from the `ActivateGenerationCommand`; ported
+/// from `lojix-cli/src/activate.rs`.
+#[derive(Debug, Clone)]
+enum Activation {
+    System(SystemActivation),
+    Home(HomeActivation),
+}
+
+impl Activation {
+    fn from_command(
+        command: &nexus::ActivateGenerationCommand,
+    ) -> std::result::Result<Self, String> {
+        let target = SshTarget::root_at_node(&command.cluster_name, &command.node_name)?;
+        let store_path = command.closure_path.payload().clone();
+        match &command.profile {
+            nexus::ActivationProfile::System(action) => Ok(Self::System(SystemActivation {
+                target,
+                store_path,
+                action: *action,
+            })),
+            nexus::ActivationProfile::Home(profile) => {
+                let user = HorizonUserName::try_new(profile.user.payload().clone())
+                    .map_err(|error| format!("invalid user name for home activation: {error}"))?;
+                Ok(Self::Home(HomeActivation {
+                    node_name: command.node_name.clone(),
+                    target,
+                    user,
+                    store_path,
+                    mode: profile.mode,
+                }))
+            }
+        }
+    }
+
+    async fn run(&self) -> std::result::Result<(), String> {
+        match self {
+            Self::System(activation) => activation.run().await,
+            Self::Home(activation) => activation.run().await,
+        }
+    }
+}
+
+/// System activation on the target (ported from
+/// `lojix-cli/src/activate.rs::SystemActivation`).
+///
+/// `Boot`/`Switch`/`Test`: one ssh call running `switch-to-configuration
+/// <action>` directly (Boot/Switch first set the system profile). `BootOnce`:
+/// one ssh call wrapping the boot-once script in `systemd-run --unit=<name>
+/// --collect --wait --service-type=oneshot /bin/sh -c '…'` — owned by PID 1,
+/// not the dispatcher's ssh, so a network blip that kills the ssh leaves the
+/// unit running on the target to completion.
+#[derive(Debug, Clone)]
+struct SystemActivation {
+    target: SshTarget,
+    store_path: String,
+    action: ordinary::SystemAction,
+}
+
+impl SystemActivation {
+    /// Invocation for the simple Boot/Switch/Test path. `None` for the
+    /// non-simple actions (BootOnce uses `systemd_run_invocation`; Eval/Build
+    /// do not activate).
+    fn ssh_invocation(&self) -> Option<NixCommand> {
+        let action_word = match self.action {
+            ordinary::SystemAction::Boot => "boot",
+            ordinary::SystemAction::Switch => "switch",
+            ordinary::SystemAction::Test => "test",
+            ordinary::SystemAction::BootOnce
+            | ordinary::SystemAction::Eval
+            | ordinary::SystemAction::Build => return None,
+        };
+        let store = &self.store_path;
+        let remote_command = if matches!(self.action, ordinary::SystemAction::Test) {
+            format!("{store}/bin/switch-to-configuration {action_word}")
+        } else {
+            format!(
+                "nix-env -p /nix/var/nix/profiles/system --set {store} \
+                 && {store}/bin/switch-to-configuration {action_word}"
+            )
+        };
+        Some(
+            self.target
+                .remote_invocation(ShellCommand::from_raw(remote_command)),
+        )
+    }
+
+    /// Unique transient unit name for this deploy. Includes a time + pid suffix
+    /// so concurrent deploys don't collide and the operator can grep the right
+    /// one in the journal after a disconnect (`unit_name()`).
+    fn unit_name(&self) -> String {
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        let process = std::process::id();
+        format!("lojix-boot-once-{seconds:x}-{process:x}")
+    }
+
+    /// The bash script that runs inside the transient unit on the target. `OLD`
+    /// (the rollback target) is read from `bootctl status`'s `Current Entry`
+    /// (the running generation), `NEW` is derived from the system profile's
+    /// `readlink` (canonical latest). reboot 1 lands NEW, reboot 2+ returns to
+    /// OLD — headless-safe rollback (`boot_once_script()`).
+    fn boot_once_script(&self) -> String {
+        let store = &self.store_path;
+        format!(
+            "export PATH=/run/current-system/sw/bin:/run/wrappers/bin:$PATH\n\
+             set -eu\n\
+             CLOSURE='{store}'\n\
+             OLD=$(bootctl status | awk -F': *' '/Current Entry:/ {{print $2}}')\n\
+             [ -n \"$OLD\" ]\n\
+             nix-env -p /nix/var/nix/profiles/system --set \"$CLOSURE\"\n\
+             \"$CLOSURE/bin/switch-to-configuration\" boot\n\
+             SYSTEM_LINK=$(readlink /nix/var/nix/profiles/system)\n\
+             GENERATION=$(echo \"$SYSTEM_LINK\" | sed -E 's/^system-([0-9]+)-link$/\\1/')\n\
+             NEW=\"nixos-generation-$GENERATION.conf\"\n\
+             [ -f \"/boot/loader/entries/$NEW\" ]\n\
+             [ \"$NEW\" != \"$OLD\" ]\n\
+             bootctl set-default \"$OLD\"\n\
+             bootctl set-oneshot \"$NEW\"\n\
+             echo \"boot-once: oneshot=$NEW persistent-default=$OLD (=running generation)\"\n",
+        )
+    }
+
+    /// BootOnce ssh call: wraps the boot-once script in `systemd-run --wait`.
+    /// ssh holds open as a live stdout/stderr channel; if it dies the unit runs
+    /// to completion regardless (`systemd_run_invocation()`).
+    fn systemd_run_invocation(&self, unit_name: &str) -> NixCommand {
+        let remote_command = format!(
+            "systemd-run \
+             --unit={unit_name} \
+             --collect \
+             --wait \
+             --service-type=oneshot \
+             /bin/sh -c {script}",
+            script = ShellArgument::new(self.boot_once_script()).to_command_text(),
+        );
+        self.target
+            .remote_invocation(ShellCommand::from_raw(remote_command))
+    }
+
+    /// Whether this action reconciles EFI bootloader vars after activation.
+    /// `Boot`/`Switch` write `loader.conf`'s default but not EFI's
+    /// `LoaderEntryDefault`; reconcile claims it explicitly and clears any
+    /// stale one-shot. `Test` is non-persistent; `BootOnce` is its own thing
+    /// (`requires_efi_reconcile()`).
+    fn requires_efi_reconcile(&self) -> bool {
+        matches!(
+            self.action,
+            ordinary::SystemAction::Boot | ordinary::SystemAction::Switch
+        )
+    }
+
+    /// `readlink /nix/var/nix/profiles/system` — stdout parsed via
+    /// `SystemProfileLink` to derive the `nixos-generation-N.conf` entry.
+    fn step_readlink_system_profile_invocation(&self) -> NixCommand {
+        self.target.remote_invocation(ShellCommand::from_raw(
+            "readlink /nix/var/nix/profiles/system",
+        ))
+    }
+
+    /// `bootctl set-default <entry>` — points EFI `LoaderEntryDefault` at the
+    /// just-installed generation.
+    fn step_set_efi_default_invocation(&self, entry: &BootEntry) -> NixCommand {
+        self.target
+            .remote_invocation(ShellCommand::from_raw(format!(
+                "bootctl set-default {}",
+                entry.as_str()
+            )))
+    }
+
+    /// `bootctl set-oneshot ''` — clears any pending EFI one-shot from a prior
+    /// BootOnce so it does not hijack the next reboot.
+    fn step_clear_efi_oneshot_invocation(&self) -> NixCommand {
+        self.target
+            .remote_invocation(ShellCommand::from_raw("bootctl set-oneshot ''"))
+    }
+
+    async fn run(&self) -> std::result::Result<(), String> {
+        match self.action {
+            ordinary::SystemAction::BootOnce => self.run_boot_once().await,
+            _ => self.run_simple().await,
+        }
+    }
+
+    async fn run_simple(&self) -> std::result::Result<(), String> {
+        match self.ssh_invocation() {
+            Some(invocation) => invocation.run().await.map(|_| ())?,
+            None => {
+                return Err(format!(
+                    "no simple activation for action {:?}",
+                    self.action
+                ));
+            }
+        }
+        if self.requires_efi_reconcile() {
+            self.reconcile_efi().await?;
+        }
+        Ok(())
+    }
+
+    async fn reconcile_efi(&self) -> std::result::Result<(), String> {
+        let output = self.step_readlink_system_profile_invocation().run().await?;
+        let link = SystemProfileLink::try_new(output.trim())?;
+        let entry = link.generation().boot_entry();
+        self.step_set_efi_default_invocation(&entry)
+            .run()
+            .await?;
+        self.step_clear_efi_oneshot_invocation().run().await?;
+        Ok(())
+    }
+
+    async fn run_boot_once(&self) -> std::result::Result<(), String> {
+        let unit_name = self.unit_name();
+        self.systemd_run_invocation(&unit_name)
+            .run()
+            .await
+            .map(|_| ())
+    }
+}
+
+/// Home activation on the target (ported from
+/// `lojix-cli/src/activate.rs::HomeActivation`). `Profile`/`Activate` set the
+/// home-manager profile as the target user, then `Activate` additionally runs
+/// the activation package. Includes the local fast-path: skip ssh entirely
+/// when the dispatcher already is the requested user on the target node.
+#[derive(Debug, Clone)]
+struct HomeActivation {
+    node_name: ordinary::NodeName,
+    target: SshTarget,
+    user: HorizonUserName,
+    store_path: String,
+    mode: meta::HomeMode,
+}
+
+impl HomeActivation {
+    fn local_profile_invocation(&self, home: &Path) -> NixCommand {
+        NixCommand::new(
+            "nix-env",
+            vec![
+                "-p".to_string(),
+                home.join(".local/state/nix/profiles/home-manager")
+                    .display()
+                    .to_string(),
+                "--set".to_string(),
+                self.store_path.clone(),
+            ],
+        )
+    }
+
+    fn local_activate_invocation(&self) -> NixCommand {
+        NixCommand::new(format!("{}/activate", self.store_path), Vec::new())
+    }
+
+    fn remote_profile_invocation(&self) -> NixCommand {
+        self.user_target()
+            .remote_invocation(ShellCommand::from_raw(format!(
+                "nix-env -p \"$HOME/.local/state/nix/profiles/home-manager\" --set {}",
+                ShellArgument::new(self.store_path.clone()).to_command_text(),
+            )))
+    }
+
+    fn remote_activate_invocation(&self) -> NixCommand {
+        self.user_target().remote_invocation(ShellCommand::from_raw(
+            ShellArgument::new(format!("{}/activate", self.store_path)).to_command_text(),
+        ))
+    }
+
+    async fn run(&self) -> std::result::Result<(), String> {
+        match self.mode {
+            meta::HomeMode::Build => Ok(()),
+            meta::HomeMode::Profile => self.run_profile().await,
+            meta::HomeMode::Activate => {
+                self.run_profile().await?;
+                self.run_activate().await
+            }
+        }
+    }
+
+    async fn run_profile(&self) -> std::result::Result<(), String> {
+        if !self.is_local_context().await {
+            return self.remote_profile_invocation().run().await.map(|_| ());
+        }
+        let home = std::env::var("HOME")
+            .map_err(|_| "HOME is unset for local home activation".to_string())?;
+        self.local_profile_invocation(Path::new(&home))
+            .run()
+            .await
+            .map(|_| ())
+    }
+
+    async fn run_activate(&self) -> std::result::Result<(), String> {
+        if !self.is_local_context().await {
+            return self.remote_activate_invocation().run().await.map(|_| ());
+        }
+        self.local_activate_invocation().run().await.map(|_| ())
+    }
+
+    /// The local fast-path predicate: the dispatcher is already the requested
+    /// user on the target node, so activation runs locally without ssh.
+    async fn is_local_context(&self) -> bool {
+        self.current_user().as_deref() == Some(self.user.as_str())
+            && self.current_node().await.as_deref() == Some(self.node_name.payload().as_str())
+    }
+
+    fn user_target(&self) -> SshTarget {
+        self.target.with_user(&self.user)
+    }
+
+    fn current_user(&self) -> Option<String> {
+        std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .ok()
+    }
+
+    async fn current_node(&self) -> Option<String> {
+        // The local-context node match compares the dispatcher's short hostname
+        // against the deploy cursor's node name (the same comparison lojix-cli
+        // makes with `hostname -s`).
+        let output = NixCommand::new("hostname", vec!["-s".to_string()])
+            .run()
+            .await
+            .ok()?;
+        Some(output.trim().to_string())
+    }
+}
+
+/// The `system-N-link` symlink target of `/nix/var/nix/profiles/system`, parsed
+/// to its generation number (ported from
+/// `lojix-cli/src/activate.rs::SystemProfileLink`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SystemProfileLink {
+    generation: SystemGeneration,
+}
+
+impl SystemProfileLink {
+    fn try_new(link: &str) -> std::result::Result<Self, String> {
+        let number = link
+            .strip_prefix("system-")
+            .and_then(|rest| rest.strip_suffix("-link"))
+            .and_then(|number| number.parse::<u64>().ok())
+            .ok_or_else(|| format!("invalid system profile link: {link}"))?;
+        Ok(Self {
+            generation: SystemGeneration(number),
+        })
+    }
+
+    fn generation(&self) -> SystemGeneration {
+        self.generation
+    }
+}
+
+/// A NixOS system generation number, projecting to its EFI boot-entry name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SystemGeneration(u64);
+
+impl SystemGeneration {
+    fn boot_entry(self) -> BootEntry {
+        BootEntry(format!("nixos-generation-{}.conf", self.0))
+    }
+}
+
+/// A systemd-boot EFI loader entry filename (`nixos-generation-N.conf`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BootEntry(String);
+
+impl BootEntry {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// A typed `nix` / `nix-store` invocation. Holds the program name and its
 /// argument vector so the same value can be inspected before it runs; `run`
 /// spawns it via `tokio::process::Command` and returns captured stdout or a
@@ -1883,30 +2508,6 @@ impl NixCommand {
         arguments
     }
 
-    fn copy_closure(node_name: &str, closure_path: &str) -> Self {
-        Self::new(
-            "nix",
-            vec![
-                "copy".to_string(),
-                "--to".to_string(),
-                format!("ssh-ng://{node_name}"),
-                closure_path.to_string(),
-            ],
-        )
-    }
-
-    fn activate_system(node_name: &str) -> Self {
-        // Remote system activation: set the system profile to the freshly
-        // copied closure on the target node, then run its switch-to-configuration.
-        Self::new(
-            "ssh",
-            vec![
-                node_name.to_string(),
-                "nix-env -p /nix/var/nix/profiles/system --set \"$CLOSURE\"".to_string(),
-            ],
-        )
-    }
-
     fn collect_garbage(node_name: &str) -> Self {
         Self::new(
             "ssh",
@@ -1951,6 +2552,21 @@ impl NixCommand {
             .lines()
             .filter(|line| !line.trim().is_empty())
             .count() as u64
+    }
+
+    /// The program name. Test-only inspection of the constructed invocation
+    /// (the on-node execution is proven at S5).
+    #[cfg(test)]
+    fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// The arguments joined by single spaces — a flat view of the constructed
+    /// argv for inspection (the remote-command body is the final argument).
+    /// Test-only.
+    #[cfg(test)]
+    fn joined_arguments(&self) -> String {
+        self.arguments.join(" ")
     }
 }
 
@@ -2030,5 +2646,403 @@ impl sema::SemaEngine for SchemaRuntime {
         let origin_route = input.origin_route();
         self.observe_sema(input.into_root())
             .with_origin_route(origin_route)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit/argv/snapshot tests for the S4a command port: closure-threading
+    //! onto the activate command, and the faithful `lojix-cli` command shapes
+    //! (`SshTarget` addressing, `ClosureCopy`, `SystemActivation`,
+    //! `HomeActivation`). The construction is unit-testable here; the on-node
+    //! behavior is proven later at S5 on a live VM.
+
+    use super::*;
+
+    const STORE: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-toplevel";
+
+    fn system_submission(action: ordinary::SystemAction) -> sema::DeploySubmission {
+        sema::DeploySubmission::System(meta::SystemDeployment {
+            cluster_name: ordinary::ClusterName::new("alpha"),
+            node_name: ordinary::NodeName::new("node-1"),
+            deployment_kind: ordinary::DeploymentKind::OsOnly,
+            source: ordinary::ProposalSource::new("/dev/null"),
+            flake: ordinary::FlakeReference::new("github:owner/repo"),
+            system_action: action,
+            builder: None,
+            substituters: Vec::new(),
+            build_attribute: None,
+        })
+    }
+
+    fn system_pipeline(action: ordinary::SystemAction) -> DeployPipeline {
+        DeployPipeline::from_submission(
+            ordinary::DeploymentIdentifier::new(1),
+            ordinary::GenerationIdentifier::new(1),
+            SchemaRuntime::marker(0),
+            system_submission(action),
+        )
+    }
+
+    fn cluster() -> ordinary::ClusterName {
+        ordinary::ClusterName::new("alpha")
+    }
+
+    fn node() -> ordinary::NodeName {
+        ordinary::NodeName::new("node-1")
+    }
+
+    // ---- Step 1: closure-threading onto the activate command ----
+
+    #[test]
+    fn activate_command_carries_built_closure_path() {
+        // The cursor captures the built path via `set_closure_path` (the
+        // `ClosureBuilt` arm); `advance_after_phase` at `BuildingRecorded` reads
+        // it onto the fired ActivateGeneration command — same non-empty path,
+        // never dropped between build and activate (risk R2).
+        let mut engine = SchemaRuntime::new();
+        engine.active_deploy = Some(system_pipeline(ordinary::SystemAction::Switch));
+        let built = ordinary::ClosurePath::new(STORE);
+        engine.set_closure_path(built.clone());
+        engine.set_stage(DeployStage::BuildingRecorded);
+
+        match engine.advance_after_phase() {
+            nexus::NexusAction::CommandEffect(nexus::EffectCommand::ActivateGeneration(command)) => {
+                assert_eq!(command.closure_path, built);
+                assert!(!command.closure_path.payload().is_empty());
+            }
+            other => panic!("expected ActivateGeneration effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activate_without_closure_fails_rather_than_activating_empty() {
+        // No closure on the cursor at activate time is an internal invariant
+        // failure, not an empty activation: the pipeline fails, never fires an
+        // ActivateGeneration with an empty path (risk R2).
+        let mut engine = SchemaRuntime::new();
+        engine.active_deploy = Some(system_pipeline(ordinary::SystemAction::Switch));
+        engine.set_stage(DeployStage::BuildingRecorded);
+
+        match engine.advance_after_phase() {
+            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
+                meta::Output::DeployRejected(_),
+            )) => {}
+            other => panic!("expected DeployRejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activation_commit_requires_closure_path() {
+        let mut pipeline = system_pipeline(ordinary::SystemAction::Switch);
+        assert!(pipeline.activation_commit().is_none());
+        pipeline.closure_path = Some(ordinary::ClosurePath::new(STORE));
+        let commit = pipeline.activation_commit().expect("commit with closure");
+        assert_eq!(commit.closure_path.payload(), STORE);
+    }
+
+    // ---- Step 2: the reject-guard opens the activating actions ----
+
+    #[test]
+    fn guard_accepts_every_declared_action() {
+        for action in [
+            ordinary::SystemAction::Eval,
+            ordinary::SystemAction::Build,
+            ordinary::SystemAction::Boot,
+            ordinary::SystemAction::Switch,
+            ordinary::SystemAction::Test,
+            ordinary::SystemAction::BootOnce,
+        ] {
+            let request = meta::DeployRequest::System(meta::SystemDeployment {
+                cluster_name: cluster(),
+                node_name: node(),
+                deployment_kind: ordinary::DeploymentKind::OsOnly,
+                source: ordinary::ProposalSource::new("/dev/null"),
+                flake: ordinary::FlakeReference::new("github:owner/repo"),
+                system_action: action,
+                builder: None,
+                substituters: Vec::new(),
+                build_attribute: None,
+            });
+            assert!(
+                SchemaRuntime::unsupported_deploy_reason(&request).is_none(),
+                "System {action:?} should be supported"
+            );
+        }
+        for mode in [
+            meta::HomeMode::Build,
+            meta::HomeMode::Profile,
+            meta::HomeMode::Activate,
+        ] {
+            let request = meta::DeployRequest::Home(meta::HomeDeployment {
+                cluster_name: cluster(),
+                node_name: node(),
+                user_name: ordinary::UserName::new("li"),
+                source: ordinary::ProposalSource::new("/dev/null"),
+                flake: ordinary::FlakeReference::new("github:owner/repo"),
+                home_mode: mode,
+                builder: None,
+                substituters: Vec::new(),
+            });
+            assert!(
+                SchemaRuntime::unsupported_deploy_reason(&request).is_none(),
+                "Home {mode:?} should be supported"
+            );
+        }
+    }
+
+    // ---- Step 3: SSH addressing — root@<criome_domain>, never bare node ----
+
+    #[test]
+    fn ssh_target_addresses_root_at_criome_domain() {
+        let target = SshTarget::root_at_node(&cluster(), &node()).expect("target");
+        assert_eq!(target.as_ssh_arg(), "root@node-1.alpha.criome");
+        assert_eq!(target.ssh_uri(), "ssh-ng://root@node-1.alpha.criome");
+    }
+
+    fn copy_command(
+        source: nexus::BuildTarget,
+    ) -> nexus::CopyClosureCommand {
+        nexus::CopyClosureCommand {
+            generation_identifier: ordinary::GenerationIdentifier::new(1),
+            cluster_name: cluster(),
+            node_name: node(),
+            closure_path: ordinary::ClosurePath::new(STORE),
+            source,
+        }
+    }
+
+    // ---- Step 3: copy argv — always --substitute-on-destination, three cases ----
+
+    #[test]
+    fn copy_from_dispatcher_uses_to_only_with_substitute() {
+        let copy = ClosureCopy::from_command(&copy_command(nexus::BuildTarget::Local))
+            .expect("copy");
+        let invocation = copy.invocation().expect("dispatcher source needs a copy");
+        assert_eq!(invocation.program(), "nix");
+        let argv = invocation.joined_arguments();
+        assert!(argv.contains("--substitute-on-destination"), "{argv}");
+        assert!(argv.contains("--to ssh-ng://root@node-1.alpha.criome"), "{argv}");
+        assert!(!argv.contains("--from"), "{argv}");
+        assert!(argv.contains(STORE), "{argv}");
+    }
+
+    #[test]
+    fn copy_builder_equals_target_is_skipped() {
+        let source = nexus::BuildTarget::Remote(nexus::BuilderNode::new(node()));
+        let copy = ClosureCopy::from_command(&copy_command(source)).expect("copy");
+        assert!(
+            copy.invocation().is_none(),
+            "builder == target: closure is already on the target"
+        );
+    }
+
+    #[test]
+    fn copy_builder_differs_from_target_uses_from_and_to() {
+        let builder = ordinary::NodeName::new("builder-node");
+        let source = nexus::BuildTarget::Remote(nexus::BuilderNode::new(builder));
+        let copy = ClosureCopy::from_command(&copy_command(source)).expect("copy");
+        let invocation = copy.invocation().expect("cross-node copy needed");
+        let argv = invocation.joined_arguments();
+        assert!(argv.contains("--substitute-on-destination"), "{argv}");
+        assert!(
+            argv.contains("--from ssh-ng://root@builder-node.alpha.criome"),
+            "{argv}"
+        );
+        assert!(argv.contains("--to ssh-ng://root@node-1.alpha.criome"), "{argv}");
+    }
+
+    fn activate_command(
+        profile: nexus::ActivationProfile,
+        kind: ordinary::ActivationKind,
+    ) -> nexus::ActivateGenerationCommand {
+        nexus::ActivateGenerationCommand {
+            generation_identifier: ordinary::GenerationIdentifier::new(1),
+            cluster_name: cluster(),
+            node_name: node(),
+            closure_path: ordinary::ClosurePath::new(STORE),
+            activation_kind: kind,
+            profile,
+        }
+    }
+
+    fn system_activation(action: ordinary::SystemAction) -> SystemActivation {
+        match Activation::from_command(&activate_command(
+            nexus::ActivationProfile::System(action),
+            ordinary::ActivationKind::Switch,
+        ))
+        .expect("activation")
+        {
+            Activation::System(activation) => activation,
+            Activation::Home(_) => panic!("expected System activation"),
+        }
+    }
+
+    // ---- Step 3: per-action System activation argv, no $CLOSURE token ----
+
+    #[test]
+    fn switch_activation_has_store_path_and_switch_subcommand_no_closure_token() {
+        let activation = system_activation(ordinary::SystemAction::Switch);
+        let invocation = activation.ssh_invocation().expect("switch invocation");
+        assert_eq!(invocation.program(), "ssh");
+        let argv = invocation.joined_arguments();
+        assert!(argv.contains("root@node-1.alpha.criome"), "{argv}");
+        assert!(argv.contains(STORE), "{argv}");
+        assert!(
+            argv.contains(&format!("{STORE}/bin/switch-to-configuration switch")),
+            "{argv}"
+        );
+        assert!(argv.contains("nix-env -p /nix/var/nix/profiles/system --set"), "{argv}");
+        assert!(!argv.contains("$CLOSURE"), "no $CLOSURE token: {argv}");
+    }
+
+    #[test]
+    fn boot_activation_runs_switch_to_configuration_boot_then_reconciles_efi() {
+        let activation = system_activation(ordinary::SystemAction::Boot);
+        let invocation = activation.ssh_invocation().expect("boot invocation");
+        let argv = invocation.joined_arguments();
+        assert!(
+            argv.contains(&format!("{STORE}/bin/switch-to-configuration boot")),
+            "{argv}"
+        );
+        assert!(!argv.contains("$CLOSURE"), "{argv}");
+        assert!(activation.requires_efi_reconcile());
+        // EFI reconcile commands are present and correctly shaped.
+        let readlink = activation.step_readlink_system_profile_invocation();
+        assert!(
+            readlink
+                .joined_arguments()
+                .contains("readlink /nix/var/nix/profiles/system"),
+            "{}",
+            readlink.joined_arguments()
+        );
+        let entry = BootEntry("nixos-generation-42.conf".to_string());
+        let set_default = activation.step_set_efi_default_invocation(&entry);
+        assert!(
+            set_default
+                .joined_arguments()
+                .contains("bootctl set-default nixos-generation-42.conf"),
+            "{}",
+            set_default.joined_arguments()
+        );
+        let clear = activation.step_clear_efi_oneshot_invocation();
+        assert!(
+            clear.joined_arguments().contains("bootctl set-oneshot ''"),
+            "{}",
+            clear.joined_arguments()
+        );
+    }
+
+    #[test]
+    fn test_activation_runs_switch_to_configuration_test_only_no_profile_set() {
+        let activation = system_activation(ordinary::SystemAction::Test);
+        let invocation = activation.ssh_invocation().expect("test invocation");
+        let argv = invocation.joined_arguments();
+        assert!(
+            argv.contains(&format!("{STORE}/bin/switch-to-configuration test")),
+            "{argv}"
+        );
+        assert!(!argv.contains("nix-env"), "test does not set the profile: {argv}");
+        assert!(!activation.requires_efi_reconcile());
+    }
+
+    #[test]
+    fn boot_once_uses_simple_invocation_none() {
+        // BootOnce is not a simple invocation; it uses the systemd-run shape.
+        let activation = system_activation(ordinary::SystemAction::BootOnce);
+        assert!(activation.ssh_invocation().is_none());
+    }
+
+    // ---- Step 3: BootOnce transient-unit argv + script snapshot ----
+
+    #[test]
+    fn boot_once_systemd_run_argv_shape() {
+        let activation = system_activation(ordinary::SystemAction::BootOnce);
+        let invocation = activation.systemd_run_invocation("lojix-boot-once-abc-def");
+        assert_eq!(invocation.program(), "ssh");
+        let argv = invocation.joined_arguments();
+        assert!(argv.contains("root@node-1.alpha.criome"), "{argv}");
+        assert!(argv.contains("systemd-run"), "{argv}");
+        assert!(argv.contains("--unit=lojix-boot-once-abc-def"), "{argv}");
+        assert!(argv.contains("--collect"), "{argv}");
+        assert!(argv.contains("--wait"), "{argv}");
+        assert!(argv.contains("--service-type=oneshot"), "{argv}");
+        assert!(argv.contains("/bin/sh -c"), "{argv}");
+    }
+
+    #[test]
+    fn boot_once_unit_name_has_lojix_prefix() {
+        let activation = system_activation(ordinary::SystemAction::BootOnce);
+        assert!(activation.unit_name().starts_with("lojix-boot-once-"));
+    }
+
+    #[test]
+    fn boot_once_script_snapshot() {
+        let activation = system_activation(ordinary::SystemAction::BootOnce);
+        let expected = format!(
+            "export PATH=/run/current-system/sw/bin:/run/wrappers/bin:$PATH\n\
+             set -eu\n\
+             CLOSURE='{STORE}'\n\
+             OLD=$(bootctl status | awk -F': *' '/Current Entry:/ {{print $2}}')\n\
+             [ -n \"$OLD\" ]\n\
+             nix-env -p /nix/var/nix/profiles/system --set \"$CLOSURE\"\n\
+             \"$CLOSURE/bin/switch-to-configuration\" boot\n\
+             SYSTEM_LINK=$(readlink /nix/var/nix/profiles/system)\n\
+             GENERATION=$(echo \"$SYSTEM_LINK\" | sed -E 's/^system-([0-9]+)-link$/\\1/')\n\
+             NEW=\"nixos-generation-$GENERATION.conf\"\n\
+             [ -f \"/boot/loader/entries/$NEW\" ]\n\
+             [ \"$NEW\" != \"$OLD\" ]\n\
+             bootctl set-default \"$OLD\"\n\
+             bootctl set-oneshot \"$NEW\"\n\
+             echo \"boot-once: oneshot=$NEW persistent-default=$OLD (=running generation)\"\n",
+        );
+        assert_eq!(activation.boot_once_script(), expected);
+    }
+
+    // ---- Step 3: system profile link parse + EFI entry derivation ----
+
+    #[test]
+    fn system_profile_link_parses_generation_and_derives_entry() {
+        let link = SystemProfileLink::try_new("system-42-link").expect("link");
+        assert_eq!(link.generation().boot_entry().as_str(), "nixos-generation-42.conf");
+        assert!(SystemProfileLink::try_new("not-a-link").is_err());
+    }
+
+    // ---- Step 3: Home activation argv ----
+
+    fn home_activation(mode: meta::HomeMode) -> HomeActivation {
+        let profile = nexus::ActivationProfile::Home(nexus::HomeActivationProfile {
+            mode,
+            user: ordinary::UserName::new("li"),
+        });
+        match Activation::from_command(&activate_command(profile, ordinary::ActivationKind::Switch))
+            .expect("activation")
+        {
+            Activation::Home(activation) => activation,
+            Activation::System(_) => panic!("expected Home activation"),
+        }
+    }
+
+    #[test]
+    fn home_remote_profile_addresses_user_at_criome_domain() {
+        let activation = home_activation(meta::HomeMode::Profile);
+        let invocation = activation.remote_profile_invocation();
+        assert_eq!(invocation.program(), "ssh");
+        let argv = invocation.joined_arguments();
+        assert!(argv.contains("li@node-1.alpha.criome"), "{argv}");
+        assert!(
+            argv.contains("nix-env -p \"$HOME/.local/state/nix/profiles/home-manager\" --set"),
+            "{argv}"
+        );
+        assert!(argv.contains(STORE), "{argv}");
+    }
+
+    #[test]
+    fn home_remote_activate_runs_activate_package() {
+        let activation = home_activation(meta::HomeMode::Activate);
+        let invocation = activation.remote_activate_invocation();
+        let argv = invocation.joined_arguments();
+        assert!(argv.contains("li@node-1.alpha.criome"), "{argv}");
+        assert!(argv.contains(&format!("{STORE}/activate")), "{argv}");
     }
 }
