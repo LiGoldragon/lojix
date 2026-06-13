@@ -40,11 +40,14 @@ retires once CriomOS consumes this daemon's projection.
   external operation is a typed Signal variant — no untyped escape
   hatch on the wire. This crate consumes schema-derived contract
   output; it does not invent parallel framing.
-- **SEMA tables are daemon-owned.** The live generation set, GC
-  roots, event log, and container-lifecycle records are modeled as
-  schema-derived SEMA tables. The current implementation is
-  in-memory behind a shared store; durable redb/sema-engine backing
-  remains the next storage cutover.
+- **SEMA tables are daemon-owned and durable.** The live generation
+  set, GC roots, event log, and container-lifecycle records are
+  schema-derived SEMA tables backed by a durable `sema-engine` store
+  (`<state-directory>/lojix.sema`) — one keyed row per element, not one
+  blob per table. Opening the engine resumes the persisted catalog,
+  commit sequence, and records, so daemon state and restart-safe
+  identifier issuance survive a process restart (Spirit `oh9l`,
+  `ur16`). Atomic version-controlled backup is the named follow-on.
 - **The daemon starts from binary rkyv configuration only.** Launch
   tooling encodes typed configuration before exec; `lojix-daemon`
   rejects inline NOTA and `.nota` startup files and never parses

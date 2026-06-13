@@ -120,8 +120,15 @@ Each daemon actor is a Kameo actor per
 
 ## 4 · Storage and wire
 
-- **Storage:** schema-derived SEMA tables over an in-memory shared
-  store today. Redb/sema-engine durability is the next storage cutover.
+- **Storage:** schema-derived SEMA tables over a durable `sema-engine`
+  store — a `*.sema` file under `<state-directory>/lojix.sema`. The four
+  record families (live set, gc-roots, event log, container lifecycle)
+  are keyed rows, one per element; `Engine::open` resumes the persisted
+  catalog, commit sequence, and records on restart, so daemon state
+  survives a process stop with no replay code. The identifier counters
+  (generation, deployment, event-log position) derive from the persisted
+  rows, so they no longer reset to zero on restart. Atomic
+  version-controlled backup is the named follow-on.
 - **Wire:** `signal-frame` records carrying `signal-lojix` on the
   ordinary socket and `meta-signal-lojix` on the owner/meta socket.
   Length-prefixed rkyv archives over Unix sockets.
@@ -145,8 +152,12 @@ Each daemon actor is a Kameo actor per
   there is no untyped escape hatch on the wire.
 - The daemon never initiates deploys on its own — every deploy
   starts from a received `DeploymentSubmission`.
-- The daemon still uses an in-memory shared store; replacing that with
-  `sema-engine` / redb durability remains the next storage cutover.
+- The daemon's shared store is durable `sema-engine` backing; cross-table
+  atomicity (an activation writes the live-set row then the gc-root row as
+  two sequential keyed asserts) awaits a multi-table commit enhancement in
+  `sema-engine`. The keyed asserts are fail-safe — a duplicate key errors
+  rather than clobbering — but a crash mid-activation leaves a torn write
+  with no reopen reconciliation, tracked as the follow-on.
 - Subscription events ride on the acceptor's outbound lane via
   `StreamingFrameBody::SubscriptionEvent`; the daemon mints each
   event's `StreamEventIdentifier` from the lane's monotonic

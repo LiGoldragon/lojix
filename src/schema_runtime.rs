@@ -402,7 +402,27 @@ impl Default for SchemaRuntime {
 
 impl SchemaRuntime {
     pub fn new() -> Self {
-        Self::with_store(Arc::new(Store::new()))
+        Self::with_store(Arc::new(Store::open(Self::test_store_path()).expect("open sema store")))
+    }
+
+    /// A unique tempdir-backed `*.sema` path for a test-only `Store`. Each call
+    /// names a fresh file under the temp directory (process id, a nanosecond
+    /// timestamp, and a per-process counter) so parallel tests never collide and
+    /// each starts from a virgin store.
+    fn test_store_path() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanoseconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let unique = COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir()
+            .join("lojix-test-store")
+            .join(format!(
+                "{}-{nanoseconds}-{unique}.sema",
+                std::process::id()
+            ))
     }
 
     /// Build an engine over a SHARED `Store`. The daemon constructs one per
@@ -467,10 +487,9 @@ impl SchemaRuntime {
     }
 
     fn open_subscription(&mut self) -> nexus::NexusAction {
-        let reply = match self.store.lock() {
-            Ok(mut state) => {
-                let subscription_token = state.next_subscription_token();
-                let commit_sequence = state.commit_sequence;
+        let subscription_token = self.store.next_subscription_token();
+        let reply = match self.store.commit_sequence() {
+            Ok(commit_sequence) => {
                 ordinary::Output::Watching(ordinary::Watching::new(ordinary::SubscriptionOpened {
                     subscription_token: ordinary::SubscriptionToken::new(subscription_token),
                     commit_sequence: ordinary::CommitSequence::new(commit_sequence),
@@ -871,15 +890,8 @@ impl SchemaRuntime {
     ) -> nexus::NexusAction {
         let event = match self.active_deploy.as_ref() {
             Some(pipeline) => {
-                let position = self
-                    .store
-                    .lock()
-                    .map(|state| state.next_event_log_position());
-                pipeline.phase_event(
-                    phase,
-                    ordinary::EventLogPosition::new(position.unwrap_or(0)),
-                    detail,
-                )
+                let position = self.store.next_event_log_position().unwrap_or(0);
+                pipeline.phase_event(phase, ordinary::EventLogPosition::new(position), detail)
             }
             None => {
                 return Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
@@ -937,18 +949,18 @@ impl SchemaRuntime {
         &mut self,
         submission: sema::DeploySubmission,
     ) -> sema::SemaWriteOutput {
-        let result = self.store.lock().map(|mut state| {
-            let commit_sequence = state.next_commit_sequence();
-            let deployment_identifier = state.next_deployment_identifier();
-            let generation_identifier = state.next_generation_identifier();
-            (
-                commit_sequence,
-                deployment_identifier,
-                generation_identifier,
-            )
-        });
-        match result {
-            Ok((commit_sequence, deployment_identifier, generation_identifier)) => {
+        // Submission issues the deployment + generation identifiers and opens
+        // the pipeline; the durable live-set / gc-roots write happens only at
+        // activation. The identifiers are issued from the persisted maxima
+        // (restart-safe), and the marker reflects the current commit sequence —
+        // no row is written here, so the engine's commit counter does not move.
+        let identifiers = (
+            self.store.commit_sequence(),
+            self.store.next_deployment_identifier(),
+            self.store.next_generation_identifier(),
+        );
+        match identifiers {
+            (Ok(commit_sequence), Ok(deployment_identifier), Ok(generation_identifier)) => {
                 let accepted_marker = Self::marker(commit_sequence);
                 self.active_deploy = Some(DeployPipeline::from_submission(
                     deployment_identifier.into(),
@@ -961,7 +973,7 @@ impl SchemaRuntime {
                     database_marker: accepted_marker,
                 })
             }
-            Err(_) => Self::write_rejected(0, sema::RejectionReason::PlanNotApproved),
+            _ => Self::write_rejected(0, sema::RejectionReason::PlanNotApproved),
         }
     }
 
@@ -969,14 +981,17 @@ impl SchemaRuntime {
         &mut self,
         event: ordinary::DeploymentPhaseEvent,
     ) -> sema::SemaWriteOutput {
-        match self.store.lock() {
-            Ok(mut state) => {
-                let commit_sequence = state.next_commit_sequence();
-                let event_log_position = state.next_event_log_position();
-                state.push_event_log_entry(sema::EventLogEntry {
-                    event_log_position: ordinary::EventLogPosition::new(event_log_position),
+        let recorded = self.store.next_event_log_position().and_then(|position| {
+            self.store
+                .append_event_log_entry(sema::EventLogEntry {
+                    event_log_position: ordinary::EventLogPosition::new(position),
                     record: sema::LoggedEvent::Deployment(event),
-                });
+                })
+                .and_then(|()| self.store.commit_sequence())
+                .map(|commit_sequence| (position, commit_sequence))
+        });
+        match recorded {
+            Ok((event_log_position, commit_sequence)) => {
                 sema::SemaWriteOutput::PhaseRecorded(sema::PhaseReceipt {
                     event_log_position: ordinary::EventLogPosition::new(event_log_position),
                     state_marker: Self::sema_marker(commit_sequence),
@@ -990,40 +1005,50 @@ impl SchemaRuntime {
         &mut self,
         commit: sema::ActivationCommit,
     ) -> sema::SemaWriteOutput {
-        match self.store.lock() {
-            Ok(mut state) => {
-                let commit_sequence = state.next_commit_sequence();
-                let pipeline = self.active_deploy.clone();
-                let deployment_identifier = pipeline
-                    .as_ref()
-                    .map(|p| p.deployment_identifier.clone())
-                    .unwrap_or_else(|| ordinary::DeploymentIdentifier::new(0));
-                let deployment_kind = pipeline
-                    .as_ref()
-                    .map(|p| p.deployment_kind)
-                    .unwrap_or(ordinary::DeploymentKind::FullOs);
-                let activation_kind = pipeline
-                    .as_ref()
-                    .map(|p| p.activation_kind)
-                    .unwrap_or(ordinary::ActivationKind::Switch);
-                state.push_live_generation(sema::LiveGeneration {
-                    deployment_identifier,
-                    generation_identifier: commit.generation_identifier.clone(),
-                    cluster_name: commit.cluster_name.clone(),
-                    node_name: commit.node_name.clone(),
-                    deployment_kind,
-                    activation_kind,
-                    generation_slot: commit.generation_slot,
-                    closure_path: commit.closure_path.clone(),
-                });
-                state.push_gc_root(sema::GcRoot {
-                    generation_identifier: commit.generation_identifier.clone(),
-                    cluster_name: commit.cluster_name,
-                    node_name: commit.node_name,
-                    generation_slot: commit.generation_slot,
-                    closure_path: commit.closure_path,
-                    label: None,
-                });
+        let pipeline = self.active_deploy.clone();
+        let deployment_identifier = pipeline
+            .as_ref()
+            .map(|p| p.deployment_identifier.clone())
+            .unwrap_or_else(|| ordinary::DeploymentIdentifier::new(0));
+        let deployment_kind = pipeline
+            .as_ref()
+            .map(|p| p.deployment_kind)
+            .unwrap_or(ordinary::DeploymentKind::FullOs);
+        let activation_kind = pipeline
+            .as_ref()
+            .map(|p| p.activation_kind)
+            .unwrap_or(ordinary::ActivationKind::Switch);
+        let generation = sema::LiveGeneration {
+            deployment_identifier,
+            generation_identifier: commit.generation_identifier.clone(),
+            cluster_name: commit.cluster_name.clone(),
+            node_name: commit.node_name.clone(),
+            deployment_kind,
+            activation_kind,
+            generation_slot: commit.generation_slot,
+            closure_path: commit.closure_path.clone(),
+        };
+        let root = sema::GcRoot {
+            generation_identifier: commit.generation_identifier.clone(),
+            cluster_name: commit.cluster_name.clone(),
+            node_name: commit.node_name.clone(),
+            generation_slot: commit.generation_slot,
+            closure_path: commit.closure_path.clone(),
+            label: None,
+        };
+        // The live-set row and the gc-root row are written as TWO sequential
+        // keyed asserts (inside `Store::record_activation`). A `CommitRequest`
+        // is single-table, so true cross-table atomicity is not available; the
+        // sequential write is the accepted baseline. The keyed asserts are
+        // fail-safe (a duplicate key errors, never clobbers), but a crash
+        // between them leaves a torn write with no reopen reconciliation —
+        // cross-table atomicity needs a sema-engine multi-table commit.
+        let recorded = self
+            .store
+            .record_activation(generation, root)
+            .and_then(|()| self.store.commit_sequence());
+        match recorded {
+            Ok(commit_sequence) => {
                 sema::SemaWriteOutput::GenerationActivated(sema::AppliedActivation {
                     generation_identifier: commit.generation_identifier,
                     generation_slot: commit.generation_slot,
@@ -1035,106 +1060,109 @@ impl SchemaRuntime {
     }
 
     fn pin_generation(&mut self, request: meta::PinRequest) -> sema::SemaWriteOutput {
-        match self.store.lock() {
-            Ok(mut state) => {
-                let commit_sequence = state.next_commit_sequence();
-                let mut roots = state.gc_roots.clone().into_payload();
-                let already_used = roots
-                    .iter()
-                    .any(|root| root.label.as_ref() == Some(&request.pin_label));
-                if already_used {
-                    return Self::write_rejected(
-                        commit_sequence,
-                        sema::RejectionReason::PinLabelInUse,
-                    );
-                }
-                if let Some(root) = roots.iter_mut().find(|root| {
-                    root.generation_identifier == request.generation_identifier
-                        && root.cluster_name == request.cluster_name
-                        && root.node_name == request.node_name
-                }) {
-                    let from_slot = root.generation_slot;
-                    root.generation_slot = ordinary::GenerationSlot::Pinned;
-                    root.label = Some(request.pin_label.clone());
-                    state.replace_gc_roots(roots);
-                    sema::SemaWriteOutput::GenerationPinned(meta::AppliedPin {
-                        generation_identifier: request.generation_identifier,
-                        pin_label: request.pin_label,
-                        from_slot,
-                        to_slot: ordinary::GenerationSlot::Pinned,
-                        database_marker: Self::marker(commit_sequence),
-                    })
-                } else {
-                    Self::write_rejected(commit_sequence, sema::RejectionReason::GenerationUnknown)
-                }
+        let roots = match self.store.gc_roots() {
+            Ok(roots) => roots,
+            Err(_) => return Self::write_rejected(0, sema::RejectionReason::GenerationUnknown),
+        };
+        let current_sequence = self.store.commit_sequence().unwrap_or(0);
+        let already_used = roots
+            .iter()
+            .any(|root| root.label.as_ref() == Some(&request.pin_label));
+        if already_used {
+            return Self::write_rejected(current_sequence, sema::RejectionReason::PinLabelInUse);
+        }
+        let Some(mut root) = roots.into_iter().find(|root| {
+            root.generation_identifier == request.generation_identifier
+                && root.cluster_name == request.cluster_name
+                && root.node_name == request.node_name
+        }) else {
+            return Self::write_rejected(current_sequence, sema::RejectionReason::GenerationUnknown);
+        };
+        let from_slot = root.generation_slot;
+        root.generation_slot = ordinary::GenerationSlot::Pinned;
+        root.label = Some(request.pin_label.clone());
+        let committed = self
+            .store
+            .mutate_gc_root(root)
+            .and_then(|()| self.store.commit_sequence());
+        match committed {
+            Ok(commit_sequence) => sema::SemaWriteOutput::GenerationPinned(meta::AppliedPin {
+                generation_identifier: request.generation_identifier,
+                pin_label: request.pin_label,
+                from_slot,
+                to_slot: ordinary::GenerationSlot::Pinned,
+                database_marker: Self::marker(commit_sequence),
+            }),
+            Err(_) => {
+                Self::write_rejected(current_sequence, sema::RejectionReason::GenerationUnknown)
             }
-            Err(_) => Self::write_rejected(0, sema::RejectionReason::GenerationUnknown),
         }
     }
 
     fn unpin_generation(&mut self, request: meta::UnpinRequest) -> sema::SemaWriteOutput {
-        match self.store.lock() {
-            Ok(mut state) => {
-                let commit_sequence = state.next_commit_sequence();
-                let mut roots = state.gc_roots.clone().into_payload();
-                if let Some(root) = roots.iter_mut().find(|root| {
-                    root.label.as_ref() == Some(&request.pin_label)
-                        && root.cluster_name == request.cluster_name
-                        && root.node_name == request.node_name
-                }) {
-                    let generation_identifier = root.generation_identifier.clone();
-                    let from_slot = root.generation_slot;
-                    root.generation_slot = ordinary::GenerationSlot::Recent;
-                    root.label = None;
-                    state.replace_gc_roots(roots);
-                    sema::SemaWriteOutput::GenerationUnpinned(meta::AppliedUnpin {
-                        generation_identifier,
-                        pin_label: request.pin_label,
-                        from_slot,
-                        to_slot: ordinary::GenerationSlot::Recent,
-                        database_marker: Self::marker(commit_sequence),
-                    })
-                } else {
-                    Self::write_rejected(commit_sequence, sema::RejectionReason::PinLabelUnknown)
-                }
+        let roots = match self.store.gc_roots() {
+            Ok(roots) => roots,
+            Err(_) => return Self::write_rejected(0, sema::RejectionReason::PinLabelUnknown),
+        };
+        let current_sequence = self.store.commit_sequence().unwrap_or(0);
+        let Some(mut root) = roots.into_iter().find(|root| {
+            root.label.as_ref() == Some(&request.pin_label)
+                && root.cluster_name == request.cluster_name
+                && root.node_name == request.node_name
+        }) else {
+            return Self::write_rejected(current_sequence, sema::RejectionReason::PinLabelUnknown);
+        };
+        let generation_identifier = root.generation_identifier.clone();
+        let from_slot = root.generation_slot;
+        root.generation_slot = ordinary::GenerationSlot::Recent;
+        root.label = None;
+        let committed = self
+            .store
+            .mutate_gc_root(root)
+            .and_then(|()| self.store.commit_sequence());
+        match committed {
+            Ok(commit_sequence) => sema::SemaWriteOutput::GenerationUnpinned(meta::AppliedUnpin {
+                generation_identifier,
+                pin_label: request.pin_label,
+                from_slot,
+                to_slot: ordinary::GenerationSlot::Recent,
+                database_marker: Self::marker(commit_sequence),
+            }),
+            Err(_) => {
+                Self::write_rejected(current_sequence, sema::RejectionReason::PinLabelUnknown)
             }
-            Err(_) => Self::write_rejected(0, sema::RejectionReason::PinLabelUnknown),
         }
     }
 
     fn retire_generation(&mut self, request: meta::RetireRequest) -> sema::SemaWriteOutput {
-        match self.store.lock() {
-            Ok(mut state) => {
-                let commit_sequence = state.next_commit_sequence();
-                let mut roots = state.gc_roots.clone().into_payload();
-                let found = roots.iter().position(|root| {
-                    root.generation_identifier == request.generation_identifier
-                        && root.cluster_name == request.cluster_name
-                        && root.node_name == request.node_name
-                });
-                match found {
-                    Some(index) => {
-                        let root = roots.remove(index);
-                        if matches!(root.generation_slot, ordinary::GenerationSlot::Pinned) {
-                            return Self::write_rejected(
-                                commit_sequence,
-                                sema::RejectionReason::GenerationPinned,
-                            );
-                        }
-                        state.replace_gc_roots(roots);
-                        sema::SemaWriteOutput::GenerationRetired(meta::AppliedRetire {
-                            generation_identifier: request.generation_identifier,
-                            from_slot: root.generation_slot,
-                            database_marker: Self::marker(commit_sequence),
-                        })
-                    }
-                    None => Self::write_rejected(
-                        commit_sequence,
-                        sema::RejectionReason::GenerationUnknown,
-                    ),
-                }
+        let roots = match self.store.gc_roots() {
+            Ok(roots) => roots,
+            Err(_) => return Self::write_rejected(0, sema::RejectionReason::GenerationUnknown),
+        };
+        let current_sequence = self.store.commit_sequence().unwrap_or(0);
+        let Some(root) = roots.into_iter().find(|root| {
+            root.generation_identifier == request.generation_identifier
+                && root.cluster_name == request.cluster_name
+                && root.node_name == request.node_name
+        }) else {
+            return Self::write_rejected(current_sequence, sema::RejectionReason::GenerationUnknown);
+        };
+        if matches!(root.generation_slot, ordinary::GenerationSlot::Pinned) {
+            return Self::write_rejected(current_sequence, sema::RejectionReason::GenerationPinned);
+        }
+        let committed = self
+            .store
+            .retract_gc_root(*request.generation_identifier.payload())
+            .and_then(|()| self.store.commit_sequence());
+        match committed {
+            Ok(commit_sequence) => sema::SemaWriteOutput::GenerationRetired(meta::AppliedRetire {
+                generation_identifier: request.generation_identifier,
+                from_slot: root.generation_slot,
+                database_marker: Self::marker(commit_sequence),
+            }),
+            Err(_) => {
+                Self::write_rejected(current_sequence, sema::RejectionReason::GenerationUnknown)
             }
-            Err(_) => Self::write_rejected(0, sema::RejectionReason::GenerationUnknown),
         }
     }
 
@@ -1142,22 +1170,25 @@ impl SchemaRuntime {
         &mut self,
         transition: sema::ContainerTransition,
     ) -> sema::SemaWriteOutput {
-        match self.store.lock() {
-            Ok(mut state) => {
-                let commit_sequence = state.next_commit_sequence();
-                let event_log_position = state.next_event_log_position();
-                let record = sema::ContainerLifecycleRecord {
-                    cluster_name: transition.cluster_name,
-                    node_name: transition.node_name,
-                    container: transition.container,
-                    state: transition.state,
-                    event_log_position: ordinary::EventLogPosition::new(event_log_position),
-                };
-                state.push_container_record(record.clone());
-                state.push_event_log_entry(sema::EventLogEntry {
-                    event_log_position: ordinary::EventLogPosition::new(event_log_position),
-                    record: sema::LoggedEvent::Container(record),
-                });
+        let recorded = self.store.next_event_log_position().and_then(|position| {
+            let record = sema::ContainerLifecycleRecord {
+                cluster_name: transition.cluster_name,
+                node_name: transition.node_name,
+                container: transition.container,
+                state: transition.state,
+                event_log_position: ordinary::EventLogPosition::new(position),
+            };
+            let entry = sema::EventLogEntry {
+                event_log_position: ordinary::EventLogPosition::new(position),
+                record: sema::LoggedEvent::Container(record.clone()),
+            };
+            self.store
+                .record_container_transition(record, entry)
+                .and_then(|()| self.store.commit_sequence())
+                .map(|commit_sequence| (position, commit_sequence))
+        });
+        match recorded {
+            Ok((event_log_position, commit_sequence)) => {
                 sema::SemaWriteOutput::ContainerRecorded(sema::ContainerReceipt {
                     event_log_position: ordinary::EventLogPosition::new(event_log_position),
                     state_marker: Self::sema_marker(commit_sequence),
@@ -1189,16 +1220,16 @@ impl SchemaRuntime {
     }
 
     fn query_generations(&self, selection: ordinary::Selection) -> sema::SemaReadOutput {
-        let state = match self.store.lock() {
-            Ok(state) => state,
+        let matching = self
+            .store
+            .matching_live_generations(|live| Self::generation_matches(&selection, live));
+        let live_generations = match matching {
+            Ok(live_generations) => live_generations,
             Err(_) => return Self::read_missed(0, sema::RejectionReason::GenerationUnknown),
         };
-        let commit_sequence = state.commit_sequence;
-        let generations: Vec<ordinary::Generation> = state
-            .live_set
-            .payload()
+        let commit_sequence = self.store.commit_sequence().unwrap_or(0);
+        let generations: Vec<ordinary::Generation> = live_generations
             .iter()
-            .filter(|live| Self::generation_matches(&selection, live))
             .map(Self::project_generation)
             .collect();
         sema::SemaReadOutput::GenerationsQueried(ordinary::GenerationListing {
@@ -1238,21 +1269,19 @@ impl SchemaRuntime {
     }
 
     fn read_event_log(&self, range: ordinary::EventLogRange) -> sema::SemaReadOutput {
-        let state = match self.store.lock() {
-            Ok(state) => state,
+        let entries = match self
+            .store
+            .event_log_in_range(*range.from.payload(), *range.until.payload())
+        {
+            Ok(entries) => entries,
             Err(_) => {
                 return Self::read_missed(0, sema::RejectionReason::EventLogPositionOutOfRange);
             }
         };
-        let commit_sequence = state.commit_sequence;
+        let commit_sequence = self.store.commit_sequence().unwrap_or(0);
         let mut deployment_events = Vec::new();
         let mut retention_events = Vec::new();
-        for entry in state.event_log.payload() {
-            if *entry.event_log_position.payload() < *range.from.payload()
-                || *entry.event_log_position.payload() >= *range.until.payload()
-            {
-                continue;
-            }
+        for entry in &entries {
             match &entry.record {
                 sema::LoggedEvent::Deployment(event) => deployment_events.push(event.clone()),
                 sema::LoggedEvent::CacheRetention(event) => retention_events.push(event.clone()),

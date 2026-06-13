@@ -85,9 +85,17 @@ impl Daemon {
             AsyncListenerSocket::new(ListenerRole::Owner, configuration.owner_socket_path.clone())
                 .with_socket_mode(SocketMode::new(configuration.owner_socket_mode)),
         ];
-        let runtime = LojixRuntime::new(RuntimeConfiguration::from_daemon_configuration(
-            &configuration,
-        ));
+        // Open the durable sema-engine store under the state directory,
+        // parallel to the `generated-inputs` subdir. Opening doubles as the
+        // self-resume: an existing `lojix.sema` resumes its persisted catalog,
+        // commit sequence, and records (ur16). Construction is fallible and its
+        // Result propagates through `run`'s existing Result.
+        let state_database_path =
+            std::path::PathBuf::from(&configuration.state_directory_path).join("lojix.sema");
+        let runtime = LojixRuntime::new(
+            RuntimeConfiguration::from_daemon_configuration(&configuration),
+            state_database_path,
+        )?;
         let request_error_log = RequestErrorLog::new("lojix-daemon");
         AsyncMultiListenerDaemon::new(sockets, runtime, request_error_log)
             .with_concurrency_limit(RequestConcurrencyLimit::new(MAXIMUM_CONCURRENT_REQUESTS))
@@ -139,13 +147,16 @@ struct LojixRuntime {
 }
 
 impl LojixRuntime {
-    fn new(configuration: RuntimeConfiguration) -> Self {
-        Self {
-            store: Arc::new(Store::new()),
+    fn new(
+        configuration: RuntimeConfiguration,
+        state_database_path: std::path::PathBuf,
+    ) -> Result<Self> {
+        Ok(Self {
+            store: Arc::new(Store::open(state_database_path)?),
             configuration: Arc::new(configuration),
             codec: LengthPrefixedCodec::new(MaximumFrameLength::new(MAXIMUM_REQUEST_FRAME_BYTES)),
             owner_authority: OwnerPeerAuthority::current_process(),
-        }
+        })
     }
 }
 
