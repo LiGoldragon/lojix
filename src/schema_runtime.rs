@@ -2761,7 +2761,7 @@ impl NixCommand {
             "build".to_string(),
             "--no-link".to_string(),
             "--print-out-paths".to_string(),
-            closure_path.to_string(),
+            Self::output_installable(closure_path),
         ];
         arguments.extend(Self::substituter_options(substituters));
         Self::new("nix", arguments)
@@ -2778,10 +2778,22 @@ impl NixCommand {
             "--print-out-paths".to_string(),
             "--builders".to_string(),
             format!("ssh-ng://{builder}"),
-            closure_path.to_string(),
+            Self::output_installable(closure_path),
         ];
         arguments.extend(Self::substituter_options(substituters));
         Self::new("nix", arguments)
+    }
+
+    /// Select the derivation's *outputs* with the `^*` installable suffix so
+    /// `nix build ... --print-out-paths` returns the realised output store
+    /// path. The closure path threaded in is a `.drv` path (from
+    /// `eval_drv_path`'s `.drvPath`); on nix 2.4+ a bare `.drv` installable
+    /// makes `--print-out-paths` print the `.drv` path itself, NOT the built
+    /// output — the daemon would then copy and activate the `.drv` and
+    /// activation could never succeed (Unit C live e2e on Prometheus). The
+    /// `^*` selector resolves the derivation to all its outputs.
+    fn output_installable(closure_path: &str) -> String {
+        format!("{closure_path}^*")
     }
 
     /// The `--option extra-substituters / extra-trusted-public-keys` arguments
@@ -3106,6 +3118,58 @@ mod tests {
                 "Home {mode:?} should be supported"
             );
         }
+    }
+
+    // ---- closure build argv — `.drv^*` output selector, never the bare .drv ----
+
+    const DERIVATION: &str =
+        "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-mercury.drv";
+
+    #[test]
+    fn build_closure_selects_drv_outputs_not_the_bare_drv() {
+        // The closure path threaded in is a `.drv` (from `eval_drv_path`'s
+        // `.drvPath`). On nix 2.4+ a bare `.drv` installable makes
+        // `--print-out-paths` print the `.drv` path itself, so the daemon would
+        // copy/activate the `.drv` and activation could never succeed (Unit C
+        // live e2e). The `^*` output selector pins the realised output path.
+        let invocation = NixCommand::build_closure(DERIVATION, &[]);
+        assert_eq!(invocation.program(), "nix");
+        let argv = invocation.joined_arguments();
+        assert!(argv.contains("--print-out-paths"), "{argv}");
+        assert!(
+            argv.contains(&format!("{DERIVATION}^*")),
+            "build installable must carry the `^*` output selector: {argv}"
+        );
+        // The bare `.drv` must never be handed in as its own argv token — that
+        // is exactly the regression that printed/activated the `.drv`.
+        assert!(
+            !invocation
+                .arguments
+                .iter()
+                .any(|argument| argument == DERIVATION),
+            "bare .drv must not appear as an installable token: {argv}"
+        );
+    }
+
+    #[test]
+    fn build_closure_remote_selects_drv_outputs_not_the_bare_drv() {
+        let invocation =
+            NixCommand::build_closure_remote("builder.alpha.criome", DERIVATION, &[]);
+        assert_eq!(invocation.program(), "nix");
+        let argv = invocation.joined_arguments();
+        assert!(argv.contains("--print-out-paths"), "{argv}");
+        assert!(argv.contains("ssh-ng://builder.alpha.criome"), "{argv}");
+        assert!(
+            argv.contains(&format!("{DERIVATION}^*")),
+            "remote build installable must carry the `^*` output selector: {argv}"
+        );
+        assert!(
+            !invocation
+                .arguments
+                .iter()
+                .any(|argument| argument == DERIVATION),
+            "bare .drv must not appear as an installable token: {argv}"
+        );
     }
 
     // ---- Step 3: SSH addressing — root@<criome_domain>, never bare node ----
