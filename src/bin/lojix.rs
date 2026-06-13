@@ -2,7 +2,7 @@
 //!
 //! Reads one typed `signal_lojix::LojixCliConfiguration` source from
 //! argv position 0, then reads one Nota request from argv position 1+
-//! (joined with spaces) or stdin. Sends a `signal-core` frame carrying a
+//! (joined with spaces) or stdin. Sends a `signal-frame` frame carrying a
 //! `signal_lojix::Request`, awaits the matching `signal_lojix::Reply`,
 //! and prints the reply payload as Nota.
 

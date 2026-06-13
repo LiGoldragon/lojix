@@ -11,19 +11,18 @@ use horizon_lib::name::{
     ClusterName as HorizonClusterName, CriomeDomainName, NodeName as HorizonNodeName,
     UserName as HorizonUserName,
 };
+use horizon_lib::node::Node;
 use horizon_lib::species::System;
-use horizon_lib::view::Node;
-use horizon_lib::{ClusterProposal, Horizon, HorizonProposal, Viewpoint};
-use horizon_nota_codec::NotaDecode as HorizonNotaDecode;
+use horizon_lib::{ClusterProposal, Horizon, Viewpoint};
 use kameo::Actor;
 use kameo::actor::{ActorRef, Spawn};
 use kameo::error::Infallible;
 use kameo::message::{Context, Message};
+use nota_next::NotaSource;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema::SchemaVersion;
 use sema_engine::{
-    Assertion, Engine, EngineOpen, EngineRecord, QueryPlan, RecordKey, Retraction, TableDescriptor,
-    TableName, TableReference,
+    Assertion, Engine, EngineOpen, EngineRecord, FamilyName, QueryPlan, RecordKey, Retraction,
+    SchemaHash, SchemaVersion, SnapshotIdentifier, TableDescriptor, TableName, TableReference,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -47,7 +46,7 @@ pub struct DeploymentLedger {
     engine: Engine,
     deployment_identities: TableReference<DeploymentIdentityRecord>,
     deployment_events: TableReference<DeploymentEventRecord>,
-    deployment_observation_subscriptions: TableReference<DeploymentObservationSubscriptionRecord>,
+    deployment_observation_subscriptions: TableReference<WatchDeploymentsRecord>,
     generations: TableReference<GenerationRecord>,
 }
 
@@ -59,14 +58,21 @@ impl DeploymentLedger {
             database_path,
             SchemaVersion::new(LOJIX_SCHEMA_VERSION),
         ))?;
-        let deployment_identities =
-            engine.register_table(TableDescriptor::new(DEPLOYMENT_IDENTITIES_TABLE))?;
-        let deployment_events =
-            engine.register_table(TableDescriptor::new(DEPLOYMENT_EVENTS_TABLE))?;
-        let deployment_observation_subscriptions = engine.register_table(TableDescriptor::new(
-            DEPLOYMENT_OBSERVATION_SUBSCRIPTIONS_TABLE,
+        let deployment_identities = engine.register_table(Self::table_descriptor(
+            DEPLOYMENT_IDENTITIES_TABLE,
+            "deployment-identity",
         ))?;
-        let generations = engine.register_table(TableDescriptor::new(GENERATIONS_TABLE))?;
+        let deployment_events = engine.register_table(Self::table_descriptor(
+            DEPLOYMENT_EVENTS_TABLE,
+            "deployment-event",
+        ))?;
+        let deployment_observation_subscriptions =
+            engine.register_table(Self::table_descriptor(
+                DEPLOYMENT_OBSERVATION_SUBSCRIPTIONS_TABLE,
+                "deployment-observation-subscription",
+            ))?;
+        let generations =
+            engine.register_table(Self::table_descriptor(GENERATIONS_TABLE, "generation"))?;
         Ok(Self {
             engine,
             deployment_identities,
@@ -104,12 +110,11 @@ impl DeploymentLedger {
 
     pub fn open_deployment_observation_subscription(
         &self,
-        subscription: wire::DeploymentObservationSubscription,
+        subscription: wire::WatchDeployments,
     ) -> Result<wire::DeploymentObservationSubscriptionOpened> {
         let key = self.next_key("deployment_observation_subscription")?;
         let token = wire::DeploymentObservationToken::new(key.value());
-        let record =
-            DeploymentObservationSubscriptionRecord::new(key, token.clone(), subscription.clone());
+        let record = WatchDeploymentsRecord::new(key, token.clone(), subscription.clone());
         self.engine.assert(Assertion::new(
             self.deployment_observation_subscriptions,
             record,
@@ -125,7 +130,7 @@ impl DeploymentLedger {
         &self,
         token: &wire::DeploymentObservationToken,
     ) -> Result<()> {
-        let key = DeploymentObservationSubscriptionRecord::key_from_token(token).to_owned_string();
+        let key = WatchDeploymentsRecord::key_from_token(token).to_owned_string();
         match self.engine.retract(Retraction::new(
             self.deployment_observation_subscriptions,
             RecordKey::new(key),
@@ -182,7 +187,7 @@ impl DeploymentLedger {
 
     pub fn snapshot_deployment_observations(
         &self,
-        subscription: &wire::DeploymentObservationSubscription,
+        subscription: &wire::WatchDeployments,
     ) -> Result<Vec<wire::DeploymentObservation>> {
         Ok(self
             .engine
@@ -200,6 +205,17 @@ impl DeploymentLedger {
             self.engine.latest_snapshot()?.next(),
         ))
     }
+
+    fn table_descriptor<RecordValue>(
+        table: TableName,
+        family: &'static str,
+    ) -> TableDescriptor<RecordValue> {
+        TableDescriptor::new(
+            table,
+            FamilyName::new(family),
+            SchemaHash::for_label(format!("{family}-v1")),
+        )
+    }
 }
 
 struct DurableKey {
@@ -208,7 +224,7 @@ struct DurableKey {
 }
 
 impl DurableKey {
-    fn new(prefix: &'static str, snapshot: sema_engine::SnapshotId) -> Self {
+    fn new(prefix: &'static str, snapshot: SnapshotIdentifier) -> Self {
         Self::from_value(prefix, snapshot.value())
     }
 
@@ -269,7 +285,7 @@ impl DeploymentEventRecord {
         }
     }
 
-    fn matches(&self, subscription: &wire::DeploymentObservationSubscription) -> bool {
+    fn matches(&self, subscription: &wire::WatchDeployments) -> bool {
         subscription
             .cluster
             .as_ref()
@@ -292,19 +308,19 @@ impl EngineRecord for DeploymentEventRecord {
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct DeploymentObservationSubscriptionRecord {
+struct WatchDeploymentsRecord {
     key: String,
     token: wire::DeploymentObservationToken,
-    subscription: wire::DeploymentObservationSubscription,
+    subscription: wire::WatchDeployments,
 }
 
-impl DeploymentObservationSubscriptionRecord {
+impl WatchDeploymentsRecord {
     const KEY_PREFIX: &'static str = "deployment_observation_subscription";
 
     fn new(
         key: DurableKey,
         token: wire::DeploymentObservationToken,
-        subscription: wire::DeploymentObservationSubscription,
+        subscription: wire::WatchDeployments,
     ) -> Self {
         Self {
             key: key.into_string(),
@@ -318,7 +334,7 @@ impl DeploymentObservationSubscriptionRecord {
     }
 }
 
-impl EngineRecord for DeploymentObservationSubscriptionRecord {
+impl EngineRecord for WatchDeploymentsRecord {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.key.clone())
     }
@@ -422,7 +438,7 @@ impl Message<AllocateDeployment> for DeploymentLedgerActor {
 }
 
 pub struct OpenDeploymentObservationSubscription {
-    pub subscription: wire::DeploymentObservationSubscription,
+    pub subscription: wire::WatchDeployments,
     pub subscriber: Option<UnboundedSender<wire::DeploymentObservation>>,
 }
 
@@ -561,7 +577,7 @@ impl DeploymentLedgerActor {
 }
 
 struct ActiveDeploymentObservationSubscriber {
-    subscription: wire::DeploymentObservationSubscription,
+    subscription: wire::WatchDeployments,
     sender: UnboundedSender<wire::DeploymentObservation>,
 }
 
@@ -749,11 +765,11 @@ impl Actor for DeploymentActor {
 
 pub struct StartDeployment {
     pub deployment: wire::DeploymentId,
-    pub submission: wire::DeploymentSubmission,
+    pub submission: wire::DeploymentRequest,
 }
 
 impl Message<StartDeployment> for DeploymentActor {
-    type Reply = std::result::Result<wire::Reply, Infallible>;
+    type Reply = std::result::Result<wire::LojixReply, Infallible>;
 
     async fn handle(
         &mut self,
@@ -761,7 +777,7 @@ impl Message<StartDeployment> for DeploymentActor {
         _context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if let Err(error) = BuildOnlyRequest::validate_fast(&message.submission) {
-            return Ok(wire::Reply::DeploymentRejected(error.into_rejection()));
+            return Ok(wire::LojixReply::DeploymentRejected(error.into_rejection()));
         }
 
         let authorization = match self
@@ -774,7 +790,7 @@ impl Message<StartDeployment> for DeploymentActor {
         {
             Ok(grant) => grant,
             Err(error) => {
-                return Ok(wire::Reply::DeploymentRejected(
+                return Ok(wire::LojixReply::DeploymentRejected(
                     DeploymentError::new(error.to_string()).into_rejection(),
                 ));
             }
@@ -790,15 +806,17 @@ impl Message<StartDeployment> for DeploymentActor {
             message.submission,
         ));
         if job.tell(RunBuildJob).send().await.is_err() {
-            return Ok(wire::Reply::DeploymentRejected(
+            return Ok(wire::LojixReply::DeploymentRejected(
                 DeploymentError::new("build job actor stopped before accepting work")
                     .into_rejection(),
             ));
         }
 
-        Ok(wire::Reply::DeploymentAccepted(wire::DeploymentAccepted {
-            deployment: message.deployment,
-        }))
+        Ok(wire::LojixReply::DeploymentAccepted(
+            wire::DeploymentAccepted {
+                deployment: message.deployment,
+            },
+        ))
     }
 }
 
@@ -809,7 +827,7 @@ struct BuildJobActor {
     deployment: wire::DeploymentId,
     cluster: wire::ClusterName,
     node: wire::NodeName,
-    submission: Option<wire::DeploymentSubmission>,
+    submission: Option<wire::DeploymentRequest>,
 }
 
 impl BuildJobActor {
@@ -818,7 +836,7 @@ impl BuildJobActor {
         deployment_ledger: ActorRef<DeploymentLedgerActor>,
         garbage_collection_roots: ActorRef<GarbageCollectionRoots>,
         deployment: wire::DeploymentId,
-        submission: wire::DeploymentSubmission,
+        submission: wire::DeploymentRequest,
     ) -> Self {
         let cluster = submission.cluster.clone();
         let node = submission.node.clone();
@@ -987,7 +1005,6 @@ pub struct BuildOnlyRequest {
     generation_kind: wire::GenerationKind,
     horizon_cluster: HorizonClusterName,
     horizon_node: HorizonNodeName,
-    horizon_configuration_source: HorizonConfigurationSource,
     source: ProposalSource,
     flake: FlakeReference,
     plan: BuildOnlyPlan,
@@ -997,7 +1014,7 @@ pub struct BuildOnlyRequest {
 
 impl BuildOnlyRequest {
     fn validate_fast(
-        submission: &wire::DeploymentSubmission,
+        submission: &wire::DeploymentRequest,
     ) -> std::result::Result<(), DeploymentError> {
         let _ = BuildOnlyPlan::from_wire(&submission.plan)?;
         match &submission.builder {
@@ -1011,7 +1028,7 @@ impl BuildOnlyRequest {
 
     fn from_submission(
         configuration: &RuntimeConfiguration,
-        submission: wire::DeploymentSubmission,
+        submission: wire::DeploymentRequest,
     ) -> Result<Self> {
         Self::validate_fast(&submission)
             .map_err(|error| Error::DeploymentRejected(error.message))?;
@@ -1025,9 +1042,6 @@ impl BuildOnlyRequest {
             generation_kind: plan.generation_kind(),
             horizon_cluster: horizon_cluster_name(&submission.cluster)?,
             horizon_node: horizon_node_name(&submission.node)?,
-            horizon_configuration_source: HorizonConfigurationSource::new(
-                configuration.horizon_configuration_source(),
-            ),
             source: ProposalSource::new(submission.source.as_str()),
             flake: FlakeReference::new(submission.flake.as_str()),
             plan,
@@ -1074,13 +1088,12 @@ impl BuildOnlyRequest {
     }
 
     pub async fn run(&self) -> Result<wire::BuildResult> {
-        let horizon_proposal = self.horizon_configuration_source.load()?;
         let proposal = self.source.load()?;
         let viewpoint = Viewpoint {
             cluster: self.horizon_cluster.clone(),
             node: self.horizon_node.clone(),
         };
-        let horizon = proposal.project(&horizon_proposal, &viewpoint)?;
+        let horizon = proposal.project(&viewpoint)?;
         self.plan.validate_home_user(&horizon)?;
         let builder = BuilderPolicy::new(&horizon).resolve(&self.builder)?;
         let extra_substituters =
@@ -1354,23 +1367,7 @@ impl ProposalSource {
 
     fn load(&self) -> Result<ClusterProposal> {
         let text = std::fs::read_to_string(&self.0)?;
-        let mut decoder = horizon_nota_codec::Decoder::new(&text);
-        Ok(ClusterProposal::decode(&mut decoder)?)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HorizonConfigurationSource(PathBuf);
-
-impl HorizonConfigurationSource {
-    fn new(path: impl Into<PathBuf>) -> Self {
-        Self(path.into())
-    }
-
-    fn load(&self) -> Result<HorizonProposal> {
-        let text = std::fs::read_to_string(&self.0)?;
-        let mut decoder = horizon_nota_codec::Decoder::new(&text);
-        Ok(HorizonProposal::decode(&mut decoder)?)
+        Ok(NotaSource::new(&text).parse()?)
     }
 }
 
@@ -1969,18 +1966,23 @@ impl ExtraSubstituters {
                     ))
                 })?
             };
-            let Some(cache) = &node.nix_cache else {
+            if !node.is_nix_cache {
                 return Err(Error::DeploymentRejected(format!(
                     "substituter node {name} is not a Nix cache"
                 )));
-            };
+            }
             let Some(public_key) = &node.nix_pub_key_line else {
                 return Err(Error::DeploymentRejected(format!(
                     "substituter node {name} has no Nix public key"
                 )));
             };
+            let Some(url) = &node.nix_url else {
+                return Err(Error::DeploymentRejected(format!(
+                    "substituter node {name} has no Nix cache URL"
+                )));
+            };
             entries.push(ExtraSubstituter {
-                url: cache.url.clone(),
+                url: url.clone(),
                 public_key: public_key.as_str().to_string(),
             });
         }

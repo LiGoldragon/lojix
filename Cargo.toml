@@ -21,8 +21,8 @@ name = "lojix"
 path = "src/bin/lojix.rs"
 
 [dependencies]
-# Wire kernel — Frame, handshake, SignalVerb, channel macro.
-signal-core  = { git = "https://github.com/LiGoldragon/signal-core.git" }
+# Wire kernel — Frame, handshake, channel macro.
+signal-frame = { git = "https://github.com/LiGoldragon/signal-frame.git", branch = "main" }
 
 # Lojix wire vocabulary (Request/Reply, deploy/cache-retention/generation
 # records). Tracks this feature branch alongside this crate.
@@ -35,11 +35,10 @@ signal-criome = { git = "https://github.com/LiGoldragon/signal-criome.git", bran
 # Typed database engine (registered record families, Assert/Mutate/Match/
 # Subscribe/commit/Validate). The daemon owns one redb file via Engine.
 sema-engine  = { git = "https://github.com/LiGoldragon/sema-engine.git", branch = "main" }
-sema         = { git = "https://github.com/LiGoldragon/sema.git" }
 
 # Horizon projection library — projects cluster proposals before build.
-horizon-lib  = { git = "https://github.com/LiGoldragon/horizon-rs.git", branch = "horizon-leaner-shape", package = "horizon-lib" }
-horizon-nota-codec = { package = "nota-codec", git = "https://github.com/LiGoldragon/nota-codec.git" }
+horizon-lib  = { git = "https://github.com/LiGoldragon/horizon-rs.git", branch = "main", package = "horizon-lib" }
+nota-next    = { git = "https://github.com/LiGoldragon/nota-next.git", branch = "main" }
 
 # Text codec for the CLI's nota-in / nota-out boundary.
 nota-codec   = { git = "https://github.com/LiGoldragon/nota-codec.git", branch = "main" }
@@ -47,7 +46,7 @@ nota-codec   = { git = "https://github.com/LiGoldragon/nota-codec.git", branch =
 # Typed startup configuration boundary for production binaries.
 nota-config  = { git = "https://github.com/LiGoldragon/nota-config.git", branch = "main" }
 
-# Wire-format derives shared with signal-core / signal-lojix.
+# Wire-format derives shared with signal-frame / signal-lojix.
 rkyv         = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 
 # Unix socket ownership and group lookup.

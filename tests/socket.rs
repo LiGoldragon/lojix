@@ -2,23 +2,23 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kameo::actor::Spawn;
 use lojix::deploy::{AppendDeploymentObservation, CountDeploymentObservationSubscriptions};
-use signal_core::{
+use signal_frame::{
     ExchangeIdentifier, ExchangeLane, LaneSequence, Reply as CoreReply, RequestPayload,
-    SessionEpoch, SubReply,
+    SessionEpoch, StreamingFrameBody, SubReply,
 };
 use tokio::net::UnixStream;
 
 use lojix::wire::{
-    BuildResult, BuilderSelection, CacheRetentionObservationSubscription, ClusterName,
-    DeploymentBuilding, DeploymentBuilt, DeploymentFailed, DeploymentId, DeploymentObservation,
-    DeploymentObservationSubscription, DeploymentObservationToken, DeploymentPhase,
-    DeploymentSubmitted, DispatcherChoosesBuilder, Event, FailureText, GenerationKind,
-    GenerationQuery, LojixFrame, LojixFrameBody, NodeName, RealizedStorePath, Request, StorePath,
+    BuildResult, BuilderSelection, ClusterName, DeploymentBuilding, DeploymentBuilt,
+    DeploymentFailed, DeploymentId, DeploymentObservation, DeploymentObservationToken,
+    DeploymentPhase, DeploymentSubmitted, DispatcherChoosesBuilder, FailureText, Frame,
+    GenerationKind, GenerationQuery, LojixEvent, NodeName, Operation, RealizedStorePath, StorePath,
+    WatchCacheRetention, WatchDeployments,
 };
 use lojix::{Client, Connection, RuntimeRoot, SocketAddress, SocketServer};
 
-fn generation_query() -> Request {
-    Request::GenerationQuery(GenerationQuery {
+fn generation_query() -> Operation {
+    Operation::Query(GenerationQuery {
         cluster: None,
         node: None,
         kind: Some(GenerationKind::HomeOnly),
@@ -34,24 +34,23 @@ async fn socket_round_trip_routes_request_through_runtime_root() {
     let client = async move {
         let mut connection = Connection::new(client_stream);
         let exchange = lojix::socket::ExchangeIdentity::first_connector_exchange();
-        let frame = LojixFrame::new(LojixFrameBody::Request {
+        let frame = Frame::new(StreamingFrameBody::Request {
             exchange: exchange.value(),
             request: generation_query().into_request(),
         });
         connection.write_frame(&frame).await.expect("write request");
         let reply_frame = connection.read_frame().await.expect("read reply");
         match reply_frame.into_body() {
-            LojixFrameBody::Reply {
+            StreamingFrameBody::Reply {
                 exchange: reply_exchange,
                 reply,
             } => {
                 assert_eq!(reply_exchange, exchange.value());
                 match reply {
                     CoreReply::Accepted { per_operation, .. } => match per_operation.into_head() {
-                        SubReply::Ok {
-                            payload: lojix::wire::Reply::GenerationListing(listing),
-                            ..
-                        } => assert!(listing.generations.is_empty()),
+                        SubReply::Ok(lojix::wire::LojixReply::GenerationListing(listing)) => {
+                            assert!(listing.generations.is_empty())
+                        }
                         other => panic!("expected generation listing, got {other:?}"),
                     },
                     other => panic!("expected accepted reply, got {other:?}"),
@@ -74,24 +73,21 @@ async fn subscription_request_receives_stream_open_reply() {
     let client = async move {
         let mut connection = Connection::new(client_stream);
         let exchange = lojix::socket::ExchangeIdentity::first_connector_exchange();
-        let request =
-            Request::CacheRetentionObservationSubscription(CacheRetentionObservationSubscription {
-                generation: None,
-            });
-        let frame = LojixFrame::new(LojixFrameBody::Request {
+        let request = Operation::WatchCacheRetention(WatchCacheRetention { generation: None });
+        let frame = Frame::new(StreamingFrameBody::Request {
             exchange: exchange.value(),
             request: request.into_request(),
         });
         connection.write_frame(&frame).await.expect("write request");
         let reply_frame = connection.read_frame().await.expect("read reply");
         match reply_frame.into_body() {
-            LojixFrameBody::Reply { reply, .. } => match reply {
+            StreamingFrameBody::Reply { reply, .. } => match reply {
                 CoreReply::Accepted { per_operation, .. } => match per_operation.into_head() {
-                    SubReply::Ok {
-                        payload:
-                            lojix::wire::Reply::CacheRetentionObservationSubscriptionOpened(opened),
-                        ..
-                    } => assert_eq!(opened.token.value(), 1),
+                    SubReply::Ok(
+                        lojix::wire::LojixReply::CacheRetentionObservationSubscriptionOpened(
+                            opened,
+                        ),
+                    ) => assert_eq!(opened.token.value(), 1),
                     other => panic!("expected cache-retention stream-open reply, got {other:?}"),
                 },
                 other => panic!("expected accepted reply, got {other:?}"),
@@ -120,15 +116,13 @@ async fn deployment_observation_subscription_receives_live_stream_sequence_and_c
     let client = async move {
         let mut connection = Connection::new(client_stream);
         let exchange = lojix::socket::ExchangeIdentity::first_connector_exchange();
-        let frame = LojixFrame::new(LojixFrameBody::Request {
+        let frame = Frame::new(StreamingFrameBody::Request {
             exchange: exchange.value(),
-            request: Request::DeploymentObservationSubscription(
-                DeploymentObservationSubscription {
-                    cluster: Some(cluster.clone()),
-                    node: Some(node.clone()),
-                    deployment: Some(deployment.clone()),
-                },
-            )
+            request: Operation::WatchDeployments(WatchDeployments {
+                cluster: Some(cluster.clone()),
+                node: Some(node.clone()),
+                deployment: Some(deployment.clone()),
+            })
             .into_request(),
         });
         connection.write_frame(&frame).await.expect("write request");
@@ -154,9 +148,9 @@ async fn deployment_observation_subscription_receives_live_stream_sequence_and_c
             ExchangeLane::Connector,
             LaneSequence::new(1),
         );
-        let close_frame = LojixFrame::new(LojixFrameBody::Request {
+        let close_frame = Frame::new(StreamingFrameBody::Request {
             exchange: close_exchange,
-            request: Request::DeploymentObservationRetraction(token.clone()).into_request(),
+            request: Operation::UnwatchDeployments(token.clone()).into_request(),
         });
         connection
             .write_frame(&close_frame)
@@ -185,15 +179,13 @@ async fn deployment_observation_subscription_retracts_when_client_disconnects() 
     let client = async move {
         let mut connection = Connection::new(client_stream);
         let exchange = lojix::socket::ExchangeIdentity::first_connector_exchange();
-        let frame = LojixFrame::new(LojixFrameBody::Request {
+        let frame = Frame::new(StreamingFrameBody::Request {
             exchange: exchange.value(),
-            request: Request::DeploymentObservationSubscription(
-                DeploymentObservationSubscription {
-                    cluster: None,
-                    node: None,
-                    deployment: None,
-                },
-            )
+            request: Operation::WatchDeployments(WatchDeployments {
+                cluster: None,
+                node: None,
+                deployment: None,
+            })
             .into_request(),
         });
         connection.write_frame(&frame).await.expect("write request");
@@ -262,7 +254,9 @@ async fn stalled_connection_does_not_block_next_client() {
         .expect("client reply");
 
     match reply {
-        lojix::wire::Reply::GenerationListing(listing) => assert!(listing.generations.is_empty()),
+        lojix::wire::LojixReply::GenerationListing(listing) => {
+            assert!(listing.generations.is_empty())
+        }
         other => panic!("expected generation listing, got {other:?}"),
     }
 
@@ -277,17 +271,16 @@ async fn read_deployment_observation_opened(
 ) -> DeploymentObservationToken {
     let reply_frame = connection.read_frame().await.expect("read reply");
     match reply_frame.into_body() {
-        LojixFrameBody::Reply {
+        StreamingFrameBody::Reply {
             exchange: reply_exchange,
             reply,
         } => {
             assert_eq!(reply_exchange, exchange);
             match reply {
                 CoreReply::Accepted { per_operation, .. } => match per_operation.into_head() {
-                    SubReply::Ok {
-                        payload: lojix::wire::Reply::DeploymentObservationSubscriptionOpened(opened),
-                        ..
-                    } => opened.token,
+                    SubReply::Ok(
+                        lojix::wire::LojixReply::DeploymentObservationSubscriptionOpened(opened),
+                    ) => opened.token,
                     other => panic!("expected deployment observation open reply, got {other:?}"),
                 },
                 other => panic!("expected accepted reply, got {other:?}"),
@@ -303,10 +296,10 @@ async fn read_deployment_observation_event(
 ) -> DeploymentObservation {
     let event_frame = connection.read_frame().await.expect("read stream event");
     match event_frame.into_body() {
-        LojixFrameBody::SubscriptionEvent {
+        StreamingFrameBody::SubscriptionEvent {
             event_identifier,
             token: inner_token,
-            event: Event::DeploymentObservation(observation),
+            event: LojixEvent::DeploymentObservation(observation),
         } => {
             assert_eq!(event_identifier.lane, ExchangeLane::Acceptor);
             assert_eq!(inner_token.value(), token.value());
@@ -323,17 +316,16 @@ async fn read_deployment_observation_closed(
 ) {
     let reply_frame = connection.read_frame().await.expect("read close reply");
     match reply_frame.into_body() {
-        LojixFrameBody::Reply {
+        StreamingFrameBody::Reply {
             exchange: reply_exchange,
             reply,
         } => {
             assert_eq!(reply_exchange, exchange);
             match reply {
                 CoreReply::Accepted { per_operation, .. } => match per_operation.into_head() {
-                    SubReply::Ok {
-                        payload: lojix::wire::Reply::DeploymentObservationSubscriptionClosed(closed),
-                        ..
-                    } => assert_eq!(closed.token, expected),
+                    SubReply::Ok(
+                        lojix::wire::LojixReply::DeploymentObservationSubscriptionClosed(closed),
+                    ) => assert_eq!(closed.token, expected),
                     other => panic!("expected deployment observation close reply, got {other:?}"),
                 },
                 other => panic!("expected accepted close reply, got {other:?}"),

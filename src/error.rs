@@ -8,13 +8,13 @@ pub enum Error {
     Io(#[from] std::io::Error),
 
     #[error("frame error: {0}")]
-    Frame(#[from] signal_core::FrameError),
+    Frame(#[from] signal_frame::FrameError),
 
     #[error("nota error: {0}")]
     Nota(#[from] nota_codec::Error),
 
     #[error("horizon nota error: {0}")]
-    HorizonNota(#[from] horizon_nota_codec::Error),
+    HorizonNota(#[from] nota_next::NotaDecodeError),
 
     #[error("configuration error: {0}")]
     Configuration(#[from] nota_config::Error),
@@ -57,7 +57,7 @@ pub enum Error {
     ReplyExchangeMismatch,
 
     #[error("daemon rejected request before execution: {0}")]
-    RequestRejected(signal_core::RequestRejectionReason),
+    RequestRejected(signal_frame::RequestRejectionReason),
 
     #[error("daemon reply did not contain exactly one successful payload")]
     ExpectedSingleReplyPayload,

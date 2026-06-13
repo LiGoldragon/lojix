@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use lojix::deploy::DeploymentLedger;
 use lojix::wire::{
-    ClusterName, DeploymentObservation, DeploymentObservationSubscription, DeploymentPhase,
-    DeploymentSubmitted, GenerationKind, GenerationQuery, GenerationState, NodeName, StorePath,
+    ClusterName, DeploymentObservation, DeploymentPhase, DeploymentSubmitted, GenerationKind,
+    GenerationQuery, GenerationState, NodeName, StorePath, WatchDeployments,
 };
 
 #[test]
@@ -35,7 +35,7 @@ fn deployment_ledger_observations_survive_reopen_through_sema_engine() {
 
     let reopened = DeploymentLedger::open(&state_directory).expect("reopen deployment ledger");
     let opened = reopened
-        .open_deployment_observation_subscription(DeploymentObservationSubscription {
+        .open_deployment_observation_subscription(WatchDeployments {
             cluster: Some(cluster.clone()),
             node: Some(node.clone()),
             deployment: Some(deployment.clone()),
@@ -54,7 +54,7 @@ fn deployment_ledger_observations_survive_reopen_through_sema_engine() {
     );
 
     let filtered = reopened
-        .snapshot_deployment_observations(&DeploymentObservationSubscription {
+        .snapshot_deployment_observations(&WatchDeployments {
             cluster: Some(cluster),
             node: Some(other_node),
             deployment: Some(deployment),
@@ -131,7 +131,7 @@ fn deployment_observation_subscription_retraction_removes_durable_record() {
     let state_directory = unique_temporary_directory("lojix-event-log-subscriptions").join("state");
     let ledger = DeploymentLedger::open(&state_directory).expect("open deployment ledger");
     let opened = ledger
-        .open_deployment_observation_subscription(DeploymentObservationSubscription {
+        .open_deployment_observation_subscription(WatchDeployments {
             cluster: None,
             node: None,
             deployment: None,

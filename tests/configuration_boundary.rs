@@ -51,6 +51,7 @@ fn cli_has_exactly_one_runtime_peer_the_daemon_socket() {
             "horizon_lib",
             "horizon_nota_codec",
             "HorizonProposal",
+            "NotaSource",
             "ClusterProposal",
             "Viewpoint",
             "ProcessToolchain",
@@ -76,7 +77,7 @@ fn cli_has_exactly_one_runtime_peer_the_daemon_socket() {
 
     assert!(cli_source.contains("Client::from_configuration"));
     assert!(client_source.contains("UnixStream::connect"));
-    assert!(client_source.contains("LojixFrameBody::Request"));
+    assert!(client_source.contains("StreamingFrameBody::Request"));
     assert!(client_source.contains("write_frame"));
     assert!(client_source.contains("read_frame"));
 }
@@ -86,12 +87,12 @@ fn daemon_deployment_path_owns_horizon_projection() {
     let deploy_source = read_source("src/deploy.rs");
 
     for required in [
-        "HorizonProposal",
         "ClusterProposal",
+        "NotaSource",
         "Viewpoint",
-        "HorizonConfigurationSource",
         "ProposalSource",
-        "proposal.project(&horizon_proposal, &viewpoint)",
+        "NotaSource::new(&text).parse()",
+        "proposal.project(&viewpoint)",
     ] {
         assert!(
             deploy_source.contains(required),

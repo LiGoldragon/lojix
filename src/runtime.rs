@@ -199,11 +199,11 @@ impl Actor for RuntimeRoot {
 }
 
 pub struct RuntimeRequest {
-    pub request: wire::Request,
+    pub request: wire::Operation,
 }
 
 impl Message<RuntimeRequest> for RuntimeRoot {
-    type Reply = Result<wire::Reply, Infallible>;
+    type Reply = Result<wire::LojixReply, Infallible>;
 
     async fn handle(
         &mut self,
@@ -211,7 +211,7 @@ impl Message<RuntimeRequest> for RuntimeRoot {
         _context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let reply = match message.request {
-            wire::Request::DeploymentSubmission(submission) => {
+            wire::Operation::Deploy(submission) => {
                 let deployment = match self.deployment_ledger.ask(AllocateDeployment).await {
                     Ok(deployment) => deployment,
                     Err(error) => {
@@ -229,7 +229,7 @@ impl Message<RuntimeRequest> for RuntimeRoot {
                     .await
                 {
                     Ok(reply) => reply,
-                    Err(_) => wire::Reply::DeploymentRejected(wire::DeploymentRejected {
+                    Err(_) => wire::LojixReply::DeploymentRejected(wire::DeploymentRejected {
                         reason: wire::DeploymentRejectionReason::InvalidRequest,
                         detail: Some(
                             wire::FailureText::from_text(
@@ -240,8 +240,8 @@ impl Message<RuntimeRequest> for RuntimeRoot {
                     }),
                 }
             }
-            wire::Request::CacheRetentionRequest(_) => {
-                wire::Reply::CacheRetentionRejected(wire::CacheRetentionRejected {
+            wire::Operation::Pin(_) | wire::Operation::Unpin(_) | wire::Operation::Retire(_) => {
+                wire::LojixReply::CacheRetentionRejected(wire::CacheRetentionRejected {
                     reason: wire::CacheRetentionRejectionReason::StoreUnavailable,
                     detail: Some(
                         wire::FailureText::from_text(
@@ -251,17 +251,17 @@ impl Message<RuntimeRequest> for RuntimeRoot {
                     ),
                 })
             }
-            wire::Request::GenerationQuery(query) => {
+            wire::Operation::Query(query) => {
                 match self.deployment_ledger.ask(QueryGenerations { query }).await {
                     Ok(generations) => {
-                        wire::Reply::GenerationListing(wire::GenerationListing { generations })
+                        wire::LojixReply::GenerationListing(wire::GenerationListing { generations })
                     }
                     Err(error) => {
                         deployment_rejected(format!("failed to query generations: {error}"))
                     }
                 }
             }
-            wire::Request::DeploymentObservationSubscription(subscription) => {
+            wire::Operation::WatchDeployments(subscription) => {
                 match self
                     .deployment_ledger
                     .ask(OpenDeploymentObservationSubscription {
@@ -270,38 +270,38 @@ impl Message<RuntimeRequest> for RuntimeRoot {
                     })
                     .await
                 {
-                    Ok(opened) => wire::Reply::DeploymentObservationSubscriptionOpened(opened),
+                    Ok(opened) => wire::LojixReply::DeploymentObservationSubscriptionOpened(opened),
                     Err(error) => deployment_rejected(format!(
                         "failed to open deployment observation subscription: {error}"
                     )),
                 }
             }
-            wire::Request::CacheRetentionObservationSubscription(_) => {
+            wire::Operation::WatchCacheRetention(_) => {
                 let token = wire::CacheRetentionObservationToken::new(
                     self.next_cache_retention_observation_token,
                 );
                 self.next_cache_retention_observation_token += 1;
-                wire::Reply::CacheRetentionObservationSubscriptionOpened(
+                wire::LojixReply::CacheRetentionObservationSubscriptionOpened(
                     wire::CacheRetentionObservationSubscriptionOpened {
                         token,
                         observations: Vec::new(),
                     },
                 )
             }
-            wire::Request::DeploymentObservationRetraction(token) => {
+            wire::Operation::UnwatchDeployments(token) => {
                 match self
                     .deployment_ledger
                     .ask(CloseDeploymentObservationSubscription { token })
                     .await
                 {
-                    Ok(closed) => wire::Reply::DeploymentObservationSubscriptionClosed(closed),
+                    Ok(closed) => wire::LojixReply::DeploymentObservationSubscriptionClosed(closed),
                     Err(error) => deployment_rejected(format!(
                         "failed to close deployment observation subscription: {error}"
                     )),
                 }
             }
-            wire::Request::CacheRetentionObservationRetraction(token) => {
-                wire::Reply::CacheRetentionObservationSubscriptionClosed(
+            wire::Operation::UnwatchCacheRetention(token) => {
+                wire::LojixReply::CacheRetentionObservationSubscriptionClosed(
                     wire::CacheRetentionObservationSubscriptionClosed { token },
                 )
             }
@@ -311,12 +311,12 @@ impl Message<RuntimeRequest> for RuntimeRoot {
 }
 
 pub struct OpenDeploymentObservationStream {
-    pub subscription: wire::DeploymentObservationSubscription,
+    pub subscription: wire::WatchDeployments,
     pub sender: UnboundedSender<wire::DeploymentObservation>,
 }
 
 impl Message<OpenDeploymentObservationStream> for RuntimeRoot {
-    type Reply = Result<wire::Reply, Infallible>;
+    type Reply = Result<wire::LojixReply, Infallible>;
 
     async fn handle(
         &mut self,
@@ -331,7 +331,7 @@ impl Message<OpenDeploymentObservationStream> for RuntimeRoot {
             })
             .await
         {
-            Ok(opened) => wire::Reply::DeploymentObservationSubscriptionOpened(opened),
+            Ok(opened) => wire::LojixReply::DeploymentObservationSubscriptionOpened(opened),
             Err(error) => deployment_rejected(format!(
                 "failed to open deployment observation stream: {error}"
             )),
@@ -340,8 +340,8 @@ impl Message<OpenDeploymentObservationStream> for RuntimeRoot {
     }
 }
 
-fn deployment_rejected(message: impl Into<String>) -> wire::Reply {
-    wire::Reply::DeploymentRejected(wire::DeploymentRejected {
+fn deployment_rejected(message: impl Into<String>) -> wire::LojixReply {
+    wire::LojixReply::DeploymentRejected(wire::DeploymentRejected {
         reason: wire::DeploymentRejectionReason::InvalidRequest,
         detail: Some(failure_text(message)),
     })

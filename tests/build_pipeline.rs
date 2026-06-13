@@ -4,27 +4,29 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use horizon_lib::address::{YggAddress, YggSubnet};
-use horizon_lib::disk::{DevicePath, Disk, FsType, MountPath};
+use horizon_lib::io::{DevicePath, Disk, FsType, Io, MountPath};
+use horizon_lib::machine::Machine;
 use horizon_lib::magnitude::Magnitude;
 use horizon_lib::name::{Keygrip, NodeName as HorizonNodeName, UserName as HorizonUserName};
 use horizon_lib::proposal::{
-    ClusterProposal, ClusterTrust, Io, Machine, NodePlacement, NodeProposal, NodePubKeys,
-    NodeService, UserProposal, UserPubKeyEntry, YggPubKeyEntry,
+    ClusterProposal, ClusterTrust, NodeProposal, NodePubKeys, NodeService, UserProposal,
+    UserPubKeyEntry, YggPubKeyEntry,
 };
 use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
-use horizon_lib::species::{Arch, Bootloader, Keyboard, NodeSpecies, Style, UserSpecies};
-use horizon_nota_codec::{Encoder as HorizonNotaEncoder, NotaEncode as HorizonNotaEncode};
+use horizon_lib::species::{
+    Arch, Bootloader, Keyboard, MachineSpecies, NodeSpecies, Style, UserSpecies,
+};
 use kameo::actor::{ActorRef, Spawn};
 use lojix::authorization::CriomeAuthorizationPolicy;
 use lojix::process::ProcessToolchain;
 use lojix::wire::{
-    BuildLocally, BuilderSelection, ClusterName, DeploymentObservationSubscription,
-    DeploymentPhase, DeploymentPlan, DeploymentRejected, DeploymentRejectionReason,
-    DeploymentSubmission, DispatcherChoosesBuilder, FlakeReference, FullOsDeployment,
-    GenerationKind, GenerationQuery, GenerationState, NodeName, ProposalSource, RealizedStorePath,
-    Reply, Request, SystemAction,
+    BuildLocally, BuilderSelection, ClusterName, DeploymentPhase, DeploymentPlan,
+    DeploymentRejected, DeploymentRejectionReason, DeploymentRequest, DispatcherChoosesBuilder,
+    FlakeReference, FullOsDeployment, GenerationKind, GenerationQuery, GenerationState, LojixReply,
+    NodeName, Operation, ProposalSource, RealizedStorePath, SystemAction, WatchDeployments,
 };
 use lojix::{RuntimeConfiguration, RuntimeRequest, RuntimeRoot};
+use nota_next::NotaEncode;
 
 const NIX_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const FAKE_NAR_HASH: &str = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -37,13 +39,13 @@ async fn build_only_deployment_pins_output_before_reporting_built() {
 
     let accepted = tokio::time::timeout(
         Duration::from_millis(500),
-        ask_runtime(&root, Request::DeploymentSubmission(fixture.submission())),
+        ask_runtime(&root, Operation::Deploy(fixture.submission())),
     )
     .await
     .expect("build submission returned before fake remote build completed");
 
     let deployment = match accepted {
-        Reply::DeploymentAccepted(accepted) => accepted.deployment,
+        LojixReply::DeploymentAccepted(accepted) => accepted.deployment,
         other => panic!("expected deployment acceptance, got {other:?}"),
     };
 
@@ -76,14 +78,14 @@ async fn build_only_deployment_pins_output_before_reporting_built() {
     fixture.assert_built_gc_root(&deployment);
     let generation_listing = ask_runtime(
         &root,
-        Request::GenerationQuery(GenerationQuery {
+        Operation::Query(GenerationQuery {
             cluster: Some(ClusterName::from_text("goldragon").expect("cluster name")),
             node: Some(NodeName::from_text("zeus").expect("node name")),
             kind: Some(GenerationKind::FullOs),
         }),
     )
     .await;
-    let Reply::GenerationListing(listing) = generation_listing else {
+    let LojixReply::GenerationListing(listing) = generation_listing else {
         panic!("expected generation listing, got {generation_listing:?}");
     };
     assert_eq!(listing.generations.len(), 1);
@@ -113,7 +115,7 @@ async fn build_locally_is_rejected_before_any_tool_runs() {
 
     let reply = ask_runtime(
         &root,
-        Request::DeploymentSubmission(DeploymentSubmission {
+        Operation::Deploy(DeploymentRequest {
             builder: BuilderSelection::BuildLocally(BuildLocally {}),
             ..fixture.submission()
         }),
@@ -131,7 +133,7 @@ async fn criome_authorization_denial_blocks_every_fake_nix_effect() {
         reason: "fixture criome denied deployment".to_string(),
     });
 
-    let reply = ask_runtime(&root, Request::DeploymentSubmission(fixture.submission())).await;
+    let reply = ask_runtime(&root, Operation::Deploy(fixture.submission())).await;
 
     assert_rejected_with(reply, "fixture criome denied deployment");
     assert_eq!(fixture.tool_log(), "");
@@ -144,7 +146,7 @@ async fn activation_actions_are_rejected_before_any_tool_runs() {
 
     let reply = ask_runtime(
         &root,
-        Request::DeploymentSubmission(DeploymentSubmission {
+        Operation::Deploy(DeploymentRequest {
             plan: DeploymentPlan::FullOsDeployment(FullOsDeployment {
                 action: SystemAction::Switch,
             }),
@@ -157,7 +159,7 @@ async fn activation_actions_are_rejected_before_any_tool_runs() {
     assert_eq!(fixture.tool_log(), "");
 }
 
-async fn ask_runtime(root: &ActorRef<RuntimeRoot>, request: Request) -> Reply {
+async fn ask_runtime(root: &ActorRef<RuntimeRoot>, request: Operation) -> LojixReply {
     root.ask(RuntimeRequest { request })
         .await
         .expect("runtime actor replied")
@@ -170,7 +172,7 @@ async fn wait_for_built_observation(
     for _ in 0..100 {
         let reply = ask_runtime(
             root,
-            Request::DeploymentObservationSubscription(DeploymentObservationSubscription {
+            Operation::WatchDeployments(WatchDeployments {
                 cluster: None,
                 node: None,
                 deployment: Some(deployment.clone()),
@@ -178,7 +180,7 @@ async fn wait_for_built_observation(
         )
         .await;
 
-        let Reply::DeploymentObservationSubscriptionOpened(opened) = reply else {
+        let LojixReply::DeploymentObservationSubscriptionOpened(opened) = reply else {
             panic!("expected observation subscription snapshot");
         };
         if opened
@@ -206,8 +208,8 @@ async fn wait_for_built_observation(
     panic!("build observation did not appear");
 }
 
-fn assert_rejected_with(reply: Reply, expected_detail: &str) {
-    let Reply::DeploymentRejected(DeploymentRejected {
+fn assert_rejected_with(reply: LojixReply, expected_detail: &str) {
+    let LojixReply::DeploymentRejected(DeploymentRejected {
         reason,
         detail: Some(detail),
     }) = reply
@@ -286,8 +288,8 @@ impl BuildPipelineFixture {
         ))
     }
 
-    fn submission(&self) -> DeploymentSubmission {
-        DeploymentSubmission {
+    fn submission(&self) -> DeploymentRequest {
+        DeploymentRequest {
             cluster: ClusterName::from_text("goldragon").expect("cluster name"),
             node: NodeName::from_text("zeus").expect("node name"),
             source: ProposalSource::from_text(self.proposal_path.display().to_string())
@@ -429,28 +431,11 @@ fn unique_temporary_directory(prefix: &str) -> PathBuf {
 }
 
 fn write_proposal(path: &Path) {
-    let mut encoder = HorizonNotaEncoder::new();
-    cluster_proposal()
-        .encode(&mut encoder)
-        .expect("encode horizon proposal");
-    std::fs::write(path, encoder.into_string()).expect("write horizon proposal");
+    std::fs::write(path, cluster_proposal().to_nota()).expect("write horizon proposal");
 }
 
 fn write_horizon_configuration(path: &Path) {
-    std::fs::write(
-        path,
-        r#"(HorizonProposal
-  TestOperator
-  (DomainSuffixes "criome" "criome.net")
-  (TransitionalIpv4Lan
-    "10.18.0.0/24"
-    "10.18.0.1"
-    (DhcpPool "10.18.0.100" "10.18.0.240")
-    "TEMPORARY: single-router IPv4 LAN until IPv6-first networking lands")
-  [])
-"#,
-    )
-    .expect("write horizon configuration");
+    write_proposal(path);
 }
 
 fn cluster_proposal() -> ClusterProposal {
@@ -488,10 +473,6 @@ fn cluster_proposal() -> ClusterProposal {
             nodes: node_trust,
             users: user_trust,
         },
-        secret_bindings: Vec::new(),
-        tailnet: None,
-        ai_providers: Vec::new(),
-        vpn_profiles: Vec::new(),
     }
 }
 
@@ -501,10 +482,13 @@ fn node_proposal(species: NodeSpecies, size: Magnitude, full_keys: bool) -> Node
         size,
         trust: Magnitude::Max,
         machine: Machine {
+            species: MachineSpecies::Metal,
             arch: Some(Arch::X86_64),
             cores: 4,
             model: None,
             mother_board: None,
+            super_node: None,
+            super_user: None,
             chip_gen: None,
             ram_gb: None,
         },
@@ -513,6 +497,7 @@ fn node_proposal(species: NodeSpecies, size: Magnitude, full_keys: bool) -> Node
             bootloader: Bootloader::Uefi,
             disks: root_disks(),
             swap_devices: Vec::new(),
+            compressed_swap: None,
         },
         pub_keys: NodePubKeys {
             ssh: SshPubKey::try_new("AAA=").unwrap(),
@@ -534,7 +519,6 @@ fn node_proposal(species: NodeSpecies, size: Magnitude, full_keys: bool) -> Node
         router_interfaces: None,
         online: None,
         services: Vec::new(),
-        placement: NodePlacement::Metal {},
     }
 }
 

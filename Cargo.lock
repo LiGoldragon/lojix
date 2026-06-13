@@ -82,6 +82,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
+name = "camino"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e629a66d692cb9ff1a1c664e41771b3dcaf961985a9774c0eb0bd1b51cf60a48"
+
+[[package]]
 name = "cc"
 version = "1.2.62"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -267,10 +273,10 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 [[package]]
 name = "horizon-lib"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/horizon-rs.git?branch=horizon-leaner-shape#189bfd046b4423f13d8c4fbf7db74166194e80e3"
+source = "git+https://github.com/LiGoldragon/horizon-rs.git?branch=main#9fae4a368126612e4bba2e855190505a33a42c2c"
 dependencies = [
  "ipnet",
- "nota-codec 0.1.0 (git+https://github.com/LiGoldragon/nota-codec.git)",
+ "nota-next",
  "serde",
  "thiserror",
 ]
@@ -361,15 +367,14 @@ dependencies = [
  "horizon-lib",
  "kameo",
  "nix",
- "nota-codec 0.1.0 (git+https://github.com/LiGoldragon/nota-codec.git?branch=main)",
- "nota-codec 0.1.0 (git+https://github.com/LiGoldragon/nota-codec.git)",
+ "nota-codec",
  "nota-config",
+ "nota-next",
  "rkyv",
- "sema",
  "sema-engine",
  "serde_json",
- "signal-core",
  "signal-criome",
+ "signal-frame",
  "signal-lojix",
  "thiserror",
  "tokio",
@@ -427,17 +432,9 @@ dependencies = [
 [[package]]
 name = "nota-codec"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/nota-codec.git?branch=main#2618adbfc140d856723a729c316203d006af8207"
+source = "git+https://github.com/LiGoldragon/nota-codec.git?branch=main#f761421c383121a04df761a444a3778d1c0b137d"
 dependencies = [
- "nota-derive",
- "thiserror",
-]
-
-[[package]]
-name = "nota-codec"
-version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/nota-codec.git#97c1f4969a1c79d5d79be780cdc8ec8356883b84"
-dependencies = [
+ "camino",
  "nota-derive",
  "thiserror",
 ]
@@ -447,7 +444,7 @@ name = "nota-config"
 version = "0.1.0"
 source = "git+https://github.com/LiGoldragon/nota-config.git?branch=main#d557fbf1dea78e417aa26a3b2858e810a6b6f292"
 dependencies = [
- "nota-codec 0.1.0 (git+https://github.com/LiGoldragon/nota-codec.git?branch=main)",
+ "nota-codec",
  "rkyv",
  "thiserror",
 ]
@@ -455,7 +452,26 @@ dependencies = [
 [[package]]
 name = "nota-derive"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/nota-derive.git?branch=main#e24e50afe110810db50a7eb8f9a7963c6761c0af"
+source = "git+https://github.com/LiGoldragon/nota-derive.git?branch=main#11347da1ff4425ff4e743c15a3e3ec322b54ea9a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "nota-next"
+version = "0.4.0"
+source = "git+https://github.com/LiGoldragon/nota-next.git?branch=main#3d6c2cdf4a7a62b36640b8622fdcaa2b931f0d43"
+dependencies = [
+ "nota-next-derive",
+ "rkyv",
+]
+
+[[package]]
+name = "nota-next-derive"
+version = "0.2.0"
+source = "git+https://github.com/LiGoldragon/nota-next.git?branch=main#3d6c2cdf4a7a62b36640b8622fdcaa2b931f0d43"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -502,10 +518,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "prettyplease"
+version = "0.2.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
+dependencies = [
+ "proc-macro2",
+ "syn",
+]
 
 [[package]]
 name = "proc-macro2"
@@ -618,6 +650,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "schema-next"
+version = "0.2.0"
+source = "git+https://github.com/LiGoldragon/schema-next.git?branch=main#f460e7b6e76ef8766e45b870c323becd0ef461bf"
+dependencies = [
+ "blake3",
+ "nota-next",
+ "rkyv",
+]
+
+[[package]]
+name = "schema-rust-next"
+version = "0.5.3"
+source = "git+https://github.com/LiGoldragon/schema-rust-next.git?branch=main#7c15bc3fa3d07f4710acca16f14eef1aa68b02dd"
+dependencies = [
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "schema-next",
+ "syn",
+ "thiserror",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -625,8 +680,8 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "sema"
-version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/sema.git#4ea561bc53f6aa38fb71a7570665d57191fce0ea"
+version = "0.1.1"
+source = "git+https://github.com/LiGoldragon/sema.git?branch=main#da96de248cc3fe2e3191ca524d60cfc378f62a11"
 dependencies = [
  "redb",
  "rkyv",
@@ -635,12 +690,14 @@ dependencies = [
 
 [[package]]
 name = "sema-engine"
-version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/sema-engine.git?branch=main#d38091494eb1e8ba245091e28bb197ad6e994430"
+version = "0.4.0"
+source = "git+https://github.com/LiGoldragon/sema-engine.git?branch=main#dbe29427d9a2c6c194909385485ad42b008048b8"
 dependencies = [
+ "blake3",
  "rkyv",
  "sema",
- "signal-core",
+ "signal-frame",
+ "signal-sema",
  "thiserror",
 ]
 
@@ -694,37 +751,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
-name = "signal-core"
+name = "signal-criome"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-core.git#f17efc1c9c8c2d3bf755ef3a285a8618886c49fa"
+source = "git+https://github.com/LiGoldragon/signal-criome.git?branch=main#86f00eb0e00206b402418f1193a9802521bb2586"
 dependencies = [
- "nota-codec 0.1.0 (git+https://github.com/LiGoldragon/nota-codec.git?branch=main)",
+ "blake3",
+ "blst",
  "rkyv",
- "signal-core-macros",
+ "schema-rust-next",
+ "signal-frame",
  "thiserror",
 ]
 
 [[package]]
-name = "signal-core-macros"
-version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-core.git#f17efc1c9c8c2d3bf755ef3a285a8618886c49fa"
+name = "signal-frame"
+version = "0.2.1"
+source = "git+https://github.com/LiGoldragon/signal-frame.git?branch=main#166bda84dc63bf8461fff11a41c43d6a1c92a941"
+dependencies = [
+ "paste",
+ "rkyv",
+ "signal-frame-macros",
+ "thiserror",
+]
+
+[[package]]
+name = "signal-frame-macros"
+version = "0.1.1"
+source = "git+https://github.com/LiGoldragon/signal-frame.git?branch=main#166bda84dc63bf8461fff11a41c43d6a1c92a941"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "signal-criome"
-version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-criome.git?branch=main#be950e383d7701a7a86155b30c139c728c600049"
-dependencies = [
- "blake3",
- "blst",
- "nota-codec 0.1.0 (git+https://github.com/LiGoldragon/nota-codec.git?branch=main)",
- "rkyv",
- "signal-core",
- "thiserror",
 ]
 
 [[package]]
@@ -740,13 +797,22 @@ dependencies = [
 [[package]]
 name = "signal-lojix"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=horizon-leaner-shape#df49dae15b1ef967162762396cdee96189f234de"
+source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=horizon-leaner-shape#355d205325bfac500e1fcceb7357d9144b38cb43"
 dependencies = [
  "blake3",
- "nota-codec 0.1.0 (git+https://github.com/LiGoldragon/nota-codec.git?branch=main)",
+ "nota-codec",
  "nota-config",
  "rkyv",
- "signal-core",
+ "signal-frame",
+ "thiserror",
+]
+
+[[package]]
+name = "signal-sema"
+version = "0.2.0"
+source = "git+https://github.com/LiGoldragon/signal-sema.git?branch=main#33f62840678530289e9b96485453f7d86e343182"
+dependencies = [
+ "rkyv",
  "thiserror",
 ]
 

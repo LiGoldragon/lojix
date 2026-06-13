@@ -19,7 +19,7 @@ pub enum CriomeAuthorizationPolicy {
 
 pub struct AuthorizeDeployment {
     deployment: wire::DeploymentId,
-    submission: wire::DeploymentSubmission,
+    submission: wire::DeploymentRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,7 +64,7 @@ impl CriomeAuthorizationPolicy {
 }
 
 impl AuthorizeDeployment {
-    pub fn new(deployment: wire::DeploymentId, submission: wire::DeploymentSubmission) -> Self {
+    pub fn new(deployment: wire::DeploymentId, submission: wire::DeploymentRequest) -> Self {
         Self {
             deployment,
             submission,
@@ -119,7 +119,7 @@ struct DeploymentAuthorizationRequest {
 impl DeploymentAuthorizationRequest {
     fn from_submission(
         deployment: wire::DeploymentId,
-        submission: &wire::DeploymentSubmission,
+        submission: &wire::DeploymentRequest,
     ) -> Result<Self> {
         let request_digest = submission.canonical_digest()?;
         Ok(Self {
@@ -135,7 +135,7 @@ struct DeploymentAuthorizationScope {
 }
 
 impl DeploymentAuthorizationScope {
-    fn from_submission(submission: &wire::DeploymentSubmission) -> Self {
+    fn from_submission(submission: &wire::DeploymentRequest) -> Self {
         Self {
             text: format!(
                 "lojix:{}:{}:{}",
