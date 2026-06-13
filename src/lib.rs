@@ -25,7 +25,7 @@ use sema_engine::{
 };
 
 use crate::schema::sema::{
-    ContainerLifecycleRecord, EventLogEntry, GcRoot, LiveGeneration,
+    ContainerLifecycleRecord, DeployJob, EventLogEntry, GcRoot, LiveGeneration,
 };
 
 pub mod client;
@@ -39,12 +39,16 @@ pub mod schema_runtime;
 /// the kernel hard-fails to open a store stamped at a different version.
 const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1);
 
-/// The four durable table names. One row per element (a keyed record family),
-/// not one blob per table — the sema-engine model.
+/// The five durable table names. One row per element (a keyed record family),
+/// not one blob per table — the sema-engine model. `deploy-job` is the
+/// in-flight deploy-job mirror (up9q): one row per submitted deploy, rewritten
+/// per phase transition, read on daemon start so an in-flight deploy resumes
+/// rather than being lost with the connection that submitted it.
 const LIVE_SET_TABLE: TableName = TableName::new("live-set");
 const GC_ROOTS_TABLE: TableName = TableName::new("gc-roots");
 const EVENT_LOG_TABLE: TableName = TableName::new("event-log");
 const CONTAINER_LIFECYCLE_TABLE: TableName = TableName::new("container-lifecycle");
+const DEPLOY_JOB_TABLE: TableName = TableName::new("deploy-job");
 
 /// The stable per-family schema identities. Each table is its own record
 /// family with a distinct, reopen-stable `FamilyName` + `SchemaHash`. The hash
@@ -55,10 +59,12 @@ const LIVE_SET_FAMILY: &str = "LiveSetFamily";
 const GC_ROOTS_FAMILY: &str = "GcRootsFamily";
 const EVENT_LOG_FAMILY: &str = "EventLogFamily";
 const CONTAINER_LIFECYCLE_FAMILY: &str = "ContainerLifecycleFamily";
+const DEPLOY_JOB_FAMILY: &str = "DeployJobFamily";
 const LIVE_SET_SCHEMA_HASH: [u8; 32] = [1; 32];
 const GC_ROOTS_SCHEMA_HASH: [u8; 32] = [2; 32];
 const EVENT_LOG_SCHEMA_HASH: [u8; 32] = [3; 32];
 const CONTAINER_LIFECYCLE_SCHEMA_HASH: [u8; 32] = [4; 32];
+const DEPLOY_JOB_SCHEMA_HASH: [u8; 32] = [5; 32];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -200,6 +206,7 @@ pub struct Store {
     gc_roots: TableReference<GcRoot>,
     event_log: TableReference<EventLogEntry>,
     containers: TableReference<ContainerLifecycleRecord>,
+    deploy_jobs: TableReference<DeployJob>,
     path: PathBuf,
     /// The ephemeral subscription-token counter. Subscriptions are connection
     /// state, not durable state — they do NOT persist across restart — so an
@@ -245,12 +252,18 @@ impl Store {
             FamilyName::new(CONTAINER_LIFECYCLE_FAMILY),
             SchemaHash::new(CONTAINER_LIFECYCLE_SCHEMA_HASH),
         ))?;
+        let deploy_jobs = database.register_table(TableDescriptor::new(
+            DEPLOY_JOB_TABLE,
+            FamilyName::new(DEPLOY_JOB_FAMILY),
+            SchemaHash::new(DEPLOY_JOB_SCHEMA_HASH),
+        ))?;
         Ok(Self {
             database,
             live_set,
             gc_roots,
             event_log,
             containers,
+            deploy_jobs,
             path,
             subscription_sequence: AtomicU64::new(0),
         })
@@ -431,6 +444,53 @@ impl Store {
         Ok(())
     }
 
+    /// The persisted in-flight deploy-job rows — read on daemon start so an
+    /// in-flight deploy resumes from its recorded phase rather than being lost
+    /// with the connection that submitted it (up9q). A finished or failed job
+    /// is retracted on completion, so a steady-state store reads back empty.
+    pub fn deploy_jobs(&self) -> Result<Vec<DeployJob>> {
+        Ok(self
+            .database
+            .match_records(QueryPlan::all(self.deploy_jobs))?
+            .records()
+            .to_vec())
+    }
+
+    /// Write or rewrite one deploy-job row, keyed by its deployment identifier.
+    /// `assert` on the first (submit) write, `mutate` to overwrite the existing
+    /// row on each phase transition — so the persisted phase cursor always
+    /// reflects the latest committed step (up9q durable resume).
+    pub fn upsert_deploy_job(&self, job: DeployJob) -> Result<()> {
+        let key = *job.deployment_identifier.payload();
+        let present = self
+            .deploy_jobs()?
+            .iter()
+            .any(|existing| *existing.deployment_identifier.payload() == key);
+        if present {
+            self.database.mutate(Mutation::new(self.deploy_jobs, job))?;
+        } else {
+            self.database.assert(Assertion::new(self.deploy_jobs, job))?;
+        }
+        Ok(())
+    }
+
+    /// Drop one deploy-job row by its deployment identifier — called when the
+    /// deploy reaches a terminal phase (Activated or Failed), so the in-flight
+    /// mirror tracks only deploys that still need resuming. A no-op when the
+    /// row is already absent.
+    pub fn retract_deploy_job(&self, deployment_identifier: u64) -> Result<()> {
+        let present = self
+            .deploy_jobs()?
+            .iter()
+            .any(|existing| *existing.deployment_identifier.payload() == deployment_identifier);
+        if present {
+            self.database.retract(Retraction::new(
+                self.deploy_jobs,
+                RecordKey::new(deployment_identifier.to_string()),
+            ))?;
+        }
+        Ok(())
+    }
 }
 
 impl EngineRecord for LiveGeneration {
@@ -454,5 +514,11 @@ impl EngineRecord for EventLogEntry {
 impl EngineRecord for ContainerLifecycleRecord {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.event_log_position.payload().to_string())
+    }
+}
+
+impl EngineRecord for DeployJob {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.deployment_identifier.payload().to_string())
     }
 }

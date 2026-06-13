@@ -330,6 +330,47 @@ pub struct ContainerLifecycleRecord {
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeployJobTable(Vec<DeployJob>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeployJob {
+    pub deployment_identifier: DeploymentIdentifier,
+    pub generation_identifier: GenerationIdentifier,
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub phase: DeployJobPhase,
+    pub closure_path: Option<ClosurePath>,
+    pub resolved_target: Option<String>,
+    pub boot_once_unit: Option<String>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum DeployJobPhase {
+    Submitted,
+    Building,
+    Built,
+    Copying,
+    Activating,
+    Activated,
+    Failed,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Input {
     SemaReadInput(SemaReadInput),
     SemaWriteInput(SemaWriteInput),
@@ -472,6 +513,25 @@ impl ContainerLifecycleTable {
 #[rustfmt::skip]
 impl From<Vec<ContainerLifecycleRecord>> for ContainerLifecycleTable {
     fn from(payload: Vec<ContainerLifecycleRecord>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl DeployJobTable {
+    pub fn new(payload: Vec<DeployJob>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Vec<DeployJob> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Vec<DeployJob> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Vec<DeployJob>> for DeployJobTable {
+    fn from(payload: Vec<DeployJob>) -> Self {
         Self::new(payload)
     }
 }

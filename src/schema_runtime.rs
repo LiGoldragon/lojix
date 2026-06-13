@@ -25,6 +25,7 @@ use nota_next::NotaSource;
 use signal_lojix::schema::lib as ordinary;
 use tokio::process::Command;
 
+use crate::schema::nexus::NexusEngine;
 use crate::schema::{nexus, sema};
 use crate::{DaemonConfiguration, Result, Store};
 
@@ -47,9 +48,55 @@ pub struct SchemaRuntime {
 /// Runtime paths the daemon needs for production deploy materialization.
 /// These are decoded once from the daemon's binary startup configuration and
 /// then shared across per-request engine values.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RuntimeConfiguration {
     generated_inputs_directory: PathBuf,
+    /// A test-only gate that the deploy pipeline awaits before its first effect
+    /// runs. `None` in production (the pipeline runs straight through). A test
+    /// holds the barrier closed to prove the daemon replies the accepted handle
+    /// while the pipeline is still parked, then opens it to let the pipeline
+    /// complete on the daemon-owned executor — the up9b decoupling witness.
+    effect_barrier: Option<EffectBarrier>,
+}
+
+/// A pipeline-pause gate the deploy job awaits once before its first effect.
+/// Test-only: production [`RuntimeConfiguration`] carries `None`. Backed by a
+/// semaphore that starts with zero permits (the pipeline parks on `acquire`)
+/// until the test `open`s it. Lets a test prove ordering deterministically
+/// without shelling out to `nix`.
+#[derive(Debug, Clone)]
+pub struct EffectBarrier {
+    gate: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for EffectBarrier {
+    fn default() -> Self {
+        Self::held()
+    }
+}
+
+impl EffectBarrier {
+    /// A barrier that starts CLOSED — the pipeline parks at its first effect
+    /// until [`Self::open`] is called.
+    pub fn held() -> Self {
+        Self {
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+        }
+    }
+
+    /// Release the barrier so the parked pipeline proceeds. Idempotent enough
+    /// for a test: adds a generous permit budget so every awaiter passes.
+    pub fn open(&self) {
+        self.gate.add_permits(1024);
+    }
+
+    /// Park until the barrier opens. The acquired permit is forgotten so the
+    /// budget is not returned, keeping the barrier open for any later awaiter.
+    async fn wait(&self) {
+        if let Ok(permit) = self.gate.acquire().await {
+            permit.forget();
+        }
+    }
 }
 
 /// Which single-write meta mutation is in flight, so a `WriteRejected` from the
@@ -64,18 +111,45 @@ enum MetaOperation {
     Retire,
 }
 
+/// The synchronous outcome of [`SchemaRuntime::submit_deploy`] — the verdict the
+/// daemon replies to the owner connection immediately, before the deploy
+/// pipeline runs (up9q). `Accepted` carries the `AcceptedDeploy` handle (the
+/// durable deployment identifier + marker) and leaves the in-flight cursor set
+/// for the deploy-job actor to drive; `Rejected` is a typed up-front refusal
+/// (unsupported action, or a submission write rejection) and leaves no cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeploySubmissionOutcome {
+    Accepted(meta::AcceptedDeploy),
+    Rejected(meta::RejectedDeploy),
+}
+
 impl RuntimeConfiguration {
     pub fn from_daemon_configuration(configuration: &DaemonConfiguration) -> Self {
         Self {
             generated_inputs_directory: PathBuf::from(&configuration.state_directory_path)
                 .join("generated-inputs"),
+            effect_barrier: None,
         }
     }
 
     pub fn test_default() -> Self {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
+            effect_barrier: None,
         }
+    }
+
+    /// A test configuration whose deploy pipeline parks at its first effect on
+    /// the given barrier — the seam the up9b decoupling tests drive.
+    pub fn test_with_effect_barrier(barrier: EffectBarrier) -> Self {
+        Self {
+            generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
+            effect_barrier: Some(barrier),
+        }
+    }
+
+    fn effect_barrier(&self) -> Option<&EffectBarrier> {
+        self.effect_barrier.as_ref()
     }
 
     fn materialization_root(&self, command: &nexus::HorizonMaterializationCommand) -> PathBuf {
@@ -418,6 +492,111 @@ impl DeployPipeline {
             detail,
         }
     }
+
+    /// The resolved `root@<node>.<cluster>.criome` SSH target this deploy
+    /// activates, captured on the durable job row so a resumed job knows where
+    /// to poll without re-deriving from a partially-applied cursor. `None` only
+    /// if the names fail horizon validation (a submitted deploy never does).
+    fn resolved_target(&self) -> Option<String> {
+        SshTarget::root_at_node(&self.cluster_name, &self.node_name)
+            .ok()
+            .map(|target| target.as_ssh_arg())
+    }
+
+    /// The BootOnce transient-unit name a resumed `Activating` job polls via
+    /// `journalctl -u <unit>` instead of re-activating. Deterministic in the
+    /// deployment identifier so the resumed daemon computes the same name that
+    /// was persisted at submit, rather than a time/pid value it cannot
+    /// reconstruct. `None` for non-BootOnce actions (which have no transient
+    /// unit to poll; copy is idempotent and activation re-runs safely).
+    fn boot_once_unit(&self) -> Option<String> {
+        match &self.action {
+            DeployAction::System(ordinary::SystemAction::BootOnce) => Some(format!(
+                "lojix-boot-once-deploy-{}",
+                self.deployment_identifier.payload()
+            )),
+            _ => None,
+        }
+    }
+
+    /// The durable in-flight job row at the given phase. Written on submit and
+    /// rewritten at every phase transition (up9q): the persisted phase cursor,
+    /// closure path (once built), resolved target, and BootOnce unit name let a
+    /// restarted daemon read the row and reconcile the in-flight deploy.
+    fn deploy_job(&self, phase: sema::DeployJobPhase) -> sema::DeployJob {
+        sema::DeployJob {
+            deployment_identifier: self.deployment_identifier.clone(),
+            generation_identifier: self.generation_identifier.clone(),
+            cluster_name: self.cluster_name.clone(),
+            node_name: self.node_name.clone(),
+            phase,
+            closure_path: self.closure_path.clone(),
+            resolved_target: self.resolved_target(),
+            boot_once_unit: self.boot_once_unit(),
+        }
+    }
+}
+
+/// The reconcile decision a daemon makes for one persisted in-flight deploy
+/// job it reads on start (up9q). Computed from the job's persisted phase; the
+/// daemon acts on it to resume the deploy rather than losing it. The LIVE
+/// continuation behind each variant (actually polling journalctl, actually
+/// re-running the idempotent copy) is proven on a real target at S5 — this
+/// type is the read-on-start reconcile-decision scaffolding S4b lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeployJobResumption {
+    /// Phase reached `Activating`: the activate effect was in flight when the
+    /// daemon stopped. Re-activating could double-switch, so poll the BootOnce
+    /// transient unit (PID-1-owned, survives the daemon) via
+    /// `journalctl -u <unit>` and adopt its outcome. Carries the unit name when
+    /// the job recorded one (BootOnce); a non-BootOnce activating job has no
+    /// unit and falls back to re-running the idempotent activation at S5.
+    PollActivationUnit { unit: Option<String> },
+    /// Phase is pre-activation (`Submitted`/`Building`/`Built`/`Copying`): no
+    /// target state was mutated yet, or only the idempotent copy ran. Re-drive
+    /// the pipeline from submit; copy is idempotent and re-runs safely.
+    RestartPipeline,
+    /// Phase is terminal (`Activated`/`Failed`): the deploy already finished
+    /// (success committed its live generation, failure is final). Nothing to
+    /// resume; drop the stale job row.
+    AlreadyTerminal,
+}
+
+impl sema::DeployJob {
+    /// The reconcile decision for this persisted job, read on daemon start. A
+    /// pure projection of the persisted phase cursor — the daemon calls it once
+    /// per resumed row and acts on the typed verdict (up9q resume scaffolding).
+    pub fn resumption(&self) -> DeployJobResumption {
+        match self.phase {
+            sema::DeployJobPhase::Activating => DeployJobResumption::PollActivationUnit {
+                unit: self.boot_once_unit.clone(),
+            },
+            sema::DeployJobPhase::Submitted
+            | sema::DeployJobPhase::Building
+            | sema::DeployJobPhase::Built
+            | sema::DeployJobPhase::Copying => DeployJobResumption::RestartPipeline,
+            sema::DeployJobPhase::Activated | sema::DeployJobPhase::Failed => {
+                DeployJobResumption::AlreadyTerminal
+            }
+        }
+    }
+}
+
+impl From<ordinary::DeploymentPhase> for sema::DeployJobPhase {
+    /// Mirror the wire phase onto the durable job-row phase cursor. The two
+    /// enums carry the same variants; the job row tracks the same lifecycle the
+    /// event log records, so a resumed daemon reads one phase value.
+    fn from(phase: ordinary::DeploymentPhase) -> Self {
+        match phase {
+            ordinary::DeploymentPhase::Submitted => Self::Submitted,
+            ordinary::DeploymentPhase::Building => Self::Building,
+            ordinary::DeploymentPhase::Built => Self::Built,
+            ordinary::DeploymentPhase::Copying => Self::Copying,
+            ordinary::DeploymentPhase::Activating => Self::Activating,
+            ordinary::DeploymentPhase::Activated => Self::Activated,
+            ordinary::DeploymentPhase::Failed => Self::Failed,
+        }
+    }
 }
 
 impl Default for SchemaRuntime {
@@ -472,6 +651,90 @@ impl SchemaRuntime {
 
     pub fn store(&self) -> &Store {
         self.store.as_ref()
+    }
+
+    /// The deployment identifier currently on this engine's in-flight cursor, if
+    /// any — the durable handle the job actor uses to track the deploy and that
+    /// a watcher re-observes by. `None` outside an active deploy.
+    pub fn active_deployment_identifier(&self) -> Option<ordinary::DeploymentIdentifier> {
+        self.active_deploy
+            .as_ref()
+            .map(|pipeline| pipeline.deployment_identifier.clone())
+    }
+
+    /// Run ONLY the synchronous submit step of a `Deploy` (up9q surface a): the
+    /// reject-guard, restart-safe identifier issuance, in-flight job-row
+    /// persistence at `Submitted`, and cursor construction. Returns the typed
+    /// admission outcome immediately — the `AcceptedDeploy` handle the daemon
+    /// replies before the pipeline runs, or a typed rejection. On accept the
+    /// in-flight cursor is left set on `self`, so the daemon hands this engine
+    /// to the deploy-job actor, which drives the pipeline via
+    /// [`Self::drive_submitted_deploy`]. The pipeline does NOT run here.
+    pub fn submit_deploy(&mut self, request: meta::DeployRequest) -> DeploySubmissionOutcome {
+        if let Some(reason) = Self::unsupported_deploy_reason(&request) {
+            return DeploySubmissionOutcome::Rejected(self.deploy_rejection(reason));
+        }
+        self.active_operation = Some(MetaOperation::Deploy);
+        let submission = match request {
+            meta::DeployRequest::System(deployment) => sema::DeploySubmission::System(deployment),
+            meta::DeployRequest::Home(deployment) => sema::DeploySubmission::Home(deployment),
+        };
+        match self.record_deploy_submitted(submission) {
+            sema::SemaWriteOutput::DeploySubmitted(accepted) => {
+                DeploySubmissionOutcome::Accepted(accepted)
+            }
+            sema::SemaWriteOutput::WriteRejected(report) => {
+                self.active_operation = None;
+                self.active_deploy = None;
+                DeploySubmissionOutcome::Rejected(meta::RejectedDeploy {
+                    deploy_rejection_reason: Self::deploy_reason(report.reason),
+                    database_marker: Self::marker(report.marker.commit_sequence.into_payload()),
+                })
+            }
+            // `record_deploy_submitted` only ever returns the two arms above;
+            // any other output is an internal invariant violation surfaced as a
+            // typed rejection rather than a panic.
+            _ => {
+                self.active_operation = None;
+                self.active_deploy = None;
+                DeploySubmissionOutcome::Rejected(
+                    self.deploy_rejection(meta::DeployRejectionReason::InternalError),
+                )
+            }
+        }
+    }
+
+    /// Drive an already-submitted deploy's effect pipeline to its terminal
+    /// reply (up9q surface a, the daemon-owned executor body). Requires the
+    /// in-flight cursor to be set by a prior [`Self::submit_deploy`]; re-enters
+    /// the generated runner at the `DeploySubmitted` continuation, so it runs
+    /// the SAME flake-auth -> eval -> build -> copy -> activate -> record chain
+    /// the inline path ran, updating the durable job row at every phase. The
+    /// returned `meta::Output` is the terminal deploy outcome (Deployed or
+    /// DeployRejected) for logging and tests; the client already has its handle
+    /// and re-observes the outcome by deployment identifier.
+    pub async fn drive_submitted_deploy(&mut self) -> meta::Output {
+        let accepted = match self.active_deploy.as_ref() {
+            Some(pipeline) => meta::AcceptedDeploy {
+                deployment_identifier: pipeline.deployment_identifier.clone(),
+                database_marker: pipeline.accepted_marker.clone(),
+            },
+            None => {
+                return meta::Output::DeployRejected(meta::DeployRejected::new(
+                    self.deploy_rejection(meta::DeployRejectionReason::InternalError),
+                ));
+            }
+        };
+        let work = nexus::NexusWork::SemaWriteCompleted(sema::SemaWriteOutput::DeploySubmitted(
+            accepted,
+        ))
+        .with_origin_route(nexus::OriginRoute::new(0));
+        match self.execute(work).await.into_root() {
+            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => output,
+            _ => meta::Output::DeployRejected(meta::DeployRejected::new(
+                self.deploy_rejection(meta::DeployRejectionReason::InternalError),
+            )),
+        }
     }
 
     fn marker(commit_sequence: u64) -> ordinary::DatabaseMarker {
@@ -716,6 +979,12 @@ impl SchemaRuntime {
                     }
                 };
                 self.set_stage(DeployStage::CopyingRecorded);
+                // Mark the durable job row Activating before the activate effect
+                // runs (up9q): a daemon that crashes mid-activation reads this
+                // phase on restart and reconciles via the BootOnce unit rather
+                // than blindly re-activating. There is no Activating event-log
+                // phase today; the job row is the resume cursor for this window.
+                self.persist_job_phase(sema::DeployJobPhase::Activating);
                 nexus::NexusAction::CommandEffect(nexus::EffectCommand::ActivateGeneration(
                     pipeline.activate_generation_command(closure_path),
                 ))
@@ -748,6 +1017,12 @@ impl SchemaRuntime {
 
     fn finish_deploy_pipeline(&mut self) -> nexus::NexusAction {
         self.active_operation = None;
+        // The deploy reached a terminal success: its live generation is
+        // committed, so drop the in-flight job row — only deploys that still
+        // need resuming stay in the mirror (up9q).
+        if let Some(pipeline) = self.active_deploy.as_ref() {
+            self.retire_job_row(&pipeline.clone());
+        }
         let accepted = match self.active_deploy.take() {
             Some(pipeline) => meta::AcceptedDeploy {
                 deployment_identifier: pipeline.deployment_identifier,
@@ -962,7 +1237,31 @@ impl SchemaRuntime {
         nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordPhaseTransition(event))
     }
 
+    /// Rewrite the durable in-flight job row at `phase` from the active deploy
+    /// cursor (up9q). Best-effort: a persistence error here must not abort the
+    /// running deploy — the event log remains the authoritative phase record
+    /// and the job row is the resume convenience. No-op when no deploy is
+    /// active (e.g. a standalone effect).
+    fn persist_job_phase(&self, phase: sema::DeployJobPhase) {
+        if let Some(pipeline) = self.active_deploy.as_ref() {
+            let _ = self.store.upsert_deploy_job(pipeline.deploy_job(phase));
+        }
+    }
+
+    /// Drop the durable in-flight job row for the active deploy (a terminal
+    /// transition: the deploy finished and committed its live generation, so it
+    /// no longer needs resuming). Best-effort, like `persist_job_phase`.
+    fn retire_job_row(&self, pipeline: &DeployPipeline) {
+        let _ = self
+            .store
+            .retract_deploy_job(*pipeline.deployment_identifier.payload());
+    }
+
     fn fail_pipeline(&mut self, failure: nexus::EffectFailure) -> nexus::NexusAction {
+        // Mark the durable job row Failed before clearing the cursor (up9q): a
+        // restarted daemon reads Failed and does not re-attempt — the deploy is
+        // terminal. The event log already carries the failed deployment.
+        self.persist_job_phase(sema::DeployJobPhase::Failed);
         // Clear BOTH in-flight slots symmetrically with the finish path (audit
         // R5) — a mid-pipeline effect failure must not leak `active_operation`.
         self.active_deploy = None;
@@ -1028,6 +1327,11 @@ impl SchemaRuntime {
                     accepted_marker.clone(),
                     submission,
                 ));
+                // Persist the in-flight job row at Submitted (up9q): from this
+                // point the deploy is durably recorded and resumable across a
+                // daemon restart, independent of the connection that submitted
+                // it and of the job actor that will drive the pipeline.
+                self.persist_job_phase(sema::DeployJobPhase::Submitted);
                 sema::SemaWriteOutput::DeploySubmitted(meta::AcceptedDeploy {
                     deployment_identifier: deployment_identifier.into(),
                     database_marker: accepted_marker,
@@ -1041,6 +1345,7 @@ impl SchemaRuntime {
         &mut self,
         event: ordinary::DeploymentPhaseEvent,
     ) -> sema::SemaWriteOutput {
+        let recorded_phase = event.deployment_phase;
         let recorded = self.store.next_event_log_position().and_then(|position| {
             self.store
                 .append_event_log_entry(sema::EventLogEntry {
@@ -1052,6 +1357,11 @@ impl SchemaRuntime {
         });
         match recorded {
             Ok((event_log_position, commit_sequence)) => {
+                // Mirror the just-committed phase onto the durable job row so a
+                // restarted daemon reads the latest phase the deploy reached
+                // (up9q). The event-log write above is authoritative; this keeps
+                // the resume convenience row in step.
+                self.persist_job_phase(sema::DeployJobPhase::from(recorded_phase));
                 sema::SemaWriteOutput::PhaseRecorded(sema::PhaseReceipt {
                     event_log_position: ordinary::EventLogPosition::new(event_log_position),
                     state_marker: Self::sema_marker(commit_sequence),
@@ -1376,6 +1686,13 @@ impl SchemaRuntime {
     // ---- real nix IO (port plan §4.3) -----------------------------------
 
     async fn resolve_flake_auth(&self, request: nexus::FlakeAuthRequest) -> nexus::EffectResult {
+        // Park on the test effect barrier (if any) before the first real effect
+        // runs. Production carries no barrier and falls straight through; a
+        // decoupling test holds it closed to prove the accepted handle is
+        // replied while the pipeline is still parked here (up9b).
+        if let Some(barrier) = self.configuration.effect_barrier() {
+            barrier.wait().await;
+        }
         // Resolve the flake metadata to a locked revision through the proposal
         // source. `nix flake metadata --json <flake>` reports the resolved ref.
         match NixCommand::flake_metadata(request.flake.payload())

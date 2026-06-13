@@ -13,6 +13,9 @@ use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
 
+use kameo::actor::{Actor, ActorRef, Spawn};
+use kameo::error::Infallible;
+use kameo::message::{Context, Message};
 use triad_runtime::{
     AcceptedConnection, AsyncListenerSocket, AsyncMultiConnectionRuntime, AsyncMultiListenerDaemon,
     AsyncMultiListenerDaemonError, ConnectionContext, FrameBody, LengthPrefixedCodec,
@@ -31,8 +34,9 @@ const MAXIMUM_REQUEST_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 use crate::schema::nexus::{self, NexusEngine};
-use crate::schema_runtime::{RuntimeConfiguration, SchemaRuntime};
+use crate::schema_runtime::{DeploySubmissionOutcome, RuntimeConfiguration, SchemaRuntime};
 use crate::{DaemonConfiguration, Error, Result, Store};
+use meta_signal_lojix::schema::lib as meta;
 
 /// Which authority-tiered socket an arriving stream belongs to. Ordinary is the
 /// peer-callable `signal-lojix` surface; Owner is the `meta-signal-lojix`
@@ -95,7 +99,8 @@ impl Daemon {
         let runtime = LojixRuntime::new(
             RuntimeConfiguration::from_daemon_configuration(&configuration),
             state_database_path,
-        )?;
+        )
+        .await?;
         let request_error_log = RequestErrorLog::new("lojix-daemon");
         AsyncMultiListenerDaemon::new(sockets, runtime, request_error_log)
             .with_concurrency_limit(RequestConcurrencyLimit::new(MAXIMUM_CONCURRENT_REQUESTS))
@@ -132,6 +137,16 @@ impl Daemon {
 /// a flood cannot exhaust resources.
 const MAXIMUM_CONCURRENT_REQUESTS: usize = 64;
 
+/// Maximum number of deploy pipelines running concurrently on the daemon-owned
+/// deploy-job executor (up9q). Decoupled from `MAXIMUM_CONCURRENT_REQUESTS`:
+/// the per-connection request permit now covers only the short submit-reply, so
+/// a long-running deploy no longer holds a request permit for its whole run.
+/// This separate cap bounds concurrent pipelines; over it, a `Deploy` is
+/// refused with the typed `DeploymentInFlight` rejection rather than queued
+/// unbounded. A deploy is a heavyweight nix build + activation, so the bound is
+/// small relative to the request cap.
+const MAXIMUM_CONCURRENT_DEPLOYS: usize = 8;
+
 /// The `AsyncMultiConnectionRuntime` realization. Owns the SHARED durable
 /// `Store` (the concurrency point — locked only briefly per sema operation), the frame
 /// codec, and no local listener/thread machinery. The actor runtime admits
@@ -144,18 +159,40 @@ struct LojixRuntime {
     configuration: Arc<RuntimeConfiguration>,
     codec: LengthPrefixedCodec,
     owner_authority: OwnerPeerAuthority,
+    /// The daemon-owned deploy-job executor. Its `ActorRef` lives here on the
+    /// runtime (daemon-lifetime), NOT on a connection task, so an admitted
+    /// deploy's pipeline outlives the owner connection that submitted it
+    /// (up9q): a dropped client kills only the short submit-reply task.
+    deploy_jobs: ActorRef<DeployJobs>,
 }
 
 impl LojixRuntime {
-    fn new(
+    async fn new(
         configuration: RuntimeConfiguration,
         state_database_path: std::path::PathBuf,
     ) -> Result<Self> {
+        let store = Arc::new(Store::open(state_database_path)?);
+        let configuration = Arc::new(configuration);
+        let deploy_jobs = DeployJobs::start(
+            store.clone(),
+            configuration.clone(),
+            MAXIMUM_CONCURRENT_DEPLOYS,
+        )
+        .await;
+        // Read any persisted in-flight deploy-job rows and reconcile them on
+        // start (up9q durable resume scaffolding). A clean shutdown leaves no
+        // rows; rows present mean a deploy was in flight when the daemon
+        // stopped, so the actor decides per row whether to poll the activation
+        // unit, re-drive the pipeline, or drop a stale terminal row. A startup
+        // reconcile failure is non-fatal: the durable rows remain for the next
+        // start, and the daemon still serves new requests.
+        let _ = deploy_jobs.ask(ReconcilePersistedJobs).await;
         Ok(Self {
-            store: Arc::new(Store::open(state_database_path)?),
-            configuration: Arc::new(configuration),
+            store,
+            configuration,
             codec: LengthPrefixedCodec::new(MaximumFrameLength::new(MAXIMUM_REQUEST_FRAME_BYTES)),
             owner_authority: OwnerPeerAuthority::current_process(),
+            deploy_jobs,
         })
     }
 }
@@ -230,6 +267,7 @@ impl AsyncMultiConnectionRuntime for LojixRuntime {
             configuration: self.configuration.clone(),
             codec: self.codec,
             owner_authority: self.owner_authority,
+            deploy_jobs: self.deploy_jobs.clone(),
         };
         worker.serve(listener, connection).await
     }
@@ -243,6 +281,10 @@ struct RequestWorker {
     configuration: Arc<RuntimeConfiguration>,
     codec: LengthPrefixedCodec,
     owner_authority: OwnerPeerAuthority,
+    /// The daemon-owned deploy-job executor's handle. A `Deploy` request hands
+    /// the submission here and replies the accepted handle; the pipeline runs
+    /// on the actor, not this connection task.
+    deploy_jobs: ActorRef<DeployJobs>,
 }
 
 impl RequestWorker {
@@ -276,10 +318,19 @@ impl RequestWorker {
         self.owner_authority.authorize(connection.context())?;
         let body = self.read_body(connection).await?;
         let (_, input) = meta_signal_lojix::schema::lib::Input::decode_signal_frame(body.bytes())?;
-        let output = self
-            .execute_request(ListenerRole::Owner, nexus::SignalInput::MetaInput(input))
-            .await;
-        let reply = Self::meta_reply(output)?;
+        // A `Deploy` decouples from this connection task: the deploy-job actor
+        // owns the pipeline, this task only submits and replies the accepted
+        // handle. Pin/Unpin/Retire are fast single writes and stay synchronous
+        // on this task (up9q surface a — only Deploy decouples).
+        let reply = match input {
+            meta::Input::Deploy(request) => self.submit_deploy(request.into_payload()).await,
+            other => {
+                let output = self
+                    .execute_request(ListenerRole::Owner, nexus::SignalInput::MetaInput(other))
+                    .await;
+                Self::meta_reply(output)?
+            }
+        };
         self.codec
             .write_body_async(
                 connection.stream_mut(),
@@ -287,6 +338,39 @@ impl RequestWorker {
             )
             .await?;
         Ok(())
+    }
+
+    /// Submit a `Deploy` to the daemon-owned deploy-job actor and return the
+    /// immediate wire reply (up9q surface a). The actor checks the deploy-job
+    /// cap, runs the synchronous submit (issue identifier, persist the
+    /// `Submitted` job row), spawns the pipeline on the daemon runtime, and
+    /// replies the `AcceptedDeploy` handle — all before any pipeline effect
+    /// runs. When the cap is full it replies `DeploymentInFlight`. This task's
+    /// only remaining work is writing this reply frame; dropping it (a client
+    /// disconnect) cannot cancel the spawned pipeline.
+    async fn submit_deploy(&self, request: meta::DeployRequest) -> meta::Output {
+        match self.deploy_jobs.ask(AdmitDeploy { request }).await {
+            Ok(DeployAdmission::Accepted(accepted)) => {
+                meta::Output::Deployed(meta::Deployed::new(accepted))
+            }
+            Ok(DeployAdmission::Rejected(rejected)) => {
+                meta::Output::DeployRejected(meta::DeployRejected::new(rejected))
+            }
+            // The deploy-job actor is daemon-lifetime; a send error means the
+            // runtime is tearing down. Reply a typed internal rejection rather
+            // than dropping the connection without a frame.
+            Err(_) => meta::Output::DeployRejected(meta::DeployRejected::new(meta::RejectedDeploy {
+                deploy_rejection_reason: meta::DeployRejectionReason::InternalError,
+                database_marker: Self::zero_marker(),
+            })),
+        }
+    }
+
+    fn zero_marker() -> meta::DatabaseMarker {
+        meta::DatabaseMarker {
+            commit_sequence: signal_lojix::schema::lib::CommitSequence::new(0),
+            state_digest: signal_lojix::schema::lib::StateDigest::new(0),
+        }
     }
 
     async fn read_body(&self, connection: &mut AcceptedConnection) -> Result<FrameBody> {
@@ -382,5 +466,186 @@ impl RequestWorker {
             nexus::SignalOutput::MetaOutput(output) => Ok(output),
             nexus::SignalOutput::OrdinaryOutput(_) => Err(Error::UnexpectedFrame),
         }
+    }
+}
+
+/// The daemon-owned deploy-job executor (up9q surface a). A kameo actor whose
+/// `ActorRef` lives on [`LojixRuntime`] for the daemon's whole lifetime, NOT on
+/// any connection task. It owns the deploy-job admission cap and the in-flight
+/// count; on each accepted `Deploy` it runs the synchronous submit and then
+/// launches the deploy pipeline as an independent runtime task (decoupled from
+/// the owner connection), so a dropped client cannot cancel an in-flight
+/// deploy. The per-deploy pipeline task is a daemon-owned `tokio::spawn` the
+/// actor tracks via its count; a later iteration can promote it to a supervised
+/// child actor without changing the decoupling property this actor guarantees.
+pub struct DeployJobs {
+    store: Arc<Store>,
+    configuration: Arc<RuntimeConfiguration>,
+    /// Maximum concurrent deploy pipelines. Over it, `AdmitDeploy` replies
+    /// `DeploymentInFlight` (a real `DeployRejectionReason`).
+    cap: usize,
+    /// Pipelines currently running. Incremented on admit, decremented when the
+    /// pipeline task reports `DeployCompleted`. Single-writer (the actor), so
+    /// the cap check and the increment are atomic with no shared lock.
+    active_count: usize,
+}
+
+impl DeployJobs {
+    pub async fn start(
+        store: Arc<Store>,
+        configuration: Arc<RuntimeConfiguration>,
+        cap: usize,
+    ) -> ActorRef<Self> {
+        let actor = Self::spawn(Self {
+            store,
+            configuration,
+            cap,
+            active_count: 0,
+        });
+        actor.wait_for_startup().await;
+        actor
+    }
+
+    fn at_capacity(&self) -> bool {
+        self.active_count >= self.cap
+    }
+
+    fn deployment_in_flight_rejection(&self) -> meta::RejectedDeploy {
+        let commit_sequence = self.store.commit_sequence().unwrap_or(0);
+        meta::RejectedDeploy {
+            deploy_rejection_reason: meta::DeployRejectionReason::DeploymentInFlight,
+            database_marker: meta::DatabaseMarker {
+                commit_sequence: signal_lojix::schema::lib::CommitSequence::new(commit_sequence),
+                state_digest: signal_lojix::schema::lib::StateDigest::new(commit_sequence),
+            },
+        }
+    }
+
+    /// Launch one admitted deploy's pipeline as an independent daemon runtime
+    /// task and return immediately. The task owns the seeded engine and drives
+    /// the full effect chain to completion, then reports `DeployCompleted` so
+    /// the actor frees a cap slot. Because the task is spawned on the runtime
+    /// (not the owner connection's task), dropping the connection — or the
+    /// short submit-reply task — never cancels it. THIS is the decoupling.
+    fn launch_pipeline(&self, mut engine: SchemaRuntime, jobs: ActorRef<DeployJobs>) {
+        tokio::spawn(async move {
+            let _terminal = engine.drive_submitted_deploy().await;
+            // Free the cap slot. `tell` is safe: `DeployCompleted` has an
+            // infallible `()` reply, so it cannot crash the actor.
+            let _ = jobs.tell(DeployCompleted).await;
+        });
+    }
+
+    /// Read persisted in-flight deploy-job rows on start and decide each one's
+    /// reconcile action (up9q durable resume). A row present means a deploy was
+    /// mid-flight at the last shutdown. The typed [`crate::schema_runtime`]
+    /// `DeployJobResumption` verdict (poll the activation unit, re-drive the
+    /// pipeline, or drop a stale terminal row) is computed per row here; the
+    /// LIVE continuation behind each verdict is proven on a real target at S5,
+    /// so this start path computes and (for terminal rows) clears, leaving live
+    /// resumption to S5. Pre-activation rows are dropped here so they do not
+    /// wedge the cap; they are re-submittable by the operator.
+    fn reconcile_persisted_jobs(&self) {
+        let Ok(jobs) = self.store.deploy_jobs() else {
+            return;
+        };
+        for job in jobs {
+            let deployment_identifier = *job.deployment_identifier.payload();
+            match job.resumption() {
+                crate::schema_runtime::DeployJobResumption::PollActivationUnit { .. } => {
+                    // S5: poll `journalctl -u <unit>` and adopt the unit's
+                    // outcome rather than re-activating. Until then leave the
+                    // row so the operator sees the in-flight activation.
+                }
+                crate::schema_runtime::DeployJobResumption::RestartPipeline
+                | crate::schema_runtime::DeployJobResumption::AlreadyTerminal => {
+                    // Pre-activation work mutated no durable target state (or the
+                    // deploy already finished); drop the stale row so it does not
+                    // occupy a cap slot. Live re-drive is an S5 follow-on.
+                    let _ = self.store.retract_deploy_job(deployment_identifier);
+                }
+            }
+        }
+    }
+}
+
+impl Actor for DeployJobs {
+    type Args = Self;
+    type Error = Infallible;
+
+    async fn on_start(
+        jobs: Self::Args,
+        _actor_reference: ActorRef<Self>,
+    ) -> std::result::Result<Self, Self::Error> {
+        Ok(jobs)
+    }
+}
+
+/// Submit a `Deploy` to the executor: check the cap, run the synchronous
+/// submit, and on accept launch the pipeline. The reply is the immediate
+/// admission verdict.
+pub struct AdmitDeploy {
+    pub request: meta::DeployRequest,
+}
+
+/// The immediate admission verdict for an `AdmitDeploy` — the wire reply the
+/// daemon sends the owner connection before any pipeline effect runs.
+#[derive(Debug, Clone, PartialEq, Eq, kameo::Reply)]
+pub enum DeployAdmission {
+    Accepted(meta::AcceptedDeploy),
+    Rejected(meta::RejectedDeploy),
+}
+
+impl Message<AdmitDeploy> for DeployJobs {
+    type Reply = DeployAdmission;
+
+    async fn handle(
+        &mut self,
+        message: AdmitDeploy,
+        context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self.at_capacity() {
+            return DeployAdmission::Rejected(self.deployment_in_flight_rejection());
+        }
+        let mut engine =
+            SchemaRuntime::with_store_and_configuration(self.store.clone(), self.configuration.clone());
+        match engine.submit_deploy(message.request) {
+            DeploySubmissionOutcome::Accepted(accepted) => {
+                self.active_count += 1;
+                self.launch_pipeline(engine, context.actor_ref().clone());
+                DeployAdmission::Accepted(accepted)
+            }
+            DeploySubmissionOutcome::Rejected(rejected) => DeployAdmission::Rejected(rejected),
+        }
+    }
+}
+
+/// One deploy pipeline finished (success or failure). Frees a cap slot.
+pub struct DeployCompleted;
+
+impl Message<DeployCompleted> for DeployJobs {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _message: DeployCompleted,
+        _context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.active_count = self.active_count.saturating_sub(1);
+    }
+}
+
+/// Read and reconcile persisted in-flight deploy-job rows on daemon start.
+pub struct ReconcilePersistedJobs;
+
+impl Message<ReconcilePersistedJobs> for DeployJobs {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _message: ReconcilePersistedJobs,
+        _context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.reconcile_persisted_jobs();
     }
 }

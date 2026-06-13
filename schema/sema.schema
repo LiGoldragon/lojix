@@ -80,4 +80,15 @@
 
   ContainerLifecycleTable { records (Vec ContainerLifecycleRecord) }
   ContainerLifecycleRecord { ClusterName * NodeName * container ContainerName state ContainerState EventLogPosition * }
+
+  ;; The durable in-flight deploy-job row (up9q). One row per submitted deploy,
+  ;; keyed by DeploymentIdentifier. Written on submit and rewritten at every
+  ;; phase transition, so a daemon restart reads the persisted cursor and
+  ;; reconciles the in-flight deploy rather than losing it. The phase cursor
+  ;; mirrors DeployJobPhase; resolved_target / boot_once_unit are populated as
+  ;; the pipeline learns them so a resumed Activating job can poll the
+  ;; transient unit instead of re-activating.
+  DeployJobTable { jobs (Vec DeployJob) }
+  DeployJob { DeploymentIdentifier * GenerationIdentifier * ClusterName * NodeName * phase DeployJobPhase closure_path (Optional ClosurePath) resolved_target (Optional String) boot_once_unit (Optional String) }
+  DeployJobPhase [Submitted Building Built Copying Activating Activated Failed]
 }
