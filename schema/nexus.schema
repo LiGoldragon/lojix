@@ -64,7 +64,7 @@
   FlakeInputOverride { name String reference FlakeInputReference }
   MaterializedInputs { overrides (Vec FlakeInputOverride) }
   NixEvalCommand { ClusterName * NodeName * DeploymentKind * flake FlakeReference attribute String overrides (Vec FlakeInputOverride) }
-  NixBuildCommand { GenerationIdentifier * ClosurePath * target BuildTarget substituters (Vec ExtraSubstituter) }
+  NixBuildCommand { GenerationIdentifier * ClusterName * ClosurePath * target BuildTarget substituters (Vec ExtraSubstituter) }
   CopyClosureCommand { GenerationIdentifier * ClusterName * NodeName * ClosurePath * source BuildTarget }
   HomeActivationProfile { mode HomeMode user UserName }
   ActivationProfile [(System SystemAction) (Home HomeActivationProfile)]

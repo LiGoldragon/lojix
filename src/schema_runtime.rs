@@ -428,6 +428,7 @@ impl DeployPipeline {
     fn nix_build_command(&self, closure_path: ordinary::ClosurePath) -> nexus::NixBuildCommand {
         nexus::NixBuildCommand {
             generation_identifier: self.generation_identifier.clone(),
+            cluster_name: self.cluster_name.clone(),
             closure_path,
             target: self.build_target(),
             substituters: self.substituters.clone(),
@@ -1742,11 +1743,17 @@ impl SchemaRuntime {
             nexus::BuildTarget::Local => {
                 NixCommand::build_closure(command.closure_path.payload(), &command.substituters)
             }
-            nexus::BuildTarget::Remote(builder) => NixCommand::build_closure_remote(
-                builder.payload().payload(),
-                command.closure_path.payload(),
-                &command.substituters,
-            ),
+            nexus::BuildTarget::Remote(builder) => {
+                let target =
+                    match SshTarget::root_at_node(&command.cluster_name, builder.payload()) {
+                        Ok(target) => target,
+                        Err(detail) => {
+                            return Self::effect_failed(nexus::EffectStage::Build, detail);
+                        }
+                    };
+                NixCommand::build_closure(command.closure_path.payload(), &command.substituters)
+                    .remote_on(&target)
+            }
         };
         match invocation.run().await {
             Ok(output) => nexus::EffectResult::ClosureBuilt(nexus::BuiltClosure {
@@ -2767,21 +2774,19 @@ impl NixCommand {
         Self::new("nix", arguments)
     }
 
-    fn build_closure_remote(
-        builder: &str,
-        closure_path: &str,
-        substituters: &[nexus::ExtraSubstituter],
-    ) -> Self {
-        let mut arguments = vec![
-            "build".to_string(),
-            "--no-link".to_string(),
-            "--print-out-paths".to_string(),
-            "--builders".to_string(),
-            format!("ssh-ng://{builder}"),
-            Self::output_installable(closure_path),
-        ];
-        arguments.extend(Self::substituter_options(substituters));
-        Self::new("nix", arguments)
+    fn remote_on(self, target: &SshTarget) -> Self {
+        target.remote_invocation(self.to_shell_command())
+    }
+
+    fn to_shell_command(&self) -> ShellCommand {
+        let mut words = Vec::with_capacity(self.arguments.len() + 1);
+        words.push(ShellArgument::new(self.program.clone()).to_command_text());
+        words.extend(
+            self.arguments
+                .iter()
+                .map(|argument| ShellArgument::new(argument.clone()).to_command_text()),
+        );
+        ShellCommand::from_raw(words.join(" "))
     }
 
     /// Select the derivation's *outputs* with the `^*` installable suffix so
@@ -3152,13 +3157,15 @@ mod tests {
     }
 
     #[test]
-    fn build_closure_remote_selects_drv_outputs_not_the_bare_drv() {
-        let invocation =
-            NixCommand::build_closure_remote("builder.alpha.criome", DERIVATION, &[]);
-        assert_eq!(invocation.program(), "nix");
+    fn remote_build_ssh_runs_nix_on_cluster_qualified_builder() {
+        let target = SshTarget::root_at_node(&cluster(), &ordinary::NodeName::new("builder"))
+            .expect("target");
+        let invocation = NixCommand::build_closure(DERIVATION, &[]).remote_on(&target);
+        assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
+        assert!(argv.contains("root@builder.alpha.criome"), "{argv}");
+        assert!(argv.contains("nix build"), "{argv}");
         assert!(argv.contains("--print-out-paths"), "{argv}");
-        assert!(argv.contains("ssh-ng://builder.alpha.criome"), "{argv}");
         assert!(
             argv.contains(&format!("{DERIVATION}^*")),
             "remote build installable must carry the `^*` output selector: {argv}"
