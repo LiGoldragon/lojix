@@ -96,7 +96,9 @@ fn store_self_resumes_after_reopen() {
     );
 
     assert_eq!(
-        store.commit_sequence().expect("commit sequence after reopen"),
+        store
+            .commit_sequence()
+            .expect("commit sequence after reopen"),
         committed_sequence,
         "the persisted commit sequence resumed at its pre-restart value"
     );

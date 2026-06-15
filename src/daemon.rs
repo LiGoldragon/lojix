@@ -359,10 +359,12 @@ impl RequestWorker {
             // The deploy-job actor is daemon-lifetime; a send error means the
             // runtime is tearing down. Reply a typed internal rejection rather
             // than dropping the connection without a frame.
-            Err(_) => meta::Output::DeployRejected(meta::DeployRejected::new(meta::RejectedDeploy {
-                deploy_rejection_reason: meta::DeployRejectionReason::InternalError,
-                database_marker: Self::zero_marker(),
-            })),
+            Err(_) => {
+                meta::Output::DeployRejected(meta::DeployRejected::new(meta::RejectedDeploy {
+                    deploy_rejection_reason: meta::DeployRejectionReason::InternalError,
+                    database_marker: Self::zero_marker(),
+                }))
+            }
         }
     }
 
@@ -608,8 +610,10 @@ impl Message<AdmitDeploy> for DeployJobs {
         if self.at_capacity() {
             return DeployAdmission::Rejected(self.deployment_in_flight_rejection());
         }
-        let mut engine =
-            SchemaRuntime::with_store_and_configuration(self.store.clone(), self.configuration.clone());
+        let mut engine = SchemaRuntime::with_store_and_configuration(
+            self.store.clone(),
+            self.configuration.clone(),
+        );
         match engine.submit_deploy(message.request) {
             DeploySubmissionOutcome::Accepted(accepted) => {
                 self.active_count += 1;

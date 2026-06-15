@@ -12,7 +12,8 @@ use lojix::Store;
 use lojix::daemon::{AdmitDeploy, DeployAdmission, DeployJobs, ReconcilePersistedJobs};
 use lojix::schema::sema::{self, DeployJob, DeployJobPhase};
 use lojix::schema_runtime::{
-    DeployJobResumption, DeploySubmissionOutcome, EffectBarrier, RuntimeConfiguration, SchemaRuntime,
+    DeployJobResumption, DeploySubmissionOutcome, EffectBarrier, RuntimeConfiguration,
+    SchemaRuntime,
 };
 use meta_signal_lojix::schema::lib as meta;
 use signal_lojix::schema::lib as ordinary;
@@ -67,8 +68,10 @@ async fn await_until(store: &Store, mut predicate: impl FnMut(&Store) -> bool) -
 #[tokio::test]
 async fn submit_deploy_accepts_and_persists_submitted_row_before_pipeline() {
     let (_directory, store) = store();
-    let mut engine =
-        SchemaRuntime::with_store_and_configuration(store.clone(), Arc::new(RuntimeConfiguration::test_default()));
+    let mut engine = SchemaRuntime::with_store_and_configuration(
+        store.clone(),
+        Arc::new(RuntimeConfiguration::test_default()),
+    );
 
     let outcome = engine.submit_deploy(deploy_request());
 
@@ -91,7 +94,10 @@ async fn submit_deploy_accepts_and_persists_submitted_row_before_pipeline() {
     // effect ran (the pipeline driver was never invoked here).
     let job = job_row(&store, 1).expect("submitted job row");
     assert_eq!(job.phase, DeployJobPhase::Submitted);
-    assert_eq!(job.resolved_target.as_deref(), Some("root@node-1.alpha.criome"));
+    assert_eq!(
+        job.resolved_target.as_deref(),
+        Some("root@node-1.alpha.criome")
+    );
 }
 
 // ---- (2) the accepted handle is replied while the pipeline is still parked,
@@ -102,7 +108,9 @@ async fn submit_deploy_accepts_and_persists_submitted_row_before_pipeline() {
 async fn deploy_replies_accepted_before_pipeline_completes_and_survives_caller_drop() {
     let (_directory, store) = store();
     let barrier = EffectBarrier::held();
-    let configuration = Arc::new(RuntimeConfiguration::test_with_effect_barrier(barrier.clone()));
+    let configuration = Arc::new(RuntimeConfiguration::test_with_effect_barrier(
+        barrier.clone(),
+    ));
     let jobs = DeployJobs::start(store.clone(), configuration, 8).await;
 
     // Submit on a SEPARATE task — the stand-in for the client's connection /
@@ -165,7 +173,9 @@ async fn deploy_replies_accepted_before_pipeline_completes_and_survives_caller_d
 async fn deploy_job_cap_rejects_when_full_and_frees_on_completion() {
     let (_directory, store) = store();
     let barrier = EffectBarrier::held();
-    let configuration = Arc::new(RuntimeConfiguration::test_with_effect_barrier(barrier.clone()));
+    let configuration = Arc::new(RuntimeConfiguration::test_with_effect_barrier(
+        barrier.clone(),
+    ));
     // Cap of one: a single parked deploy fills the executor.
     let jobs = DeployJobs::start(store.clone(), configuration, 1).await;
 
@@ -204,7 +214,10 @@ async fn deploy_job_cap_rejects_when_full_and_frees_on_completion() {
         job_row(store, 1).is_none_or(|job| matches!(job.phase, DeployJobPhase::Failed))
     })
     .await;
-    assert!(freed, "the first deploy must complete and free its cap slot");
+    assert!(
+        freed,
+        "the first deploy must complete and free its cap slot"
+    );
 
     // The barrier is already open, so the retried deploy is admitted and runs;
     // a fresh Accepted proves the cap slot reopened on the first's completion.
@@ -263,11 +276,17 @@ fn deploy_job_resumption_decides_per_phase() {
         DeployJobPhase::Built,
         DeployJobPhase::Copying,
     ] {
-        assert_eq!(make(phase, None).resumption(), DeployJobResumption::RestartPipeline);
+        assert_eq!(
+            make(phase, None).resumption(),
+            DeployJobResumption::RestartPipeline
+        );
     }
     // Terminal phases have nothing to resume.
     for phase in [DeployJobPhase::Activated, DeployJobPhase::Failed] {
-        assert_eq!(make(phase, None).resumption(), DeployJobResumption::AlreadyTerminal);
+        assert_eq!(
+            make(phase, None).resumption(),
+            DeployJobResumption::AlreadyTerminal
+        );
     }
 }
 
@@ -291,7 +310,10 @@ async fn reconcile_on_start_clears_a_stale_pre_activation_job_row() {
             boot_once_unit: None,
         })
         .expect("seed crashed-daemon job row");
-    assert!(job_row(&store, 7).is_some(), "the stale row is present pre-start");
+    assert!(
+        job_row(&store, 7).is_some(),
+        "the stale row is present pre-start"
+    );
 
     let configuration = Arc::new(RuntimeConfiguration::test_default());
     let jobs = DeployJobs::start(store.clone(), configuration, 8).await;

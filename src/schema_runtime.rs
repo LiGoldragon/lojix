@@ -607,7 +607,9 @@ impl Default for SchemaRuntime {
 
 impl SchemaRuntime {
     pub fn new() -> Self {
-        Self::with_store(Arc::new(Store::open(Self::test_store_path()).expect("open sema store")))
+        Self::with_store(Arc::new(
+            Store::open(Self::test_store_path()).expect("open sema store"),
+        ))
     }
 
     /// A unique tempdir-backed `*.sema` path for a test-only `Store`. Each call
@@ -622,12 +624,10 @@ impl SchemaRuntime {
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or(0);
         let unique = COUNTER.fetch_add(1, Ordering::SeqCst);
-        std::env::temp_dir()
-            .join("lojix-test-store")
-            .join(format!(
-                "{}-{nanoseconds}-{unique}.sema",
-                std::process::id()
-            ))
+        std::env::temp_dir().join("lojix-test-store").join(format!(
+            "{}-{nanoseconds}-{unique}.sema",
+            std::process::id()
+        ))
     }
 
     /// Build an engine over a SHARED `Store`. The daemon constructs one per
@@ -725,10 +725,9 @@ impl SchemaRuntime {
                 ));
             }
         };
-        let work = nexus::NexusWork::SemaWriteCompleted(sema::SemaWriteOutput::DeploySubmitted(
-            accepted,
-        ))
-        .with_origin_route(nexus::OriginRoute::new(0));
+        let work =
+            nexus::NexusWork::SemaWriteCompleted(sema::SemaWriteOutput::DeploySubmitted(accepted))
+                .with_origin_route(nexus::OriginRoute::new(0));
         match self.execute(work).await.into_root() {
             nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => output,
             _ => meta::Output::DeployRejected(meta::DeployRejected::new(
@@ -1450,7 +1449,10 @@ impl SchemaRuntime {
                 && root.cluster_name == request.cluster_name
                 && root.node_name == request.node_name
         }) else {
-            return Self::write_rejected(current_sequence, sema::RejectionReason::GenerationUnknown);
+            return Self::write_rejected(
+                current_sequence,
+                sema::RejectionReason::GenerationUnknown,
+            );
         };
         let from_slot = root.generation_slot;
         root.generation_slot = ordinary::GenerationSlot::Pinned;
@@ -1519,7 +1521,10 @@ impl SchemaRuntime {
                 && root.cluster_name == request.cluster_name
                 && root.node_name == request.node_name
         }) else {
-            return Self::write_rejected(current_sequence, sema::RejectionReason::GenerationUnknown);
+            return Self::write_rejected(
+                current_sequence,
+                sema::RejectionReason::GenerationUnknown,
+            );
         };
         if matches!(root.generation_slot, ordinary::GenerationSlot::Pinned) {
             return Self::write_rejected(current_sequence, sema::RejectionReason::GenerationPinned);
@@ -2262,71 +2267,42 @@ impl ShellArgument {
     }
 }
 
-/// Move a closure from wherever the build phase landed it to the activation
-/// target (ported from `lojix-cli/src/copy.rs::ClosureCopy`). Always passes
-/// `--substitute-on-destination` so the target pulls signed paths from the
-/// cluster cache; unsigned daemon-to-daemon transfer is rejected under
-/// `require-sigs` (risk R6). Three cases: dispatcher source -> `--to` only;
-/// builder == target -> skip; builder != target -> `--from`/`--to`.
+/// Move a closure from the dispatcher store to the activation target. Always
+/// passes `--substitute-on-destination` so the target pulls signed paths from
+/// the cluster cache when available; unsigned daemon-to-daemon transfer is
+/// rejected under `require-sigs` (risk R6). Remote builds use the configured
+/// Nix machine file and copy their result back into the dispatcher store, so
+/// the copy command never opens a direct root SSH source to the builder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClosureCopy {
     store_path: String,
-    source: nexus::BuildTarget,
-    builder_target: Option<SshTarget>,
     target: SshTarget,
 }
 
 impl ClosureCopy {
-    fn from_command(
-        command: &nexus::CopyClosureCommand,
-    ) -> std::result::Result<Self, String> {
+    fn from_command(command: &nexus::CopyClosureCommand) -> std::result::Result<Self, String> {
         let target = SshTarget::root_at_node(&command.cluster_name, &command.node_name)?;
-        let builder_target = match &command.source {
-            nexus::BuildTarget::Local => None,
-            nexus::BuildTarget::Remote(builder) => Some(SshTarget::root_at_node(
-                &command.cluster_name,
-                builder.payload(),
-            )?),
-        };
         Ok(Self {
             store_path: command.closure_path.payload().clone(),
-            source: command.source.clone(),
-            builder_target,
             target,
         })
     }
 
-    /// `Some(invocation)` if a copy is needed, `None` if the closure already
-    /// lives on the target (builder == target). Pure.
-    fn invocation(&self) -> Option<NixCommand> {
-        if self.source_matches_target() {
-            return None;
-        }
-        let mut arguments: Vec<String> =
-            vec!["copy".to_string(), "--substitute-on-destination".to_string()];
-        if let Some(builder) = &self.builder_target {
-            arguments.push("--from".to_string());
-            arguments.push(builder.ssh_uri());
-        }
-        arguments.push("--to".to_string());
-        arguments.push(self.target.ssh_uri());
-        arguments.push(self.store_path.clone());
-        Some(NixCommand::new("nix", arguments))
+    /// Copy is idempotent: if the closure already exists on the target, Nix
+    /// exits successfully without changing the activation state.
+    fn invocation(&self) -> NixCommand {
+        let arguments: Vec<String> = vec![
+            "copy".to_string(),
+            "--substitute-on-destination".to_string(),
+            "--to".to_string(),
+            self.target.ssh_uri(),
+            self.store_path.clone(),
+        ];
+        NixCommand::new("nix", arguments)
     }
 
     async fn run(&self) -> std::result::Result<(), String> {
-        let Some(invocation) = self.invocation() else {
-            return Ok(());
-        };
-        invocation.run().await.map(|_| ())
-    }
-
-    fn source_matches_target(&self) -> bool {
-        match (&self.source, &self.builder_target) {
-            (nexus::BuildTarget::Local, _) => false,
-            (nexus::BuildTarget::Remote(_), Some(builder)) => builder == &self.target,
-            (nexus::BuildTarget::Remote(_), None) => false,
-        }
+        self.invocation().run().await.map(|_| ())
     }
 }
 
@@ -2521,10 +2497,7 @@ impl SystemActivation {
         match self.ssh_invocation() {
             Some(invocation) => invocation.run().await.map(|_| ())?,
             None => {
-                return Err(format!(
-                    "no simple activation for action {:?}",
-                    self.action
-                ));
+                return Err(format!("no simple activation for action {:?}", self.action));
             }
         }
         if self.requires_efi_reconcile() {
@@ -2537,9 +2510,7 @@ impl SystemActivation {
         let output = self.step_readlink_system_profile_invocation().run().await?;
         let link = SystemProfileLink::try_new(output.trim())?;
         let entry = link.generation().boot_entry();
-        self.step_set_efi_default_invocation(&entry)
-            .run()
-            .await?;
+        self.step_set_efi_default_invocation(&entry).run().await?;
         self.step_clear_efi_oneshot_invocation().run().await?;
         Ok(())
     }
@@ -2770,10 +2741,7 @@ impl NixCommand {
         Self::new("nix", arguments)
     }
 
-    fn build_closure_remote(
-        closure_path: &str,
-        substituters: &[nexus::ExtraSubstituter],
-    ) -> Self {
+    fn build_closure_remote(closure_path: &str, substituters: &[nexus::ExtraSubstituter]) -> Self {
         let mut arguments = vec![
             "build".to_string(),
             "--no-link".to_string(),
@@ -3041,7 +3009,9 @@ mod tests {
         engine.set_stage(DeployStage::BuildingRecorded);
 
         match engine.advance_after_phase() {
-            nexus::NexusAction::CommandEffect(nexus::EffectCommand::ActivateGeneration(command)) => {
+            nexus::NexusAction::CommandEffect(nexus::EffectCommand::ActivateGeneration(
+                command,
+            )) => {
                 assert_eq!(command.closure_path, built);
                 assert!(!command.closure_path.payload().is_empty());
             }
@@ -3127,8 +3097,7 @@ mod tests {
 
     // ---- closure build argv — `.drv^*` output selector, never the bare .drv ----
 
-    const DERIVATION: &str =
-        "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-mercury.drv";
+    const DERIVATION: &str = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-mercury.drv";
 
     #[test]
     fn build_closure_selects_drv_outputs_not_the_bare_drv() {
@@ -3186,9 +3155,7 @@ mod tests {
         assert_eq!(target.ssh_uri(), "ssh-ng://root@node-1.alpha.criome");
     }
 
-    fn copy_command(
-        source: nexus::BuildTarget,
-    ) -> nexus::CopyClosureCommand {
+    fn copy_command(source: nexus::BuildTarget) -> nexus::CopyClosureCommand {
         nexus::CopyClosureCommand {
             generation_identifier: ordinary::GenerationIdentifier::new(1),
             cluster_name: cluster(),
@@ -3198,44 +3165,50 @@ mod tests {
         }
     }
 
-    // ---- Step 3: copy argv — always --substitute-on-destination, three cases ----
+    // ---- Step 3: copy argv — always --substitute-on-destination, target only ----
 
     #[test]
     fn copy_from_dispatcher_uses_to_only_with_substitute() {
-        let copy = ClosureCopy::from_command(&copy_command(nexus::BuildTarget::Local))
-            .expect("copy");
-        let invocation = copy.invocation().expect("dispatcher source needs a copy");
+        let copy =
+            ClosureCopy::from_command(&copy_command(nexus::BuildTarget::Local)).expect("copy");
+        let invocation = copy.invocation();
         assert_eq!(invocation.program(), "nix");
         let argv = invocation.joined_arguments();
         assert!(argv.contains("--substitute-on-destination"), "{argv}");
-        assert!(argv.contains("--to ssh-ng://root@node-1.alpha.criome"), "{argv}");
+        assert!(
+            argv.contains("--to ssh-ng://root@node-1.alpha.criome"),
+            "{argv}"
+        );
         assert!(!argv.contains("--from"), "{argv}");
         assert!(argv.contains(STORE), "{argv}");
     }
 
     #[test]
-    fn copy_builder_equals_target_is_skipped() {
-        let source = nexus::BuildTarget::Remote(nexus::BuilderNode::new(node()));
+    fn copy_remote_builder_still_uses_dispatcher_to_target_copy() {
+        let builder = ordinary::NodeName::new("builder-node");
+        let source = nexus::BuildTarget::Remote(nexus::BuilderNode::new(builder));
         let copy = ClosureCopy::from_command(&copy_command(source)).expect("copy");
+        let invocation = copy.invocation();
+        let argv = invocation.joined_arguments();
+        assert!(argv.contains("--substitute-on-destination"), "{argv}");
+        assert!(!argv.contains("--from"), "{argv}");
         assert!(
-            copy.invocation().is_none(),
-            "builder == target: closure is already on the target"
+            argv.contains("--to ssh-ng://root@node-1.alpha.criome"),
+            "{argv}"
         );
     }
 
     #[test]
-    fn copy_builder_differs_from_target_uses_from_and_to() {
-        let builder = ordinary::NodeName::new("builder-node");
-        let source = nexus::BuildTarget::Remote(nexus::BuilderNode::new(builder));
+    fn copy_builder_equals_target_still_runs_idempotent_target_copy() {
+        let source = nexus::BuildTarget::Remote(nexus::BuilderNode::new(node()));
         let copy = ClosureCopy::from_command(&copy_command(source)).expect("copy");
-        let invocation = copy.invocation().expect("cross-node copy needed");
+        let invocation = copy.invocation();
         let argv = invocation.joined_arguments();
-        assert!(argv.contains("--substitute-on-destination"), "{argv}");
+        assert!(!argv.contains("--from"), "{argv}");
         assert!(
-            argv.contains("--from ssh-ng://root@builder-node.alpha.criome"),
+            argv.contains("--to ssh-ng://root@node-1.alpha.criome"),
             "{argv}"
         );
-        assert!(argv.contains("--to ssh-ng://root@node-1.alpha.criome"), "{argv}");
     }
 
     fn activate_command(
@@ -3278,7 +3251,10 @@ mod tests {
             argv.contains(&format!("{STORE}/bin/switch-to-configuration switch")),
             "{argv}"
         );
-        assert!(argv.contains("nix-env -p /nix/var/nix/profiles/system --set"), "{argv}");
+        assert!(
+            argv.contains("nix-env -p /nix/var/nix/profiles/system --set"),
+            "{argv}"
+        );
         assert!(!argv.contains("$CLOSURE"), "no $CLOSURE token: {argv}");
     }
 
@@ -3328,7 +3304,10 @@ mod tests {
             argv.contains(&format!("{STORE}/bin/switch-to-configuration test")),
             "{argv}"
         );
-        assert!(!argv.contains("nix-env"), "test does not set the profile: {argv}");
+        assert!(
+            !argv.contains("nix-env"),
+            "test does not set the profile: {argv}"
+        );
         assert!(!activation.requires_efi_reconcile());
     }
 
@@ -3390,7 +3369,10 @@ mod tests {
     #[test]
     fn system_profile_link_parses_generation_and_derives_entry() {
         let link = SystemProfileLink::try_new("system-42-link").expect("link");
-        assert_eq!(link.generation().boot_entry().as_str(), "nixos-generation-42.conf");
+        assert_eq!(
+            link.generation().boot_entry().as_str(),
+            "nixos-generation-42.conf"
+        );
         assert!(SystemProfileLink::try_new("not-a-link").is_err());
     }
 

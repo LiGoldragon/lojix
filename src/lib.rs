@@ -370,7 +370,8 @@ impl Store {
 
     /// Append one event-log entry, keyed by its position (decision 4).
     pub fn append_event_log_entry(&self, entry: EventLogEntry) -> Result<()> {
-        self.database.assert(Assertion::new(self.event_log, entry))?;
+        self.database
+            .assert(Assertion::new(self.event_log, entry))?;
         Ok(())
     }
 
@@ -391,11 +392,7 @@ impl Store {
     /// without its gc-root) that is NOT auto-reconciled on reopen. True
     /// cross-table atomicity needs a sema-engine multi-table commit, tracked as
     /// the follow-on.
-    pub fn record_activation(
-        &self,
-        generation: LiveGeneration,
-        root: GcRoot,
-    ) -> Result<()> {
+    pub fn record_activation(&self, generation: LiveGeneration, root: GcRoot) -> Result<()> {
         self.append_live_generation(generation)?;
         self.append_gc_root(root)?;
         Ok(())
@@ -469,7 +466,8 @@ impl Store {
         if present {
             self.database.mutate(Mutation::new(self.deploy_jobs, job))?;
         } else {
-            self.database.assert(Assertion::new(self.deploy_jobs, job))?;
+            self.database
+                .assert(Assertion::new(self.deploy_jobs, job))?;
         }
         Ok(())
     }
