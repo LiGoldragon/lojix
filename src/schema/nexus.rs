@@ -171,7 +171,6 @@ pub struct NixEvalCommand {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct NixBuildCommand {
     pub generation_identifier: GenerationIdentifier,
-    pub cluster_name: ClusterName,
     pub closure_path: ClosurePath,
     pub target: BuildTarget,
     pub substituters: Vec<ExtraSubstituter>,
