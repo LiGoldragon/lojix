@@ -529,7 +529,8 @@ impl DeployJobs {
     /// short submit-reply task — never cancels it. THIS is the decoupling.
     fn launch_pipeline(&self, mut engine: SchemaRuntime, jobs: ActorRef<DeployJobs>) {
         tokio::spawn(async move {
-            let _terminal = engine.drive_submitted_deploy().await;
+            let terminal = engine.drive_submitted_deploy().await;
+            eprintln!("lojix deploy pipeline terminal output: {terminal:?}");
             // Free the cap slot. `tell` is safe: `DeployCompleted` has an
             // infallible `()` reply, so it cannot crash the actor.
             let _ = jobs.tell(DeployCompleted).await;
