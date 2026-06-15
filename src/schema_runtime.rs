@@ -1258,6 +1258,10 @@ impl SchemaRuntime {
     }
 
     fn fail_pipeline(&mut self, failure: nexus::EffectFailure) -> nexus::NexusAction {
+        eprintln!(
+            "lojix deploy pipeline effect failed at {:?}: {}",
+            failure.stage, failure.detail
+        );
         // Mark the durable job row Failed before clearing the cursor (up9q): a
         // restarted daemon reads Failed and does not re-attempt — the deploy is
         // terminal. The event log already carries the failed deployment.
