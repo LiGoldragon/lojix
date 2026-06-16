@@ -34,7 +34,9 @@ const MAXIMUM_REQUEST_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 use crate::schema::nexus::{self, NexusEngine};
-use crate::schema_runtime::{DeploySubmissionOutcome, RuntimeConfiguration, SchemaRuntime};
+use crate::schema_runtime::{
+    DeploySubmissionOutcome, RuntimeConfiguration, SchemaRuntime, TestSubmissionOutcome,
+};
 use crate::{DaemonConfiguration, Error, Result, Store};
 use meta_signal_lojix::schema::lib as meta;
 
@@ -164,6 +166,11 @@ struct LojixRuntime {
     /// deploy's pipeline outlives the owner connection that submitted it
     /// (up9q): a dropped client kills only the short submit-reply task.
     deploy_jobs: ActorRef<DeployJobs>,
+    /// The daemon-owned test-job executor (Unit 2b). Same decoupling property
+    /// as `deploy_jobs`: an admitted test's dispatch pipeline (the real
+    /// hermetic `nix build`, or the gated live cycle) outlives the owner
+    /// connection that submitted it.
+    test_jobs: ActorRef<TestJobs>,
 }
 
 impl LojixRuntime {
@@ -187,12 +194,19 @@ impl LojixRuntime {
         // reconcile failure is non-fatal: the durable rows remain for the next
         // start, and the daemon still serves new requests.
         let _ = deploy_jobs.ask(ReconcilePersistedJobs).await;
+        let test_jobs = TestJobs::start(
+            store.clone(),
+            configuration.clone(),
+            MAXIMUM_CONCURRENT_DEPLOYS,
+        )
+        .await;
         Ok(Self {
             store,
             configuration,
             codec: LengthPrefixedCodec::new(MaximumFrameLength::new(MAXIMUM_REQUEST_FRAME_BYTES)),
             owner_authority: OwnerPeerAuthority::current_process(),
             deploy_jobs,
+            test_jobs,
         })
     }
 }
@@ -268,6 +282,7 @@ impl AsyncMultiConnectionRuntime for LojixRuntime {
             codec: self.codec,
             owner_authority: self.owner_authority,
             deploy_jobs: self.deploy_jobs.clone(),
+            test_jobs: self.test_jobs.clone(),
         };
         worker.serve(listener, connection).await
     }
@@ -285,6 +300,10 @@ struct RequestWorker {
     /// the submission here and replies the accepted handle; the pipeline runs
     /// on the actor, not this connection task.
     deploy_jobs: ActorRef<DeployJobs>,
+    /// The daemon-owned test-job executor's handle (Unit 2b). A `Test` request
+    /// hands the submission here and replies the accepted handle; the dispatch
+    /// runs on the actor, not this connection task.
+    test_jobs: ActorRef<TestJobs>,
 }
 
 impl RequestWorker {
@@ -324,6 +343,11 @@ impl RequestWorker {
         // on this task (up9q surface a — only Deploy decouples).
         let reply = match input {
             meta::Input::Deploy(request) => self.submit_deploy(request.into_payload()).await,
+            // A `Test` decouples from this connection task exactly like a
+            // `Deploy` (Unit 2b): the test-job actor owns the dispatch pipeline
+            // (the real `nix build` of the hermetic check, or the gated live
+            // cycle), this task only submits and replies the accepted handle.
+            meta::Input::Test(request) => self.submit_test(request.into_payload()).await,
             other => {
                 let output = self
                     .execute_request(ListenerRole::Owner, nexus::SignalInput::MetaInput(other))
@@ -365,6 +389,29 @@ impl RequestWorker {
                     database_marker: Self::zero_marker(),
                 }))
             }
+        }
+    }
+
+    /// Submit a `Test` to the daemon-owned test-job actor and return the
+    /// immediate wire reply (Unit 2b, mirroring `submit_deploy`). The actor runs
+    /// the synchronous submit (lower + validate + persist the Pending row),
+    /// spawns the dispatch pipeline (the real hermetic `nix build`, or the gated
+    /// live cycle) on the daemon runtime, and replies the `AcceptedTest` handle
+    /// — all before the build runs. Dropping this task (a client disconnect)
+    /// cannot cancel the spawned pipeline; the result lands durably and is read
+    /// over the ordinary `(ByTestRun …)` query.
+    async fn submit_test(&self, request: meta::TestRequest) -> meta::Output {
+        match self.test_jobs.ask(AdmitTest { request }).await {
+            Ok(TestAdmission::Accepted(accepted)) => {
+                meta::Output::Tested(meta::Tested::new(accepted))
+            }
+            Ok(TestAdmission::Rejected(rejected)) => {
+                meta::Output::TestRejected(meta::TestRejected::new(rejected))
+            }
+            Err(_) => meta::Output::TestRejected(meta::TestRejected::new(meta::RejectedTest {
+                test_rejection_reason: meta::TestRejectionReason::InternalError,
+                database_marker: Self::zero_marker(),
+            })),
         }
     }
 
@@ -652,5 +699,135 @@ impl Message<ReconcilePersistedJobs> for DeployJobs {
         _context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.reconcile_persisted_jobs();
+    }
+}
+
+/// The daemon-owned TEST-job executor (Unit 2b, the test analogue of
+/// [`DeployJobs`]). A kameo actor whose `ActorRef` lives on [`LojixRuntime`] for
+/// the daemon's whole lifetime, NOT on any connection task. On each accepted
+/// `Test` it runs the synchronous submit (lower + validate + persist the
+/// Pending row), then launches the dispatch pipeline — the real hermetic
+/// `nix build` of `vm-<node>`, or the gated live cycle — as an independent
+/// runtime task, so a dropped client cannot cancel an in-flight test. The
+/// pipeline rewrites the durable row to a terminal `Passed`/`Failed`, read over
+/// the ordinary `(ByTestRun …)` query.
+pub struct TestJobs {
+    store: Arc<Store>,
+    configuration: Arc<RuntimeConfiguration>,
+    cap: usize,
+    active_count: usize,
+}
+
+impl TestJobs {
+    pub async fn start(
+        store: Arc<Store>,
+        configuration: Arc<RuntimeConfiguration>,
+        cap: usize,
+    ) -> ActorRef<Self> {
+        let actor = Self::spawn(Self {
+            store,
+            configuration,
+            cap,
+            active_count: 0,
+        });
+        actor.wait_for_startup().await;
+        actor
+    }
+
+    fn at_capacity(&self) -> bool {
+        self.active_count >= self.cap
+    }
+
+    fn substrate_unavailable_rejection(&self) -> meta::RejectedTest {
+        let commit_sequence = self.store.commit_sequence().unwrap_or(0);
+        meta::RejectedTest {
+            test_rejection_reason: meta::TestRejectionReason::SubstrateUnavailable,
+            database_marker: meta::DatabaseMarker {
+                commit_sequence: signal_lojix::schema::lib::CommitSequence::new(commit_sequence),
+                state_digest: signal_lojix::schema::lib::StateDigest::new(commit_sequence),
+            },
+        }
+    }
+
+    /// Launch one admitted test's dispatch pipeline as an independent daemon
+    /// runtime task and return immediately. The task owns the seeded engine and
+    /// drives the real dispatch (`drive_submitted_test`) to its terminal
+    /// outcome, then reports `TestCompleted` so the actor frees a cap slot.
+    /// Because the task is spawned on the runtime (not the owner connection's
+    /// task), dropping the connection never cancels it — the decoupling.
+    fn launch_pipeline(&self, mut engine: SchemaRuntime, jobs: ActorRef<TestJobs>) {
+        tokio::spawn(async move {
+            let terminal = engine.drive_submitted_test().await;
+            eprintln!("lojix test pipeline terminal output: {terminal:?}");
+            let _ = jobs.tell(TestCompleted).await;
+        });
+    }
+}
+
+impl Actor for TestJobs {
+    type Args = Self;
+    type Error = Infallible;
+
+    async fn on_start(
+        jobs: Self::Args,
+        _actor_reference: ActorRef<Self>,
+    ) -> std::result::Result<Self, Self::Error> {
+        Ok(jobs)
+    }
+}
+
+/// Submit a `Test` to the executor: check the cap, run the synchronous submit,
+/// and on accept launch the dispatch pipeline. The reply is the immediate
+/// admission verdict the daemon sends the owner connection.
+pub struct AdmitTest {
+    pub request: meta::TestRequest,
+}
+
+/// The immediate admission verdict for an `AdmitTest` — the wire reply the
+/// daemon sends before any dispatch effect runs.
+#[derive(Debug, Clone, PartialEq, Eq, kameo::Reply)]
+pub enum TestAdmission {
+    Accepted(meta::AcceptedTest),
+    Rejected(meta::RejectedTest),
+}
+
+impl Message<AdmitTest> for TestJobs {
+    type Reply = TestAdmission;
+
+    async fn handle(
+        &mut self,
+        message: AdmitTest,
+        context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self.at_capacity() {
+            return TestAdmission::Rejected(self.substrate_unavailable_rejection());
+        }
+        let mut engine = SchemaRuntime::with_store_and_configuration(
+            self.store.clone(),
+            self.configuration.clone(),
+        );
+        match engine.submit_test(message.request).await {
+            TestSubmissionOutcome::Accepted(accepted) => {
+                self.active_count += 1;
+                self.launch_pipeline(engine, context.actor_ref().clone());
+                TestAdmission::Accepted(accepted)
+            }
+            TestSubmissionOutcome::Rejected(rejected) => TestAdmission::Rejected(rejected),
+        }
+    }
+}
+
+/// One test dispatch finished (success or failure). Frees a cap slot.
+pub struct TestCompleted;
+
+impl Message<TestCompleted> for TestJobs {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _message: TestCompleted,
+        _context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.active_count = self.active_count.saturating_sub(1);
     }
 }

@@ -1,0 +1,13 @@
+;; Host/node-selection fixture (report 54 Unit 2b fix 2). A minimal cluster
+;; proposal proving the daemon's host/node-selection guarantee: `atlas` is a
+;; bare-metal vmhost (Metal, super_node None), `beacon` is a Pod hosted on
+;; `atlas` (Pod, super_node (Some atlas)) so beacon's declared host-set is
+;; exactly {atlas}. The Test-op selection tests project this file and assert a
+;; member OnHost is accepted, a non-member OnHost is VmHostNotDeclaredForNode,
+;; an unknown node is NodeUnknown, and `All` resolves to the hosted-Pod nodes
+;; ([beacon], not the bare-metal atlas). Canonical form emitted by
+;; ClusterProposal::to_nota (nota-next 0.5) — every Optional position carries a
+;; token; bare atoms stay bare. Regenerate via the same encoder if the proposal
+;; schema shape changes.
+
+({atlas (EdgeTesting Large Max (Metal (Some X86_64) 4 None None None None None None) (Qwerty Uefi {} [] None) (AAA= (Some AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA) (Some (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 200::1 300:ca41:6b12:fba))) [] None None False False [] False False None None []) beacon (EdgeTesting Large Max (Pod (Some X86_64) 4 None None (Some atlas) (Some operator) None None) (Qwerty Uefi {} [] None) (AAA= (Some AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA) (Some (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 200::1 300:ca41:6b12:fba))) [] None None False False [] False False None None [])} {} {} (Max {} {} {}))

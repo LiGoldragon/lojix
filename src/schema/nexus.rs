@@ -226,6 +226,63 @@ pub struct PathInfoGcCommand {
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct HermeticCheckCommand {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub flake: FlakeReference,
+    pub system: String,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CheckBuilt {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub closure_path: ClosurePath,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BringUpTestVmCommand {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub host: NodeName,
+    pub runner: ClosurePath,
+    pub guest_ip: String,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TearDownTestVmCommand {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub host: NodeName,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TestVmBroughtUp {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub host: NodeName,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TestVmTornDown {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub host: NodeName,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum EffectCommand {
     ResolveFlakeAuth(FlakeAuthRequest),
     MaterializeHorizon(HorizonMaterializationCommand),
@@ -234,6 +291,9 @@ pub enum EffectCommand {
     CopyClosure(CopyClosureCommand),
     ActivateGeneration(ActivateGenerationCommand),
     PathInfoGc(PathInfoGcCommand),
+    HermeticCheck(HermeticCheckCommand),
+    BringUpTestVm(BringUpTestVmCommand),
+    TearDownTestVm(TearDownTestVmCommand),
 }
 
 #[rustfmt::skip]
@@ -307,6 +367,9 @@ pub enum EffectStage {
     CopyClosure,
     Activate,
     Gc,
+    HermeticCheck,
+    BringUpTestVm,
+    TearDownTestVm,
 }
 
 #[rustfmt::skip]
@@ -320,6 +383,9 @@ pub enum EffectResult {
     ClosureCopied(CopiedClosure),
     GenerationActivated(ActivatedGeneration),
     PathsCollected(GarbageCollected),
+    HermeticCheckBuilt(CheckBuilt),
+    TestVmBroughtUp(TestVmBroughtUp),
+    TestVmTornDown(TestVmTornDown),
     EffectFailed(EffectFailure),
 }
 
@@ -482,6 +548,15 @@ impl EffectCommand {
     pub fn path_info_gc(payload: PathInfoGcCommand) -> Self {
         Self::PathInfoGc(payload)
     }
+    pub fn hermetic_check(payload: HermeticCheckCommand) -> Self {
+        Self::HermeticCheck(payload)
+    }
+    pub fn bring_up_test_vm(payload: BringUpTestVmCommand) -> Self {
+        Self::BringUpTestVm(payload)
+    }
+    pub fn tear_down_test_vm(payload: TearDownTestVmCommand) -> Self {
+        Self::TearDownTestVm(payload)
+    }
 }
 
 #[rustfmt::skip]
@@ -506,6 +581,15 @@ impl EffectResult {
     }
     pub fn paths_collected(payload: GarbageCollected) -> Self {
         Self::PathsCollected(payload)
+    }
+    pub fn hermetic_check_built(payload: CheckBuilt) -> Self {
+        Self::HermeticCheckBuilt(payload)
+    }
+    pub fn test_vm_brought_up(payload: TestVmBroughtUp) -> Self {
+        Self::TestVmBroughtUp(payload)
+    }
+    pub fn test_vm_torn_down(payload: TestVmTornDown) -> Self {
+        Self::TestVmTornDown(payload)
     }
     pub fn effect_failed(payload: EffectFailure) -> Self {
         Self::EffectFailed(payload)
@@ -667,6 +751,27 @@ impl From<PathInfoGcCommand> for EffectCommand {
 }
 
 #[rustfmt::skip]
+impl From<HermeticCheckCommand> for EffectCommand {
+    fn from(payload: HermeticCheckCommand) -> Self {
+        Self::HermeticCheck(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<BringUpTestVmCommand> for EffectCommand {
+    fn from(payload: BringUpTestVmCommand) -> Self {
+        Self::BringUpTestVm(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<TearDownTestVmCommand> for EffectCommand {
+    fn from(payload: TearDownTestVmCommand) -> Self {
+        Self::TearDownTestVm(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl From<ResolvedFlake> for EffectResult {
     fn from(payload: ResolvedFlake) -> Self {
         Self::FlakeResolved(payload)
@@ -712,6 +817,27 @@ impl From<ActivatedGeneration> for EffectResult {
 impl From<GarbageCollected> for EffectResult {
     fn from(payload: GarbageCollected) -> Self {
         Self::PathsCollected(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<CheckBuilt> for EffectResult {
+    fn from(payload: CheckBuilt) -> Self {
+        Self::HermeticCheckBuilt(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<TestVmBroughtUp> for EffectResult {
+    fn from(payload: TestVmBroughtUp) -> Self {
+        Self::TestVmBroughtUp(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<TestVmTornDown> for EffectResult {
+    fn from(payload: TestVmTornDown) -> Self {
+        Self::TestVmTornDown(payload)
     }
 }
 

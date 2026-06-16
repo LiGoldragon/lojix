@@ -19,6 +19,8 @@ fn daemon_configuration_round_trips_through_rkyv_file() {
             cluster: "goldragon".to_string(),
             default_vm_host: "prometheus".to_string(),
             default_mode: lojix::TestMode::Hermetic,
+            test_flake: "github:LiGoldragon/CriomOS-test-cluster".to_string(),
+            proposal_source: String::new(),
         },
     };
 

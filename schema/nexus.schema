@@ -71,7 +71,30 @@
   ActivateGenerationCommand { GenerationIdentifier * ClusterName * NodeName * ClosurePath * ActivationKind * profile ActivationProfile }
   PathInfoGcCommand { ClusterName * NodeName * }
 
-  EffectCommand [(ResolveFlakeAuth FlakeAuthRequest) (MaterializeHorizon HorizonMaterializationCommand) (NixEval NixEvalCommand) (NixBuild NixBuildCommand) (CopyClosure CopyClosureCommand) (ActivateGeneration ActivateGenerationCommand) (PathInfoGc PathInfoGcCommand)]
+  ;; HERMETIC test dispatch (report 54 §5.2). Build the pre-declared
+  ;; auto-pickup nixos test `<flake>#checks.<system>.vm-<node>` (the
+  ;; runNixOSTest engine owns its own sandboxed VM — no SSH, no tap, no live
+  ;; host). Pass/fail IS the build exit status; the realised out-path is the
+  ;; check's closure. The daemon is a pure dispatcher selecting a check by
+  ;; name — no nix authoring at runtime.
+  HermeticCheckCommand { ClusterName * NodeName * flake FlakeReference system String }
+  CheckBuilt { ClusterName * NodeName * ClosurePath * }
+
+  ;; LIVE test dispatch (report 54 §5.2, report 47 v2 / report 51 §3). Two
+  ;; daemon-owned effects bracket the existing deploy chain: BringUpTestVm
+  ;; brings up the generated microVM + additive tap inside a user network
+  ;; namespace on the resolved vmhost (the report-51 host-untouched
+  ;; user-level bring-up — `ssh <host-fqdn>` + `systemd-run --user` +
+  ;; `unshare -rn` + `nsenter`, no sudo, no switch-to-configuration);
+  ;; TearDownTestVm stops the user units so the tap + route vanish with the
+  ;; namespace, host netns byte-identical. BUILT but NOT run live here (the
+  ;; first Prometheus cycle is psyche-gated).
+  BringUpTestVmCommand { ClusterName * NodeName * host NodeName runner ClosurePath guest_ip String }
+  TearDownTestVmCommand { ClusterName * NodeName * host NodeName }
+  TestVmBroughtUp { ClusterName * NodeName * host NodeName }
+  TestVmTornDown { ClusterName * NodeName * host NodeName }
+
+  EffectCommand [(ResolveFlakeAuth FlakeAuthRequest) (MaterializeHorizon HorizonMaterializationCommand) (NixEval NixEvalCommand) (NixBuild NixBuildCommand) (CopyClosure CopyClosureCommand) (ActivateGeneration ActivateGenerationCommand) (PathInfoGc PathInfoGcCommand) (HermeticCheck HermeticCheckCommand) (BringUpTestVm BringUpTestVmCommand) (TearDownTestVm TearDownTestVmCommand)]
 
   EvaluatedClosure { GenerationIdentifier * ClosurePath * }
   BuiltClosure { GenerationIdentifier * ClosurePath * }
@@ -79,9 +102,9 @@
   ActivatedGeneration { GenerationIdentifier * NodeName * GenerationSlot * }
   GarbageCollected { ClusterName * NodeName * reclaimed_paths Integer }
   EffectFailure { stage EffectStage detail String }
-  EffectStage [FlakeAuth MaterializeHorizon Eval Build CopyClosure Activate Gc]
+  EffectStage [FlakeAuth MaterializeHorizon Eval Build CopyClosure Activate Gc HermeticCheck BringUpTestVm TearDownTestVm]
 
-  EffectResult [(FlakeResolved ResolvedFlake) (HorizonMaterialized MaterializedInputs) (ClosureEvaluated EvaluatedClosure) (ClosureBuilt BuiltClosure) (ClosureCopied CopiedClosure) (GenerationActivated ActivatedGeneration) (PathsCollected GarbageCollected) (EffectFailed EffectFailure)]
+  EffectResult [(FlakeResolved ResolvedFlake) (HorizonMaterialized MaterializedInputs) (ClosureEvaluated EvaluatedClosure) (ClosureBuilt BuiltClosure) (ClosureCopied CopiedClosure) (GenerationActivated ActivatedGeneration) (PathsCollected GarbageCollected) (HermeticCheckBuilt CheckBuilt) (TestVmBroughtUp TestVmBroughtUp) (TestVmTornDown TestVmTornDown) (EffectFailed EffectFailure)]
 
   NexusWork [(SignalArrived SignalInput) (SemaReadCompleted SemaReadOutput) (SemaWriteCompleted SemaWriteOutput) (EffectCompleted EffectResult)]
   NexusAction [(CommandSemaRead SemaReadInput) (CommandSemaWrite SemaWriteInput) (CommandEffect EffectCommand) (ReplyToSignal SignalOutput) (Continue NexusWork)]

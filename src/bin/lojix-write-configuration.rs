@@ -43,6 +43,8 @@ struct WriterTestDefaults {
     cluster: WriterCluster,
     default_vm_host: WriterCluster,
     default_mode: WriterTestMode,
+    test_flake: WriterCluster,
+    proposal_source: WriterPath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
@@ -120,6 +122,8 @@ impl ConfigurationWriteRequest {
                 cluster: self.test_defaults.cluster.0,
                 default_vm_host: self.test_defaults.default_vm_host.0,
                 default_mode: self.test_defaults.default_mode.into(),
+                test_flake: self.test_defaults.test_flake.0,
+                proposal_source: self.test_defaults.proposal_source.0,
             },
         };
         configuration

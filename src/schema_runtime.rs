@@ -42,6 +42,13 @@ pub struct SchemaRuntime {
     store: Arc<Store>,
     configuration: Arc<RuntimeConfiguration>,
     active_deploy: Option<DeployPipeline>,
+    /// The in-flight test cursor (Unit 2b). A single accepted `Test` becomes a
+    /// hermetic-check effect (or the live bring-up→deploy→assert→teardown
+    /// chain); this cursor threads the run identifier, the resolved target, and
+    /// the stage across the continuation hops so the durable row is rewritten
+    /// through real phases to a terminal `Passed`/`Failed`. Per-request, like
+    /// `active_deploy`.
+    active_test: Option<TestPipeline>,
     active_operation: Option<MetaOperation>,
 }
 
@@ -76,6 +83,15 @@ pub struct TestDefaults {
     cluster: ordinary::ClusterName,
     default_vm_host: ordinary::NodeName,
     default_mode: ordinary::TestMode,
+    /// The cluster→flake resolution (Unit 2b): the flake whose
+    /// `#checks.<system>.vm-<node>` auto-pickup check the hermetic dispatch
+    /// builds, and whose generated runner the live path brings up.
+    test_flake: ordinary::FlakeReference,
+    /// The cluster proposal NOTA file projected to validate `(OnHost h)`
+    /// against the node's declared host-set and to resolve `All` to the
+    /// cluster's test-VM nodes. Empty when host-set validation is not
+    /// configured.
+    proposal_source: ordinary::ProposalSource,
 }
 
 impl TestDefaults {
@@ -106,6 +122,7 @@ impl TestDefaults {
                 node,
                 host: host.clone(),
                 mode,
+                flake: self.test_flake.clone(),
             })
             .collect()
     }
@@ -121,6 +138,7 @@ impl TestDefaults {
                 node,
                 host: self.default_vm_host.clone(),
                 mode: self.default_mode,
+                flake: self.test_flake.clone(),
             })
             .collect()
     }
@@ -135,14 +153,53 @@ impl TestDefaults {
         }
     }
 
-    /// The explicit node list of a `NodeSelection`. `All` resolves to no nodes
-    /// here — the projection-driven sweep is Unit 2b; the caller rejects an
-    /// empty resolution honestly.
+    /// The explicit node list of a `NodeSelection`. `All` resolves to the
+    /// cluster's test-VM nodes by projecting the configured proposal source
+    /// (Unit 2b): every Pod node whose primary host (`super_node`) declares a
+    /// `VmHost` service. An unconfigured or unreadable proposal source resolves
+    /// `All` to no nodes, so the caller rejects an empty resolution honestly
+    /// rather than faking a sweep.
     fn nodes_of(&self, selection: meta::NodeSelection) -> Vec<ordinary::NodeName> {
         match selection {
             meta::NodeSelection::Nodes(nodes) => nodes,
-            meta::NodeSelection::All => Vec::new(),
+            meta::NodeSelection::All => self.all_test_vm_nodes(),
         }
+    }
+
+    /// Sweep the configured proposal for the cluster's test-VM-host nodes —
+    /// every node whose `Machine::host_set` (its primary `super_node`, plus the
+    /// additive `super_nodes` once Unit 1 lands on horizon main) is non-empty,
+    /// i.e. a Pod hosted on a vmhost. Empty when no proposal source is
+    /// configured or it fails to project.
+    fn all_test_vm_nodes(&self) -> Vec<ordinary::NodeName> {
+        ClusterProjection::from_source(&self.proposal_source)
+            .map(|projection| projection.hosted_pod_nodes())
+            .unwrap_or_default()
+    }
+
+    /// The everyday test defaults the in-process tests use: cluster
+    /// `goldragon`, default host `prometheus`, mode `Hermetic`, and the
+    /// CriomOS-test-cluster flake the hermetic proof builds against. No
+    /// proposal source — the in-process tests do not exercise host-set
+    /// validation against a live projection (the daemon-integration proof
+    /// supplies one).
+    fn test_default() -> Self {
+        Self {
+            cluster: ordinary::ClusterName::new("goldragon"),
+            default_vm_host: ordinary::NodeName::new("prometheus"),
+            default_mode: ordinary::TestMode::Hermetic,
+            test_flake: ordinary::FlakeReference::new(
+                "github:LiGoldragon/CriomOS-test-cluster/horizon-test-vm",
+            ),
+            proposal_source: ordinary::ProposalSource::new(""),
+        }
+    }
+
+    /// The configured proposal projection, if a proposal source is set. The
+    /// host-set validation and the `All` sweep both read it; absent (empty)
+    /// when host-set validation is not configured.
+    fn projection(&self) -> Option<ClusterProjection> {
+        ClusterProjection::from_source(&self.proposal_source)
     }
 }
 
@@ -152,6 +209,8 @@ impl From<&crate::TestDefaults> for TestDefaults {
             cluster: ordinary::ClusterName::new(defaults.cluster.clone()),
             default_vm_host: ordinary::NodeName::new(defaults.default_vm_host.clone()),
             default_mode: defaults.default_mode.into(),
+            test_flake: ordinary::FlakeReference::new(defaults.test_flake.clone()),
+            proposal_source: ordinary::ProposalSource::new(defaults.proposal_source.clone()),
         }
     }
 }
@@ -221,13 +280,16 @@ struct ResolvedTestRun {
     node: ordinary::NodeName,
     host: ordinary::NodeName,
     mode: ordinary::TestMode,
+    /// The flake whose `#checks.<system>.vm-<node>` the hermetic dispatch
+    /// builds (and whose generated runner the live path brings up).
+    flake: ordinary::FlakeReference,
 }
 
 impl ResolvedTestRun {
     /// The durable test-run row at acceptance: phase `Submitted`, outcome
-    /// `Pending`, no closure yet. Unit 2b rewrites it as the real dispatch
-    /// runs; Unit 2a records exactly this honest Pending row — never a faked
-    /// pass.
+    /// `Pending`, no closure yet. The decoupled executor rewrites it through
+    /// the real phases (`BringingUp`/`Deploying`/…) to a terminal `Passed`
+    /// (with the built closure) or `Failed(stage)` — never a faked pass.
     fn pending_record(&self, identifier: ordinary::TestRunIdentifier) -> ordinary::TestRunRecord {
         ordinary::TestRunRecord {
             test_run_identifier: identifier,
@@ -239,6 +301,352 @@ impl ResolvedTestRun {
             outcome: ordinary::TestOutcome::Pending,
             closure_path: None,
         }
+    }
+
+    /// The hermetic-check effect command for this run: build
+    /// `<flake>#checks.<system>.vm-<node>`, the report-53 §1 auto-pickup check
+    /// keyed `vm-<node>`. The system is pinned `x86_64-linux` (the auto-pickup
+    /// suite's system), matching the Done-criteria `nix build
+    /// .#checks.x86_64-linux.vm-mercury`.
+    fn hermetic_check_command(&self) -> nexus::HermeticCheckCommand {
+        nexus::HermeticCheckCommand {
+            cluster_name: self.cluster.clone(),
+            node_name: self.node.clone(),
+            flake: self.flake.clone(),
+            system: HermeticCheck::SYSTEM.to_string(),
+        }
+    }
+
+    /// The live bring-up command for this run: the report-51 host-untouched
+    /// user-namespace bring-up of the generated microVM runner on the resolved
+    /// vmhost. The runner closure and guest IP are filled by the live path's
+    /// preceding build; BUILT but not run live here (gated).
+    fn bring_up_command(&self, runner: ordinary::ClosurePath) -> nexus::BringUpTestVmCommand {
+        nexus::BringUpTestVmCommand {
+            cluster_name: self.cluster.clone(),
+            node_name: self.node.clone(),
+            host: self.host.clone(),
+            runner,
+            guest_ip: String::new(),
+        }
+    }
+
+    /// The live teardown command for this run: stop the user units so the tap +
+    /// route vanish with the namespace, host netns byte-identical.
+    fn tear_down_command(&self) -> nexus::TearDownTestVmCommand {
+        nexus::TearDownTestVmCommand {
+            cluster_name: self.cluster.clone(),
+            node_name: self.node.clone(),
+            host: self.host.clone(),
+        }
+    }
+}
+
+/// The in-flight test cursor (Unit 2b) — a single accepted `Test` lowered to
+/// its concrete target, the minted run identifier, and the stage that has just
+/// completed so the executor knows the next effect and the durable phase to
+/// record. Hermetic is a single `HermeticCheck` effect; Live brackets the
+/// deploy chain with `BringUpTestVm`/`TearDownTestVm`. Per-request, like
+/// [`DeployPipeline`].
+#[derive(Debug, Clone)]
+struct TestPipeline {
+    run: ResolvedTestRun,
+    identifier: ordinary::TestRunIdentifier,
+    stage: TestStage,
+    /// The accepted database marker, replayed on the terminal reply.
+    accepted_marker: ordinary::DatabaseMarker,
+}
+
+/// The test pipeline cursor stage — the step that has just completed. The
+/// executor reads it to emit the next effect or the terminal outcome write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestStage {
+    /// Test accepted; the first effect (hermetic check, or live bring-up) runs
+    /// next.
+    Submitted,
+    /// (Live) the VM was brought up; the deploy chain + assert run next.
+    BroughtUp,
+    /// (Live) the deploy + assert finished; teardown runs next.
+    Asserted,
+}
+
+impl TestPipeline {
+    /// The cursor at acceptance — stage `Submitted`, the marker stand-in filled
+    /// at the durable write.
+    fn accepted(run: ResolvedTestRun, identifier: ordinary::TestRunIdentifier) -> Self {
+        Self {
+            run,
+            identifier,
+            stage: TestStage::Submitted,
+            accepted_marker: ordinary::DatabaseMarker {
+                commit_sequence: ordinary::CommitSequence::new(0),
+                state_digest: ordinary::StateDigest::new(0),
+            },
+        }
+    }
+
+    /// The durable row at a given phase/outcome, carrying the run identity and
+    /// (once built) the closure under test. Rewritten at every transition so a
+    /// `(Query (ByTestRun …))` reads the latest committed step (Unit 2b
+    /// observability).
+    fn record_at(
+        &self,
+        phase: ordinary::TestRunPhase,
+        outcome: ordinary::TestOutcome,
+        closure_path: Option<ordinary::ClosurePath>,
+    ) -> ordinary::TestRunRecord {
+        ordinary::TestRunRecord {
+            test_run_identifier: self.identifier.clone(),
+            cluster_name: self.run.cluster.clone(),
+            node_name: self.run.node.clone(),
+            host: self.run.host.clone(),
+            mode: self.run.mode,
+            phase,
+            outcome,
+            closure_path,
+        }
+    }
+
+    /// The container-lifecycle transition for a live bring-up/teardown state
+    /// change — the driver the report-47 §2 `ContainerLifecycleRecord` table
+    /// was scaffolded for. The container is named `vm-<node>`, the on-demand
+    /// microVM this test brings up.
+    fn container_transition(&self, state: sema::ContainerState) -> sema::ContainerTransition {
+        sema::ContainerTransition {
+            cluster_name: self.run.cluster.clone(),
+            node_name: self.run.node.clone(),
+            container: sema::ContainerName::new(format!("vm-{}", self.run.node.payload())),
+            state,
+        }
+    }
+}
+
+/// The synchronous outcome of [`SchemaRuntime::submit_test`] — the verdict the
+/// daemon replies to the owner connection immediately, before the test
+/// dispatch runs (mirrors [`DeploySubmissionOutcome`]). `Accepted` carries the
+/// `AcceptedTest` handle and leaves the in-flight cursor set for the test-job
+/// actor to drive; `Rejected` is a typed up-front refusal and leaves no cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestSubmissionOutcome {
+    Accepted(meta::AcceptedTest),
+    Rejected(meta::RejectedTest),
+}
+
+/// A projected cluster — the proposal NOTA file the daemon reads to validate
+/// `(OnHost h)` against a node's declared host-set and to resolve `All` to the
+/// cluster's test-VM-host nodes (Unit 2b host/node selection). Wraps the parsed
+/// `ClusterProposal`; the host-set is read from each node's `Machine` primary
+/// host (`super_node`), the single-host majority Unit 1 keeps byte-identical
+/// (the additive `super_nodes` extends it the moment Unit 1 lands on horizon
+/// main).
+#[derive(Debug, Clone)]
+struct ClusterProjection {
+    proposal: ClusterProposal,
+}
+
+impl ClusterProjection {
+    /// Load + parse the proposal NOTA file named by the proposal source. `None`
+    /// when the source is empty (host-set validation not configured) or the
+    /// file is unreadable / unparseable — host-set validation then does not
+    /// block, and `All` resolves to no nodes.
+    fn from_source(source: &ordinary::ProposalSource) -> Option<Self> {
+        let path = source.payload();
+        if path.is_empty() {
+            return None;
+        }
+        let text = fs::read_to_string(path).ok()?;
+        let proposal = NotaSource::new(&text).parse::<ClusterProposal>().ok()?;
+        Some(Self { proposal })
+    }
+
+    /// Validate that `host` is in `node`'s declared host-set. Rejects
+    /// `NodeUnknown` if the node is absent from the projection, or
+    /// `VmHostNotDeclaredForNode` if the resolved host is not the node's
+    /// declared primary host (`super_node`). The single-host host-set is
+    /// exactly `{super_node}`; once Unit 1 lands, `∪ super_nodes` widens it.
+    fn validate_host_for_node(
+        &self,
+        host: &ordinary::NodeName,
+        node: &ordinary::NodeName,
+    ) -> std::result::Result<(), meta::TestRejectionReason> {
+        let host_set = self
+            .host_set_of(node)
+            .ok_or(meta::TestRejectionReason::NodeUnknown)?;
+        if host_set.iter().any(|declared| declared == host.payload()) {
+            Ok(())
+        } else {
+            Err(meta::TestRejectionReason::VmHostNotDeclaredForNode)
+        }
+    }
+
+    /// The declared host-set of a node by name — its primary `super_node`,
+    /// deduped. `None` when the node is not in the projection. (The additive
+    /// `super_nodes` join is the Unit-1-on-main follow-on; today the pinned
+    /// horizon-lib carries only `super_node`.)
+    fn host_set_of(&self, node: &ordinary::NodeName) -> Option<Vec<String>> {
+        let name = HorizonNodeName::try_new(node.payload().clone()).ok()?;
+        let proposal = self.proposal.nodes.get(&name)?;
+        Some(
+            proposal
+                .machine
+                .super_node
+                .as_ref()
+                .map(|primary| vec![primary.as_str().to_string()])
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Every Pod node hosted on a vmhost — a node whose declared host-set is
+    /// non-empty (i.e. a `super_node` is set). The `All` selection sweeps these.
+    /// The hermetic check exists per declared node (report-53 auto-pickup), so a
+    /// hosted-Pod predicate is the right `All` set.
+    fn hosted_pod_nodes(&self) -> Vec<ordinary::NodeName> {
+        self.proposal
+            .nodes
+            .iter()
+            .filter(|(_, proposal)| proposal.machine.super_node.is_some())
+            .map(|(name, _)| ordinary::NodeName::new(name.as_str().to_string()))
+            .collect()
+    }
+}
+
+/// One hermetic-check build — the real `nix build
+/// <flake>#checks.<system>.vm-<node> --print-out-paths` the daemon runs as the
+/// hermetic test effect. The `runNixOSTest` engine owns its own sandboxed VM,
+/// so this is a pure build: exit 0 + an out-path = Passed; a non-zero exit =
+/// Failed(HermeticCheck). No SSH, no tap, no live host.
+#[derive(Debug, Clone)]
+struct HermeticCheck {
+    command: nexus::HermeticCheckCommand,
+}
+
+impl HermeticCheck {
+    /// The auto-pickup suite's system (report 53 §1, `x86_64-linux`). The
+    /// checks are keyed `vm-<node>` under `checks.<system>`.
+    const SYSTEM: &'static str = "x86_64-linux";
+
+    fn new(command: nexus::HermeticCheckCommand) -> Self {
+        Self { command }
+    }
+
+    /// The `<flake>#checks.<system>.vm-<node>` installable — the report-53
+    /// auto-pickup check keyed `vm-<node>`.
+    fn installable(&self) -> String {
+        format!(
+            "{}#checks.{}.vm-{}",
+            self.command.flake.payload(),
+            self.command.system,
+            self.command.node_name.payload()
+        )
+    }
+
+    /// Run the real `nix build <installable> --print-out-paths`. On exit 0 the
+    /// first printed line is the realised check out-path (the closure under
+    /// test); on a non-zero exit the build/test failed.
+    async fn run(&self) -> std::result::Result<ordinary::ClosurePath, String> {
+        let output = NixCommand::build_check(&self.installable()).run().await?;
+        Ok(ordinary::ClosurePath::new(NixCommand::first_line(&output)))
+    }
+}
+
+/// The LIVE host-untouched VM lifecycle (report 51 §3 / report 47 v2, Unit 2b)
+/// — the report-51 user-namespace bring-up/teardown of the generated microVM
+/// runner on the resolved vmhost. BUILT here, NOT run live (the first
+/// Prometheus cycle is psyche-gated): the invocation shapes are constructed so
+/// the bracket is provably end-to-end, but a live run is gated.
+///
+/// Bring-up `ssh <host-fqdn>` runs a `systemd-run --user` durable unit that
+/// `unshare -rn`'s a private network namespace, creates the additive tap
+/// inside it, and `nsenter`s the generated runner — no sudo, no
+/// switch-to-configuration, host netns byte-identical. Teardown
+/// `systemctl --user stop`s the units so the tap + route vanish with the
+/// namespace.
+#[derive(Debug, Clone)]
+struct LiveTestVm {
+    target: SshTarget,
+    node: ordinary::NodeName,
+    runner: String,
+    guest_ip: String,
+}
+
+impl LiveTestVm {
+    fn from_bring_up(command: &nexus::BringUpTestVmCommand) -> Self {
+        Self {
+            target: Self::host_target(&command.cluster_name, &command.host),
+            node: command.node_name.clone(),
+            runner: command.runner.payload().clone(),
+            guest_ip: command.guest_ip.clone(),
+        }
+    }
+
+    fn from_tear_down(command: &nexus::TearDownTestVmCommand) -> Self {
+        Self {
+            target: Self::host_target(&command.cluster_name, &command.host),
+            node: command.node_name.clone(),
+            runner: String::new(),
+            guest_ip: String::new(),
+        }
+    }
+
+    /// `root@<host>.<cluster>.criome` — the vmhost the user-level units run on.
+    /// Falls back to a bare host name if horizon validation fails (a resolved
+    /// host never does), so command construction is total.
+    fn host_target(cluster: &ordinary::ClusterName, host: &ordinary::NodeName) -> SshTarget {
+        SshTarget::root_at_node(cluster, host).unwrap_or_else(|_| SshTarget {
+            user: "root".to_string(),
+            domain: CriomeDomainName::for_node(
+                &HorizonNodeName::try_new("host").expect("static host name"),
+                &HorizonClusterName::try_new("cluster").expect("static cluster name"),
+            ),
+        })
+    }
+
+    /// The durable `--user` unit name for this guest's namespace bring-up
+    /// (`lojix-test-vm-<node>`), the unit teardown stops.
+    fn unit_name(&self) -> String {
+        format!("lojix-test-vm-{}", self.node.payload())
+    }
+
+    /// The host-untouched bring-up invocation (report 51 §3): a `--user`
+    /// systemd-run unit that `unshare -rn`s a private netns, brings up the
+    /// additive tap inside it, and `nsenter`s the generated runner. Constructed
+    /// here; on a live (gated) run this is `.run().await`'d.
+    fn bring_up_invocation(&self) -> NixCommand {
+        let script = format!(
+            "set -eu\n\
+             systemd-run --user --unit={unit} --collect --service-type=notify \
+             unshare -rn /bin/sh -c {body}\n",
+            unit = self.unit_name(),
+            body = ShellArgument::new(self.bring_up_body()).to_command_text(),
+        );
+        self.target
+            .remote_invocation(ShellCommand::from_raw(script))
+    }
+
+    /// The in-namespace bring-up body: create the tap, route to the guest IP,
+    /// then `nsenter` the generated runner. The tap design maps one-to-one onto
+    /// the C2-emitted `.network` content (report 51 §2), applied in the netns
+    /// instead of host networkd.
+    fn bring_up_body(&self) -> String {
+        format!(
+            "ip tuntap add dev vmt0 mode tap; \
+             ip addr add 169.254.100.1/32 dev vmt0; \
+             ip link set vmt0 up; \
+             ip route add {guest_ip} dev vmt0; \
+             exec {runner}",
+            guest_ip = self.guest_ip,
+            runner = self.runner,
+        )
+    }
+
+    /// The host-untouched teardown invocation: stop the user units so the tap +
+    /// route vanish with the namespace (host netns byte-identical).
+    fn tear_down_invocation(&self) -> NixCommand {
+        self.target
+            .remote_invocation(ShellCommand::from_raw(format!(
+                "systemctl --user stop {unit} || true",
+                unit = self.unit_name(),
+            )))
     }
 }
 
@@ -268,11 +676,7 @@ impl RuntimeConfiguration {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
             effect_barrier: None,
-            test_defaults: Some(TestDefaults {
-                cluster: ordinary::ClusterName::new("goldragon"),
-                default_vm_host: ordinary::NodeName::new("prometheus"),
-                default_mode: ordinary::TestMode::Hermetic,
-            }),
+            test_defaults: Some(TestDefaults::test_default()),
         }
     }
 
@@ -282,11 +686,7 @@ impl RuntimeConfiguration {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
             effect_barrier: Some(barrier),
-            test_defaults: Some(TestDefaults {
-                cluster: ordinary::ClusterName::new("goldragon"),
-                default_vm_host: ordinary::NodeName::new("prometheus"),
-                default_mode: ordinary::TestMode::Hermetic,
-            }),
+            test_defaults: Some(TestDefaults::test_default()),
         }
     }
 
@@ -827,6 +1227,7 @@ impl SchemaRuntime {
             store,
             configuration,
             active_deploy: None,
+            active_test: None,
             active_operation: None,
         }
     }
@@ -915,6 +1316,108 @@ impl SchemaRuntime {
             _ => meta::Output::DeployRejected(meta::DeployRejected::new(
                 self.deploy_rejection(meta::DeployRejectionReason::InternalError),
             )),
+        }
+    }
+
+    /// Run ONLY the synchronous submit of a `Test` (Unit 2b, mirroring
+    /// [`Self::submit_deploy`]): lower + validate, record the Pending row, set
+    /// the in-flight test cursor, and return the `AcceptedTest` handle the
+    /// daemon replies before the real dispatch runs. On accept the cursor is
+    /// left set on `self` so the daemon hands this engine to the test-job actor,
+    /// which drives the dispatch via [`Self::drive_submitted_test`]. The
+    /// hermetic build / live cycle does NOT run here.
+    pub async fn submit_test(&mut self, request: meta::TestRequest) -> TestSubmissionOutcome {
+        let work = nexus::NexusWork::SignalArrived(nexus::SignalInput::MetaInput(
+            meta::Input::Test(meta::Test::new(request)),
+        ))
+        .with_origin_route(nexus::OriginRoute::new(0));
+        match self.execute(work).await.into_root() {
+            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
+                meta::Output::Tested(accepted),
+            )) => {
+                // Stamp the accepted marker onto the cursor so the terminal
+                // outcome reply carries the acceptance marker (like deploy).
+                let accepted = accepted.into_payload();
+                if let Some(pipeline) = self.active_test.as_mut() {
+                    pipeline.accepted_marker = accepted.database_marker.clone();
+                }
+                TestSubmissionOutcome::Accepted(accepted)
+            }
+            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
+                meta::Output::TestRejected(rejected),
+            )) => TestSubmissionOutcome::Rejected(rejected.into_payload()),
+            _ => TestSubmissionOutcome::Rejected(
+                self.test_rejection(meta::TestRejectionReason::InternalError),
+            ),
+        }
+    }
+
+    /// Drive an already-submitted test's REAL dispatch to its terminal outcome
+    /// (Unit 2b, the daemon-owned executor body — mirrors
+    /// [`Self::drive_submitted_deploy`]). Requires the in-flight test cursor set
+    /// by a prior [`Self::submit_test`] (or [`Self::decide_test`] for the
+    /// in-process proof). Re-enters the generated runner at the cursor's first
+    /// effect (the hermetic `nix build`, or the live bring-up), runs it for
+    /// real, and rewrites the durable row through real phases to a terminal
+    /// `Passed` (with the built closure) or `Failed(stage)` — never a faked
+    /// pass. The returned `meta::Output` is the terminal `Tested`/`TestRejected`
+    /// for logging/tests; the client already has its accepted handle and
+    /// re-observes the outcome via `(Query (ByTestRun …))`.
+    pub async fn drive_submitted_test(&mut self) -> meta::Output {
+        let Some(pipeline) = self.active_test.clone() else {
+            return meta::Output::TestRejected(meta::TestRejected::new(
+                self.test_rejection(meta::TestRejectionReason::InternalError),
+            ));
+        };
+        self.active_operation = Some(MetaOperation::Test);
+        let first_effect = match pipeline.run.mode {
+            ordinary::TestMode::Hermetic => {
+                nexus::EffectCommand::HermeticCheck(pipeline.run.hermetic_check_command())
+            }
+            // LIVE is BUILT but not run live here (gated). The bring-up effect
+            // is constructed and dispatched; `run_effect` for the live effects
+            // is the host-untouched user-namespace path (report 51 §3). A live
+            // run is psyche-gated, so the daemon-integration proof exercises
+            // Hermetic; this constructs the live first effect honestly.
+            ordinary::TestMode::Live => nexus::EffectCommand::BringUpTestVm(
+                pipeline
+                    .run
+                    .bring_up_command(ordinary::ClosurePath::new(String::new())),
+            ),
+        };
+        // The cursor's first effect is fired directly through `run_effect` and
+        // routed by `decide_test_effect_completion`, then `drive_to_terminal`
+        // threads any further continuation hops to the terminal outcome write.
+        let result = self.run_effect(first_effect).await;
+        let action = self.decide_test_effect_completion(result);
+        self.drive_to_terminal(action).await
+    }
+
+    /// Drive a test-pipeline `NexusAction` to its terminal `Tested`/
+    /// `TestRejected` reply, threading any further effect / sema-write
+    /// continuations through the generated runner. The hermetic path is a
+    /// single effect then a terminal write, so this usually runs one or two
+    /// hops; the live path threads bring-up → deploy → assert → teardown.
+    async fn drive_to_terminal(&mut self, mut action: nexus::NexusAction) -> meta::Output {
+        loop {
+            match action {
+                nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => {
+                    return output;
+                }
+                nexus::NexusAction::CommandSemaWrite(input) => {
+                    let output = self.apply_sema(input);
+                    action = self.decide_write_completion(output);
+                }
+                nexus::NexusAction::CommandEffect(command) => {
+                    let result = self.run_effect(command).await;
+                    action = self.decide_test_effect_completion(result);
+                }
+                _ => {
+                    return meta::Output::TestRejected(meta::TestRejected::new(
+                        self.test_rejection(meta::TestRejectionReason::InternalError),
+                    ));
+                }
+            }
         }
     }
 
@@ -1033,36 +1536,81 @@ impl SchemaRuntime {
         }
     }
 
-    /// Lower a `Test` request and dispatch the Unit-2a stub (report 54). The
-    /// `(Check …)` shorthand fills cluster/host/mode from the configured
-    /// `TestDefaults`; `(Run …)` carries them explicitly. The resolved run is
-    /// minted a `TestRunIdentifier` and recorded as a Pending row via the SEMA
-    /// `RecordTestRun` write, which replies `AcceptedTest`. The REAL hermetic /
-    /// live dispatch is Unit 2b — this records Accepted/Pending honestly and
-    /// never fakes a pass.
+    /// Synchronously SUBMIT a `Test` request (report 54, Unit 2b): lower it to
+    /// resolved targets through `TestDefaults`, validate host-set membership,
+    /// record the FIRST target's Pending row, set the in-flight cursor, and
+    /// reply `AcceptedTest`. The REAL hermetic/live dispatch runs on the
+    /// decoupled executor (`drive_submitted_test`), which rewrites the row to a
+    /// terminal `Passed`/`Failed` — never a faked pass.
+    ///
+    /// The `(Check …)` shorthand fills cluster/host/mode from the configured
+    /// `TestDefaults`; `(Run …)` carries them explicitly. Multi-target fan-out
+    /// (`(Nodes [a b])`/`All`) records this submit's first target and returns
+    /// the remaining targets so the daemon's executor admits one TestRun per
+    /// node (the daemon loops `submit_test` per resolved run).
     fn decide_test(&mut self, request: meta::TestRequest) -> nexus::NexusAction {
-        let Some(defaults) = self.configuration.test_defaults() else {
-            return Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
-                self.test_rejection(meta::TestRejectionReason::NoTestDefaults),
-            )));
-        };
-        let mut resolved = defaults.lower(request);
-        // Unit 2a records a single resolved run per request (the first target).
-        // `All` and the multi-node per-target fan-out are Unit-2b projection
-        // work; an empty resolution (a bare `All`, or `(Nodes [])`) has no
-        // target to record and is rejected honestly rather than faked.
-        if resolved.is_empty() {
-            return Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
-                self.test_rejection(meta::TestRejectionReason::NodeUnknown),
-            )));
+        match self.resolve_and_validate(request) {
+            Ok(mut resolved) => {
+                let run = resolved.remove(0);
+                self.active_operation = Some(MetaOperation::Test);
+                let identifier = ordinary::TestRunIdentifier::new(
+                    self.store.next_test_run_identifier().unwrap_or(1),
+                );
+                self.active_test = Some(TestPipeline::accepted(run.clone(), identifier.clone()));
+                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordTestRun(
+                    run.pending_record(identifier),
+                ))
+            }
+            Err(reason) => Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
+                self.test_rejection(reason),
+            ))),
         }
-        let run = resolved.remove(0);
-        self.active_operation = Some(MetaOperation::Test);
-        let identifier =
-            ordinary::TestRunIdentifier::new(self.store.next_test_run_identifier().unwrap_or(1));
-        nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordTestRun(
-            run.pending_record(identifier),
-        ))
+    }
+
+    /// Lower + validate one `Test` request to its resolved targets. Rejects an
+    /// unconfigured daemon (`NoTestDefaults`), an empty resolution
+    /// (`NodeUnknown` — a bare `All` on an unconfigured/empty cluster, or
+    /// `(Nodes [])`), a Live run while the live chain is unimplemented
+    /// (`LiveNotYetEnabled` — honest reject over a faked pass), or a host not in
+    /// the node's declared host-set (`VmHostNotDeclaredForNode`). On success the
+    /// FIRST element is this submit's target; the remainder are the fan-out
+    /// tail.
+    fn resolve_and_validate(
+        &self,
+        request: meta::TestRequest,
+    ) -> std::result::Result<Vec<ResolvedTestRun>, meta::TestRejectionReason> {
+        let defaults = self
+            .configuration
+            .test_defaults()
+            .ok_or(meta::TestRejectionReason::NoTestDefaults)?;
+        let resolved = defaults.lower(request);
+        if resolved.is_empty() {
+            return Err(meta::TestRejectionReason::NodeUnknown);
+        }
+        // LIVE honesty (report 54 Unit 2b fix 1): the live deploy-into-VM +
+        // assert chain is not yet implemented, so a Live run is rejected at
+        // submit rather than driven through a bracket that would write a
+        // `Passed` it never earned. Mirrors the Deploy `UnsupportedDeployAction`
+        // precedent. The HERMETIC path is fully real and unaffected.
+        if resolved
+            .iter()
+            .any(|run| matches!(run.mode, ordinary::TestMode::Live))
+        {
+            return Err(meta::TestRejectionReason::LiveNotYetEnabled);
+        }
+        // Host-set validation (report 54 §5.1, Unit 2b deferral 2): the
+        // resolved host must be a member of the node's declared host-set. When
+        // a proposal source is configured the daemon projects the cluster and
+        // rejects a host the node does not declare; with no proposal source the
+        // host is recorded unvalidated (the sandboxed hermetic check owns its
+        // own VM and needs no real host, so an unconfigured projection does not
+        // block the hermetic proof).
+        if let Some(projection) = defaults.projection() {
+            for run in &resolved {
+                projection.validate_host_for_node(&run.host, &run.node)?;
+            }
+        }
+        Ok(resolved)
     }
 
     fn test_rejection(&self, reason: meta::TestRejectionReason) -> meta::RejectedTest {
@@ -1164,10 +1712,161 @@ impl SchemaRuntime {
             }
             sema::SemaWriteOutput::ContainerRecorded(_) => self.advance_after_phase(),
             sema::SemaWriteOutput::TestRunRecorded(accepted) => {
+                // The accepted SUBMIT reply. `active_operation` is cleared (the
+                // synchronous submit is done) but `active_test` stays set: the
+                // decoupled executor (`drive_submitted_test`) re-enters to run
+                // the real dispatch and rewrite the row to a terminal outcome.
                 self.active_operation = None;
                 Self::reply_meta(meta::Output::Tested(meta::Tested::new(accepted)))
             }
             sema::SemaWriteOutput::WriteRejected(report) => self.reject_active_or_meta(report),
+        }
+    }
+
+    // ---- decide: TEST effect completion (drives the test dispatch) ------
+
+    /// Route a test effect's result to the next test step (Unit 2b). The
+    /// hermetic check is a single effect: a built check records `Passed` with
+    /// the realised out-path as the closure, a failed build records
+    /// `Failed(HermeticCheck)` — never a faked pass. The live effects bracket
+    /// the (not-yet-implemented) deploy chain: `TestVmBroughtUp` records the
+    /// container `Started` transition and advances to teardown; `TestVmTornDown`
+    /// records `Stopped` and the terminal `Failed(Assert)` — the deploy + assert
+    /// between bring-up and teardown is unimplemented, so the bracket cannot
+    /// pass. A Live run is rejected at submit (`LiveNotYetEnabled`), so this
+    /// honest live terminal is the belt to that submit-time gate.
+    fn decide_test_effect_completion(&mut self, result: nexus::EffectResult) -> nexus::NexusAction {
+        let Some(pipeline) = self.active_test.clone() else {
+            return Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
+                self.test_rejection(meta::TestRejectionReason::InternalError),
+            )));
+        };
+        match result {
+            nexus::EffectResult::HermeticCheckBuilt(built) => {
+                // Real nix build succeeded: the out-path is the realised check
+                // closure. Record Completed/Passed with it — the durable proof.
+                self.record_test_terminal(
+                    &pipeline,
+                    ordinary::TestRunPhase::Completed,
+                    ordinary::TestOutcome::Passed,
+                    Some(built.closure_path),
+                )
+            }
+            nexus::EffectResult::TestVmBroughtUp(_) => {
+                self.record_container(&pipeline, sema::ContainerState::Started);
+                self.set_test_stage(TestStage::BroughtUp);
+                // The deploy-into-VM + assert chain runs here in a live run
+                // (gated). BUILT path advances straight to teardown so the
+                // bracket is provably constructed end-to-end.
+                self.set_test_stage(TestStage::Asserted);
+                nexus::NexusAction::CommandEffect(nexus::EffectCommand::TearDownTestVm(
+                    pipeline.run.tear_down_command(),
+                ))
+            }
+            nexus::EffectResult::TestVmTornDown(_) => {
+                self.record_container(&pipeline, sema::ContainerState::Stopped);
+                // Honest LIVE terminal (report 54 Unit 2b fix 1): the bring-up →
+                // teardown bracket ran, but the deploy-into-VM + assert chain
+                // between them is not yet implemented, so nothing was asserted.
+                // Record `Failed(Assert)`, never `Passed` — a pass must be
+                // earned by a real assertion. Belt to the submit-time
+                // `LiveNotYetEnabled` reject: a Live run never reaches this arm
+                // today, and if a future caller drives a live bracket before the
+                // assert lands it still cannot fake a pass.
+                self.record_test_terminal(
+                    &pipeline,
+                    ordinary::TestRunPhase::Failed,
+                    ordinary::TestOutcome::Failed(ordinary::FailureStage::Assert),
+                    None,
+                )
+            }
+            nexus::EffectResult::EffectFailed(failure) => self.fail_test_pipeline(failure),
+            // No other effect result belongs to a test dispatch; treat it as an
+            // internal invariant failure rather than a misleading pass.
+            _ => self.fail_test_pipeline(nexus::EffectFailure {
+                stage: nexus::EffectStage::HermeticCheck,
+                detail: "unexpected effect result on the test pipeline".to_string(),
+            }),
+        }
+    }
+
+    /// Write the terminal durable test-run row (phase + outcome + closure) and
+    /// reply the terminal `Tested`/`TestRejected`. Clears the in-flight test
+    /// cursor. The row is rewritten in place (keyed by run identifier), so a
+    /// `(Query (ByTestRun …))` reads the terminal outcome — closing the
+    /// silent-daemon observability gap (report 54 §5.3).
+    fn record_test_terminal(
+        &mut self,
+        pipeline: &TestPipeline,
+        phase: ordinary::TestRunPhase,
+        outcome: ordinary::TestOutcome,
+        closure_path: Option<ordinary::ClosurePath>,
+    ) -> nexus::NexusAction {
+        let record = pipeline.record_at(phase, outcome, closure_path);
+        let output = self.record_test_run(record);
+        self.active_operation = None;
+        self.active_test = None;
+        match output {
+            sema::SemaWriteOutput::TestRunRecorded(accepted) => {
+                Self::reply_meta(meta::Output::Tested(meta::Tested::new(accepted)))
+            }
+            _ => Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
+                self.test_rejection(meta::TestRejectionReason::InternalError),
+            ))),
+        }
+    }
+
+    /// Record a live VM container-lifecycle transition (Unit 2b): the report-47
+    /// §2 `ContainerLifecycleRecord` table finally gets its driver. Best-effort,
+    /// like the deploy job-row persistence — a record error never fakes the
+    /// outcome.
+    fn record_container(&mut self, pipeline: &TestPipeline, state: sema::ContainerState) {
+        let _ = self.record_container_transition(pipeline.container_transition(state));
+    }
+
+    fn set_test_stage(&mut self, stage: TestStage) {
+        if let Some(pipeline) = self.active_test.as_mut() {
+            pipeline.stage = stage;
+        }
+    }
+
+    /// Record a terminal `Failed(stage)` test outcome and reply. The stage maps
+    /// the effect failure to the durable `FailureStage`, so a query sees
+    /// exactly where the test failed (`HermeticCheck` vs `BringUp`/`TearDown`).
+    /// NEVER a faked pass — a build/test failure is recorded as Failed.
+    fn fail_test_pipeline(&mut self, failure: nexus::EffectFailure) -> nexus::NexusAction {
+        eprintln!(
+            "lojix test pipeline effect failed at {:?}: {}",
+            failure.stage, failure.detail
+        );
+        let stage = Self::test_failure_stage(failure.stage);
+        let pipeline = match self.active_test.clone() {
+            Some(pipeline) => pipeline,
+            None => {
+                return Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
+                    self.test_rejection(meta::TestRejectionReason::InternalError),
+                )));
+            }
+        };
+        self.record_test_terminal(
+            &pipeline,
+            ordinary::TestRunPhase::Failed,
+            ordinary::TestOutcome::Failed(stage),
+            None,
+        )
+    }
+
+    fn test_failure_stage(stage: nexus::EffectStage) -> ordinary::FailureStage {
+        match stage {
+            nexus::EffectStage::HermeticCheck => ordinary::FailureStage::HermeticCheck,
+            nexus::EffectStage::BringUpTestVm => ordinary::FailureStage::BringUp,
+            nexus::EffectStage::TearDownTestVm => ordinary::FailureStage::TearDown,
+            // The live deploy-into-VM chain failing is a Deploy-stage test
+            // failure; assert-stage failures map to Assert. Any other effect
+            // stage on the test pipeline is recorded as a Deploy-stage failure
+            // honestly (the live cycle's deploy bracket).
+            nexus::EffectStage::Activate => ordinary::FailureStage::Assert,
+            _ => ordinary::FailureStage::Deploy,
         }
     }
 
@@ -1457,6 +2156,17 @@ impl SchemaRuntime {
                 self.record_phase(ordinary::DeploymentPhase::Activated, None)
             }
             nexus::EffectResult::PathsCollected(_) => self.finish_deploy_pipeline(),
+            // The test-dispatch effect results never reach the DEPLOY effect
+            // router — `drive_submitted_test` routes them through
+            // `decide_test_effect_completion`. One arriving here is an internal
+            // invariant failure, surfaced as a deploy failure rather than a
+            // misleading success.
+            nexus::EffectResult::HermeticCheckBuilt(_)
+            | nexus::EffectResult::TestVmBroughtUp(_)
+            | nexus::EffectResult::TestVmTornDown(_) => self.fail_pipeline(nexus::EffectFailure {
+                stage: nexus::EffectStage::Build,
+                detail: "test effect result on the deploy pipeline".to_string(),
+            }),
             nexus::EffectResult::EffectFailed(failure) => self.fail_pipeline(failure),
         }
     }
@@ -1535,6 +2245,12 @@ impl SchemaRuntime {
             nexus::EffectStage::CopyClosure => meta::DeployRejectionReason::BuilderUnreachable,
             nexus::EffectStage::Activate => meta::DeployRejectionReason::BuilderUnreachable,
             nexus::EffectStage::Gc => meta::DeployRejectionReason::DeploymentInFlight,
+            // The test-only effect stages never reach the DEPLOY pipeline's
+            // failure path (`fail_test_pipeline` owns them); an internal
+            // invariant failure rather than a misleading deploy reason.
+            nexus::EffectStage::HermeticCheck
+            | nexus::EffectStage::BringUpTestVm
+            | nexus::EffectStage::TearDownTestVm => meta::DeployRejectionReason::InternalError,
         };
         Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
             self.deploy_rejection(reason),
@@ -2143,6 +2859,70 @@ impl SchemaRuntime {
             }),
             Err(detail) => Self::effect_failed(nexus::EffectStage::Gc, detail),
         }
+    }
+
+    /// The REAL hermetic check effect (Unit 2b): build
+    /// `<flake>#checks.<system>.vm-<node> --print-out-paths`. Exit 0 + an
+    /// out-path → `HermeticCheckBuilt` carrying the realised check closure;
+    /// a non-zero exit → `EffectFailed(HermeticCheck)`. The `runNixOSTest`
+    /// engine owns its own sandboxed VM, so this is a pure build with zero host
+    /// effect. NEVER fakes a pass — the outcome IS the nix-build result.
+    async fn run_hermetic_check(
+        &self,
+        command: nexus::HermeticCheckCommand,
+    ) -> nexus::EffectResult {
+        let cluster_name = command.cluster_name.clone();
+        let node_name = command.node_name.clone();
+        match HermeticCheck::new(command).run().await {
+            Ok(closure_path) => nexus::EffectResult::HermeticCheckBuilt(nexus::CheckBuilt {
+                cluster_name,
+                node_name,
+                closure_path,
+            }),
+            Err(detail) => Self::effect_failed(nexus::EffectStage::HermeticCheck, detail),
+        }
+    }
+
+    /// The LIVE bring-up effect (Unit 2b — report 47 v2 / report 51 §3). BUILT
+    /// here, NOT run live (the first Prometheus cycle is psyche-gated): the
+    /// host-untouched user-namespace bring-up command is constructed
+    /// (`ssh <host-fqdn>` + `systemd-run --user` + `unshare -rn` + `nsenter`)
+    /// and would, on a live run, start the generated microVM runner + additive
+    /// tap inside a private user network namespace on the resolved vmhost. The
+    /// gated build path returns `TestVmBroughtUp` so the bracket is provably
+    /// constructed end-to-end without touching a real host.
+    async fn run_bring_up_test_vm(
+        &self,
+        command: nexus::BringUpTestVmCommand,
+    ) -> nexus::EffectResult {
+        let bring_up = LiveTestVm::from_bring_up(&command);
+        // The invocation is CONSTRUCTED (the host-untouched user-namespace
+        // command) but not executed — a live run is gated. Constructing it
+        // proves the command shape; `invocation()` is the on-host effect a live
+        // run would `.run().await`.
+        let _invocation = bring_up.bring_up_invocation();
+        nexus::EffectResult::TestVmBroughtUp(nexus::TestVmBroughtUp {
+            cluster_name: command.cluster_name,
+            node_name: command.node_name,
+            host: command.host,
+        })
+    }
+
+    /// The LIVE teardown effect (Unit 2b). BUILT here, NOT run live: constructs
+    /// the `systemctl --user stop` command that, on a live run, stops the user
+    /// units so the tap + route vanish with the namespace (host netns
+    /// byte-identical). Returns `TestVmTornDown` for the gated build path.
+    async fn run_tear_down_test_vm(
+        &self,
+        command: nexus::TearDownTestVmCommand,
+    ) -> nexus::EffectResult {
+        let tear_down = LiveTestVm::from_tear_down(&command);
+        let _invocation = tear_down.tear_down_invocation();
+        nexus::EffectResult::TestVmTornDown(nexus::TestVmTornDown {
+            cluster_name: command.cluster_name,
+            node_name: command.node_name,
+            host: command.host,
+        })
     }
 
     fn effect_failed(stage: nexus::EffectStage, detail: String) -> nexus::EffectResult {
@@ -3061,6 +3841,25 @@ impl NixCommand {
         Self::new("nix", arguments)
     }
 
+    /// `nix build <installable> --no-link --print-out-paths` for a hermetic
+    /// auto-pickup check (Unit 2b). The installable already names the
+    /// `#checks.<system>.vm-<node>` attribute (an `runNixOSTest` derivation
+    /// whose realised output IS the check result), so it is passed verbatim —
+    /// no `^*` output selector and no `.drvPath` indirection (unlike the deploy
+    /// build, which threads a `.drv` path). Exit status IS pass/fail; the
+    /// printed line is the realised check out-path.
+    fn build_check(installable: &str) -> Self {
+        Self::new(
+            "nix",
+            vec![
+                "build".to_string(),
+                "--no-link".to_string(),
+                "--print-out-paths".to_string(),
+                installable.to_string(),
+            ],
+        )
+    }
+
     fn build_closure_remote(closure_path: &str, substituters: &[nexus::ExtraSubstituter]) -> Self {
         let mut arguments = vec![
             "build".to_string(),
@@ -3224,6 +4023,13 @@ impl nexus::NexusEngine for SchemaRuntime {
                 self.run_activate_generation(command).await
             }
             nexus::EffectCommand::PathInfoGc(command) => self.run_path_info_gc(command).await,
+            nexus::EffectCommand::HermeticCheck(command) => self.run_hermetic_check(command).await,
+            nexus::EffectCommand::BringUpTestVm(command) => {
+                self.run_bring_up_test_vm(command).await
+            }
+            nexus::EffectCommand::TearDownTestVm(command) => {
+                self.run_tear_down_test_vm(command).await
+            }
         }
     }
 

@@ -184,11 +184,23 @@ pub struct DaemonConfiguration {
 /// `default_mode` is the everyday dispatch mode (`Hermetic`). `TestMode` is the
 /// shared signal type, so the wire op, the durable record, and this config
 /// default all name one type.
+///
+/// `test_flake` is the cluster→flake resolution (report 54 §5.2, Unit 2b): the
+/// flake whose `#checks.<system>.vm-<node>` auto-pickup check the hermetic
+/// dispatch builds, and whose generated runner the live path brings up. For
+/// the CriomOS-test-cluster proof this is
+/// `github:LiGoldragon/CriomOS-test-cluster`. `proposal_source` is the cluster
+/// proposal NOTA file the daemon projects to validate `(OnHost h)` against the
+/// node's declared host-set and to resolve `All` to the cluster's test-VM
+/// nodes — empty when host-set validation is not configured (the hermetic
+/// build never needs it; the sandboxed check owns its own VM).
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TestDefaults {
     pub cluster: String,
     pub default_vm_host: String,
     pub default_mode: TestMode,
+    pub test_flake: String,
+    pub proposal_source: String,
 }
 
 /// The rkyv-stored test mode. A daemon-local mirror of the shared

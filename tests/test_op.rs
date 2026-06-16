@@ -7,11 +7,19 @@
 //!   D, the routine form);
 //! - `(Run …)` carries cluster/host/mode explicitly;
 //! - a Test write returns `AcceptedTest` AND lands a durable, queryable Pending
-//!   `TestRunRecord` (status Submitted / outcome Pending) — the Unit-2a stub
-//!   records Accepted honestly, never a faked pass.
+//!   `TestRunRecord` (status Submitted / outcome Pending) — the submit records
+//!   Accepted honestly, never a faked pass.
 //!
-//! The REAL hermetic / live dispatch is Unit 2b; these tests assert the
-//! contract + plumbing only.
+//! Unit 2b adds the REAL dispatch proofs (the `#[ignore]` ones run `nix`):
+//! `(Check [mercury])` ACTUALLY nix-builds `vm-mercury` through the decoupled
+//! executor and records `Passed` with the realised out-path; a missing check is
+//! recorded `Failed(HermeticCheck)`, never faked; the full daemon-socket
+//! roundtrip proves the same over the real owner + ordinary sockets. A Live
+//! `(Run … Live)` is rejected at submit (`LiveNotYetEnabled`) so it can never
+//! record a `Passed` the unimplemented live chain never earned. The host/node
+//! selection guarantee is proven against a real projected cluster fixture:
+//! a member `OnHost` is accepted, a non-member is `VmHostNotDeclaredForNode`,
+//! an unknown node is `NodeUnknown`, and `All` sweeps the hosted-Pod nodes.
 
 use std::sync::Arc;
 
@@ -169,12 +177,15 @@ fn accepted_test_lands_a_queryable_pending_record() {
 #[test]
 fn run_full_form_carries_explicit_selection() {
     let mut engine = engine();
-    // The full (Run …) form on a different cluster/host/mode than the defaults.
+    // The full (Run …) form on a different cluster/host than the defaults. The
+    // mode is Hermetic: the explicit-selection plumbing is mode-agnostic, and a
+    // Live submit is now rejected up front (see `live_run_is_rejected_*`), so
+    // this proves the cluster/host override on the path that actually records.
     let input = run_request(
         "alpha",
         "node-1",
         ordinary::HostSelection::OnHost(ordinary::NodeName::new("prometheus")),
-        ordinary::TestMode::Live,
+        ordinary::TestMode::Hermetic,
     );
     accepted_identifier(run(&mut engine, input));
     let runs = query_runs(&mut engine, "alpha", "node-1");
@@ -186,7 +197,11 @@ fn run_full_form_carries_explicit_selection() {
         "prometheus",
         "explicit OnHost override"
     );
-    assert_eq!(record.mode, ordinary::TestMode::Live, "explicit Live mode");
+    assert_eq!(
+        record.mode,
+        ordinary::TestMode::Hermetic,
+        "explicit Hermetic mode"
+    );
 }
 
 #[test]
@@ -238,6 +253,298 @@ fn query_by_run_identifier_filters_to_one() {
     assert_eq!(*runs[0].test_run_identifier.payload(), second);
 }
 
+// ---- Unit 2b: the REAL hermetic dispatch, proven end-to-end ----
+
+/// Drive a `Test` through the daemon's decoupled-executor path: the synchronous
+/// `submit_test` (records Pending, returns AcceptedTest) then the real dispatch
+/// `drive_submitted_test` (the actual `nix build`), returning the terminal
+/// outcome. This is the in-process witness of what the `TestJobs` actor runs.
+fn submit_and_drive(engine: &mut SchemaRuntime, request: meta::TestRequest) -> meta::Output {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    runtime.block_on(async {
+        let accepted = engine.submit_test(request).await;
+        assert!(
+            matches!(
+                accepted,
+                lojix::schema_runtime::TestSubmissionOutcome::Accepted(_)
+            ),
+            "submit must accept before the real dispatch runs, got {accepted:?}"
+        );
+        engine.drive_submitted_test().await
+    })
+}
+
+fn check_test_request(node: &str) -> meta::TestRequest {
+    meta::TestRequest::Check(meta::QuickCheck::new(vec![ordinary::NodeName::new(node)]))
+}
+
+/// The REAL hermetic proof (Unit 2b Done): `(Check [mercury])` actually
+/// nix-builds `vm-mercury`, the durable row transitions to Passed with the
+/// realised check out-path, and `(Query (ByTestRun …))` returns the Passed
+/// record. Ignored because it runs `nix build` against the network.
+#[test]
+#[ignore = "ACTUALLY nix-builds vm-mercury (slow, hits the network); run with --ignored"]
+fn hermetic_check_mercury_actually_builds_and_records_passed() {
+    let mut engine = engine();
+    let terminal = submit_and_drive(&mut engine, check_test_request("mercury"));
+    assert!(
+        matches!(terminal, meta::Output::Tested(_)),
+        "the terminal reply is Tested, got {terminal:?}"
+    );
+    let runs = query_runs(&mut engine, "goldragon", "mercury");
+    assert_eq!(runs.len(), 1, "exactly one run recorded");
+    let record = &runs[0];
+    assert_eq!(
+        record.outcome,
+        ordinary::TestOutcome::Passed,
+        "the real nix-build of vm-mercury Passed"
+    );
+    assert_eq!(record.phase, ordinary::TestRunPhase::Completed);
+    let closure = record
+        .closure_path
+        .as_ref()
+        .expect("Passed carries the realised check out-path");
+    assert!(
+        closure.payload().starts_with("/nix/store/"),
+        "the closure is a real store out-path, got {closure:?}"
+    );
+    eprintln!(
+        "HERMETIC mercury Passed with out-path {}",
+        closure.payload()
+    );
+}
+
+/// The REAL FAILED proof (Unit 2b Done): a node whose `vm-<node>` check does not
+/// exist / fails to build is recorded as `Failed(HermeticCheck)`, NOT faked as a
+/// pass. Uses a bogus node name so the check attribute is absent and `nix build`
+/// exits non-zero.
+#[test]
+#[ignore = "ACTUALLY runs `nix build` against a missing check (hits the network); run with --ignored"]
+fn hermetic_check_missing_node_records_failed_not_faked() {
+    let mut engine = engine();
+    let terminal = submit_and_drive(&mut engine, check_test_request("no-such-node"));
+    eprintln!("FAILED-case terminal reply: {terminal:?}");
+    let runs = query_runs(&mut engine, "goldragon", "no-such-node");
+    assert_eq!(runs.len(), 1);
+    let record = &runs[0];
+    assert_eq!(
+        record.outcome,
+        ordinary::TestOutcome::Failed(ordinary::FailureStage::HermeticCheck),
+        "a failed nix-build is recorded Failed(HermeticCheck), never a faked pass"
+    );
+    assert_eq!(record.phase, ordinary::TestRunPhase::Failed);
+    assert!(
+        record.closure_path.is_none(),
+        "a failed check has no closure"
+    );
+}
+
+/// LIVE honesty (report 54 Unit 2b fix 1): the live deploy-into-VM + assert
+/// chain is unimplemented, so a Live `(Run … Live)` is REJECTED at submit with
+/// `LiveNotYetEnabled` — it never mints an accepted run, never records a row,
+/// and so can never yield a `Passed` it did not earn. The synchronous submit
+/// path is exercised directly (the up-front verdict the owner socket replies).
+#[test]
+fn live_run_is_rejected_at_submit_never_a_faked_pass() {
+    use lojix::schema_runtime::TestSubmissionOutcome;
+
+    let mut engine = engine();
+    let request = meta::TestRequest::Run(meta::TestRun {
+        cluster_name: ordinary::ClusterName::new("goldragon"),
+        node_selection: meta::NodeSelection::Nodes(vec![ordinary::NodeName::new("mercury")]),
+        host_selection: ordinary::HostSelection::DefaultHost,
+        test_mode: ordinary::TestMode::Live,
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let outcome = runtime.block_on(async { engine.submit_test(request).await });
+    match outcome {
+        TestSubmissionOutcome::Rejected(rejected) => assert_eq!(
+            rejected.test_rejection_reason,
+            meta::TestRejectionReason::LiveNotYetEnabled,
+            "a Live submit is rejected LiveNotYetEnabled, not accepted"
+        ),
+        TestSubmissionOutcome::Accepted(accepted) => {
+            panic!("a Live run must NOT be accepted, got {accepted:?}")
+        }
+    }
+    // Nothing was recorded — a rejected submit leaves no row to fake a pass.
+    assert!(
+        query_runs(&mut engine, "goldragon", "mercury").is_empty(),
+        "a rejected Live submit records no test-run row"
+    );
+}
+
+/// The fully-online HERMETIC proof (Unit 2b Done): spawn the actual
+/// `lojix-daemon`, submit `(Test (Check [mercury]))` over the REAL owner socket
+/// (the same wire path `meta-lojix` uses), let the decoupled `TestJobs` actor
+/// ACTUALLY nix-build vm-mercury, then poll `(Query (ByTestRun …))` over the
+/// REAL ordinary socket until the durable row reaches Passed with the realised
+/// out-path. Exercises the daemon process, rkyv config, two-socket bind, frame
+/// codec, the decoupled test-job executor, real `nix` IO, and the durable query.
+#[test]
+#[ignore = "spawns lojix-daemon, binds sockets, ACTUALLY nix-builds vm-mercury; run with --ignored"]
+fn daemon_socket_roundtrip_hermetic_check_mercury_passes() {
+    use std::io::ErrorKind;
+    use std::os::unix::net::UnixStream;
+    use std::process::Command;
+    use std::thread::sleep;
+    use std::time::{Duration, Instant};
+
+    use triad_runtime::{FrameBody, LengthPrefixedCodec};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ordinary_socket = dir.path().join("ordinary.sock");
+    let owner_socket = dir.path().join("owner.sock");
+    let configuration =
+        write_test_daemon_configuration(dir.path(), &ordinary_socket, &owner_socket);
+
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_lojix-daemon"))
+        .arg(&configuration)
+        .spawn()
+        .expect("spawn lojix-daemon");
+
+    let codec = LengthPrefixedCodec::default();
+    let connect = |path: &std::path::Path, deadline: Instant, daemon: &mut std::process::Child| {
+        loop {
+            match UnixStream::connect(path) {
+                Ok(stream) => return stream,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    if let Ok(Some(status)) = daemon.try_wait() {
+                        panic!("daemon exited early with {status}");
+                    }
+                    if Instant::now() > deadline {
+                        daemon.kill().ok();
+                        panic!("socket never became connectable: {}", path.display());
+                    }
+                    sleep(Duration::from_millis(50));
+                }
+                Err(error) => {
+                    daemon.kill().ok();
+                    panic!("connect failed: {error}");
+                }
+            }
+        }
+    };
+
+    // 1. (Test (Check [mercury])) over the REAL owner socket → AcceptedTest.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut owner = connect(&owner_socket, deadline, &mut daemon);
+    let test_input = meta::Input::Test(meta::Test::new(check_test_request("mercury")));
+    let frame = FrameBody::new(test_input.encode_signal_frame().expect("encode test"));
+    codec.write_body(&mut owner, &frame).expect("write test");
+    let reply = codec.read_body(&mut owner).expect("read test reply");
+    let (_, output) = meta::Output::decode_signal_frame(reply.bytes()).expect("decode test reply");
+    let accepted = match output {
+        meta::Output::Tested(accepted) => *accepted.payload().test_run_identifier.payload(),
+        other => {
+            daemon.kill().ok();
+            panic!("expected AcceptedTest, got {other:?}");
+        }
+    };
+    eprintln!("DAEMON accepted test run {accepted}");
+
+    // 2. Poll (Query (ByTestRun (goldragon mercury None))) over the REAL
+    //    ordinary socket until the decoupled dispatch reaches a terminal
+    //    outcome — the real `nix build vm-mercury` runs on the daemon.
+    let query = ordinary::Input::Query(ordinary::Query::new(ordinary::Selection::ByTestRun(
+        ordinary::TestRunLookup {
+            cluster_name: ordinary::ClusterName::new("goldragon"),
+            node_name: ordinary::NodeName::new("mercury"),
+            run: None,
+        },
+    )));
+    let query_frame = query.encode_signal_frame().expect("encode query");
+    let build_deadline = Instant::now() + Duration::from_secs(540);
+    let terminal = loop {
+        let mut ordinary = connect(&ordinary_socket, deadline, &mut daemon);
+        codec
+            .write_body(&mut ordinary, &FrameBody::new(query_frame.clone()))
+            .expect("write query");
+        let reply = codec.read_body(&mut ordinary).expect("read query reply");
+        let (_, output) =
+            ordinary::Output::decode_signal_frame(reply.bytes()).expect("decode query reply");
+        let runs = match output {
+            ordinary::Output::TestRunsQueried(listing) => listing.into_payload().runs,
+            other => {
+                daemon.kill().ok();
+                panic!("expected TestRunsQueried, got {other:?}");
+            }
+        };
+        if let Some(record) = runs.into_iter().next()
+            && !matches!(record.outcome, ordinary::TestOutcome::Pending)
+        {
+            break record;
+        }
+        if Instant::now() > build_deadline {
+            daemon.kill().ok();
+            panic!("the test never reached a terminal outcome");
+        }
+        sleep(Duration::from_millis(500));
+    };
+
+    daemon.kill().ok();
+    daemon.wait().ok();
+
+    assert_eq!(
+        terminal.outcome,
+        ordinary::TestOutcome::Passed,
+        "the real daemon nix-built vm-mercury and recorded Passed"
+    );
+    let closure = terminal
+        .closure_path
+        .as_ref()
+        .expect("Passed carries the realised out-path");
+    assert!(
+        closure.payload().starts_with("/nix/store/"),
+        "the out-path is a real store path: {closure:?}"
+    );
+    eprintln!(
+        "DAEMON SOCKET hermetic mercury Passed with out-path {}",
+        closure.payload()
+    );
+}
+
+/// Write the daemon's rkyv startup configuration for the integration proof:
+/// both socket paths, a state dir, and the `TestDefaults` pointing at the
+/// CriomOS-test-cluster `horizon-test-vm` flake (the auto-pickup `vm-<node>`
+/// suite).
+fn write_test_daemon_configuration(
+    directory: &std::path::Path,
+    ordinary_socket: &std::path::Path,
+    owner_socket: &std::path::Path,
+) -> std::path::PathBuf {
+    let configuration = lojix::DaemonConfiguration {
+        ordinary_socket_path: ordinary_socket.display().to_string(),
+        ordinary_socket_mode: 0o660,
+        owner_socket_path: owner_socket.display().to_string(),
+        owner_socket_mode: 0o660,
+        state_directory_path: directory.join("state").display().to_string(),
+        test_defaults: lojix::TestDefaults {
+            cluster: "goldragon".to_string(),
+            default_vm_host: "prometheus".to_string(),
+            default_mode: lojix::TestMode::Hermetic,
+            test_flake: "github:LiGoldragon/CriomOS-test-cluster/horizon-test-vm".to_string(),
+            proposal_source: String::new(),
+        },
+    };
+    let path = directory.join("daemon-configuration.rkyv");
+    configuration
+        .write_rkyv_file(&path)
+        .expect("write daemon configuration");
+    path
+}
+
 #[test]
 fn test_run_table_survives_store_reopen() {
     // Prove the durable plane: record a test through one engine over a shared
@@ -262,4 +569,152 @@ fn test_run_table_survives_store_reopen() {
     assert_eq!(runs.len(), 1, "the run persisted across reopen");
     assert_eq!(*runs[0].test_run_identifier.payload(), identifier);
     assert_eq!(runs[0].outcome, ordinary::TestOutcome::Pending);
+}
+
+// ---- Unit 2b fix 2: the host/node selection guarantee, proven ----
+//
+// The 2a/2b code wires `validate_host_for_node` / the `OnHost` rejection /
+// `NodeUnknown` / the `All` sweep, but all of it is gated on a NON-EMPTY
+// `proposal_source` that every other test leaves `""`. These tests configure a
+// real proposal projection (the fixture cluster, `beacon` a Pod hosted on
+// `atlas`, `atlas` bare metal) and prove the rejection guarantee end-to-end.
+
+/// The host/node-selection fixture proposal (a `beacon` Pod hosted on `atlas`).
+const HOST_SET_FIXTURE: &str = include_str!("fixtures/host-set-cluster.nota");
+
+/// A fresh engine whose `TestDefaults` carry a real `proposal_source` — the
+/// fixture proposal written to a tempfile — so `(OnHost …)`/`All` resolve and
+/// validate against the projected host-sets. `default_vm_host` is `atlas` so an
+/// `All` + `DefaultHost` run lands on a host every hosted Pod declares. Returns
+/// the tempdir too so it outlives the engine (it owns the fixture file).
+fn engine_with_projection() -> (tempfile::TempDir, SchemaRuntime) {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let proposal_path = directory.path().join("cluster.nota");
+    std::fs::write(&proposal_path, HOST_SET_FIXTURE).expect("write proposal fixture");
+    let configuration = lojix::DaemonConfiguration {
+        ordinary_socket_path: directory.path().join("ordinary.sock").display().to_string(),
+        ordinary_socket_mode: 0o660,
+        owner_socket_path: directory.path().join("owner.sock").display().to_string(),
+        owner_socket_mode: 0o660,
+        state_directory_path: directory.path().join("state").display().to_string(),
+        test_defaults: lojix::TestDefaults {
+            cluster: "goldragon".to_string(),
+            default_vm_host: "atlas".to_string(),
+            default_mode: lojix::TestMode::Hermetic,
+            test_flake: "github:LiGoldragon/CriomOS-test-cluster/horizon-test-vm".to_string(),
+            proposal_source: proposal_path.display().to_string(),
+        },
+    };
+    let store = Arc::new(
+        Store::open(directory.path().join("lojix.sema")).expect("open store over the projection"),
+    );
+    let engine = SchemaRuntime::with_store_and_configuration(
+        store,
+        Arc::new(RuntimeConfiguration::from_daemon_configuration(
+            &configuration,
+        )),
+    );
+    (directory, engine)
+}
+
+fn submit_verdict(engine: &mut SchemaRuntime, request: meta::TestRequest) -> nexus::SignalOutput {
+    run(
+        engine,
+        nexus::SignalInput::MetaInput(meta::Input::Test(meta::Test::new(request))),
+    )
+}
+
+fn rejection_reason(output: nexus::SignalOutput) -> meta::TestRejectionReason {
+    match meta_reply(output) {
+        meta::Output::TestRejected(rejected) => rejected.into_payload().test_rejection_reason,
+        other => panic!("expected TestRejected, got {other:?}"),
+    }
+}
+
+fn host_run(node: &str, host: &str) -> meta::TestRequest {
+    meta::TestRequest::Run(meta::TestRun {
+        cluster_name: ordinary::ClusterName::new("goldragon"),
+        node_selection: meta::NodeSelection::Nodes(vec![ordinary::NodeName::new(node)]),
+        host_selection: ordinary::HostSelection::OnHost(ordinary::NodeName::new(host)),
+        test_mode: ordinary::TestMode::Hermetic,
+    })
+}
+
+/// (a) A member `OnHost`: `beacon` declares host-set `{atlas}`, so a run
+/// `(Run goldragon [beacon] (OnHost atlas) Hermetic)` is ACCEPTED against the
+/// projection.
+#[test]
+fn member_on_host_is_accepted_against_the_projection() {
+    let (_directory, mut engine) = engine_with_projection();
+    accepted_identifier(submit_verdict(&mut engine, host_run("beacon", "atlas")));
+    let runs = query_runs(&mut engine, "goldragon", "beacon");
+    assert_eq!(runs.len(), 1, "the accepted member run is recorded");
+    assert_eq!(
+        runs[0].host.payload(),
+        "atlas",
+        "the validated member host is recorded"
+    );
+}
+
+/// (b) A non-member `OnHost`: `prometheus` is not in `beacon`'s declared
+/// host-set `{atlas}`, so the run is REJECTED `VmHostNotDeclaredForNode` — and
+/// records no row.
+#[test]
+fn non_member_on_host_is_rejected_vm_host_not_declared() {
+    let (_directory, mut engine) = engine_with_projection();
+    let reason = rejection_reason(submit_verdict(
+        &mut engine,
+        host_run("beacon", "prometheus"),
+    ));
+    assert_eq!(
+        reason,
+        meta::TestRejectionReason::VmHostNotDeclaredForNode,
+        "a host the node does not declare is rejected"
+    );
+    assert!(
+        query_runs(&mut engine, "goldragon", "beacon").is_empty(),
+        "a rejected run records no row"
+    );
+}
+
+/// (c) An unknown node: `mars` is absent from the projection, so any run for it
+/// is REJECTED `NodeUnknown`.
+#[test]
+fn unknown_node_is_rejected_node_unknown() {
+    let (_directory, mut engine) = engine_with_projection();
+    let reason = rejection_reason(submit_verdict(&mut engine, host_run("mars", "atlas")));
+    assert_eq!(
+        reason,
+        meta::TestRejectionReason::NodeUnknown,
+        "a node absent from the projection is rejected"
+    );
+}
+
+/// (d) `All` resolves to the cluster's test-VM (hosted-Pod) nodes: only
+/// `beacon` declares a `super_node`, so `All` + `DefaultHost` (= `atlas`)
+/// resolves to and accepts exactly `[beacon]` — and the bare-metal `atlas` is
+/// not swept.
+#[test]
+fn all_resolves_to_the_hosted_pod_nodes() {
+    let (_directory, mut engine) = engine_with_projection();
+    let request = meta::TestRequest::Run(meta::TestRun {
+        cluster_name: ordinary::ClusterName::new("goldragon"),
+        node_selection: meta::NodeSelection::All,
+        host_selection: ordinary::HostSelection::DefaultHost,
+        test_mode: ordinary::TestMode::Hermetic,
+    });
+    // The submit admits this submit's FIRST resolved target; the fan-out tail
+    // is the daemon's per-node loop. With one hosted Pod the first target IS
+    // beacon, proving `All` projected the hosted-Pod set (not the bare-metal
+    // atlas, and not an empty NodeUnknown rejection).
+    accepted_identifier(submit_verdict(&mut engine, request));
+    assert_eq!(
+        query_runs(&mut engine, "goldragon", "beacon").len(),
+        1,
+        "All swept the hosted-Pod node beacon"
+    );
+    assert!(
+        query_runs(&mut engine, "goldragon", "atlas").is_empty(),
+        "All did not sweep the bare-metal atlas (no super_node)"
+    );
 }

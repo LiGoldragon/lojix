@@ -37,6 +37,8 @@ fn write_daemon_configuration(
             cluster: "goldragon".to_string(),
             default_vm_host: "prometheus".to_string(),
             default_mode: lojix::TestMode::Hermetic,
+            test_flake: "github:LiGoldragon/CriomOS-test-cluster".to_string(),
+            proposal_source: String::new(),
         },
     };
     let path = directory.join("daemon-configuration.rkyv");

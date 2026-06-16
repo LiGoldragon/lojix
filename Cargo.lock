@@ -410,7 +410,7 @@ checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 [[package]]
 name = "meta-signal-lojix"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?branch=main#b9a1de87b9999eaf7b4a2a3ef40051b7705e3e4d"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?branch=main#1dbecc08229958ab781c813b1bda02140761d073"
 dependencies = [
  "nota-next",
  "rkyv",
