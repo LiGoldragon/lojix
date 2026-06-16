@@ -93,6 +93,72 @@ fn meta_client_decodes_inline_pin() {
     assert_eq!(client.input(), &input);
 }
 
+/// The routine test shorthand: `meta-lojix '(Test (Check [mercury]))'`. The CLI
+/// decodes it through the generated meta parser (no hand-parsing); the daemon
+/// lowers the cluster/host/mode from TestDefaults (report 54).
+#[cfg(feature = "nota-text")]
+fn owner_test_check() -> meta::Input {
+    meta::Input::Test(meta::Test::new(meta::TestRequest::Check(
+        meta::QuickCheck::new(vec![ordinary::NodeName::new("mercury")]),
+    )))
+}
+
+/// The full test form: explicit node selection, host, and mode.
+#[cfg(feature = "nota-text")]
+fn owner_test_run() -> meta::Input {
+    meta::Input::Test(meta::Test::new(meta::TestRequest::Run(meta::TestRun {
+        cluster_name: ordinary::ClusterName::new("goldragon"),
+        node_selection: meta::NodeSelection::Nodes(vec![ordinary::NodeName::new("mercury")]),
+        host_selection: ordinary::HostSelection::OnHost(ordinary::NodeName::new("prometheus")),
+        test_mode: ordinary::TestMode::Hermetic,
+    })))
+}
+
+/// The test-run read: `lojix '(Query (ByTestRun (goldragon mercury None)))'`.
+#[cfg(feature = "nota-text")]
+fn ordinary_query_test_run() -> ordinary::Input {
+    ordinary::Input::Query(ordinary::Query::new(ordinary::Selection::ByTestRun(
+        ordinary::TestRunLookup {
+            cluster_name: ordinary::ClusterName::new("goldragon"),
+            node_name: ordinary::NodeName::new("mercury"),
+            run: None,
+        },
+    )))
+}
+
+#[test]
+#[cfg(feature = "nota-text")]
+fn meta_client_decodes_inline_test_check() {
+    let input = owner_test_check();
+    let argument = argument_from_single(input.to_string());
+
+    let client = MetaClient::from_argument(argument).expect("decode meta Test Check NOTA");
+
+    assert_eq!(client.input(), &input);
+}
+
+#[test]
+#[cfg(feature = "nota-text")]
+fn meta_client_decodes_inline_test_run() {
+    let input = owner_test_run();
+    let argument = argument_from_single(input.to_string());
+
+    let client = MetaClient::from_argument(argument).expect("decode meta Test Run NOTA");
+
+    assert_eq!(client.input(), &input);
+}
+
+#[test]
+#[cfg(feature = "nota-text")]
+fn ordinary_client_decodes_inline_by_test_run_query() {
+    let input = ordinary_query_test_run();
+    let argument = argument_from_single(input.to_string());
+
+    let client = OrdinaryClient::from_argument(argument).expect("decode ordinary ByTestRun NOTA");
+
+    assert_eq!(client.input(), &input);
+}
+
 #[test]
 #[cfg(feature = "nota-text")]
 fn ordinary_client_decodes_nota_file() {

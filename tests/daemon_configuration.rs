@@ -15,6 +15,11 @@ fn daemon_configuration_round_trips_through_rkyv_file() {
         owner_socket_path: directory.path().join("owner.sock").display().to_string(),
         owner_socket_mode: 0o660,
         state_directory_path: directory.path().join("state").display().to_string(),
+        test_defaults: lojix::TestDefaults {
+            cluster: "goldragon".to_string(),
+            default_vm_host: "prometheus".to_string(),
+            default_mode: lojix::TestMode::Hermetic,
+        },
     };
 
     configuration

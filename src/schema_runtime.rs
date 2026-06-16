@@ -57,6 +57,103 @@ pub struct RuntimeConfiguration {
     /// while the pipeline is still parked, then opens it to let the pipeline
     /// complete on the daemon-owned executor — the up9b decoupling witness.
     effect_barrier: Option<EffectBarrier>,
+    /// The test-op defaults, projected from the daemon's binary startup
+    /// configuration (report 54). `decide_meta_input` reads these to lower a
+    /// `(Check …)` shorthand into a full `TestRun` — cluster, host, and mode
+    /// all default from here. `None` when the daemon was configured without
+    /// test defaults; a `(Check …)` then rejects with `NoTestDefaults` rather
+    /// than guessing.
+    test_defaults: Option<TestDefaults>,
+}
+
+/// The runtime projection of the config-default test selection. A daemon-side
+/// noun holding the cluster, default vm-host, and default mode a `(Check …)`
+/// fills in. Built once from [`crate::TestDefaults`] (the rkyv config shape)
+/// and shared across per-request engines, so the wire op, the durable record,
+/// and the config default all resolve through one type.
+#[derive(Debug, Clone)]
+pub struct TestDefaults {
+    cluster: ordinary::ClusterName,
+    default_vm_host: ordinary::NodeName,
+    default_mode: ordinary::TestMode,
+}
+
+impl TestDefaults {
+    /// Lower one `TestRequest` to the resolved test targets it names. A
+    /// `(Run …)` carries cluster/host/mode explicitly; a `(Check …)` fills all
+    /// three from these defaults — the routine `(Check mercury)` form (report
+    /// 54 decision D). `(Nodes [n …])` expands to one resolved run per named
+    /// node; `All` is a projection sweep deferred to Unit 2b and resolves to no
+    /// targets here (the caller rejects an empty resolution honestly rather
+    /// than faking a run). Returns the resolved targets so the caller mints an
+    /// identifier and records a Pending row per target.
+    fn lower(&self, request: meta::TestRequest) -> Vec<ResolvedTestRun> {
+        match request {
+            meta::TestRequest::Run(run) => self.lower_run(run),
+            meta::TestRequest::Check(check) => self.lower_check(check),
+        }
+    }
+
+    /// Lower a full `(Run …)`: explicit cluster + host selection + mode, one
+    /// resolved run per node in the selection.
+    fn lower_run(&self, run: meta::TestRun) -> Vec<ResolvedTestRun> {
+        let host = self.resolve_host(run.host_selection);
+        let mode = run.test_mode;
+        self.nodes_of(run.node_selection)
+            .into_iter()
+            .map(|node| ResolvedTestRun {
+                cluster: run.cluster_name.clone(),
+                node,
+                host: host.clone(),
+                mode,
+            })
+            .collect()
+    }
+
+    /// Lower a routine `(Check [n …])`: cluster, host, and mode all from these
+    /// defaults; one resolved run per named node.
+    fn lower_check(&self, check: meta::QuickCheck) -> Vec<ResolvedTestRun> {
+        check
+            .into_payload()
+            .into_iter()
+            .map(|node| ResolvedTestRun {
+                cluster: self.cluster.clone(),
+                node,
+                host: self.default_vm_host.clone(),
+                mode: self.default_mode,
+            })
+            .collect()
+    }
+
+    /// Resolve a `HostSelection` against these defaults: `DefaultHost` reads
+    /// the config default vm-host; `(OnHost h)` overrides to the named host
+    /// (the declared-host-set membership check is a Unit-2b projection gate).
+    fn resolve_host(&self, selection: ordinary::HostSelection) -> ordinary::NodeName {
+        match selection {
+            ordinary::HostSelection::DefaultHost => self.default_vm_host.clone(),
+            ordinary::HostSelection::OnHost(host) => host,
+        }
+    }
+
+    /// The explicit node list of a `NodeSelection`. `All` resolves to no nodes
+    /// here — the projection-driven sweep is Unit 2b; the caller rejects an
+    /// empty resolution honestly.
+    fn nodes_of(&self, selection: meta::NodeSelection) -> Vec<ordinary::NodeName> {
+        match selection {
+            meta::NodeSelection::Nodes(nodes) => nodes,
+            meta::NodeSelection::All => Vec::new(),
+        }
+    }
+}
+
+impl From<&crate::TestDefaults> for TestDefaults {
+    fn from(defaults: &crate::TestDefaults) -> Self {
+        Self {
+            cluster: ordinary::ClusterName::new(defaults.cluster.clone()),
+            default_vm_host: ordinary::NodeName::new(defaults.default_vm_host.clone()),
+            default_mode: defaults.default_mode.into(),
+        }
+    }
 }
 
 /// A pipeline-pause gate the deploy job awaits once before its first effect.
@@ -109,6 +206,40 @@ enum MetaOperation {
     Pin,
     Unpin,
     Retire,
+    Test,
+}
+
+/// A fully-resolved test target — the `(Check …)`/`(Run …)` request lowered to
+/// the concrete cluster, node, host, and mode the daemon records and (in Unit
+/// 2b) dispatches. The `(Check …)` shorthand fills cluster/host/mode from
+/// `TestDefaults`; the `(Run …)` full form carries them explicitly. This is the
+/// spirit `State`->`Record` precedent: a distinct typed lowering, never an
+/// under-filled wire struct.
+#[derive(Debug, Clone)]
+struct ResolvedTestRun {
+    cluster: ordinary::ClusterName,
+    node: ordinary::NodeName,
+    host: ordinary::NodeName,
+    mode: ordinary::TestMode,
+}
+
+impl ResolvedTestRun {
+    /// The durable test-run row at acceptance: phase `Submitted`, outcome
+    /// `Pending`, no closure yet. Unit 2b rewrites it as the real dispatch
+    /// runs; Unit 2a records exactly this honest Pending row — never a faked
+    /// pass.
+    fn pending_record(&self, identifier: ordinary::TestRunIdentifier) -> ordinary::TestRunRecord {
+        ordinary::TestRunRecord {
+            test_run_identifier: identifier,
+            cluster_name: self.cluster.clone(),
+            node_name: self.node.clone(),
+            host: self.host.clone(),
+            mode: self.mode,
+            phase: ordinary::TestRunPhase::Submitted,
+            outcome: ordinary::TestOutcome::Pending,
+            closure_path: None,
+        }
+    }
 }
 
 /// The synchronous outcome of [`SchemaRuntime::submit_deploy`] — the verdict the
@@ -129,6 +260,7 @@ impl RuntimeConfiguration {
             generated_inputs_directory: PathBuf::from(&configuration.state_directory_path)
                 .join("generated-inputs"),
             effect_barrier: None,
+            test_defaults: Some(TestDefaults::from(&configuration.test_defaults)),
         }
     }
 
@@ -136,6 +268,11 @@ impl RuntimeConfiguration {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
             effect_barrier: None,
+            test_defaults: Some(TestDefaults {
+                cluster: ordinary::ClusterName::new("goldragon"),
+                default_vm_host: ordinary::NodeName::new("prometheus"),
+                default_mode: ordinary::TestMode::Hermetic,
+            }),
         }
     }
 
@@ -145,11 +282,21 @@ impl RuntimeConfiguration {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
             effect_barrier: Some(barrier),
+            test_defaults: Some(TestDefaults {
+                cluster: ordinary::ClusterName::new("goldragon"),
+                default_vm_host: ordinary::NodeName::new("prometheus"),
+                default_mode: ordinary::TestMode::Hermetic,
+            }),
         }
     }
 
     fn effect_barrier(&self) -> Option<&EffectBarrier> {
         self.effect_barrier.as_ref()
+    }
+
+    /// The configured test-op defaults, if the daemon was started with them.
+    fn test_defaults(&self) -> Option<&TestDefaults> {
+        self.test_defaults.as_ref()
     }
 
     fn materialization_root(&self, command: &nexus::HorizonMaterializationCommand) -> PathBuf {
@@ -582,6 +729,41 @@ impl sema::DeployJob {
     }
 }
 
+impl From<ordinary::TestRunRecord> for sema::StoredTestRun {
+    /// Project the wire test-run record onto the lojix-local durable row. The
+    /// two carry identical fields (the LiveGeneration/Generation split): the
+    /// daemon writes the durable row, the query reads it back as the wire shape.
+    fn from(record: ordinary::TestRunRecord) -> Self {
+        Self {
+            test_run_identifier: record.test_run_identifier,
+            cluster_name: record.cluster_name,
+            node_name: record.node_name,
+            host: record.host,
+            mode: record.mode,
+            phase: record.phase,
+            outcome: record.outcome,
+            closure_path: record.closure_path,
+        }
+    }
+}
+
+impl From<sema::StoredTestRun> for ordinary::TestRunRecord {
+    /// Project the durable row back onto the wire record for the
+    /// `(ByTestRun …)` query reply.
+    fn from(run: sema::StoredTestRun) -> Self {
+        Self {
+            test_run_identifier: run.test_run_identifier,
+            cluster_name: run.cluster_name,
+            node_name: run.node_name,
+            host: run.host,
+            mode: run.mode,
+            phase: run.phase,
+            outcome: run.outcome,
+            closure_path: run.closure_path,
+        }
+    }
+}
+
 impl From<ordinary::DeploymentPhase> for sema::DeployJobPhase {
     /// Mirror the wire phase onto the durable job-row phase cursor. The two
     /// enums carry the same variants; the job row tracks the same lifecycle the
@@ -761,9 +943,19 @@ impl SchemaRuntime {
 
     fn decide_ordinary_input(&mut self, input: ordinary::Input) -> nexus::NexusAction {
         match input {
-            ordinary::Input::Query(selection) => nexus::NexusAction::CommandSemaRead(
-                sema::SemaReadInput::QueryGenerations(selection.into_payload()),
-            ),
+            ordinary::Input::Query(selection) => {
+                // A (ByTestRun …) selection reads the durable test-run table;
+                // every other selection reads the generation set. Routing here
+                // keeps one Query verb covering both read planes (report 54).
+                match selection.into_payload() {
+                    ordinary::Selection::ByTestRun(lookup) => nexus::NexusAction::CommandSemaRead(
+                        sema::SemaReadInput::QueryTestRuns(lookup),
+                    ),
+                    selection => nexus::NexusAction::CommandSemaRead(
+                        sema::SemaReadInput::QueryGenerations(selection),
+                    ),
+                }
+            }
             ordinary::Input::CheckHostKeyMaterial(query) => nexus::NexusAction::CommandSemaRead(
                 sema::SemaReadInput::CheckKeyMaterial(query.into_payload()),
             ),
@@ -837,6 +1029,46 @@ impl SchemaRuntime {
                     request.into_payload(),
                 ))
             }
+            meta::Input::Test(request) => self.decide_test(request.into_payload()),
+        }
+    }
+
+    /// Lower a `Test` request and dispatch the Unit-2a stub (report 54). The
+    /// `(Check …)` shorthand fills cluster/host/mode from the configured
+    /// `TestDefaults`; `(Run …)` carries them explicitly. The resolved run is
+    /// minted a `TestRunIdentifier` and recorded as a Pending row via the SEMA
+    /// `RecordTestRun` write, which replies `AcceptedTest`. The REAL hermetic /
+    /// live dispatch is Unit 2b — this records Accepted/Pending honestly and
+    /// never fakes a pass.
+    fn decide_test(&mut self, request: meta::TestRequest) -> nexus::NexusAction {
+        let Some(defaults) = self.configuration.test_defaults() else {
+            return Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
+                self.test_rejection(meta::TestRejectionReason::NoTestDefaults),
+            )));
+        };
+        let mut resolved = defaults.lower(request);
+        // Unit 2a records a single resolved run per request (the first target).
+        // `All` and the multi-node per-target fan-out are Unit-2b projection
+        // work; an empty resolution (a bare `All`, or `(Nodes [])`) has no
+        // target to record and is rejected honestly rather than faked.
+        if resolved.is_empty() {
+            return Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
+                self.test_rejection(meta::TestRejectionReason::NodeUnknown),
+            )));
+        }
+        let run = resolved.remove(0);
+        self.active_operation = Some(MetaOperation::Test);
+        let identifier =
+            ordinary::TestRunIdentifier::new(self.store.next_test_run_identifier().unwrap_or(1));
+        nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordTestRun(
+            run.pending_record(identifier),
+        ))
+    }
+
+    fn test_rejection(&self, reason: meta::TestRejectionReason) -> meta::RejectedTest {
+        meta::RejectedTest {
+            test_rejection_reason: reason,
+            database_marker: Self::marker(self.store.commit_sequence().unwrap_or(0)),
         }
     }
 
@@ -883,6 +1115,9 @@ impl SchemaRuntime {
             sema::SemaReadOutput::KeyMaterialChecked(report) => {
                 ordinary::Output::KeyMaterialChecked(ordinary::KeyMaterialChecked::new(report))
             }
+            sema::SemaReadOutput::TestRunsQueried(listing) => {
+                ordinary::Output::TestRunsQueried(ordinary::TestRunsQueried::new(listing))
+            }
             sema::SemaReadOutput::EventLogRead(_) => {
                 ordinary::Output::QueryRejected(ordinary::QueryRejected::new(
                     self.query_rejection(ordinary::QueryRejectionReason::MalformedSelector),
@@ -928,6 +1163,10 @@ impl SchemaRuntime {
                 Self::reply_meta(meta::Output::Retired(meta::Retired::new(applied)))
             }
             sema::SemaWriteOutput::ContainerRecorded(_) => self.advance_after_phase(),
+            sema::SemaWriteOutput::TestRunRecorded(accepted) => {
+                self.active_operation = None;
+                Self::reply_meta(meta::Output::Tested(meta::Tested::new(accepted)))
+            }
             sema::SemaWriteOutput::WriteRejected(report) => self.reject_active_or_meta(report),
         }
     }
@@ -1070,8 +1309,25 @@ impl SchemaRuntime {
                     database_marker: marker,
                 }))
             }
+            MetaOperation::Test => {
+                meta::Output::TestRejected(meta::TestRejected::new(meta::RejectedTest {
+                    test_rejection_reason: Self::test_reason(report.reason),
+                    database_marker: marker,
+                }))
+            }
         };
         Self::reply_meta(output)
+    }
+
+    /// Map a SEMA write-rejection reason to a typed test rejection. A reason
+    /// with no test-domain meaning is an internal invariant failure (the Deploy
+    /// precedent), never a misleading domain reason.
+    fn test_reason(reason: sema::RejectionReason) -> meta::TestRejectionReason {
+        match reason {
+            sema::RejectionReason::ClusterUnknown => meta::TestRejectionReason::ClusterUnknown,
+            sema::RejectionReason::NodeUnknown => meta::TestRejectionReason::NodeUnknown,
+            _ => meta::TestRejectionReason::InternalError,
+        }
     }
 
     fn pin_reason(reason: sema::RejectionReason) -> meta::PinRejectionReason {
@@ -1304,6 +1560,27 @@ impl SchemaRuntime {
             sema::SemaWriteInput::RecordContainerTransition(transition) => {
                 self.record_container_transition(transition)
             }
+            sema::SemaWriteInput::RecordTestRun(record) => self.record_test_run(record),
+        }
+    }
+
+    /// Persist one accepted test-run row (phase Submitted / outcome Pending)
+    /// and reply the `AcceptedTest` handle. Mirrors `record_deploy_submitted`:
+    /// the row is durable from acceptance, so a `(Query (ByTestRun …))` reads
+    /// it immediately and a restarted daemon reconciles the in-flight test
+    /// (Unit 2b). Unit 2a writes exactly this Pending row — no faked pass.
+    fn record_test_run(&mut self, record: ordinary::TestRunRecord) -> sema::SemaWriteOutput {
+        let identifier = record.test_run_identifier.clone();
+        match self
+            .store
+            .upsert_test_run(sema::StoredTestRun::from(record))
+            .and_then(|()| self.store.commit_sequence())
+        {
+            Ok(commit_sequence) => sema::SemaWriteOutput::TestRunRecorded(meta::AcceptedTest {
+                test_run_identifier: identifier,
+                database_marker: Self::marker(commit_sequence),
+            }),
+            Err(_) => Self::write_rejected(0, sema::RejectionReason::NodeUnknown),
         }
     }
 
@@ -1595,7 +1872,47 @@ impl SchemaRuntime {
             sema::SemaReadInput::QueryGenerations(selection) => self.query_generations(selection),
             sema::SemaReadInput::ReadEventLog(range) => self.read_event_log(range),
             sema::SemaReadInput::CheckKeyMaterial(query) => self.check_key_material(query),
+            sema::SemaReadInput::QueryTestRuns(lookup) => self.query_test_runs(lookup),
         }
+    }
+
+    /// Answer a `(ByTestRun …)` query from the durable test-run table (report
+    /// 54 §5.3). Filters by cluster + node, and by run identifier when the
+    /// lookup names one (`None` returns every run for that node). The matching
+    /// rows are returned newest-first by run identifier so the routine
+    /// `(Check …)` reader sees its latest run first.
+    fn query_test_runs(&self, lookup: ordinary::TestRunLookup) -> sema::SemaReadOutput {
+        let runs = match self.store.test_runs() {
+            Ok(runs) => runs,
+            Err(_) => return Self::read_missed(0, sema::RejectionReason::NodeUnknown),
+        };
+        let commit_sequence = self.store.commit_sequence().unwrap_or(0);
+        let mut matching: Vec<sema::StoredTestRun> = runs
+            .into_iter()
+            .filter(|run| Self::test_run_matches(&lookup, run))
+            .collect();
+        matching.sort_by(|left, right| {
+            right
+                .test_run_identifier
+                .payload()
+                .cmp(left.test_run_identifier.payload())
+        });
+        sema::SemaReadOutput::TestRunsQueried(ordinary::TestRunListing {
+            runs: matching
+                .into_iter()
+                .map(ordinary::TestRunRecord::from)
+                .collect(),
+            database_marker: Self::marker(commit_sequence),
+        })
+    }
+
+    fn test_run_matches(lookup: &ordinary::TestRunLookup, run: &sema::StoredTestRun) -> bool {
+        lookup.cluster_name == run.cluster_name
+            && lookup.node_name == run.node_name
+            && lookup
+                .run
+                .as_ref()
+                .is_none_or(|identifier| identifier == &run.test_run_identifier)
     }
 
     fn query_generations(&self, selection: ordinary::Selection) -> sema::SemaReadOutput {
@@ -1631,6 +1948,9 @@ impl SchemaRuntime {
                 *lookup.payload() == live.generation_identifier
             }
             ordinary::Selection::ByEventLog(_) => true,
+            // A test-run selection never reads the generation set — it is
+            // routed to QueryTestRuns before reaching here (decide_ordinary_input).
+            ordinary::Selection::ByTestRun(_) => false,
         }
     }
 

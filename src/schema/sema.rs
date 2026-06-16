@@ -40,11 +40,27 @@ pub use signal_lojix::schema::lib::DeploymentIdentifier as DeploymentIdentifier;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::GenerationIdentifier as GenerationIdentifier;
 #[rustfmt::skip]
+pub use signal_lojix::schema::lib::TestRunIdentifier as TestRunIdentifier;
+#[rustfmt::skip]
 pub use signal_lojix::schema::lib::DeploymentKind as DeploymentKind;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::ActivationKind as ActivationKind;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::GenerationSlot as GenerationSlot;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::TestMode as TestMode;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::TestRunRecord as TestRunRecord;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::TestRunListing as TestRunListing;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::TestRunLookup as TestRunLookup;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::TestRunPhase as TestRunPhase;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::TestOutcome as TestOutcome;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::FailureStage as FailureStage;
 #[rustfmt::skip]
 pub use meta_signal_lojix::schema::lib::SystemDeployment as SystemDeployment;
 #[rustfmt::skip]
@@ -57,6 +73,8 @@ pub use meta_signal_lojix::schema::lib::UnpinRequest as UnpinRequest;
 pub use meta_signal_lojix::schema::lib::RetireRequest as RetireRequest;
 #[rustfmt::skip]
 pub use meta_signal_lojix::schema::lib::AcceptedDeploy as AcceptedDeploy;
+#[rustfmt::skip]
+pub use meta_signal_lojix::schema::lib::AcceptedTest as AcceptedTest;
 #[rustfmt::skip]
 pub use meta_signal_lojix::schema::lib::AppliedPin as AppliedPin;
 #[rustfmt::skip]
@@ -75,6 +93,7 @@ pub enum SemaReadInput {
     QueryGenerations(Selection),
     ReadEventLog(EventLogRange),
     CheckKeyMaterial(KeyMaterialQuery),
+    QueryTestRuns(TestRunLookup),
 }
 
 #[rustfmt::skip]
@@ -84,6 +103,7 @@ pub enum SemaReadOutput {
     GenerationsQueried(GenerationListing),
     EventLogRead(EventLogPage),
     KeyMaterialChecked(KeyMaterialReport),
+    TestRunsQueried(TestRunListing),
     ReadMissed(RejectionReport),
 }
 
@@ -107,6 +127,7 @@ pub enum SemaWriteInput {
     UnpinGeneration(UnpinRequest),
     RetireGeneration(RetireRequest),
     RecordContainerTransition(ContainerTransition),
+    RecordTestRun(TestRunRecord),
 }
 
 #[rustfmt::skip]
@@ -174,6 +195,7 @@ pub enum SemaWriteOutput {
     GenerationUnpinned(AppliedUnpin),
     GenerationRetired(AppliedRetire),
     ContainerRecorded(ContainerReceipt),
+    TestRunRecorded(AcceptedTest),
     WriteRejected(RejectionReport),
 }
 
@@ -371,6 +393,25 @@ pub enum DeployJobPhase {
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TestRunTable(Vec<StoredTestRun>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StoredTestRun {
+    pub test_run_identifier: TestRunIdentifier,
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub host: NodeName,
+    pub mode: TestMode,
+    pub phase: TestRunPhase,
+    pub outcome: TestOutcome,
+    pub closure_path: Option<ClosurePath>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Input {
     SemaReadInput(SemaReadInput),
     SemaWriteInput(SemaWriteInput),
@@ -537,6 +578,25 @@ impl From<Vec<DeployJob>> for DeployJobTable {
 }
 
 #[rustfmt::skip]
+impl TestRunTable {
+    pub fn new(payload: Vec<StoredTestRun>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Vec<StoredTestRun> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Vec<StoredTestRun> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Vec<StoredTestRun>> for TestRunTable {
+    fn from(payload: Vec<StoredTestRun>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl SemaReadInput {
     pub fn query_generations(payload: Selection) -> Self {
         Self::QueryGenerations(payload)
@@ -546,6 +606,9 @@ impl SemaReadInput {
     }
     pub fn check_key_material(payload: KeyMaterialQuery) -> Self {
         Self::CheckKeyMaterial(payload)
+    }
+    pub fn query_test_runs(payload: TestRunLookup) -> Self {
+        Self::QueryTestRuns(payload)
     }
 }
 
@@ -559,6 +622,9 @@ impl SemaReadOutput {
     }
     pub fn key_material_checked(payload: KeyMaterialReport) -> Self {
         Self::KeyMaterialChecked(payload)
+    }
+    pub fn test_runs_queried(payload: TestRunListing) -> Self {
+        Self::TestRunsQueried(payload)
     }
     pub fn read_missed(payload: RejectionReport) -> Self {
         Self::ReadMissed(payload)
@@ -587,6 +653,9 @@ impl SemaWriteInput {
     }
     pub fn record_container_transition(payload: ContainerTransition) -> Self {
         Self::RecordContainerTransition(payload)
+    }
+    pub fn record_test_run(payload: TestRunRecord) -> Self {
+        Self::RecordTestRun(payload)
     }
 }
 
@@ -622,6 +691,9 @@ impl SemaWriteOutput {
     }
     pub fn container_recorded(payload: ContainerReceipt) -> Self {
         Self::ContainerRecorded(payload)
+    }
+    pub fn test_run_recorded(payload: AcceptedTest) -> Self {
+        Self::TestRunRecorded(payload)
     }
     pub fn write_rejected(payload: RejectionReport) -> Self {
         Self::WriteRejected(payload)
@@ -683,6 +755,13 @@ impl From<KeyMaterialQuery> for SemaReadInput {
 }
 
 #[rustfmt::skip]
+impl From<TestRunLookup> for SemaReadInput {
+    fn from(payload: TestRunLookup) -> Self {
+        Self::QueryTestRuns(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl From<GenerationListing> for SemaReadOutput {
     fn from(payload: GenerationListing) -> Self {
         Self::GenerationsQueried(payload)
@@ -700,6 +779,13 @@ impl From<EventLogPage> for SemaReadOutput {
 impl From<KeyMaterialReport> for SemaReadOutput {
     fn from(payload: KeyMaterialReport) -> Self {
         Self::KeyMaterialChecked(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<TestRunListing> for SemaReadOutput {
+    fn from(payload: TestRunListing) -> Self {
+        Self::TestRunsQueried(payload)
     }
 }
 
@@ -756,6 +842,13 @@ impl From<RetireRequest> for SemaWriteInput {
 impl From<ContainerTransition> for SemaWriteInput {
     fn from(payload: ContainerTransition) -> Self {
         Self::RecordContainerTransition(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<TestRunRecord> for SemaWriteInput {
+    fn from(payload: TestRunRecord) -> Self {
+        Self::RecordTestRun(payload)
     }
 }
 
@@ -819,6 +912,13 @@ impl From<AppliedRetire> for SemaWriteOutput {
 impl From<ContainerReceipt> for SemaWriteOutput {
     fn from(payload: ContainerReceipt) -> Self {
         Self::ContainerRecorded(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<AcceptedTest> for SemaWriteOutput {
+    fn from(payload: AcceptedTest) -> Self {
+        Self::TestRunRecorded(payload)
     }
 }
 
@@ -926,6 +1026,7 @@ pub enum SemaReadInputRoute {
     QueryGenerations,
     ReadEventLog,
     CheckKeyMaterial,
+    QueryTestRuns,
 }
 
 #[rustfmt::skip]
@@ -935,6 +1036,7 @@ impl SemaReadInput {
             Self::QueryGenerations(_) => SemaReadInputRoute::QueryGenerations,
             Self::ReadEventLog(_) => SemaReadInputRoute::ReadEventLog,
             Self::CheckKeyMaterial(_) => SemaReadInputRoute::CheckKeyMaterial,
+            Self::QueryTestRuns(_) => SemaReadInputRoute::QueryTestRuns,
         }
     }
 }
@@ -955,6 +1057,7 @@ pub enum SemaReadOutputRoute {
     GenerationsQueried,
     EventLogRead,
     KeyMaterialChecked,
+    TestRunsQueried,
     ReadMissed,
 }
 
@@ -965,6 +1068,7 @@ impl SemaReadOutput {
             Self::GenerationsQueried(_) => SemaReadOutputRoute::GenerationsQueried,
             Self::EventLogRead(_) => SemaReadOutputRoute::EventLogRead,
             Self::KeyMaterialChecked(_) => SemaReadOutputRoute::KeyMaterialChecked,
+            Self::TestRunsQueried(_) => SemaReadOutputRoute::TestRunsQueried,
             Self::ReadMissed(_) => SemaReadOutputRoute::ReadMissed,
         }
     }
@@ -990,6 +1094,7 @@ pub enum SemaWriteInputRoute {
     UnpinGeneration,
     RetireGeneration,
     RecordContainerTransition,
+    RecordTestRun,
 }
 
 #[rustfmt::skip]
@@ -1007,6 +1112,7 @@ impl SemaWriteInput {
             Self::RecordContainerTransition(_) => {
                 SemaWriteInputRoute::RecordContainerTransition
             }
+            Self::RecordTestRun(_) => SemaWriteInputRoute::RecordTestRun,
         }
     }
 }
@@ -1031,6 +1137,7 @@ pub enum SemaWriteOutputRoute {
     GenerationUnpinned,
     GenerationRetired,
     ContainerRecorded,
+    TestRunRecorded,
     WriteRejected,
 }
 
@@ -1045,6 +1152,7 @@ impl SemaWriteOutput {
             Self::GenerationUnpinned(_) => SemaWriteOutputRoute::GenerationUnpinned,
             Self::GenerationRetired(_) => SemaWriteOutputRoute::GenerationRetired,
             Self::ContainerRecorded(_) => SemaWriteOutputRoute::ContainerRecorded,
+            Self::TestRunRecorded(_) => SemaWriteOutputRoute::TestRunRecorded,
             Self::WriteRejected(_) => SemaWriteOutputRoute::WriteRejected,
         }
     }
@@ -1097,6 +1205,7 @@ impl SemaObjectName {
                     SemaWriteInputRoute::RecordContainerTransition => {
                         "SemaWriteInputRecordContainerTransition"
                     }
+                    SemaWriteInputRoute::RecordTestRun => "SemaWriteInputRecordTestRun",
                 }
             }
             Self::ReadInput(route) => {
@@ -1108,6 +1217,7 @@ impl SemaObjectName {
                     SemaReadInputRoute::CheckKeyMaterial => {
                         "SemaReadInputCheckKeyMaterial"
                     }
+                    SemaReadInputRoute::QueryTestRuns => "SemaReadInputQueryTestRuns",
                 }
             }
             Self::WriteOutput(route) => {
@@ -1131,6 +1241,9 @@ impl SemaObjectName {
                     SemaWriteOutputRoute::ContainerRecorded => {
                         "SemaWriteOutputContainerRecorded"
                     }
+                    SemaWriteOutputRoute::TestRunRecorded => {
+                        "SemaWriteOutputTestRunRecorded"
+                    }
                     SemaWriteOutputRoute::WriteRejected => "SemaWriteOutputWriteRejected",
                 }
             }
@@ -1142,6 +1255,9 @@ impl SemaObjectName {
                     SemaReadOutputRoute::EventLogRead => "SemaReadOutputEventLogRead",
                     SemaReadOutputRoute::KeyMaterialChecked => {
                         "SemaReadOutputKeyMaterialChecked"
+                    }
+                    SemaReadOutputRoute::TestRunsQueried => {
+                        "SemaReadOutputTestRunsQueried"
                     }
                     SemaReadOutputRoute::ReadMissed => "SemaReadOutputReadMissed",
                 }

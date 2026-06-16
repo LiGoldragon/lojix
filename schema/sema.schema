@@ -29,15 +29,24 @@
   ClosurePath signal-lojix:lib:ClosurePath
   DeploymentIdentifier signal-lojix:lib:DeploymentIdentifier
   GenerationIdentifier signal-lojix:lib:GenerationIdentifier
+  TestRunIdentifier signal-lojix:lib:TestRunIdentifier
   DeploymentKind signal-lojix:lib:DeploymentKind
   ActivationKind signal-lojix:lib:ActivationKind
   GenerationSlot signal-lojix:lib:GenerationSlot
+  TestMode signal-lojix:lib:TestMode
+  TestRunRecord signal-lojix:lib:TestRunRecord
+  TestRunListing signal-lojix:lib:TestRunListing
+  TestRunLookup signal-lojix:lib:TestRunLookup
+  TestRunPhase signal-lojix:lib:TestRunPhase
+  TestOutcome signal-lojix:lib:TestOutcome
+  FailureStage signal-lojix:lib:FailureStage
   SystemDeployment meta-signal-lojix:lib:SystemDeployment
   HomeDeployment meta-signal-lojix:lib:HomeDeployment
   PinRequest meta-signal-lojix:lib:PinRequest
   UnpinRequest meta-signal-lojix:lib:UnpinRequest
   RetireRequest meta-signal-lojix:lib:RetireRequest
   AcceptedDeploy meta-signal-lojix:lib:AcceptedDeploy
+  AcceptedTest meta-signal-lojix:lib:AcceptedTest
   AppliedPin meta-signal-lojix:lib:AppliedPin
   AppliedUnpin meta-signal-lojix:lib:AppliedUnpin
   AppliedRetire meta-signal-lojix:lib:AppliedRetire
@@ -45,19 +54,23 @@
 [SemaReadInput SemaWriteInput]
 [SemaReadOutput SemaWriteOutput]
 {
-  SemaReadInput [(QueryGenerations Selection) (ReadEventLog EventLogRange) (CheckKeyMaterial KeyMaterialQuery)]
+  SemaReadInput [(QueryGenerations Selection) (ReadEventLog EventLogRange) (CheckKeyMaterial KeyMaterialQuery) (QueryTestRuns TestRunLookup)]
 
-  SemaReadOutput [(GenerationsQueried GenerationListing) (EventLogRead EventLogPage) (KeyMaterialChecked KeyMaterialReport) (ReadMissed RejectionReport)]
+  SemaReadOutput [(GenerationsQueried GenerationListing) (EventLogRead EventLogPage) (KeyMaterialChecked KeyMaterialReport) (TestRunsQueried TestRunListing) (ReadMissed RejectionReport)]
   EventLogPage { deployment_events (Vec DeploymentPhaseEvent) retention_events (Vec CacheRetentionTransitionEvent) StateMarker * }
 
-  SemaWriteInput [(RecordDeploySubmitted DeploySubmission) (RecordPhaseTransition DeploymentPhaseEvent) (RecordGenerationActivated ActivationCommit) (PinGeneration PinRequest) (UnpinGeneration UnpinRequest) (RetireGeneration RetireRequest) (RecordContainerTransition ContainerTransition)]
+  ;; RecordTestRun persists one already-lowered test-run row (the Unit-2a stub
+  ;; writes it at phase Submitted / outcome Pending) and replies the accepted
+  ;; handle, mirroring RecordDeploySubmitted -> DeploySubmitted. Unit 2b
+  ;; rewrites the row at each phase transition as the real dispatch runs.
+  SemaWriteInput [(RecordDeploySubmitted DeploySubmission) (RecordPhaseTransition DeploymentPhaseEvent) (RecordGenerationActivated ActivationCommit) (PinGeneration PinRequest) (UnpinGeneration UnpinRequest) (RetireGeneration RetireRequest) (RecordContainerTransition ContainerTransition) (RecordTestRun TestRunRecord)]
   DeploySubmission [(System SystemDeployment) (Home HomeDeployment)]
   ActivationCommit { GenerationIdentifier * ClusterName * NodeName * GenerationSlot * ClosurePath * }
   ContainerTransition { ClusterName * NodeName * container ContainerName state ContainerState }
   ContainerName String
   ContainerState [Starting Started Stopping Stopped Failed]
 
-  SemaWriteOutput [(DeploySubmitted AcceptedDeploy) (PhaseRecorded PhaseReceipt) (GenerationActivated AppliedActivation) (GenerationPinned AppliedPin) (GenerationUnpinned AppliedUnpin) (GenerationRetired AppliedRetire) (ContainerRecorded ContainerReceipt) (WriteRejected RejectionReport)]
+  SemaWriteOutput [(DeploySubmitted AcceptedDeploy) (PhaseRecorded PhaseReceipt) (GenerationActivated AppliedActivation) (GenerationPinned AppliedPin) (GenerationUnpinned AppliedUnpin) (GenerationRetired AppliedRetire) (ContainerRecorded ContainerReceipt) (TestRunRecorded AcceptedTest) (WriteRejected RejectionReport)]
   PhaseReceipt { EventLogPosition * StateMarker * }
   AppliedActivation { GenerationIdentifier * GenerationSlot * StateMarker * }
   ContainerReceipt { EventLogPosition * StateMarker * }
@@ -91,4 +104,25 @@
   DeployJobTable { jobs (Vec DeployJob) }
   DeployJob { DeploymentIdentifier * GenerationIdentifier * ClusterName * NodeName * phase DeployJobPhase closure_path (Optional ClosurePath) resolved_target (Optional String) boot_once_unit (Optional String) }
   DeployJobPhase [Submitted Building Built Copying Activating Activated Failed]
+
+  ;; The durable test-run table (report 54 §5.3), mirroring DeployJobTable. One
+  ;; row per submitted test, keyed by TestRunIdentifier, written on accept at
+  ;; phase Submitted / outcome Pending and rewritten at every phase transition
+  ;; (Unit 2b) so a restarted daemon reconciles an in-flight test and the
+  ;; (Query (ByTestRun …)) read answers from the persisted rows. StoredTestRun
+  ;; is the lojix-LOCAL durable row (the EngineRecord key owner) mirroring the
+  ;; ordinary-contract TestRunRecord field-for-field — the same local/wire
+  ;; split LiveGeneration/Generation already uses, because EngineRecord cannot
+  ;; be implemented on an imported wire type (the orphan rule).
+  TestRunTable { runs (Vec StoredTestRun) }
+  StoredTestRun {
+    TestRunIdentifier *
+    ClusterName *
+    NodeName *
+    host NodeName
+    mode TestMode
+    phase TestRunPhase
+    outcome TestOutcome
+    closure_path (Optional ClosurePath)
+  }
 }

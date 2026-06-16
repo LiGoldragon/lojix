@@ -33,6 +33,11 @@ fn write_daemon_configuration(
         owner_socket_path: owner_socket.display().to_string(),
         owner_socket_mode,
         state_directory_path: directory.join("state").display().to_string(),
+        test_defaults: lojix::TestDefaults {
+            cluster: "goldragon".to_string(),
+            default_vm_host: "prometheus".to_string(),
+            default_mode: lojix::TestMode::Hermetic,
+        },
     };
     let path = directory.join("daemon-configuration.rkyv");
     configuration

@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use lojix::DaemonConfiguration;
+use lojix::{DaemonConfiguration, TestDefaults, TestMode};
 use nota_next::{NotaDecode, NotaDecodeError, NotaSource};
 use thiserror::Error;
 use triad_runtime::{ArgumentError, ComponentArgument, ComponentCommand};
@@ -31,7 +31,27 @@ struct ConfigurationWriteRequest {
     owner_socket_path: WriterPath,
     owner_socket_mode: WriterMode,
     state_directory_path: WriterPath,
+    test_defaults: WriterTestDefaults,
     output_path: WriterPath,
+}
+
+/// The test-op defaults authored as typed NOTA at deploy time and encoded into
+/// the daemon's binary startup — the NOTA-to-binary boundary for report 54's
+/// `TestDefaults` (never a flag, never a runtime `Configure`).
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+struct WriterTestDefaults {
+    cluster: WriterCluster,
+    default_vm_host: WriterCluster,
+    default_mode: WriterTestMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+struct WriterCluster(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+enum WriterTestMode {
+    Hermetic,
+    Live,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
@@ -96,6 +116,11 @@ impl ConfigurationWriteRequest {
             owner_socket_path: self.owner_socket_path.0,
             owner_socket_mode: self.owner_socket_mode.0,
             state_directory_path: self.state_directory_path.0,
+            test_defaults: TestDefaults {
+                cluster: self.test_defaults.cluster.0,
+                default_vm_host: self.test_defaults.default_vm_host.0,
+                default_mode: self.test_defaults.default_mode.into(),
+            },
         };
         configuration
             .write_rkyv_file(&output_path)
@@ -107,6 +132,15 @@ impl ConfigurationWriteRequest {
 impl WriterPath {
     fn path_buf(&self) -> PathBuf {
         PathBuf::from(&self.0)
+    }
+}
+
+impl From<WriterTestMode> for TestMode {
+    fn from(mode: WriterTestMode) -> Self {
+        match mode {
+            WriterTestMode::Hermetic => Self::Hermetic,
+            WriterTestMode::Live => Self::Live,
+        }
     }
 }
 

@@ -410,7 +410,7 @@ checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 [[package]]
 name = "meta-signal-lojix"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?branch=main#defade0236af47bf211869b6b8aae6791a37e5e2"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?branch=main#b9a1de87b9999eaf7b4a2a3ef40051b7705e3e4d"
 dependencies = [
  "nota-next",
  "rkyv",
@@ -452,8 +452,8 @@ dependencies = [
 
 [[package]]
 name = "nota-next"
-version = "0.4.0"
-source = "git+https://github.com/LiGoldragon/nota-next.git?branch=main#3d6c2cdf4a7a62b36640b8622fdcaa2b931f0d43"
+version = "0.5.0"
+source = "git+https://github.com/LiGoldragon/nota-next.git?branch=main#7426a6a7d60d6e37ac40df4ecc98717af58129f8"
 dependencies = [
  "nota-next-derive",
  "rkyv",
@@ -461,8 +461,8 @@ dependencies = [
 
 [[package]]
 name = "nota-next-derive"
-version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/nota-next.git?branch=main#3d6c2cdf4a7a62b36640b8622fdcaa2b931f0d43"
+version = "0.3.0"
+source = "git+https://github.com/LiGoldragon/nota-next.git?branch=main#7426a6a7d60d6e37ac40df4ecc98717af58129f8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -618,18 +618,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
-name = "schema-next"
-version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/schema-next.git?branch=main#2397d5b2a4a8f35da1ba5957f48337f9a579db00"
+name = "schema-cc"
+version = "0.1.0"
+source = "git+https://github.com/LiGoldragon/schema-next.git?branch=main#e721626038e81cce49a7b193b07903b2868e1f68"
 dependencies = [
  "nota-next",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn",
+ "thiserror",
+]
+
+[[package]]
+name = "schema-next"
+version = "0.2.0"
+source = "git+https://github.com/LiGoldragon/schema-next.git?branch=main#e721626038e81cce49a7b193b07903b2868e1f68"
+dependencies = [
+ "blake3",
+ "nota-next",
  "rkyv",
+ "schema-cc",
+ "thiserror",
 ]
 
 [[package]]
 name = "schema-rust-next"
 version = "0.5.3"
-source = "git+https://github.com/LiGoldragon/schema-rust-next.git?branch=main#cedb2e0652b2d8e3aa24c96a82b6daee6af785ad"
+source = "git+https://github.com/LiGoldragon/schema-rust-next.git?branch=main#0a7d1db2c468a387dc33bb75e6b4d21c5bbac8d0"
 dependencies = [
  "prettyplease",
  "proc-macro2",
@@ -752,7 +768,7 @@ dependencies = [
 [[package]]
 name = "signal-lojix"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=main#c33e2be445bddc8b6bed2cffc9a49eb210513587"
+source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=main#cc8bbf32aa45657a94462e0e9e152d2f99fcbfd6"
 dependencies = [
  "nota-next",
  "rkyv",

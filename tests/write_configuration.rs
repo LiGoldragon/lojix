@@ -12,7 +12,7 @@ fn write_configuration_round_trips_through_rkyv() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix {}))",
+        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix (goldragon prometheus Hermetic) {}))",
         output.display()
     );
 
