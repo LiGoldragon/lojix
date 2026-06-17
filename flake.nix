@@ -37,6 +37,7 @@
             path: type:
             (craneLib.filterCargoSources path type)
             || (type == "regular" && pkgs.lib.hasSuffix ".schema" path)
+            || (type == "regular" && pkgs.lib.hasSuffix ".nota" path)
             || (
               type == "regular"
               && builtins.elem (baseNameOf path) [
@@ -120,7 +121,7 @@
             commonArguments
             // {
               inherit cargoArtifacts;
-              cargoExtraArgs = "--all-targets --features nota-text -- -D warnings";
+              cargoClippyExtraArgs = "--all-targets --features nota-text -- -D warnings";
             }
           );
         };

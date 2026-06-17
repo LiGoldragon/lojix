@@ -328,6 +328,9 @@ fn fixture_cluster_proposal() -> ClusterProposal {
                 super_user: None,
                 chip_gen: None,
                 ram_gb: None,
+                disk_gb: None,
+                location: None,
+                super_nodes: Vec::new(),
             },
             io: Io {
                 keyboard: Keyboard::Qwerty,
