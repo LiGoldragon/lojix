@@ -536,6 +536,8 @@ fn write_test_daemon_configuration(
             default_mode: lojix::TestMode::Hermetic,
             test_flake: "github:LiGoldragon/CriomOS-test-cluster/horizon-test-vm".to_string(),
             proposal_source: String::new(),
+            live_enabled: false,
+            live_guest_ip: String::new(),
         },
     };
     let path = directory.join("daemon-configuration.rkyv");
@@ -603,6 +605,8 @@ fn engine_with_projection() -> (tempfile::TempDir, SchemaRuntime) {
             default_mode: lojix::TestMode::Hermetic,
             test_flake: "github:LiGoldragon/CriomOS-test-cluster/horizon-test-vm".to_string(),
             proposal_source: proposal_path.display().to_string(),
+            live_enabled: false,
+            live_guest_ip: String::new(),
         },
     };
     let store = Arc::new(

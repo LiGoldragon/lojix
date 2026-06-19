@@ -94,7 +94,22 @@
   TestVmBroughtUp { ClusterName * NodeName * host NodeName }
   TestVmTornDown { ClusterName * NodeName * host NodeName }
 
-  EffectCommand [(ResolveFlakeAuth FlakeAuthRequest) (MaterializeHorizon HorizonMaterializationCommand) (NixEval NixEvalCommand) (NixBuild NixBuildCommand) (CopyClosure CopyClosureCommand) (ActivateGeneration ActivateGenerationCommand) (PathInfoGc PathInfoGcCommand) (HermeticCheck HermeticCheckCommand) (BringUpTestVm BringUpTestVmCommand) (TearDownTestVm TearDownTestVmCommand)]
+  ;; LIVE deploy-into-VM + assert (report 54 §5.2; the middle of the live
+  ;; bracket between BringUpTestVm and TearDownTestVm). DeployIntoTestVm copies
+  ;; the closure under test into the running guest over `nix copy --to
+  ;; ssh-ng://root@<guest_ip>` and activates it (switch-to-configuration on the
+  ;; guest's copied store path) — never on the host. AssertTestVm runs the
+  ;; guest-side verdict over SSH: the assertion confirms the activated system
+  ;; generation IS the deployed closure (the live success criterion). Pass/fail
+  ;; is the SSH exit status; a recorded Passed is earned by a real guest verdict,
+  ;; never faked. The two effects map one-to-one onto the existing
+  ;; Deploying/Asserting phases and the Deploy/Assert FailureStages.
+  DeployIntoTestVmCommand { ClusterName * NodeName * guest_ip String closure ClosurePath }
+  AssertTestVmCommand { ClusterName * NodeName * guest_ip String closure ClosurePath }
+  TestVmDeployedInto { ClusterName * NodeName * ClosurePath * }
+  TestVmAsserted { ClusterName * NodeName * ClosurePath * }
+
+  EffectCommand [(ResolveFlakeAuth FlakeAuthRequest) (MaterializeHorizon HorizonMaterializationCommand) (NixEval NixEvalCommand) (NixBuild NixBuildCommand) (CopyClosure CopyClosureCommand) (ActivateGeneration ActivateGenerationCommand) (PathInfoGc PathInfoGcCommand) (HermeticCheck HermeticCheckCommand) (BringUpTestVm BringUpTestVmCommand) (TearDownTestVm TearDownTestVmCommand) (DeployIntoTestVm DeployIntoTestVmCommand) (AssertTestVm AssertTestVmCommand)]
 
   EvaluatedClosure { GenerationIdentifier * ClosurePath * }
   BuiltClosure { GenerationIdentifier * ClosurePath * }
@@ -102,9 +117,9 @@
   ActivatedGeneration { GenerationIdentifier * NodeName * GenerationSlot * }
   GarbageCollected { ClusterName * NodeName * reclaimed_paths Integer }
   EffectFailure { stage EffectStage detail String }
-  EffectStage [FlakeAuth MaterializeHorizon Eval Build CopyClosure Activate Gc HermeticCheck BringUpTestVm TearDownTestVm]
+  EffectStage [FlakeAuth MaterializeHorizon Eval Build CopyClosure Activate Gc HermeticCheck BringUpTestVm TearDownTestVm DeployIntoTestVm AssertTestVm]
 
-  EffectResult [(FlakeResolved ResolvedFlake) (HorizonMaterialized MaterializedInputs) (ClosureEvaluated EvaluatedClosure) (ClosureBuilt BuiltClosure) (ClosureCopied CopiedClosure) (GenerationActivated ActivatedGeneration) (PathsCollected GarbageCollected) (HermeticCheckBuilt CheckBuilt) (TestVmBroughtUp TestVmBroughtUp) (TestVmTornDown TestVmTornDown) (EffectFailed EffectFailure)]
+  EffectResult [(FlakeResolved ResolvedFlake) (HorizonMaterialized MaterializedInputs) (ClosureEvaluated EvaluatedClosure) (ClosureBuilt BuiltClosure) (ClosureCopied CopiedClosure) (GenerationActivated ActivatedGeneration) (PathsCollected GarbageCollected) (HermeticCheckBuilt CheckBuilt) (TestVmBroughtUp TestVmBroughtUp) (TestVmTornDown TestVmTornDown) (TestVmDeployedInto TestVmDeployedInto) (TestVmAsserted TestVmAsserted) (EffectFailed EffectFailure)]
 
   NexusWork [(SignalArrived SignalInput) (SemaReadCompleted SemaReadOutput) (SemaWriteCompleted SemaWriteOutput) (EffectCompleted EffectResult)]
   NexusAction [(CommandSemaRead SemaReadInput) (CommandSemaWrite SemaWriteInput) (CommandEffect EffectCommand) (ReplyToSignal SignalOutput) (Continue NexusWork)]

@@ -92,6 +92,14 @@ pub struct TestDefaults {
     /// cluster's test-VM nodes. Empty when host-set validation is not
     /// configured.
     proposal_source: ordinary::ProposalSource,
+    /// Whether a Live run is enabled. `false` keeps the honest
+    /// `LiveNotYetEnabled` submit reject; `true` arms the implemented live
+    /// deploy-into-VM + assert chain.
+    live_enabled: bool,
+    /// The configured live guest IP — set when an external harness owns the
+    /// guest (Track A, host-untouched) and the daemon deploys/asserts into it
+    /// by IP; empty when the daemon resolves the target itself.
+    live_guest_ip: String,
 }
 
 impl TestDefaults {
@@ -192,6 +200,8 @@ impl TestDefaults {
                 "github:LiGoldragon/CriomOS-test-cluster/horizon-test-vm",
             ),
             proposal_source: ordinary::ProposalSource::new(""),
+            live_enabled: false,
+            live_guest_ip: String::new(),
         }
     }
 
@@ -200,6 +210,19 @@ impl TestDefaults {
     /// when host-set validation is not configured.
     fn projection(&self) -> Option<ClusterProjection> {
         ClusterProjection::from_source(&self.proposal_source)
+    }
+
+    /// Whether a Live run is enabled (the explicit binary-config arm, not a
+    /// blanket reject). When `false`, `resolve_and_validate` rejects a Live run
+    /// at submit with `LiveNotYetEnabled`.
+    fn live_enabled(&self) -> bool {
+        self.live_enabled
+    }
+
+    /// The configured live guest IP, if a harness-owned guest was supplied.
+    /// Empty when the daemon resolves the live target itself.
+    fn live_guest_ip(&self) -> &str {
+        &self.live_guest_ip
     }
 }
 
@@ -211,6 +234,8 @@ impl From<&crate::TestDefaults> for TestDefaults {
             default_mode: defaults.default_mode.into(),
             test_flake: ordinary::FlakeReference::new(defaults.test_flake.clone()),
             proposal_source: ordinary::ProposalSource::new(defaults.proposal_source.clone()),
+            live_enabled: defaults.live_enabled,
+            live_guest_ip: defaults.live_guest_ip.clone(),
         }
     }
 }
@@ -320,14 +345,20 @@ impl ResolvedTestRun {
     /// The live bring-up command for this run: the report-51 host-untouched
     /// user-namespace bring-up of the generated microVM runner on the resolved
     /// vmhost. The runner closure and guest IP are filled by the live path's
-    /// preceding build; BUILT but not run live here (gated).
-    fn bring_up_command(&self, runner: ordinary::ClosurePath) -> nexus::BringUpTestVmCommand {
+    /// preceding build (report 147 hole 2) — the guest IP is the resolved live
+    /// target's, no longer a hardcoded empty string. An empty `runner` is the
+    /// Track A harness-owned-guest path (no second VM to bring up).
+    fn bring_up_command(
+        &self,
+        runner: ordinary::ClosurePath,
+        guest_ip: String,
+    ) -> nexus::BringUpTestVmCommand {
         nexus::BringUpTestVmCommand {
             cluster_name: self.cluster.clone(),
             node_name: self.node.clone(),
             host: self.host.clone(),
             runner,
-            guest_ip: String::new(),
+            guest_ip,
         }
     }
 
@@ -355,18 +386,50 @@ struct TestPipeline {
     stage: TestStage,
     /// The accepted database marker, replayed on the terminal reply.
     accepted_marker: ordinary::DatabaseMarker,
+    /// The live deploy/assert target — the brought-up guest's IP and the
+    /// closure under test — captured by the live runner build before bring-up.
+    /// `None` for a Hermetic run (the sandboxed check needs no live target) and
+    /// before the live build resolves it.
+    live_target: Option<LiveTarget>,
+}
+
+/// The resolved live deploy/assert target: the running guest's reachable IP and
+/// the closure copied into and asserted on the guest. Captured by the live
+/// runner build (mirroring the hermetic build's out-path capture) and threaded
+/// across the bracket so the `DeployIntoTestVm`/`AssertTestVm` effects address
+/// the real guest with the real closure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveTarget {
+    guest_ip: String,
+    closure: ordinary::ClosurePath,
+}
+
+impl LiveTarget {
+    fn new(guest_ip: impl Into<String>, closure: ordinary::ClosurePath) -> Self {
+        Self {
+            guest_ip: guest_ip.into(),
+            closure,
+        }
+    }
 }
 
 /// The test pipeline cursor stage — the step that has just completed. The
 /// executor reads it to emit the next effect or the terminal outcome write.
+/// The terminal verdict reads this: only a stage that reached `Asserted` (the
+/// real guest-side assertion passed) earns a `Passed`; teardown from any
+/// earlier stage records `Failed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TestStage {
     /// Test accepted; the first effect (hermetic check, or live bring-up) runs
     /// next.
     Submitted,
-    /// (Live) the VM was brought up; the deploy chain + assert run next.
+    /// (Live) the VM was brought up; the deploy-into-VM effect runs next.
     BroughtUp,
-    /// (Live) the deploy + assert finished; teardown runs next.
+    /// (Live) the closure was deployed + activated on the guest; the assert
+    /// effect runs next.
+    Deployed,
+    /// (Live) the guest-side assertion PASSED; teardown runs next, then the
+    /// terminal `Passed`.
     Asserted,
 }
 
@@ -382,7 +445,43 @@ impl TestPipeline {
                 commit_sequence: ordinary::CommitSequence::new(0),
                 state_digest: ordinary::StateDigest::new(0),
             },
+            live_target: None,
         }
+    }
+
+    /// The deploy-into-VM command for the live target captured at bring-up:
+    /// `nix copy --to ssh-ng://root@<guest_ip>` the closure under test into the
+    /// running guest, then activate it on the guest. `None` until the live
+    /// runner build has resolved the guest IP + closure.
+    fn deploy_into_command(&self) -> Option<nexus::DeployIntoTestVmCommand> {
+        let target = self.live_target.as_ref()?;
+        Some(nexus::DeployIntoTestVmCommand {
+            cluster_name: self.run.cluster.clone(),
+            node_name: self.run.node.clone(),
+            guest_ip: target.guest_ip.clone(),
+            closure: target.closure.clone(),
+        })
+    }
+
+    /// The assert command for the captured live target: the guest-side verdict
+    /// over ssh that the activated generation IS the deployed closure. `None`
+    /// until the live target is resolved.
+    fn assert_command(&self) -> Option<nexus::AssertTestVmCommand> {
+        let target = self.live_target.as_ref()?;
+        Some(nexus::AssertTestVmCommand {
+            cluster_name: self.run.cluster.clone(),
+            node_name: self.run.node.clone(),
+            guest_ip: target.guest_ip.clone(),
+            closure: target.closure.clone(),
+        })
+    }
+
+    /// The closure under test, once the live target (or hermetic build) has
+    /// captured it — the durable `closure_path` recorded with a terminal Passed.
+    fn live_closure(&self) -> Option<ordinary::ClosurePath> {
+        self.live_target
+            .as_ref()
+            .map(|target| target.closure.clone())
     }
 
     /// The durable row at a given phase/outcome, carrying the run identity and
@@ -549,6 +648,55 @@ impl HermeticCheck {
     }
 }
 
+/// The live runner build (report 54 §5.2; hole 2 in report 147) — the real
+/// `nix build <flake>#checks.<system>.live-<node> --print-out-paths` that
+/// produces the CLOSURE UNDER TEST for the live deploy-into-VM path, mirroring
+/// `HermeticCheck`'s out-path capture. Paired with the guest IP, the captured
+/// out-path is the closure the daemon copies into and asserts on the running
+/// guest. The guest IP is supplied by config (Track A: the harness owns the
+/// guest and tells the daemon its IP) rather than invented here.
+#[derive(Debug, Clone)]
+struct LiveRunner {
+    flake: ordinary::FlakeReference,
+    system: String,
+    node: ordinary::NodeName,
+    guest_ip: String,
+}
+
+impl LiveRunner {
+    fn new(run: &ResolvedTestRun, guest_ip: impl Into<String>) -> Self {
+        Self {
+            flake: run.flake.clone(),
+            system: HermeticCheck::SYSTEM.to_string(),
+            node: run.node.clone(),
+            guest_ip: guest_ip.into(),
+        }
+    }
+
+    /// The `<flake>#checks.<system>.live-<node>` installable — the live runner
+    /// closure keyed `live-<node>` (distinct from the hermetic `vm-<node>`).
+    fn installable(&self) -> String {
+        format!(
+            "{}#checks.{}.live-{}",
+            self.flake.payload(),
+            self.system,
+            self.node.payload()
+        )
+    }
+
+    /// Build the runner closure for real and pair the realised out-path with the
+    /// guest IP into the live deploy/assert target. A non-zero build exit is the
+    /// `BringUpTestVm`-stage failure detail (the build is the bring-up's first
+    /// step). NEVER fabricates a closure.
+    async fn resolve(&self) -> std::result::Result<LiveTarget, String> {
+        let output = NixCommand::build_check(&self.installable()).run().await?;
+        Ok(LiveTarget::new(
+            self.guest_ip.clone(),
+            ordinary::ClosurePath::new(NixCommand::first_line(&output)),
+        ))
+    }
+}
+
 /// The LIVE host-untouched VM lifecycle (report 51 §3 / report 47 v2, Unit 2b)
 /// — the report-51 user-namespace bring-up/teardown of the generated microVM
 /// runner on the resolved vmhost. BUILT here, NOT run live (the first
@@ -607,6 +755,15 @@ impl LiveTestVm {
         format!("lojix-test-vm-{}", self.node.payload())
     }
 
+    /// Whether this bring-up owns a generated runner to start on a real vmhost.
+    /// `false` when the verification harness owns its own transient guest (the
+    /// Track A `runNixOSTest` path, host-untouched): the daemon then does not
+    /// bring up a second VM, it deploys into and asserts against the guest the
+    /// harness already booted. `true` only on the report-51 vmhost bring-up.
+    fn has_runner(&self) -> bool {
+        !self.runner.is_empty()
+    }
+
     /// The host-untouched bring-up invocation (report 51 §3): a `--user`
     /// systemd-run unit that `unshare -rn`s a private netns, brings up the
     /// additive tap inside it, and `nsenter`s the generated runner. Constructed
@@ -647,6 +804,142 @@ impl LiveTestVm {
                 "systemctl --user stop {unit} || true",
                 unit = self.unit_name(),
             )))
+    }
+}
+
+/// A running guest addressed by its raw IP — `root@<guest_ip>` over `ssh-ng` for
+/// `nix copy` and over plain `ssh` for the activation + the guest-side
+/// assertion. Distinct from [`SshTarget`] (which addresses a node by its criome
+/// domain name): a freshly brought-up test guest has only an IP on the additive
+/// tap, no DNS name. `StrictHostKeyChecking=accept-new` because a throwaway
+/// guest's key is fresh every boot — never a persistent host, so accepting the
+/// new key on first contact does not weaken any real trust.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuestTarget {
+    guest_ip: String,
+}
+
+impl GuestTarget {
+    fn new(guest_ip: impl Into<String>) -> Self {
+        Self {
+            guest_ip: guest_ip.into(),
+        }
+    }
+
+    /// `ssh-ng://root@<guest_ip>` — the `nix copy --to` destination.
+    fn copy_uri(&self) -> String {
+        format!("ssh-ng://root@{}", self.guest_ip)
+    }
+
+    /// `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new root@<guest_ip>
+    /// <remote_command>` — a batch ssh into the guest by IP.
+    fn remote_invocation(&self, remote_command: ShellCommand) -> NixCommand {
+        NixCommand::new(
+            "ssh",
+            vec![
+                "-o".to_string(),
+                "BatchMode=yes".to_string(),
+                "-o".to_string(),
+                "StrictHostKeyChecking=accept-new".to_string(),
+                format!("root@{}", self.guest_ip),
+                remote_command.into_text(),
+            ],
+        )
+    }
+}
+
+/// The LIVE deploy-into-VM step (report 54 §5.2; the first half of the live
+/// bracket's middle). `nix copy --to ssh-ng://root@<guest_ip> <closure>` copies
+/// the closure under test into the running guest, then a single batch ssh sets
+/// the guest's system profile to the copied store path and runs
+/// `switch-to-configuration switch` ON THE GUEST — never on the host. A real
+/// success here is recorded as the `Deploying` phase advancing; a copy or
+/// activation failure is `Failed(Deploy)`, never a faked deploy.
+#[derive(Debug, Clone)]
+struct LiveDeploy {
+    target: GuestTarget,
+    closure: String,
+}
+
+impl LiveDeploy {
+    fn from_command(command: &nexus::DeployIntoTestVmCommand) -> Self {
+        Self {
+            target: GuestTarget::new(command.guest_ip.clone()),
+            closure: command.closure.payload().clone(),
+        }
+    }
+
+    /// `nix copy --substitute-on-destination --to ssh-ng://root@<guest_ip>
+    /// <closure>` — copy is idempotent (a closure already present is a no-op).
+    fn copy_invocation(&self) -> NixCommand {
+        NixCommand::new(
+            "nix",
+            vec![
+                "copy".to_string(),
+                "--substitute-on-destination".to_string(),
+                "--to".to_string(),
+                self.target.copy_uri(),
+                self.closure.clone(),
+            ],
+        )
+    }
+
+    /// The guest-side activation: set the system profile to the copied closure
+    /// and `switch-to-configuration switch`. Runs entirely on the guest over one
+    /// batch ssh — the host is never reconfigured.
+    fn activate_invocation(&self) -> NixCommand {
+        let closure = &self.closure;
+        self.target.remote_invocation(ShellCommand::from_raw(format!(
+            "set -eu; \
+             nix-env -p /nix/var/nix/profiles/system --set {closure}; \
+             {closure}/bin/switch-to-configuration switch"
+        )))
+    }
+
+    /// Copy the closure into the guest, then activate it on the guest. Either
+    /// failure surfaces as the `Deploy` stage detail.
+    async fn run(&self) -> std::result::Result<(), String> {
+        self.copy_invocation().run().await?;
+        self.activate_invocation().run().await.map(|_| ())
+    }
+}
+
+/// The LIVE assert step (report 54 §5.2; the second half of the bracket's
+/// middle). The guest-side verdict: confirm the activated system generation IS
+/// the deployed closure — `readlink /run/current-system` on the guest must equal
+/// the deployed store path. A `Passed` is earned only when this guest-side check
+/// succeeds; any mismatch or ssh failure is `Failed(Assert)`. This is the
+/// minimal, real, extensible assertion: a follow-up can run a richer flake-
+/// declared guest-side check derivation here without changing the bracket.
+#[derive(Debug, Clone)]
+struct LiveAssert {
+    target: GuestTarget,
+    closure: String,
+}
+
+impl LiveAssert {
+    fn from_command(command: &nexus::AssertTestVmCommand) -> Self {
+        Self {
+            target: GuestTarget::new(command.guest_ip.clone()),
+            closure: command.closure.payload().clone(),
+        }
+    }
+
+    /// The guest-side assertion invocation: the running system IS the deployed
+    /// closure. `test "$(readlink -f /run/current-system)" = <closure>` exits
+    /// non-zero (failing the assert) if the guest is running anything else.
+    fn assert_invocation(&self) -> NixCommand {
+        let closure = &self.closure;
+        self.target.remote_invocation(ShellCommand::from_raw(format!(
+            "set -eu; \
+             ACTIVE=$(readlink -f /run/current-system); \
+             test \"$ACTIVE\" = {closure}"
+        )))
+    }
+
+    /// Run the guest-side verdict. `Ok` only on a real success exit.
+    async fn run(&self) -> std::result::Result<(), String> {
+        self.assert_invocation().run().await.map(|_| ())
     }
 }
 
@@ -1374,16 +1667,29 @@ impl SchemaRuntime {
             ordinary::TestMode::Hermetic => {
                 nexus::EffectCommand::HermeticCheck(pipeline.run.hermetic_check_command())
             }
-            // LIVE is BUILT but not run live here (gated). The bring-up effect
-            // is constructed and dispatched; `run_effect` for the live effects
-            // is the host-untouched user-namespace path (report 51 §3). A live
-            // run is psyche-gated, so the daemon-integration proof exercises
-            // Hermetic; this constructs the live first effect honestly.
-            ordinary::TestMode::Live => nexus::EffectCommand::BringUpTestVm(
-                pipeline
-                    .run
-                    .bring_up_command(ordinary::ClosurePath::new(String::new())),
-            ),
+            // LIVE (report 147 holes 2+4): resolve the live target BEFORE
+            // bring-up — build the runner closure under test (mirror the
+            // hermetic out-path capture) and pair it with the guest IP. This
+            // replaces the empty `ClosurePath::new(String::new())` /
+            // hardcoded-empty-guest-IP stub: the deploy/assert effects address
+            // the real guest with the real closure. A build failure is recorded
+            // `Failed(BringUp)` honestly rather than driving an empty bracket.
+            ordinary::TestMode::Live => match self.resolve_live_target(&pipeline.run).await {
+                Ok(target) => {
+                    self.set_live_target(target.clone());
+                    nexus::EffectCommand::BringUpTestVm(pipeline.run.bring_up_command(
+                        ordinary::ClosurePath::new(String::new()),
+                        target.guest_ip,
+                    ))
+                }
+                Err(detail) => {
+                    let action = self.fail_test_pipeline(nexus::EffectFailure {
+                        stage: nexus::EffectStage::BringUpTestVm,
+                        detail,
+                    });
+                    return self.drive_to_terminal(action).await;
+                }
+            },
         };
         // The cursor's first effect is fired directly through `run_effect` and
         // routed by `decide_test_effect_completion`, then `drive_to_terminal`
@@ -1391,6 +1697,32 @@ impl SchemaRuntime {
         let result = self.run_effect(first_effect).await;
         let action = self.decide_test_effect_completion(result);
         self.drive_to_terminal(action).await
+    }
+
+    /// Resolve the live deploy/assert target before bring-up (report 147 hole
+    /// 2): build the runner closure under test from the flake and pair it with
+    /// the configured guest IP. The guest IP comes from the daemon's binary
+    /// startup configuration (Track A: a harness-owned guest supplies its IP);
+    /// an unconfigured guest IP is an honest error, never a fabricated target.
+    async fn resolve_live_target(
+        &self,
+        run: &ResolvedTestRun,
+    ) -> std::result::Result<LiveTarget, String> {
+        let guest_ip = self
+            .configuration
+            .test_defaults()
+            .map(|defaults| defaults.live_guest_ip().to_string())
+            .unwrap_or_default();
+        if guest_ip.is_empty() {
+            return Err("live run requires a configured live_guest_ip; none set".to_string());
+        }
+        LiveRunner::new(run, guest_ip).resolve().await
+    }
+
+    fn set_live_target(&mut self, target: LiveTarget) {
+        if let Some(pipeline) = self.active_test.as_mut() {
+            pipeline.live_target = Some(target);
+        }
     }
 
     /// Drive a test-pipeline `NexusAction` to its terminal `Tested`/
@@ -1587,14 +1919,19 @@ impl SchemaRuntime {
         if resolved.is_empty() {
             return Err(meta::TestRejectionReason::NodeUnknown);
         }
-        // LIVE honesty (report 54 Unit 2b fix 1): the live deploy-into-VM +
-        // assert chain is not yet implemented, so a Live run is rejected at
-        // submit rather than driven through a bracket that would write a
-        // `Passed` it never earned. Mirrors the Deploy `UnsupportedDeployAction`
-        // precedent. The HERMETIC path is fully real and unaffected.
-        if resolved
-            .iter()
-            .any(|run| matches!(run.mode, ordinary::TestMode::Live))
+        // LIVE gate (report 147 hole 5): the live deploy-into-VM + assert chain
+        // is implemented, so a Live run is no longer blanket-rejected — it is
+        // gated behind an EXPLICIT enable in the daemon's binary startup config
+        // (`live_enabled`). A daemon not armed for live runs still rejects at
+        // submit with `LiveNotYetEnabled` (the honest-reject precedent: an
+        // unsupported-here shape refuses up front rather than writing a `Passed`
+        // it never earned), but the gate is now a config arm, not a blanket
+        // never. The deployed production live cycle on a real host stays
+        // psyche-gated by leaving `live_enabled` false on production daemons.
+        if !defaults.live_enabled()
+            && resolved
+                .iter()
+                .any(|run| matches!(run.mode, ordinary::TestMode::Live))
         {
             return Err(meta::TestRejectionReason::LiveNotYetEnabled);
         }
@@ -1725,16 +2062,25 @@ impl SchemaRuntime {
 
     // ---- decide: TEST effect completion (drives the test dispatch) ------
 
-    /// Route a test effect's result to the next test step (Unit 2b). The
-    /// hermetic check is a single effect: a built check records `Passed` with
-    /// the realised out-path as the closure, a failed build records
-    /// `Failed(HermeticCheck)` — never a faked pass. The live effects bracket
-    /// the (not-yet-implemented) deploy chain: `TestVmBroughtUp` records the
-    /// container `Started` transition and advances to teardown; `TestVmTornDown`
-    /// records `Stopped` and the terminal `Failed(Assert)` — the deploy + assert
-    /// between bring-up and teardown is unimplemented, so the bracket cannot
-    /// pass. A Live run is rejected at submit (`LiveNotYetEnabled`), so this
-    /// honest live terminal is the belt to that submit-time gate.
+    /// Route a test effect's result to the next test step. The hermetic check
+    /// is a single effect: a built check records `Passed` with the realised
+    /// out-path, a failed build `Failed(HermeticCheck)` — never a faked pass.
+    ///
+    /// The LIVE bracket (report 147 hole 4) threads bring-up → deploy → assert
+    /// → teardown:
+    ///
+    /// - `TestVmBroughtUp` records the container `Started`, the `Deploying`
+    ///   phase, and emits the `DeployIntoTestVm` effect (the real `nix copy` +
+    ///   guest-side activate).
+    /// - `TestVmDeployedInto` records the `Asserting` phase and emits the
+    ///   `AssertTestVm` effect (the real guest-side verdict over ssh).
+    /// - `TestVmAsserted` records the `TearingDown` phase, marks the cursor
+    ///   `Asserted` (the assertion PASSED), and emits `TearDownTestVm`.
+    /// - `TestVmTornDown` writes the TERMINAL row: `Passed` only when the cursor
+    ///   reached `Asserted` (the guest-side assertion actually passed),
+    ///   `Failed(Assert)` otherwise. A pass is earned by a real verdict, never
+    ///   faked — the deploy/assert steps each `.run().await` real IO and a
+    ///   failure short-circuits to `Failed(stage)` before teardown.
     fn decide_test_effect_completion(&mut self, result: nexus::EffectResult) -> nexus::NexusAction {
         let Some(pipeline) = self.active_test.clone() else {
             return Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
@@ -1755,30 +2101,74 @@ impl SchemaRuntime {
             nexus::EffectResult::TestVmBroughtUp(_) => {
                 self.record_container(&pipeline, sema::ContainerState::Started);
                 self.set_test_stage(TestStage::BroughtUp);
-                // The deploy-into-VM + assert chain runs here in a live run
-                // (gated). BUILT path advances straight to teardown so the
-                // bracket is provably constructed end-to-end.
+                self.record_test_progress(&pipeline, ordinary::TestRunPhase::Deploying);
+                // The closure under test + guest IP were captured before
+                // bring-up; emit the real deploy-into-VM effect.
+                match pipeline.deploy_into_command() {
+                    Some(command) => {
+                        nexus::NexusAction::CommandEffect(nexus::EffectCommand::DeployIntoTestVm(
+                            command,
+                        ))
+                    }
+                    None => self.fail_test_pipeline(nexus::EffectFailure {
+                        stage: nexus::EffectStage::DeployIntoTestVm,
+                        detail: "no live target resolved before deploy".to_string(),
+                    }),
+                }
+            }
+            nexus::EffectResult::TestVmDeployedInto(_) => {
+                self.set_test_stage(TestStage::Deployed);
+                self.record_test_progress(&pipeline, ordinary::TestRunPhase::Asserting);
+                // The closure was copied + activated on the guest; emit the real
+                // guest-side assert effect.
+                match pipeline.assert_command() {
+                    Some(command) => nexus::NexusAction::CommandEffect(
+                        nexus::EffectCommand::AssertTestVm(command),
+                    ),
+                    None => self.fail_test_pipeline(nexus::EffectFailure {
+                        stage: nexus::EffectStage::AssertTestVm,
+                        detail: "no live target resolved before assert".to_string(),
+                    }),
+                }
+            }
+            nexus::EffectResult::TestVmAsserted(_) => {
+                // The guest-side assertion PASSED. Mark the cursor Asserted so
+                // the terminal verdict after teardown is an EARNED Passed, then
+                // tear the bracket down.
                 self.set_test_stage(TestStage::Asserted);
+                self.record_test_progress(&pipeline, ordinary::TestRunPhase::TearingDown);
                 nexus::NexusAction::CommandEffect(nexus::EffectCommand::TearDownTestVm(
                     pipeline.run.tear_down_command(),
                 ))
             }
             nexus::EffectResult::TestVmTornDown(_) => {
                 self.record_container(&pipeline, sema::ContainerState::Stopped);
-                // Honest LIVE terminal (report 54 Unit 2b fix 1): the bring-up →
-                // teardown bracket ran, but the deploy-into-VM + assert chain
-                // between them is not yet implemented, so nothing was asserted.
-                // Record `Failed(Assert)`, never `Passed` — a pass must be
-                // earned by a real assertion. Belt to the submit-time
-                // `LiveNotYetEnabled` reject: a Live run never reaches this arm
-                // today, and if a future caller drives a live bracket before the
-                // assert lands it still cannot fake a pass.
-                self.record_test_terminal(
-                    &pipeline,
-                    ordinary::TestRunPhase::Failed,
-                    ordinary::TestOutcome::Failed(ordinary::FailureStage::Assert),
-                    None,
-                )
+                // The terminal verdict reads the cursor: only a bracket whose
+                // guest-side assertion passed (cursor `Asserted`) earns a
+                // `Passed`; any earlier teardown records `Failed(Assert)`. A
+                // deploy/assert failure short-circuits to `fail_test_pipeline`
+                // before reaching teardown, so this arm only ever runs after a
+                // real pass — and still cannot fake one.
+                let asserted = self
+                    .active_test
+                    .as_ref()
+                    .map(|pipeline| pipeline.stage == TestStage::Asserted)
+                    .unwrap_or(false);
+                if asserted {
+                    self.record_test_terminal(
+                        &pipeline,
+                        ordinary::TestRunPhase::Completed,
+                        ordinary::TestOutcome::Passed,
+                        pipeline.live_closure(),
+                    )
+                } else {
+                    self.record_test_terminal(
+                        &pipeline,
+                        ordinary::TestRunPhase::Failed,
+                        ordinary::TestOutcome::Failed(ordinary::FailureStage::Assert),
+                        None,
+                    )
+                }
             }
             nexus::EffectResult::EffectFailed(failure) => self.fail_test_pipeline(failure),
             // No other effect result belongs to a test dispatch; treat it as an
@@ -1788,6 +2178,16 @@ impl SchemaRuntime {
                 detail: "unexpected effect result on the test pipeline".to_string(),
             }),
         }
+    }
+
+    /// Rewrite the durable test-run row to an intermediate live phase (carrying
+    /// the closure under test once captured), so `(Query (ByTestRun …))` reads
+    /// the bracket's progress — Deploying / Asserting / TearingDown — not just
+    /// the terminal outcome. Best-effort: a write error never fakes the verdict
+    /// (the terminal write is what the reply reads).
+    fn record_test_progress(&mut self, pipeline: &TestPipeline, phase: ordinary::TestRunPhase) {
+        let record = pipeline.record_at(phase, ordinary::TestOutcome::Pending, pipeline.live_closure());
+        let _ = self.record_test_run(record);
     }
 
     /// Write the terminal durable test-run row (phase + outcome + closure) and
@@ -2163,7 +2563,9 @@ impl SchemaRuntime {
             // misleading success.
             nexus::EffectResult::HermeticCheckBuilt(_)
             | nexus::EffectResult::TestVmBroughtUp(_)
-            | nexus::EffectResult::TestVmTornDown(_) => self.fail_pipeline(nexus::EffectFailure {
+            | nexus::EffectResult::TestVmTornDown(_)
+            | nexus::EffectResult::TestVmDeployedInto(_)
+            | nexus::EffectResult::TestVmAsserted(_) => self.fail_pipeline(nexus::EffectFailure {
                 stage: nexus::EffectStage::Build,
                 detail: "test effect result on the deploy pipeline".to_string(),
             }),
@@ -2250,7 +2652,9 @@ impl SchemaRuntime {
             // invariant failure rather than a misleading deploy reason.
             nexus::EffectStage::HermeticCheck
             | nexus::EffectStage::BringUpTestVm
-            | nexus::EffectStage::TearDownTestVm => meta::DeployRejectionReason::InternalError,
+            | nexus::EffectStage::TearDownTestVm
+            | nexus::EffectStage::DeployIntoTestVm
+            | nexus::EffectStage::AssertTestVm => meta::DeployRejectionReason::InternalError,
         };
         Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
             self.deploy_rejection(reason),
@@ -2883,46 +3287,107 @@ impl SchemaRuntime {
         }
     }
 
-    /// The LIVE bring-up effect (Unit 2b — report 47 v2 / report 51 §3). BUILT
-    /// here, NOT run live (the first Prometheus cycle is psyche-gated): the
-    /// host-untouched user-namespace bring-up command is constructed
-    /// (`ssh <host-fqdn>` + `systemd-run --user` + `unshare -rn` + `nsenter`)
-    /// and would, on a live run, start the generated microVM runner + additive
-    /// tap inside a private user network namespace on the resolved vmhost. The
-    /// gated build path returns `TestVmBroughtUp` so the bracket is provably
-    /// constructed end-to-end without touching a real host.
+    /// The LIVE bring-up effect (Unit 2b — report 47 v2 / report 51 §3): the
+    /// host-untouched user-namespace bring-up — `ssh <host-fqdn>` +
+    /// `systemd-run --user` + `unshare -rn` + `nsenter` — that starts the
+    /// generated microVM runner + additive tap inside a private user network
+    /// namespace on the resolved vmhost. Runs the constructed invocation for
+    /// real; exit 0 → `TestVmBroughtUp`, a non-zero exit → `EffectFailed
+    /// (BringUpTestVm)`. NEVER fakes the bring-up.
+    ///
+    /// When `runner` is empty the bring-up is a no-op success: the verification
+    /// harness (the `runNixOSTest` guest, host-untouched per Track A) owns its
+    /// own transient guest, so the daemon does not bring up a second VM — it
+    /// deploys into and asserts against the guest already booted. The runner is
+    /// non-empty only on the report-51 vmhost bring-up path.
     async fn run_bring_up_test_vm(
         &self,
         command: nexus::BringUpTestVmCommand,
     ) -> nexus::EffectResult {
         let bring_up = LiveTestVm::from_bring_up(&command);
-        // The invocation is CONSTRUCTED (the host-untouched user-namespace
-        // command) but not executed — a live run is gated. Constructing it
-        // proves the command shape; `invocation()` is the on-host effect a live
-        // run would `.run().await`.
-        let _invocation = bring_up.bring_up_invocation();
-        nexus::EffectResult::TestVmBroughtUp(nexus::TestVmBroughtUp {
-            cluster_name: command.cluster_name,
-            node_name: command.node_name,
-            host: command.host,
-        })
+        if !bring_up.has_runner() {
+            return nexus::EffectResult::TestVmBroughtUp(nexus::TestVmBroughtUp {
+                cluster_name: command.cluster_name,
+                node_name: command.node_name,
+                host: command.host,
+            });
+        }
+        match bring_up.bring_up_invocation().run().await {
+            Ok(_) => nexus::EffectResult::TestVmBroughtUp(nexus::TestVmBroughtUp {
+                cluster_name: command.cluster_name,
+                node_name: command.node_name,
+                host: command.host,
+            }),
+            Err(detail) => Self::effect_failed(nexus::EffectStage::BringUpTestVm, detail),
+        }
     }
 
-    /// The LIVE teardown effect (Unit 2b). BUILT here, NOT run live: constructs
-    /// the `systemctl --user stop` command that, on a live run, stops the user
-    /// units so the tap + route vanish with the namespace (host netns
-    /// byte-identical). Returns `TestVmTornDown` for the gated build path.
+    /// The LIVE deploy-into-VM effect (report 54 §5.2): `nix copy --to
+    /// ssh-ng://root@<guest_ip>` the closure under test into the running guest,
+    /// then `switch-to-configuration switch` on the guest. Runs both for real;
+    /// either failure → `EffectFailed(DeployIntoTestVm)`, never a faked deploy.
+    async fn run_deploy_into_test_vm(
+        &self,
+        command: nexus::DeployIntoTestVmCommand,
+    ) -> nexus::EffectResult {
+        let cluster_name = command.cluster_name.clone();
+        let node_name = command.node_name.clone();
+        let closure = command.closure.clone();
+        match LiveDeploy::from_command(&command).run().await {
+            Ok(()) => nexus::EffectResult::TestVmDeployedInto(nexus::TestVmDeployedInto {
+                cluster_name,
+                node_name,
+                closure_path: closure,
+            }),
+            Err(detail) => Self::effect_failed(nexus::EffectStage::DeployIntoTestVm, detail),
+        }
+    }
+
+    /// The LIVE assert effect (report 54 §5.2): run the guest-side verdict over
+    /// ssh — the activated system generation IS the deployed closure. Exit 0 →
+    /// `TestVmAsserted` (the run earns `Passed`); any mismatch or ssh failure →
+    /// `EffectFailed(AssertTestVm)`, recorded `Failed(Assert)`. NEVER faked.
+    async fn run_assert_test_vm(&self, command: nexus::AssertTestVmCommand) -> nexus::EffectResult {
+        let cluster_name = command.cluster_name.clone();
+        let node_name = command.node_name.clone();
+        let closure = command.closure.clone();
+        match LiveAssert::from_command(&command).run().await {
+            Ok(()) => nexus::EffectResult::TestVmAsserted(nexus::TestVmAsserted {
+                cluster_name,
+                node_name,
+                closure_path: closure,
+            }),
+            Err(detail) => Self::effect_failed(nexus::EffectStage::AssertTestVm, detail),
+        }
+    }
+
+    /// The LIVE teardown effect (Unit 2b): the `systemctl --user stop` command
+    /// that stops the user units so the tap + route vanish with the namespace
+    /// (host netns byte-identical). Runs the constructed invocation for real;
+    /// teardown is best-effort (`|| true` in the script), so a real run reports
+    /// `TestVmTornDown`. A spawn failure surfaces as `EffectFailed
+    /// (TearDownTestVm)`. When there is no runner (harness-owned guest) the
+    /// teardown is a no-op success — the harness reaps its own guest.
     async fn run_tear_down_test_vm(
         &self,
         command: nexus::TearDownTestVmCommand,
     ) -> nexus::EffectResult {
         let tear_down = LiveTestVm::from_tear_down(&command);
-        let _invocation = tear_down.tear_down_invocation();
-        nexus::EffectResult::TestVmTornDown(nexus::TestVmTornDown {
-            cluster_name: command.cluster_name,
-            node_name: command.node_name,
-            host: command.host,
-        })
+        if !tear_down.has_runner() {
+            return nexus::EffectResult::TestVmTornDown(nexus::TestVmTornDown {
+                cluster_name: command.cluster_name,
+                node_name: command.node_name,
+                host: command.host,
+            });
+        }
+        match tear_down.tear_down_invocation().run().await {
+            Ok(_) => nexus::EffectResult::TestVmTornDown(nexus::TestVmTornDown {
+                cluster_name: command.cluster_name,
+                node_name: command.node_name,
+                host: command.host,
+            }),
+            Err(detail) => Self::effect_failed(nexus::EffectStage::TearDownTestVm, detail),
+        }
     }
 
     fn effect_failed(stage: nexus::EffectStage, detail: String) -> nexus::EffectResult {
@@ -4030,6 +4495,10 @@ impl nexus::NexusEngine for SchemaRuntime {
             nexus::EffectCommand::TearDownTestVm(command) => {
                 self.run_tear_down_test_vm(command).await
             }
+            nexus::EffectCommand::DeployIntoTestVm(command) => {
+                self.run_deploy_into_test_vm(command).await
+            }
+            nexus::EffectCommand::AssertTestVm(command) => self.run_assert_test_vm(command).await,
         }
     }
 

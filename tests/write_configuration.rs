@@ -12,7 +12,7 @@ fn write_configuration_round_trips_through_rkyv() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix (goldragon prometheus Hermetic github:LiGoldragon/CriomOS-test-cluster /var/lib/lojix/cluster.nota) {}))",
+        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix (goldragon prometheus Hermetic github:LiGoldragon/CriomOS-test-cluster /var/lib/lojix/cluster.nota False 10.77.0.7) {}))",
         output.display()
     );
 
@@ -42,4 +42,9 @@ fn write_configuration_round_trips_through_rkyv() {
         configuration.test_defaults.proposal_source,
         "/var/lib/lojix/cluster.nota"
     );
+    assert!(
+        !configuration.test_defaults.live_enabled,
+        "live stays disabled unless explicitly enabled in config"
+    );
+    assert_eq!(configuration.test_defaults.live_guest_ip, "10.77.0.7");
 }

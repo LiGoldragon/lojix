@@ -21,6 +21,8 @@ fn daemon_configuration_round_trips_through_rkyv_file() {
             default_mode: lojix::TestMode::Hermetic,
             test_flake: "github:LiGoldragon/CriomOS-test-cluster".to_string(),
             proposal_source: String::new(),
+            live_enabled: false,
+            live_guest_ip: String::new(),
         },
     };
 

@@ -201,6 +201,21 @@ pub struct TestDefaults {
     pub default_mode: TestMode,
     pub test_flake: String,
     pub proposal_source: String,
+    /// Whether a Live `(Run … Live)` is enabled. `false` (the default) keeps
+    /// the honest `LiveNotYetEnabled` reject at submit — the deployed
+    /// production live cycle is psyche-gated. `true` arms the implemented live
+    /// deploy-into-VM + assert chain (Track A: a host-untouched run against a
+    /// harness-owned guest, or the report-51 vmhost path once authorized). The
+    /// gate is an explicit enable in binary startup config, never a flag and
+    /// never a blanket reject.
+    pub live_enabled: bool,
+    /// The live deploy/assert target the daemon was configured with — the
+    /// running guest's reachable IP. Empty when the daemon resolves the target
+    /// itself (the report-51 vmhost path builds the runner and projects the
+    /// guest tap address); set when an external harness owns the guest and
+    /// tells the daemon where it is (the Track A host-untouched proof: the
+    /// `runNixOSTest` harness boots its own guest and supplies its IP).
+    pub live_guest_ip: String,
 }
 
 /// The rkyv-stored test mode. A daemon-local mirror of the shared

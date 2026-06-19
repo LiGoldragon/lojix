@@ -45,6 +45,13 @@ struct WriterTestDefaults {
     default_mode: WriterTestMode,
     test_flake: WriterCluster,
     proposal_source: WriterPath,
+    /// Whether a Live `(Run … Live)` is enabled (the explicit binary-config
+    /// arm — never a flag). `false` keeps the honest `LiveNotYetEnabled` submit
+    /// reject; `true` arms the implemented live deploy-into-VM + assert chain.
+    live_enabled: WriterFlag,
+    /// The live guest IP an external harness owns and the daemon deploys into;
+    /// empty when the daemon resolves the live target itself.
+    live_guest_ip: WriterPath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
@@ -66,6 +73,9 @@ struct WriterPath(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
 struct WriterMode(u32);
+
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+struct WriterFlag(bool);
 
 impl ConfigurationWriterCli {
     fn from_environment() -> Self {
@@ -124,6 +134,8 @@ impl ConfigurationWriteRequest {
                 default_mode: self.test_defaults.default_mode.into(),
                 test_flake: self.test_defaults.test_flake.0,
                 proposal_source: self.test_defaults.proposal_source.0,
+                live_enabled: self.test_defaults.live_enabled.0,
+                live_guest_ip: self.test_defaults.live_guest_ip.0,
             },
         };
         configuration

@@ -39,6 +39,8 @@ fn write_daemon_configuration(
             default_mode: lojix::TestMode::Hermetic,
             test_flake: "github:LiGoldragon/CriomOS-test-cluster".to_string(),
             proposal_source: String::new(),
+            live_enabled: false,
+            live_guest_ip: String::new(),
         },
     };
     let path = directory.join("daemon-configuration.rkyv");

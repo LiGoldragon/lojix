@@ -283,6 +283,44 @@ pub struct TestVmTornDown {
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeployIntoTestVmCommand {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub guest_ip: String,
+    pub closure: ClosurePath,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AssertTestVmCommand {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub guest_ip: String,
+    pub closure: ClosurePath,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TestVmDeployedInto {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub closure_path: ClosurePath,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TestVmAsserted {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub closure_path: ClosurePath,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum EffectCommand {
     ResolveFlakeAuth(FlakeAuthRequest),
     MaterializeHorizon(HorizonMaterializationCommand),
@@ -294,6 +332,8 @@ pub enum EffectCommand {
     HermeticCheck(HermeticCheckCommand),
     BringUpTestVm(BringUpTestVmCommand),
     TearDownTestVm(TearDownTestVmCommand),
+    DeployIntoTestVm(DeployIntoTestVmCommand),
+    AssertTestVm(AssertTestVmCommand),
 }
 
 #[rustfmt::skip]
@@ -370,6 +410,8 @@ pub enum EffectStage {
     HermeticCheck,
     BringUpTestVm,
     TearDownTestVm,
+    DeployIntoTestVm,
+    AssertTestVm,
 }
 
 #[rustfmt::skip]
@@ -386,6 +428,8 @@ pub enum EffectResult {
     HermeticCheckBuilt(CheckBuilt),
     TestVmBroughtUp(TestVmBroughtUp),
     TestVmTornDown(TestVmTornDown),
+    TestVmDeployedInto(TestVmDeployedInto),
+    TestVmAsserted(TestVmAsserted),
     EffectFailed(EffectFailure),
 }
 
@@ -557,6 +601,12 @@ impl EffectCommand {
     pub fn tear_down_test_vm(payload: TearDownTestVmCommand) -> Self {
         Self::TearDownTestVm(payload)
     }
+    pub fn deploy_into_test_vm(payload: DeployIntoTestVmCommand) -> Self {
+        Self::DeployIntoTestVm(payload)
+    }
+    pub fn assert_test_vm(payload: AssertTestVmCommand) -> Self {
+        Self::AssertTestVm(payload)
+    }
 }
 
 #[rustfmt::skip]
@@ -590,6 +640,12 @@ impl EffectResult {
     }
     pub fn test_vm_torn_down(payload: TestVmTornDown) -> Self {
         Self::TestVmTornDown(payload)
+    }
+    pub fn test_vm_deployed_into(payload: TestVmDeployedInto) -> Self {
+        Self::TestVmDeployedInto(payload)
+    }
+    pub fn test_vm_asserted(payload: TestVmAsserted) -> Self {
+        Self::TestVmAsserted(payload)
     }
     pub fn effect_failed(payload: EffectFailure) -> Self {
         Self::EffectFailed(payload)
@@ -772,6 +828,20 @@ impl From<TearDownTestVmCommand> for EffectCommand {
 }
 
 #[rustfmt::skip]
+impl From<DeployIntoTestVmCommand> for EffectCommand {
+    fn from(payload: DeployIntoTestVmCommand) -> Self {
+        Self::DeployIntoTestVm(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<AssertTestVmCommand> for EffectCommand {
+    fn from(payload: AssertTestVmCommand) -> Self {
+        Self::AssertTestVm(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl From<ResolvedFlake> for EffectResult {
     fn from(payload: ResolvedFlake) -> Self {
         Self::FlakeResolved(payload)
@@ -838,6 +908,20 @@ impl From<TestVmBroughtUp> for EffectResult {
 impl From<TestVmTornDown> for EffectResult {
     fn from(payload: TestVmTornDown) -> Self {
         Self::TestVmTornDown(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<TestVmDeployedInto> for EffectResult {
+    fn from(payload: TestVmDeployedInto) -> Self {
+        Self::TestVmDeployedInto(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<TestVmAsserted> for EffectResult {
+    fn from(payload: TestVmAsserted) -> Self {
+        Self::TestVmAsserted(payload)
     }
 }
 
