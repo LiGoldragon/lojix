@@ -52,6 +52,9 @@ struct WriterTestDefaults {
     /// The live guest IP an external harness owns and the daemon deploys into;
     /// empty when the daemon resolves the live target itself.
     live_guest_ip: WriterPath,
+    /// The closure under test the harness owns; empty when the daemon builds it
+    /// from the flake's `live-<node>` check.
+    live_closure: WriterPath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
@@ -136,6 +139,7 @@ impl ConfigurationWriteRequest {
                 proposal_source: self.test_defaults.proposal_source.0,
                 live_enabled: self.test_defaults.live_enabled.0,
                 live_guest_ip: self.test_defaults.live_guest_ip.0,
+                live_closure: self.test_defaults.live_closure.0,
             },
         };
         configuration

@@ -41,6 +41,7 @@ fn write_daemon_configuration(
             proposal_source: String::new(),
             live_enabled: false,
             live_guest_ip: String::new(),
+            live_closure: String::new(),
         },
     };
     let path = directory.join("daemon-configuration.rkyv");

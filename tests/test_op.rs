@@ -538,6 +538,7 @@ fn write_test_daemon_configuration(
             proposal_source: String::new(),
             live_enabled: false,
             live_guest_ip: String::new(),
+            live_closure: String::new(),
         },
     };
     let path = directory.join("daemon-configuration.rkyv");
@@ -607,6 +608,7 @@ fn engine_with_projection() -> (tempfile::TempDir, SchemaRuntime) {
             proposal_source: proposal_path.display().to_string(),
             live_enabled: false,
             live_guest_ip: String::new(),
+            live_closure: String::new(),
         },
     };
     let store = Arc::new(

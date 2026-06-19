@@ -100,6 +100,10 @@ pub struct TestDefaults {
     /// guest (Track A, host-untouched) and the daemon deploys/asserts into it
     /// by IP; empty when the daemon resolves the target itself.
     live_guest_ip: String,
+    /// The configured closure under test — set when the harness owns the
+    /// closure (Track A); empty when the daemon builds it from the flake's
+    /// `live-<node>` check.
+    live_closure: String,
 }
 
 impl TestDefaults {
@@ -202,6 +206,7 @@ impl TestDefaults {
             proposal_source: ordinary::ProposalSource::new(""),
             live_enabled: false,
             live_guest_ip: String::new(),
+            live_closure: String::new(),
         }
     }
 
@@ -224,6 +229,12 @@ impl TestDefaults {
     fn live_guest_ip(&self) -> &str {
         &self.live_guest_ip
     }
+
+    /// The configured closure under test, if the harness supplied it. Empty
+    /// when the daemon builds it from the flake's `live-<node>` check.
+    fn live_closure(&self) -> &str {
+        &self.live_closure
+    }
 }
 
 impl From<&crate::TestDefaults> for TestDefaults {
@@ -236,6 +247,7 @@ impl From<&crate::TestDefaults> for TestDefaults {
             proposal_source: ordinary::ProposalSource::new(defaults.proposal_source.clone()),
             live_enabled: defaults.live_enabled,
             live_guest_ip: defaults.live_guest_ip.clone(),
+            live_closure: defaults.live_closure.clone(),
         }
     }
 }
@@ -831,8 +843,16 @@ impl GuestTarget {
         format!("ssh-ng://root@{}", self.guest_ip)
     }
 
-    /// `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new root@<guest_ip>
-    /// <remote_command>` — a batch ssh into the guest by IP.
+    /// `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new
+    /// -o ConnectTimeout=15 -o ServerAliveInterval=5 -o ServerAliveCountMax=3
+    /// root@<guest_ip> <remote_command>` — a batch ssh into the guest by IP.
+    ///
+    /// The keep-alive options bound how long a stalled channel hangs: a
+    /// guest-side activation (`switch-to-configuration`) reloads the guest's own
+    /// sshd, which can leave the controlling channel half-open. Without
+    /// `ServerAlive*`, the daemon's ssh would block indefinitely and the deploy
+    /// effect would never return; with them a genuinely dead channel surfaces as
+    /// a non-zero exit (an honest `Failed(Deploy)`), never a silent hang.
     fn remote_invocation(&self, remote_command: ShellCommand) -> NixCommand {
         NixCommand::new(
             "ssh",
@@ -841,6 +861,12 @@ impl GuestTarget {
                 "BatchMode=yes".to_string(),
                 "-o".to_string(),
                 "StrictHostKeyChecking=accept-new".to_string(),
+                "-o".to_string(),
+                "ConnectTimeout=15".to_string(),
+                "-o".to_string(),
+                "ServerAliveInterval=5".to_string(),
+                "-o".to_string(),
+                "ServerAliveCountMax=3".to_string(),
                 format!("root@{}", self.guest_ip),
                 remote_command.into_text(),
             ],
@@ -884,23 +910,70 @@ impl LiveDeploy {
         )
     }
 
-    /// The guest-side activation: set the system profile to the copied closure
-    /// and `switch-to-configuration switch`. Runs entirely on the guest over one
-    /// batch ssh — the host is never reconfigured.
-    fn activate_invocation(&self) -> NixCommand {
+    /// Fire the guest-side activation as a DETACHED transient unit: set the
+    /// system profile to the copied closure and `switch-to-configuration test`
+    /// under `systemd-run --no-block` ON THE GUEST — the host is never
+    /// reconfigured.
+    ///
+    /// `--no-block` (detached, not `--wait`): a `test` activation that
+    /// reconfigures the guest's own network / sshd does so over the very ssh link
+    /// carrying it, so a blocking activation races its own connection — the link
+    /// drops mid-switch and the controlling ssh times out (`255`) even though the
+    /// closure activates fine. Detaching the switch into a transient unit lets the
+    /// ssh return immediately; activation then completes independently of the
+    /// network blip, and [`Self::active_invocation`] polls for the real result.
+    ///
+    /// `test`, not `switch`: a deploy-into-test-VM activates the closure NOW
+    /// without installing a bootloader. `switch` runs the bootloader installer
+    /// (GRUB / systemd-boot), which fails on a transient guest that boots
+    /// directly with no boot disk (verified under KVM, report 147 Track A);
+    /// persisting a boot entry is meaningless for a throwaway VM.
+    fn fire_activation_invocation(&self) -> NixCommand {
         let closure = &self.closure;
         self.target.remote_invocation(ShellCommand::from_raw(format!(
             "set -eu; \
              nix-env -p /nix/var/nix/profiles/system --set {closure}; \
-             {closure}/bin/switch-to-configuration switch"
+             systemd-run \
+               --unit=lojix-activate \
+               --collect \
+               --no-block \
+               --service-type=oneshot \
+               {closure}/bin/switch-to-configuration test"
         )))
     }
 
-    /// Copy the closure into the guest, then activate it on the guest. Either
-    /// failure surfaces as the `Deploy` stage detail.
+    /// Probe whether the deployed closure IS the running system —
+    /// `test /run/current-system -ef <closure>` over a fresh batch ssh. Exit 0
+    /// once the detached activation has switched; non-zero (or an ssh failure
+    /// during the activation's network blip) while it is still in progress.
+    fn active_invocation(&self) -> NixCommand {
+        let closure = &self.closure;
+        self.target.remote_invocation(ShellCommand::from_raw(format!(
+            "test /run/current-system -ef {closure}"
+        )))
+    }
+
+    /// Copy the closure into the guest, fire the detached activation, then poll
+    /// until `/run/current-system` IS the deployed closure (the activation goal —
+    /// the real deploy verdict, not `switch-to-configuration`'s unit-restart exit
+    /// code). The poll tolerates transient ssh failures during the activation's
+    /// own network restart; only a closure that never becomes current-system
+    /// within the deadline is an honest `Failed(Deploy)`. NEVER a faked deploy.
     async fn run(&self) -> std::result::Result<(), String> {
         self.copy_invocation().run().await?;
-        self.activate_invocation().run().await.map(|_| ())
+        self.fire_activation_invocation().run().await?;
+        // Up to ~60s of 2s polls: ample for a `test` switch even when it cycles
+        // the guest's network, far short of the bracket's overall timeout.
+        for _ in 0..30 {
+            if self.active_invocation().run().await.is_ok() {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        Err(format!(
+            "deployed closure {} never became /run/current-system within the activation deadline",
+            self.closure
+        ))
     }
 }
 
@@ -1708,15 +1781,27 @@ impl SchemaRuntime {
         &self,
         run: &ResolvedTestRun,
     ) -> std::result::Result<LiveTarget, String> {
-        let guest_ip = self
+        let defaults = self
             .configuration
             .test_defaults()
-            .map(|defaults| defaults.live_guest_ip().to_string())
-            .unwrap_or_default();
+            .ok_or_else(|| "live run requires configured test defaults; none set".to_string())?;
+        let guest_ip = defaults.live_guest_ip().to_string();
         if guest_ip.is_empty() {
             return Err("live run requires a configured live_guest_ip; none set".to_string());
         }
-        LiveRunner::new(run, guest_ip).resolve().await
+        // When the harness owns the closure too (Track A: the guest's store
+        // already holds it), deploy that explicit store path — do NOT fetch +
+        // build a flake inside a sealed guest. Otherwise build the runner from
+        // the flake's `live-<node>` check (the report-51 vmhost path).
+        let configured_closure = defaults.live_closure();
+        if !configured_closure.is_empty() {
+            Ok(LiveTarget::new(
+                guest_ip,
+                ordinary::ClosurePath::new(configured_closure.to_string()),
+            ))
+        } else {
+            LiveRunner::new(run, guest_ip).resolve().await
+        }
     }
 
     fn set_live_target(&mut self, target: LiveTarget) {

@@ -216,6 +216,13 @@ pub struct TestDefaults {
     /// tells the daemon where it is (the Track A host-untouched proof: the
     /// `runNixOSTest` harness boots its own guest and supplies its IP).
     pub live_guest_ip: String,
+    /// The closure under test the daemon copies into and asserts on the guest.
+    /// Empty when the daemon builds it itself from the flake's
+    /// `checks.<system>.live-<node>` (the report-51 vmhost path); set when the
+    /// harness owns the closure too (Track A: the `runNixOSTest` guest's store
+    /// already holds the closure, so the daemon deploys an explicit store path
+    /// rather than fetching+building a flake inside a sealed guest).
+    pub live_closure: String,
 }
 
 /// The rkyv-stored test mode. A daemon-local mirror of the shared

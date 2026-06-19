@@ -23,6 +23,7 @@ fn daemon_configuration_round_trips_through_rkyv_file() {
             proposal_source: String::new(),
             live_enabled: false,
             live_guest_ip: String::new(),
+            live_closure: String::new(),
         },
     };
 
