@@ -31,6 +31,7 @@ struct ConfigurationWriteRequest {
     owner_socket_path: WriterPath,
     owner_socket_mode: WriterMode,
     state_directory_path: WriterPath,
+    daemon_host: WriterCluster,
     test_defaults: WriterTestDefaults,
     output_path: WriterPath,
 }
@@ -118,6 +119,7 @@ impl ConfigurationWriteRequest {
             owner_socket_path: self.owner_socket_path.0,
             owner_socket_mode: self.owner_socket_mode.0,
             state_directory_path: self.state_directory_path.0,
+            daemon_host: self.daemon_host.0,
             test_defaults: TestDefaults {
                 cluster: self.test_defaults.cluster.0,
                 default_vm_host: self.test_defaults.default_vm_host.0,

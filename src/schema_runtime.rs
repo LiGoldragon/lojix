@@ -58,6 +58,14 @@ pub struct SchemaRuntime {
 #[derive(Debug, Clone)]
 pub struct RuntimeConfiguration {
     generated_inputs_directory: PathBuf,
+    /// The node this daemon runs on (e.g. `ouranos`). The build-on-target
+    /// decision (`DeployPipeline::build_target`) compares the deploy's target
+    /// node against this: equal → build LOCALLY (the host's store already holds
+    /// any model-bearing closure); different → realize the node's closure in
+    /// the TARGET node's own store over `ssh-ng`, so the daemon host never
+    /// holds a node's model-bearing closure (Spirit ufjd / 0a9p / lc28, report
+    /// 150). Decoded once from the daemon's binary startup configuration.
+    daemon_host: ordinary::NodeName,
     /// A test-only gate that the deploy pipeline awaits before its first effect
     /// runs. `None` in production (the pipeline runs straight through). A test
     /// holds the barrier closed to prove the daemon replies the accepted handle
@@ -667,6 +675,7 @@ impl RuntimeConfiguration {
         Self {
             generated_inputs_directory: PathBuf::from(&configuration.state_directory_path)
                 .join("generated-inputs"),
+            daemon_host: ordinary::NodeName::new(configuration.daemon_host.clone()),
             effect_barrier: None,
             test_defaults: Some(TestDefaults::from(&configuration.test_defaults)),
         }
@@ -675,6 +684,7 @@ impl RuntimeConfiguration {
     pub fn test_default() -> Self {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
+            daemon_host: ordinary::NodeName::new("daemon-host"),
             effect_barrier: None,
             test_defaults: Some(TestDefaults::test_default()),
         }
@@ -685,8 +695,38 @@ impl RuntimeConfiguration {
     pub fn test_with_effect_barrier(barrier: EffectBarrier) -> Self {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
+            daemon_host: ordinary::NodeName::new("daemon-host"),
             effect_barrier: Some(barrier),
             test_defaults: Some(TestDefaults::test_default()),
+        }
+    }
+
+    /// The build target for a deploy whose closure must land on
+    /// `cluster_name`/`node_name`. When the target node IS this daemon's host,
+    /// the build stays `Local` — the host's store already holds any
+    /// model-bearing closure, so a `Switch`-on-self or an ouranos-from-ouranos
+    /// deploy realizes in place. When the target node is a DIFFERENT node, the
+    /// build realizes in that node's own store over
+    /// `ssh-ng://root@<node>.<cluster>.criome`, so a model-bearing node closure
+    /// never transits the daemon host (Spirit ufjd / 0a9p / lc28, report 150).
+    /// An explicit `builder` override still wins (it lowers to `Remote` upstream
+    /// of this call); this method only chooses between local and target-store.
+    fn build_target_for(
+        &self,
+        cluster_name: &ordinary::ClusterName,
+        node_name: &ordinary::NodeName,
+    ) -> nexus::BuildTarget {
+        if node_name.payload() == self.daemon_host.payload() {
+            return nexus::BuildTarget::Local;
+        }
+        match SshTarget::root_at_node(cluster_name, node_name) {
+            Ok(target) => nexus::BuildTarget::target_store(target.ssh_uri()),
+            // A target whose names fail horizon validation can't be addressed
+            // for a remote store; fall back to a local build rather than emit a
+            // malformed `--store` URI. A submitted deploy never has invalid
+            // names (validated at submit), so this arm is unreachable in
+            // practice and never silently pulls a model closure for a real node.
+            Err(_) => nexus::BuildTarget::Local,
         }
     }
 
@@ -714,6 +754,23 @@ impl RuntimeConfiguration {
             nexus::MaterializationShape::OsOnly => "os-only",
             nexus::MaterializationShape::Home(_) => "home",
         }
+    }
+}
+
+/// The BootOnce transient unit name a deployment owns. Defined here (not on the
+/// foreign schema-emitted `DeploymentIdentifier`) and implemented on that type
+/// so the activation-side `SystemActivation::unit_name` and the resume-side
+/// `DeployJob::boot_once_unit` derive ONE deterministic string from ONE place —
+/// `lojix-boot-once-deploy-<deployment-identifier>` — instead of the old
+/// activation-only time+pid suffix that no resumed daemon could reconstruct
+/// (report 150). The verb lives on the identifier noun, not as a free helper.
+trait BootOnceUnit {
+    fn boot_once_unit_name(&self) -> String;
+}
+
+impl BootOnceUnit for ordinary::DeploymentIdentifier {
+    fn boot_once_unit_name(&self) -> String {
+        format!("lojix-boot-once-deploy-{}", self.payload())
     }
 }
 
@@ -909,10 +966,16 @@ impl DeployPipeline {
             .collect()
     }
 
-    fn build_target(&self) -> nexus::BuildTarget {
+    /// The build target for this deploy. An explicit `builder` override always
+    /// wins — it dispatches to the named Nix builder machine. Otherwise the
+    /// daemon's configuration decides build-on-target: a target node that is
+    /// the daemon host builds `Local`, a different target node realizes in its
+    /// own store over `ssh-ng` so its model-bearing closure never transits the
+    /// daemon host (Spirit ufjd / 0a9p / lc28, report 150).
+    fn build_target(&self, configuration: &RuntimeConfiguration) -> nexus::BuildTarget {
         match &self.builder {
             Some(builder) => nexus::BuildTarget::Remote(nexus::BuilderNode::new(builder.clone())),
-            None => nexus::BuildTarget::Local,
+            None => configuration.build_target_for(&self.cluster_name, &self.node_name),
         }
     }
 
@@ -972,11 +1035,15 @@ impl DeployPipeline {
         }
     }
 
-    fn nix_build_command(&self, closure_path: ordinary::ClosurePath) -> nexus::NixBuildCommand {
+    fn nix_build_command(
+        &self,
+        closure_path: ordinary::ClosurePath,
+        configuration: &RuntimeConfiguration,
+    ) -> nexus::NixBuildCommand {
         nexus::NixBuildCommand {
             generation_identifier: self.generation_identifier.clone(),
             closure_path,
-            target: self.build_target(),
+            target: self.build_target(configuration),
             substituters: self.substituters.clone(),
         }
     }
@@ -984,13 +1051,14 @@ impl DeployPipeline {
     fn copy_closure_command(
         &self,
         closure_path: ordinary::ClosurePath,
+        configuration: &RuntimeConfiguration,
     ) -> nexus::CopyClosureCommand {
         nexus::CopyClosureCommand {
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             closure_path,
-            source: self.build_target(),
+            source: self.build_target(configuration),
         }
     }
 
@@ -999,6 +1067,7 @@ impl DeployPipeline {
         closure_path: ordinary::ClosurePath,
     ) -> nexus::ActivateGenerationCommand {
         nexus::ActivateGenerationCommand {
+            deployment_identifier: self.deployment_identifier.clone(),
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
@@ -1058,10 +1127,9 @@ impl DeployPipeline {
     /// unit to poll; copy is idempotent and activation re-runs safely).
     fn boot_once_unit(&self) -> Option<String> {
         match &self.action {
-            DeployAction::System(ordinary::SystemAction::BootOnce) => Some(format!(
-                "lojix-boot-once-deploy-{}",
-                self.deployment_identifier.payload()
-            )),
+            DeployAction::System(ordinary::SystemAction::BootOnce) => {
+                Some(self.deployment_identifier.boot_once_unit_name())
+            }
             _ => None,
         }
     }
@@ -2123,7 +2191,8 @@ impl SchemaRuntime {
                 self.set_closure_path(evaluated.closure_path.clone());
                 if pipeline.action.produces_closure() {
                     nexus::NexusAction::CommandEffect(nexus::EffectCommand::NixBuild(
-                        pipeline.nix_build_command(evaluated.closure_path),
+                        pipeline
+                            .nix_build_command(evaluated.closure_path, self.configuration.as_ref()),
                     ))
                 } else {
                     // System `Eval`: the derivation path is the result — finish
@@ -2135,7 +2204,8 @@ impl SchemaRuntime {
                 self.set_closure_path(built.closure_path.clone());
                 if pipeline.action.activates() {
                     nexus::NexusAction::CommandEffect(nexus::EffectCommand::CopyClosure(
-                        pipeline.copy_closure_command(built.closure_path),
+                        pipeline
+                            .copy_closure_command(built.closure_path, self.configuration.as_ref()),
                     ))
                 } else {
                     // Non-activating action (`Build`): the closure is realised —
@@ -2780,15 +2850,24 @@ impl SchemaRuntime {
 
     async fn run_nix_build(&self, command: nexus::NixBuildCommand) -> nexus::EffectResult {
         // Honoring the dropped local-build guard `783n`: a `BuildTarget::Local`
-        // builds on the local dispatcher (no remote builder); `Remote` would
-        // dispatch the build to the named builder node. Both run the same
-        // `nix build` invocation here; the remote dispatch wraps it in ssh.
+        // builds on the local dispatcher (no remote builder); `Remote` dispatches
+        // the build to the named builder machine; `TargetStore` realizes the
+        // closure directly in the target node's own store over `ssh-ng`, so a
+        // model-bearing node closure never transits the daemon host (Spirit
+        // ufjd / 0a9p / lc28, report 150). All run the same `nix build` shape;
+        // `Remote` adds the daemon machine file and `TargetStore` adds the
+        // `--eval-store auto --store <uri>` realization redirect.
         let invocation = match &command.target {
             nexus::BuildTarget::Local => {
                 NixCommand::build_closure(command.closure_path.payload(), &command.substituters)
             }
             nexus::BuildTarget::Remote(_) => NixCommand::build_closure_remote(
                 command.closure_path.payload(),
+                &command.substituters,
+            ),
+            nexus::BuildTarget::TargetStore(store) => NixCommand::build_closure_in_store(
+                command.closure_path.payload(),
+                store.payload(),
                 &command.substituters,
             ),
         };
@@ -2805,16 +2884,21 @@ impl SchemaRuntime {
     }
 
     async fn run_copy_closure(&self, command: nexus::CopyClosureCommand) -> nexus::EffectResult {
+        let copied = nexus::EffectResult::ClosureCopied(nexus::CopiedClosure {
+            generation_identifier: command.generation_identifier.clone(),
+            node_name: command.node_name.clone(),
+            closure_path: command.closure_path.clone(),
+        });
         let copy = match ClosureCopy::from_command(&command) {
-            Ok(copy) => copy,
+            // A build-on-target build already realized the closure in the target
+            // node's own store (Spirit lc28, report 150), so the copy is a no-op:
+            // report the closure copied without opening an `ssh-ng` transfer.
+            Ok(None) => return copied,
+            Ok(Some(copy)) => copy,
             Err(detail) => return Self::effect_failed(nexus::EffectStage::CopyClosure, detail),
         };
         match copy.run().await {
-            Ok(()) => nexus::EffectResult::ClosureCopied(nexus::CopiedClosure {
-                generation_identifier: command.generation_identifier,
-                node_name: command.node_name,
-                closure_path: command.closure_path,
-            }),
+            Ok(()) => copied,
             Err(detail) => Self::effect_failed(nexus::EffectStage::CopyClosure, detail),
         }
     }
@@ -3380,12 +3464,22 @@ struct ClosureCopy {
 }
 
 impl ClosureCopy {
-    fn from_command(command: &nexus::CopyClosureCommand) -> std::result::Result<Self, String> {
+    /// `Ok(None)` when the build already realized the closure in the target
+    /// node's own store (`BuildTarget::TargetStore`, Spirit lc28 / report 150) —
+    /// the closure is already on the target, so there is nothing to copy.
+    /// `Ok(Some(copy))` for `Local` / `Remote` builds whose result lives in the
+    /// dispatcher store and must be pushed to the target.
+    fn from_command(
+        command: &nexus::CopyClosureCommand,
+    ) -> std::result::Result<Option<Self>, String> {
+        if matches!(command.source, nexus::BuildTarget::TargetStore(_)) {
+            return Ok(None);
+        }
         let target = SshTarget::root_at_node(&command.cluster_name, &command.node_name)?;
-        Ok(Self {
+        Ok(Some(Self {
             store_path: command.closure_path.payload().clone(),
             target,
-        })
+        }))
     }
 
     /// Copy is idempotent: if the closure already exists on the target, Nix
@@ -3424,6 +3518,7 @@ impl Activation {
         let store_path = command.closure_path.payload().clone();
         match &command.profile {
             nexus::ActivationProfile::System(action) => Ok(Self::System(SystemActivation {
+                deployment_identifier: command.deployment_identifier.clone(),
                 target,
                 store_path,
                 action: *action,
@@ -3461,6 +3556,12 @@ impl Activation {
 /// unit running on the target to completion.
 #[derive(Debug, Clone)]
 struct SystemActivation {
+    /// The deployment this activation belongs to. The BootOnce transient unit
+    /// name derives deterministically from it so the unit the daemon starts on
+    /// the target matches the `lojix-boot-once-deploy-<id>` the durable resume
+    /// cursor persisted at submit — a daemon crash during the BootOnce window
+    /// can then reconcile by polling that exact unit (report 150).
+    deployment_identifier: ordinary::DeploymentIdentifier,
     target: SshTarget,
     store_path: String,
     action: ordinary::SystemAction,
@@ -3494,16 +3595,17 @@ impl SystemActivation {
         )
     }
 
-    /// Unique transient unit name for this deploy. Includes a time + pid suffix
-    /// so concurrent deploys don't collide and the operator can grep the right
-    /// one in the journal after a disconnect (`unit_name()`).
+    /// The deterministic BootOnce transient unit name for this deploy:
+    /// `lojix-boot-once-deploy-<deployment-identifier>`, the same string the
+    /// durable resume cursor (`DeployJob::boot_once_unit`) persists at submit.
+    /// Deriving both from the deployment identifier (not the old time + pid
+    /// suffix) is what lets a daemon that crashes inside the BootOnce window
+    /// recompute the running unit's name on restart and reconcile by polling
+    /// `journalctl -u <unit>` rather than re-activating (report 150). One
+    /// deploy → one identifier → one unit, so concurrent deploys still don't
+    /// collide.
     fn unit_name(&self) -> String {
-        let seconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs())
-            .unwrap_or(0);
-        let process = std::process::id();
-        format!("lojix-boot-once-{seconds:x}-{process:x}")
+        self.deployment_identifier.boot_once_unit_name()
     }
 
     /// The bash script that runs inside the transient unit on the target. `OLD`
@@ -3870,6 +3972,35 @@ impl NixCommand {
             "0".to_string(),
             "--builders".to_string(),
             "@/etc/nix/machines".to_string(),
+            Self::output_installable(closure_path),
+        ];
+        arguments.extend(Self::substituter_options(substituters));
+        Self::new("nix", arguments)
+    }
+
+    /// Build-on-target (Spirit ufjd / 0a9p / lc28, report 150): realize the
+    /// closure in the TARGET node's own store instead of the daemon host's.
+    /// `--eval-store auto` keeps evaluation cheap and LOCAL (the daemon host
+    /// reads the flake / `.drv`), while `--store <store_uri>` directs
+    /// REALIZATION — every output path build or substitute, including any
+    /// multi-tens-of-gigabyte model NAR — into the target store. The daemon
+    /// host therefore never holds the node's model-bearing closure. `store_uri`
+    /// is the `ssh-ng://root@<node>.<cluster>.criome` form
+    /// (`SshTarget::ssh_uri`). The `^*` output selector resolves the threaded
+    /// `.drv` to its realised outputs, same as the local build.
+    fn build_closure_in_store(
+        closure_path: &str,
+        store_uri: &str,
+        substituters: &[nexus::ExtraSubstituter],
+    ) -> Self {
+        let mut arguments = vec![
+            "build".to_string(),
+            "--no-link".to_string(),
+            "--print-out-paths".to_string(),
+            "--eval-store".to_string(),
+            "auto".to_string(),
+            "--store".to_string(),
+            store_uri.to_string(),
             Self::output_installable(closure_path),
         ];
         arguments.extend(Self::substituter_options(substituters));
@@ -4295,8 +4426,9 @@ mod tests {
 
     #[test]
     fn copy_from_dispatcher_uses_to_only_with_substitute() {
-        let copy =
-            ClosureCopy::from_command(&copy_command(nexus::BuildTarget::Local)).expect("copy");
+        let copy = ClosureCopy::from_command(&copy_command(nexus::BuildTarget::Local))
+            .expect("copy")
+            .expect("local build copies from the dispatcher store");
         let invocation = copy.invocation();
         assert_eq!(invocation.program(), "nix");
         let argv = invocation.joined_arguments();
@@ -4313,7 +4445,9 @@ mod tests {
     fn copy_remote_builder_still_uses_dispatcher_to_target_copy() {
         let builder = ordinary::NodeName::new("builder-node");
         let source = nexus::BuildTarget::Remote(nexus::BuilderNode::new(builder));
-        let copy = ClosureCopy::from_command(&copy_command(source)).expect("copy");
+        let copy = ClosureCopy::from_command(&copy_command(source))
+            .expect("copy")
+            .expect("a remote builder copies its result from the dispatcher store");
         let invocation = copy.invocation();
         let argv = invocation.joined_arguments();
         assert!(argv.contains("--substitute-on-destination"), "{argv}");
@@ -4327,7 +4461,9 @@ mod tests {
     #[test]
     fn copy_builder_equals_target_still_runs_idempotent_target_copy() {
         let source = nexus::BuildTarget::Remote(nexus::BuilderNode::new(node()));
-        let copy = ClosureCopy::from_command(&copy_command(source)).expect("copy");
+        let copy = ClosureCopy::from_command(&copy_command(source))
+            .expect("copy")
+            .expect("a remote builder copies its result from the dispatcher store");
         let invocation = copy.invocation();
         let argv = invocation.joined_arguments();
         assert!(!argv.contains("--from"), "{argv}");
@@ -4337,11 +4473,28 @@ mod tests {
         );
     }
 
+    // ---- build-on-target: target-store build copy is a no-op ----
+
+    #[test]
+    fn target_store_build_skips_the_copy_entirely() {
+        // A build-on-target build already realized the closure in the target
+        // node's own store (Spirit lc28 / report 150), so there is nothing to
+        // push: `from_command` returns `None` and no `ssh-ng` transfer runs.
+        let source =
+            nexus::BuildTarget::target_store("ssh-ng://root@node-1.alpha.criome".to_string());
+        let copy = ClosureCopy::from_command(&copy_command(source)).expect("copy");
+        assert!(
+            copy.is_none(),
+            "target-store build must skip the copy; the closure is already on the target"
+        );
+    }
+
     fn activate_command(
         profile: nexus::ActivationProfile,
         kind: ordinary::ActivationKind,
     ) -> nexus::ActivateGenerationCommand {
         nexus::ActivateGenerationCommand {
+            deployment_identifier: ordinary::DeploymentIdentifier::new(7),
             generation_identifier: ordinary::GenerationIdentifier::new(1),
             cluster_name: cluster(),
             node_name: node(),
@@ -4462,9 +4615,117 @@ mod tests {
     }
 
     #[test]
-    fn boot_once_unit_name_has_lojix_prefix() {
+    fn boot_once_unit_name_is_deterministic_in_the_deployment_identifier() {
+        // report 150 fix: the activation transient-unit name must be the
+        // deterministic `lojix-boot-once-deploy-<id>` — NOT the old
+        // time+pid suffix — so a daemon that crashes inside the BootOnce window
+        // recomputes the same name on restart. `activate_command` carries
+        // deployment id 7.
         let activation = system_activation(ordinary::SystemAction::BootOnce);
-        assert!(activation.unit_name().starts_with("lojix-boot-once-"));
+        assert_eq!(activation.unit_name(), "lojix-boot-once-deploy-7");
+    }
+
+    #[test]
+    fn activation_unit_name_matches_the_resume_cursor_unit() {
+        // The activation-side `unit_name` and the resume-side
+        // `DeployJob::boot_once_unit` must produce the SAME string for one
+        // deployment so the crash-resume `PollActivationUnit` polls the unit the
+        // activation actually started (report 150). Both go through
+        // `DeploymentIdentifier::boot_once_unit_name`.
+        let mut pipeline = system_pipeline(ordinary::SystemAction::BootOnce);
+        pipeline.deployment_identifier = ordinary::DeploymentIdentifier::new(7);
+        let cursor_unit = pipeline.boot_once_unit().expect("BootOnce records a unit");
+        let activation = system_activation(ordinary::SystemAction::BootOnce);
+        assert_eq!(activation.unit_name(), cursor_unit);
+    }
+
+    #[test]
+    fn non_boot_once_deploy_records_no_resume_unit() {
+        // A non-BootOnce action has no transient unit to poll; copy is
+        // idempotent and activation re-runs safely, so the cursor records None.
+        let pipeline = system_pipeline(ordinary::SystemAction::Switch);
+        assert!(pipeline.boot_once_unit().is_none());
+    }
+
+    // ---- build-on-target: selection of the build store (report 150) ----
+
+    fn configuration_on_host(host: &str) -> RuntimeConfiguration {
+        let mut configuration = RuntimeConfiguration::test_default();
+        configuration.daemon_host = ordinary::NodeName::new(host);
+        configuration
+    }
+
+    #[test]
+    fn build_on_a_different_target_realizes_in_the_target_store() {
+        // The reason for the fix: deploying node-1 from a daemon hosted on
+        // ouranos must NOT realize node-1's (model-bearing) closure on ouranos.
+        // The build target is the target node's own store over ssh-ng.
+        let pipeline = system_pipeline(ordinary::SystemAction::BootOnce);
+        let configuration = configuration_on_host("ouranos");
+        match pipeline.build_target(&configuration) {
+            nexus::BuildTarget::TargetStore(store) => {
+                assert_eq!(store.payload(), "ssh-ng://root@node-1.alpha.criome");
+            }
+            other => panic!("expected a target-store build for a remote node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_on_the_daemon_host_stays_local() {
+        // Deploying the daemon's own host (e.g. ouranos from the ouranos-hosted
+        // daemon) must stay local — its store already holds any model closure,
+        // and an ssh-ng-to-self build would be wrong. `system_pipeline` targets
+        // node `node-1`, so a daemon hosted on `node-1` builds locally.
+        let pipeline = system_pipeline(ordinary::SystemAction::BootOnce);
+        let configuration = configuration_on_host("node-1");
+        assert!(matches!(
+            pipeline.build_target(&configuration),
+            nexus::BuildTarget::Local
+        ));
+    }
+
+    #[test]
+    fn explicit_builder_override_wins_over_build_on_target() {
+        // An operator-named builder still dispatches to that Nix builder machine
+        // regardless of daemon host — the build-on-target decision only governs
+        // the default (no-builder) path.
+        let mut pipeline = system_pipeline(ordinary::SystemAction::BootOnce);
+        pipeline.builder = Some(ordinary::NodeName::new("big-builder"));
+        let configuration = configuration_on_host("ouranos");
+        assert!(matches!(
+            pipeline.build_target(&configuration),
+            nexus::BuildTarget::Remote(_)
+        ));
+    }
+
+    #[test]
+    fn target_store_build_redirects_realization_keeps_eval_local() {
+        // The target-store nix invocation must direct REALIZATION to the target
+        // store (`--store <uri>`) while keeping EVALUATION local and cheap
+        // (`--eval-store auto`), and still select the drv outputs with `^*`.
+        let invocation = NixCommand::build_closure_in_store(
+            DERIVATION,
+            "ssh-ng://root@node-1.alpha.criome",
+            &[],
+        );
+        assert_eq!(invocation.program(), "nix");
+        let argv = invocation.joined_arguments();
+        assert!(
+            argv.contains("--store ssh-ng://root@node-1.alpha.criome"),
+            "realization must target the node store: {argv}"
+        );
+        assert!(
+            argv.contains("--eval-store auto"),
+            "evaluation must stay local: {argv}"
+        );
+        assert!(argv.contains("--print-out-paths"), "{argv}");
+        assert!(
+            argv.contains(&format!("{DERIVATION}^*")),
+            "target-store build must carry the `^*` output selector: {argv}"
+        );
+        // A target-store build NEVER offloads to the daemon machine file — that
+        // would copy the result back into the daemon host store (report 150).
+        assert!(!argv.contains("--builders"), "{argv}");
     }
 
     #[test]

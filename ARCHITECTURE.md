@@ -15,6 +15,23 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 > `--override-input` values into `nix eval`. Activating deploys still
 > reject until copy/activate is target-safe.
 
+> **Build-on-target (2026-06-19, report 150).** A deploy whose target
+> node is NOT the daemon host realizes the node's closure in the TARGET
+> node's own store over `ssh-ng://root@<node>.<cluster>.criome`
+> (`nix build --eval-store auto --store <uri> <attr>^*`): evaluation
+> stays local and cheap while realization — and any model-bearing NAR —
+> happens on the target, so a node's closure never transits the daemon
+> host (Spirit `ufjd` / `0a9p` / `lc28`). When the target node IS the
+> daemon host (e.g. deploying ouranos from the ouranos-hosted daemon)
+> the build stays `Local`; an explicit operator `builder` still wins.
+> The daemon's own host is named by `DaemonConfiguration::daemon_host`.
+> A target-store build leaves the closure already on the target, so the
+> copy step is a no-op and only the `BootOnce` activation runs there.
+> The `BootOnce` transient-unit name is the deterministic
+> `lojix-boot-once-deploy-<deployment-identifier>` — the same string the
+> durable resume cursor persists — so a daemon crash inside the BootOnce
+> window reconciles by polling that exact unit.
+
 > **Scope (today vs eventually).** This stack sits on today's
 > substrate — Rust on Linux, `signal-core` over a Unix socket,
 > `sema-engine` for durable state, direct nix invocations. It is a

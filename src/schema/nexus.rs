@@ -80,9 +80,15 @@ pub struct BuilderNode(NodeName);
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TargetStore(String);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum BuildTarget {
     Local,
     Remote(BuilderNode),
+    TargetStore(TargetStore),
 }
 
 #[rustfmt::skip]
@@ -207,6 +213,7 @@ pub enum ActivationProfile {
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ActivateGenerationCommand {
+    pub deployment_identifier: DeploymentIdentifier,
     pub generation_identifier: GenerationIdentifier,
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
@@ -444,6 +451,25 @@ impl From<NodeName> for BuilderNode {
 }
 
 #[rustfmt::skip]
+impl TargetStore {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for TargetStore {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl HomeMaterialization {
     pub fn new(payload: UserName) -> Self {
         Self(payload)
@@ -505,6 +531,9 @@ impl SignalOutput {
 impl BuildTarget {
     pub fn remote(payload: NodeName) -> Self {
         Self::Remote(BuilderNode::new(payload))
+    }
+    pub fn target_store(payload: String) -> Self {
+        Self::TargetStore(TargetStore::new(payload))
     }
 }
 
@@ -677,6 +706,13 @@ impl From<MetaOutput> for SignalOutput {
 impl From<BuilderNode> for BuildTarget {
     fn from(payload: BuilderNode) -> Self {
         Self::Remote(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<TargetStore> for BuildTarget {
+    fn from(payload: TargetStore) -> Self {
+        Self::TargetStore(payload)
     }
 }
 
