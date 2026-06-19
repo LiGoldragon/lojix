@@ -23,11 +23,12 @@
       system:
       let
         pkgs = import nixpkgs { inherit system; };
-        toolchain = fenix.packages.${system}.stable.withComponents [
+        toolchain = fenix.packages.${system}.complete.withComponents [
           "cargo"
           "rustc"
           "rustfmt"
           "clippy"
+          "rust-analyzer"
           "rust-src"
         ];
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
