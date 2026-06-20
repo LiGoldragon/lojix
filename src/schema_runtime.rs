@@ -3044,7 +3044,8 @@ impl HorizonMaterialization {
         let horizon = proposal.project(&viewpoint)?;
         let root = MaterializationRoot::new(self.configuration.materialization_root(&self.command));
         root.prepare()?;
-        MaterializedInputSet::new(root, horizon, self.command.shape.clone())
+        let secrets_source = ClusterSecretsDirectory::from_proposal_source(&self.command.source);
+        MaterializedInputSet::new(root, horizon, self.command.shape.clone(), secrets_source)
             .write()
             .await
     }
@@ -3138,6 +3139,7 @@ struct MaterializedInputSet {
     root: MaterializationRoot,
     horizon: Horizon,
     shape: nexus::MaterializationShape,
+    secrets_source: ClusterSecretsDirectory,
 }
 
 impl MaterializedInputSet {
@@ -3145,11 +3147,13 @@ impl MaterializedInputSet {
         root: MaterializationRoot,
         horizon: Horizon,
         shape: nexus::MaterializationShape,
+        secrets_source: ClusterSecretsDirectory,
     ) -> Self {
         Self {
             root,
             horizon,
             shape,
+            secrets_source,
         }
     }
 
@@ -3178,6 +3182,13 @@ impl MaterializedInputSet {
                     .await?,
             );
         }
+        inputs.push(
+            self.root
+                .input_directory(GeneratedInputName::Secrets)
+                .write_secrets(&self.secrets_source)?
+                .to_override(GeneratedInputName::Secrets)
+                .await?,
+        );
         Ok(nexus::MaterializedInputs::new(inputs))
     }
 }
@@ -3229,6 +3240,31 @@ impl GeneratedInputDirectory {
         Ok(self.clone())
     }
 
+    /// Generate the per-deploy `secrets` override: copy each cluster sops file
+    /// into this directory as opaque bytes and emit a self-contained flake
+    /// mapping each CriomOS `sopsFiles` attribute to its local `./<file>.sops`
+    /// path. When the cluster has no secrets directory (or it is empty) the
+    /// flake still exposes `sopsFiles = { }`, matching the CriomOS stub so
+    /// non-cluster sources stay buildable.
+    fn write_secrets(&self, secrets: &ClusterSecretsDirectory) -> Result<Self> {
+        self.prepare()?;
+        let files = secrets.secret_files()?;
+        let mut entries = String::new();
+        for file in &files {
+            file.copy_into(&self.path)?;
+            entries.push_str(&format!(
+                "    {} = ./{};\n",
+                file.attribute_name().as_str(),
+                file.file_name()
+            ));
+        }
+        fs::write(
+            self.path.join("flake.nix"),
+            format!("{{ outputs = _: {{ sopsFiles = {{\n{entries}  }}; }}; }}\n"),
+        )?;
+        Ok(self.clone())
+    }
+
     async fn to_override(&self, name: GeneratedInputName) -> Result<nexus::FlakeInputOverride> {
         let hash = NarHash::from_path(&self.path).await?;
         Ok(nexus::FlakeInputOverride {
@@ -3246,6 +3282,7 @@ enum GeneratedInputName {
     Horizon,
     System,
     Deployment,
+    Secrets,
 }
 
 impl GeneratedInputName {
@@ -3254,6 +3291,7 @@ impl GeneratedInputName {
             Self::Horizon => "horizon",
             Self::System => "system",
             Self::Deployment => "deployment",
+            Self::Secrets => "secrets",
         }
     }
 }
@@ -3285,6 +3323,126 @@ impl DeploymentInput {
             "{{ outputs = _: {{ deployment = {{ includeHome = {}; includeAllFirmware = {}; }}; }}; }}\n",
             self.include_home, self.include_all_firmware
         )
+    }
+}
+
+/// The cluster repository's `secrets/` directory — the sibling of the deploy
+/// datom source. Each sops-encrypted file there becomes one
+/// `inputs.secrets.sopsFiles.<camelCaseName>` entry the daemon provisions per
+/// deploy, overriding CriomOS's `stubs/no-secrets` stub. The directory may be
+/// absent (a bare bootstrap datom with no cluster secrets), in which case the
+/// generated `secrets` input still exposes an empty `sopsFiles = { }`.
+#[derive(Debug, Clone)]
+struct ClusterSecretsDirectory {
+    path: PathBuf,
+}
+
+impl ClusterSecretsDirectory {
+    /// `<source-parent>/secrets` — the datom source's sibling secrets directory.
+    fn from_proposal_source(source: &ordinary::ProposalSource) -> Self {
+        let source_path = PathBuf::from(source.payload());
+        let parent = source_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        Self {
+            path: parent.join("secrets"),
+        }
+    }
+
+    /// The `*.sops` files in this directory, sorted by file name for a stable
+    /// generated flake. An absent directory yields an empty list (bootstrap
+    /// sources carry no cluster secrets); other read failures propagate.
+    fn secret_files(&self) -> Result<Vec<ClusterSecretFile>> {
+        if !self.path.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut files = Vec::new();
+        for entry in fs::read_dir(&self.path)? {
+            let path = entry?.path();
+            if path.extension().and_then(|extension| extension.to_str()) == Some("sops") {
+                files.push(ClusterSecretFile::new(path));
+            }
+        }
+        files.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+        Ok(files)
+    }
+}
+
+/// One sops-encrypted secret file in the cluster `secrets/` directory. Its
+/// bytes are opaque ciphertext — copied verbatim into the generated input,
+/// never read or decrypted by the daemon (the target decrypts at activation
+/// via sops-nix).
+#[derive(Debug, Clone)]
+struct ClusterSecretFile {
+    path: PathBuf,
+}
+
+impl ClusterSecretFile {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// The bare file name (`router-wifi-sae-passwords.sops`) used both for the
+    /// copy destination and the generated `./<file>.sops` Nix path.
+    fn file_name(&self) -> String {
+        self.path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// The CriomOS `sopsFiles` attribute name: the file-name stem with `.sops`
+    /// stripped, kebab-case lowered to camelCase
+    /// (`router-wifi-sae-passwords` -> `routerWifiSaePasswords`).
+    fn attribute_name(&self) -> SopsAttributeName {
+        let stem = self
+            .path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default();
+        SopsAttributeName::from_kebab(stem)
+    }
+
+    /// Copy the opaque ciphertext into the generated input directory so the
+    /// flake is self-contained (its narHash covers the file). The contents are
+    /// never read into the daemon.
+    fn copy_into(&self, directory: &Path) -> Result<()> {
+        fs::copy(&self.path, directory.join(self.file_name()))?;
+        Ok(())
+    }
+}
+
+/// A CriomOS `inputs.secrets.sopsFiles` attribute name in camelCase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SopsAttributeName(String);
+
+impl SopsAttributeName {
+    /// Lower a kebab-case stem to camelCase: split on `-`, lowercase the first
+    /// segment, capitalize the leading letter of each subsequent segment, then
+    /// concatenate. `local-llm-api-token` -> `localLlmApiToken`.
+    fn from_kebab(stem: &str) -> Self {
+        let mut name = String::new();
+        for (index, segment) in stem.split('-').filter(|segment| !segment.is_empty()).enumerate() {
+            let mut characters = segment.chars();
+            match characters.next() {
+                None => {}
+                Some(first) if index == 0 => {
+                    name.extend(first.to_lowercase());
+                    name.push_str(&characters.as_str().to_lowercase());
+                }
+                Some(first) => {
+                    name.extend(first.to_uppercase());
+                    name.push_str(&characters.as_str().to_lowercase());
+                }
+            }
+        }
+        Self(name)
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -4799,5 +4957,130 @@ mod tests {
         let argv = invocation.joined_arguments();
         assert!(argv.contains("li@node-1.alpha.criome"), "{argv}");
         assert!(argv.contains(&format!("{STORE}/activate")), "{argv}");
+    }
+
+    // ---- per-deploy secrets provisioning ----
+
+    fn secret_file(name: &str) -> ClusterSecretFile {
+        ClusterSecretFile::new(PathBuf::from(format!("/cluster/secrets/{name}")))
+    }
+
+    #[test]
+    fn kebab_secret_names_lower_to_camel_case_sops_attributes() {
+        assert_eq!(
+            secret_file("router-wifi-sae-passwords.sops")
+                .attribute_name()
+                .as_str(),
+            "routerWifiSaePasswords"
+        );
+        assert_eq!(
+            secret_file("local-llm-api-token.sops")
+                .attribute_name()
+                .as_str(),
+            "localLlmApiToken"
+        );
+        assert_eq!(
+            secret_file("router-backup-wifi-password.sops")
+                .attribute_name()
+                .as_str(),
+            "routerBackupWifiPassword"
+        );
+        // single-segment stem stays lowercase
+        assert_eq!(secret_file("token.sops").attribute_name().as_str(), "token");
+    }
+
+    #[test]
+    fn secrets_directory_is_the_datom_source_sibling() {
+        let source = ordinary::ProposalSource::new(
+            "/git/github.com/LiGoldragon/goldragon/datom.nota".to_string(),
+        );
+        let directory = ClusterSecretsDirectory::from_proposal_source(&source);
+        assert_eq!(
+            directory.path,
+            PathBuf::from("/git/github.com/LiGoldragon/goldragon/secrets")
+        );
+    }
+
+    #[test]
+    fn absent_secrets_directory_yields_no_files() {
+        let source = ordinary::ProposalSource::new(
+            "/nonexistent/path/that/has/no/secrets/datom.nota".to_string(),
+        );
+        let directory = ClusterSecretsDirectory::from_proposal_source(&source);
+        assert!(
+            directory
+                .secret_files()
+                .expect("absent secrets dir is empty, not an error")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn generated_secrets_flake_maps_camel_case_attributes_to_copied_files() {
+        let source_directory = std::env::temp_dir().join(format!(
+            "lojix-secrets-source-{}",
+            std::process::id()
+        ));
+        let secrets_directory = source_directory.join("secrets");
+        fs::create_dir_all(&secrets_directory).expect("create source secrets dir");
+        // opaque placeholder ciphertext — never read back by the daemon
+        fs::write(secrets_directory.join("router-wifi-sae-passwords.sops"), b"opaque")
+            .expect("write sops file");
+        fs::write(secrets_directory.join("local-llm-api-token.sops"), b"opaque")
+            .expect("write sops file");
+        // a non-.sops file in the directory is ignored
+        fs::write(secrets_directory.join("README.md"), b"ignore me").expect("write readme");
+
+        let generated = std::env::temp_dir().join(format!("lojix-secrets-gen-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&generated);
+        let source = ordinary::ProposalSource::new(
+            source_directory.join("datom.nota").to_string_lossy().to_string(),
+        );
+        let cluster = ClusterSecretsDirectory::from_proposal_source(&source);
+        GeneratedInputDirectory::new(generated.clone())
+            .write_secrets(&cluster)
+            .expect("write secrets input");
+
+        let flake = fs::read_to_string(generated.join("flake.nix")).expect("read flake");
+        assert!(flake.contains("sopsFiles = {"), "{flake}");
+        assert!(
+            flake.contains("localLlmApiToken = ./local-llm-api-token.sops;"),
+            "{flake}"
+        );
+        assert!(
+            flake.contains("routerWifiSaePasswords = ./router-wifi-sae-passwords.sops;"),
+            "{flake}"
+        );
+        assert!(!flake.contains("README"), "non-sops files excluded: {flake}");
+        assert!(
+            generated.join("router-wifi-sae-passwords.sops").is_file(),
+            "ciphertext copied into the generated input"
+        );
+        assert!(
+            generated.join("local-llm-api-token.sops").is_file(),
+            "ciphertext copied into the generated input"
+        );
+
+        let _ = fs::remove_dir_all(&source_directory);
+        let _ = fs::remove_dir_all(&generated);
+    }
+
+    #[test]
+    fn empty_cluster_secrets_emit_empty_sops_files_attribute() {
+        let generated =
+            std::env::temp_dir().join(format!("lojix-secrets-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&generated);
+        let source = ordinary::ProposalSource::new(
+            "/nonexistent/bootstrap/datom.nota".to_string(),
+        );
+        let cluster = ClusterSecretsDirectory::from_proposal_source(&source);
+        GeneratedInputDirectory::new(generated.clone())
+            .write_secrets(&cluster)
+            .expect("write empty secrets input");
+        let flake = fs::read_to_string(generated.join("flake.nix")).expect("read flake");
+        assert!(flake.contains("sopsFiles = {"), "{flake}");
+        // no entries between the braces
+        assert!(!flake.contains(" = ./"), "no entries: {flake}");
+        let _ = fs::remove_dir_all(&generated);
     }
 }
