@@ -2870,7 +2870,8 @@ impl SchemaRuntime {
         // model-bearing node closure never transits the daemon host (Spirit
         // ufjd / 0a9p / lc28, report 150). All run the same `nix build` shape;
         // `Remote` adds the daemon machine file and `TargetStore` adds the
-        // `--eval-store auto --store <uri>` realization redirect.
+        // `--store <uri>` redirect ALONE (NO `--eval-store auto`) so eval and
+        // build both operate on the target store.
         let invocation = match &command.target {
             nexus::BuildTarget::Local => {
                 NixCommand::build_closure(command.closure_path.payload(), &command.substituters)
@@ -4187,10 +4188,11 @@ impl NixCommand {
     /// adds `--store <uri>` ALONE — pointing instantiation at the target store —
     /// and deliberately NOT `--eval-store auto`: `--eval-store auto` pins
     /// instantiation local, which is exactly the failure mode (an `--eval-store
-    /// auto --store <uri>` eval still cannot find the target-only `.drv`). This
-    /// makes the eval flags DIFFERENT from the build flags
-    /// (`build_closure_in_store` keeps `--eval-store auto --store <uri>`:
-    /// eval-local, realize-remote — correct for the BUILD, wrong for the EVAL).
+    /// auto --store <uri>` eval still cannot find the target-only `.drv`). The
+    /// build step (`build_closure_in_store`) now uses the SAME flags —
+    /// `--store <uri>` ALONE, NO `--eval-store auto` — so eval and build operate
+    /// consistently on the target store: the eval instantiates the toplevel
+    /// `.drv` INTO the target store and the build finds and realizes it there.
     /// `Local` (target IS the daemon host) adds no store flags — the host store
     /// already holds everything. `Remote` keeps the eval host-local too (no
     /// store redirect): the remote builder is for the BUILD, not the eval, and
@@ -4287,16 +4289,22 @@ impl NixCommand {
         Self::new("nix", arguments)
     }
 
-    /// Build-on-target (Spirit ufjd / 0a9p / lc28, report 150): realize the
-    /// closure in the TARGET node's own store instead of the daemon host's. The
-    /// BUILD deliberately keeps DIFFERENT flags from the eval
-    /// (`eval_drv_path`): `--eval-store auto` keeps evaluation LOCAL (the
-    /// `.drv` was already instantiated by the eval step against the target
-    /// store, so the build's own re-eval reads cheaply on the daemon host),
-    /// while `--store <store_uri>` directs REALIZATION — every output path build
-    /// or substitute, including any multi-tens-of-gigabyte model NAR — into the
-    /// target store. So: eval-local, realize-remote. The daemon host therefore
-    /// never holds the node's model-bearing closure. `store_uri` is the
+    /// Build-on-target (Spirit ufjd / 0a9p / lc28, report 150; verified
+    /// 2026-06-20): realize the closure in the TARGET node's own store instead
+    /// of the daemon host's. Build-on-target now does EVAL AND BUILD ENTIRELY on
+    /// the target store — `--store <uri>` ALONE, NO `--eval-store auto` —
+    /// consistent with the eval step (`eval_drv_path`). The eval instantiates
+    /// the toplevel `.drv` INTO the target store (0.3.9, `--store <uri>` alone),
+    /// so the `.drv` lives in the target store; the build must use the SAME
+    /// store to find and realize it. Re-adding `--eval-store auto` makes the
+    /// build look in the LOCAL store for the toplevel `.drv` it cannot find
+    /// there, reintroducing the live failure `error: path
+    /// '/nix/store/...nixos-system-...drv' is not valid`. With `--store <uri>`
+    /// alone the drv resolves valid and builds on the target (verified: ~184/185
+    /// derivations realized on prometheus). `--store <store_uri>` also directs
+    /// REALIZATION — every output path build or substitute, including any
+    /// multi-tens-of-gigabyte model NAR — into the target store, so the daemon
+    /// host never holds the node's model-bearing closure. `store_uri` is the
     /// `ssh-ng://root@<node>.<cluster>.criome` form (`SshTarget::ssh_uri`). The
     /// `^*` output selector resolves the threaded `.drv` to its realised
     /// outputs, same as the local build. The `--store <uri>` pair comes from the
@@ -4310,8 +4318,6 @@ impl NixCommand {
             "build".to_string(),
             "--no-link".to_string(),
             "--print-out-paths".to_string(),
-            "--eval-store".to_string(),
-            "auto".to_string(),
         ];
         arguments.extend(Self::store_options(store_uri));
         arguments.push(Self::output_installable(closure_path));
@@ -5096,10 +5102,14 @@ mod tests {
     }
 
     #[test]
-    fn target_store_build_redirects_realization_keeps_eval_local() {
-        // The target-store nix invocation must direct REALIZATION to the target
-        // store (`--store <uri>`) while keeping EVALUATION local and cheap
-        // (`--eval-store auto`), and still select the drv outputs with `^*`.
+    fn target_store_build_realizes_on_target_store_no_eval_store_auto() {
+        // The target-store nix invocation must operate ENTIRELY on the target
+        // store — `--store <uri>` ALONE, NO `--eval-store auto` — consistent
+        // with the eval step. The eval instantiates the toplevel `.drv` INTO the
+        // target store, so the build must use the same store to FIND it;
+        // re-adding `--eval-store auto` makes the build look in the local store
+        // and fails with `... .drv is not valid`. Still selects the drv outputs
+        // with `^*`.
         let invocation = NixCommand::build_closure_in_store(
             DERIVATION,
             "ssh-ng://root@node-1.alpha.criome",
@@ -5109,11 +5119,13 @@ mod tests {
         let argv = invocation.joined_arguments();
         assert!(
             argv.contains("--store ssh-ng://root@node-1.alpha.criome"),
-            "realization must target the node store: {argv}"
+            "eval+build must target the node store: {argv}"
         );
         assert!(
-            argv.contains("--eval-store auto"),
-            "evaluation must stay local: {argv}"
+            !argv.contains("--eval-store"),
+            "build must NOT pin instantiation local — `--eval-store auto` makes \
+             the build look in the local store for the target-only `.drv` and \
+             reintroduces the `.drv is not valid` failure: {argv}"
         );
         assert!(argv.contains("--print-out-paths"), "{argv}");
         assert!(
@@ -5133,9 +5145,10 @@ mod tests {
         // `--store <uri>` ALONE — NOT `--eval-store auto --store <uri>` —
         // because `--eval-store auto` pins instantiation local and the
         // target-only `.drv` then `... .drv does not exist` (verified
-        // 2026-06-20, report 150). This is the deliberate difference from the
-        // BUILD flags. The `--override-input` flags and `.drvPath` selector are
-        // preserved.
+        // 2026-06-20, report 150). The BUILD step
+        // (`build_closure_in_store`) now uses the SAME `--store <uri>` alone, so
+        // eval and build operate consistently on the target store. The
+        // `--override-input` flags and `.drvPath` selector are preserved.
         let store = nexus::BuildTarget::TargetStore(nexus::TargetStore::new(
             "ssh-ng://root@node-1.alpha.criome",
         ));
