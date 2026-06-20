@@ -144,6 +144,18 @@ pub enum Error {
 
     #[error("horizon json encode error: {0}")]
     HorizonJson(#[from] serde_json::Error),
+
+    #[error("cluster secret file name is not valid UTF-8: {0}")]
+    SecretFileNameNotUtf8(std::path::PathBuf),
+
+    #[error(
+        "two cluster secret files map to the same sopsFiles attribute name {attribute_name:?}: {first} and {second}"
+    )]
+    SecretAttributeCollision {
+        attribute_name: String,
+        first: String,
+        second: String,
+    },
 }
 
 impl From<signal_lojix::schema::lib::SignalFrameError> for Error {

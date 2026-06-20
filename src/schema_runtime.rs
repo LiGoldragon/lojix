@@ -734,6 +734,13 @@ impl RuntimeConfiguration {
         self.effect_barrier.as_ref()
     }
 
+    /// The node this daemon runs on — used to detect a self-targeting deploy so
+    /// activation routes around the self-Switch deadlock (a foreground ssh that
+    /// `switch-to-configuration switch` kills by restarting the daemon).
+    fn daemon_host(&self) -> &ordinary::NodeName {
+        &self.daemon_host
+    }
+
     /// The configured test-op defaults, if the daemon was started with them.
     fn test_defaults(&self) -> Option<&TestDefaults> {
         self.test_defaults.as_ref()
@@ -2915,10 +2922,11 @@ impl SchemaRuntime {
         command: nexus::ActivateGenerationCommand,
     ) -> nexus::EffectResult {
         let slot = Self::activation_slot(&command.activation_kind);
-        let activation = match Activation::from_command(&command) {
-            Ok(activation) => activation,
-            Err(detail) => return Self::effect_failed(nexus::EffectStage::Activate, detail),
-        };
+        let activation =
+            match Activation::from_command(&command, Some(self.configuration.daemon_host())) {
+                Ok(activation) => activation,
+                Err(detail) => return Self::effect_failed(nexus::EffectStage::Activate, detail),
+            };
         match activation.run().await {
             Ok(()) => nexus::EffectResult::GenerationActivated(nexus::ActivatedGeneration {
                 generation_identifier: command.generation_identifier,
@@ -3253,23 +3261,49 @@ impl GeneratedInputDirectory {
     /// path. When the cluster has no secrets directory (or it is empty) the
     /// flake still exposes `sopsFiles = { }`, matching the CriomOS stub so
     /// non-cluster sources stay buildable.
+    ///
+    /// The directory is wiped and recreated EACH call before copying, so it
+    /// holds exactly the current secrets — a removed cluster secret leaves no
+    /// stale ciphertext that would drift the narHash (audit fix). Two files that
+    /// map to the same `sopsFiles` attribute name are a real conflict and return
+    /// a typed `Error::SecretAttributeCollision`, never a silent last-writer-wins.
     fn write_secrets(&self, secrets: &ClusterSecretsDirectory) -> Result<Self> {
-        self.prepare()?;
+        self.reset_directory()?;
         let files = secrets.secret_files()?;
         let mut entries = String::new();
+        let mut attributes: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
         for file in &files {
+            let file_name = file.file_name()?;
+            let attribute_name = file.attribute_name()?;
+            if let Some(existing) = attributes.insert(attribute_name.clone(), file_name.clone()) {
+                return Err(crate::Error::SecretAttributeCollision {
+                    attribute_name,
+                    first: existing,
+                    second: file_name,
+                });
+            }
             file.copy_into(&self.path)?;
-            entries.push_str(&format!(
-                "    {} = ./{};\n",
-                file.attribute_name().as_str(),
-                file.file_name()
-            ));
+            entries.push_str(&format!("    {attribute_name} = ./{file_name};\n"));
         }
         fs::write(
             self.path.join("flake.nix"),
             format!("{{ outputs = _: {{ sopsFiles = {{\n{entries}  }}; }}; }}\n"),
         )?;
         Ok(self.clone())
+    }
+
+    /// Remove the generated directory (ignoring an absent one) and recreate it
+    /// empty, so a regenerated `secrets` input contains exactly the current
+    /// files with no stale leftovers from a prior deploy.
+    fn reset_directory(&self) -> Result<()> {
+        match fs::remove_dir_all(&self.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        fs::create_dir_all(&self.path)?;
+        Ok(())
     }
 
     async fn to_override(&self, name: GeneratedInputName) -> Result<nexus::FlakeInputOverride> {
@@ -3335,10 +3369,12 @@ impl DeploymentInput {
 
 /// The cluster repository's `secrets/` directory — the sibling of the deploy
 /// datom source. Each sops-encrypted file there becomes one
-/// `inputs.secrets.sopsFiles.<camelCaseName>` entry the daemon provisions per
-/// deploy, overriding CriomOS's `stubs/no-secrets` stub. The directory may be
-/// absent (a bare bootstrap datom with no cluster secrets), in which case the
-/// generated `secrets` input still exposes an empty `sopsFiles = { }`.
+/// `inputs.secrets.sopsFiles.<stem>` entry the daemon provisions per deploy,
+/// where `<stem>` is the `.sops` filename stem VERBATIM (the file is named with
+/// its exact consumer attribute name; no case transform), overriding CriomOS's
+/// `stubs/no-secrets` stub. The directory may be absent (a bare bootstrap datom
+/// with no cluster secrets), in which case the generated `secrets` input still
+/// exposes an empty `sopsFiles = { }`.
 #[derive(Debug, Clone)]
 struct ClusterSecretsDirectory {
     path: PathBuf,
@@ -3371,7 +3407,7 @@ impl ClusterSecretsDirectory {
                 files.push(ClusterSecretFile::new(path));
             }
         }
-        files.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+        files.sort_by(|left, right| left.sort_key().cmp(right.sort_key()));
         Ok(files)
     }
 }
@@ -3390,66 +3426,47 @@ impl ClusterSecretFile {
         Self { path }
     }
 
-    /// The bare file name (`router-wifi-sae-passwords.sops`) used both for the
-    /// copy destination and the generated `./<file>.sops` Nix path.
-    fn file_name(&self) -> String {
+    /// The full path, used as the stable sort key for a deterministic generated
+    /// flake. Within one secrets directory it orders identically to the file
+    /// name, and unlike `file_name` it is infallible so the sort comparator
+    /// stays total even for a (later-rejected) non-UTF-8 name.
+    fn sort_key(&self) -> &Path {
+        &self.path
+    }
+
+    /// The bare file name (`routerWifiSaePasswords.sops`) used both for the copy
+    /// destination and the generated `./<file>.sops` Nix path. A non-UTF-8 file
+    /// name is a real error (it cannot name a Nix path), not an empty string, so
+    /// it returns a typed `Error::SecretFileNameNotUtf8` per the typed-error
+    /// discipline.
+    fn file_name(&self) -> Result<String> {
         self.path
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_string()
+            .map(str::to_string)
+            .ok_or_else(|| crate::Error::SecretFileNameNotUtf8(self.path.clone()))
     }
 
-    /// The CriomOS `sopsFiles` attribute name: the file-name stem with `.sops`
-    /// stripped, kebab-case lowered to camelCase
-    /// (`router-wifi-sae-passwords` -> `routerWifiSaePasswords`).
-    fn attribute_name(&self) -> SopsAttributeName {
-        let stem = self
-            .path
+    /// The CriomOS `sopsFiles` attribute name: the `.sops` filename stem
+    /// VERBATIM (only the `.sops` suffix stripped), with NO case transform. The
+    /// coordinated design renames each cluster secret file to its exact
+    /// camelCase consumer name (`routerWifiSaePasswords.sops`), so the attribute
+    /// name is the stem as written — no hidden, lossy kebab-to-camel coupling. A
+    /// non-UTF-8 stem returns a typed `Error::SecretFileNameNotUtf8`.
+    fn attribute_name(&self) -> Result<String> {
+        self.path
             .file_stem()
             .and_then(|stem| stem.to_str())
-            .unwrap_or_default();
-        SopsAttributeName::from_kebab(stem)
+            .map(str::to_string)
+            .ok_or_else(|| crate::Error::SecretFileNameNotUtf8(self.path.clone()))
     }
 
     /// Copy the opaque ciphertext into the generated input directory so the
     /// flake is self-contained (its narHash covers the file). The contents are
     /// never read into the daemon.
     fn copy_into(&self, directory: &Path) -> Result<()> {
-        fs::copy(&self.path, directory.join(self.file_name()))?;
+        fs::copy(&self.path, directory.join(self.file_name()?))?;
         Ok(())
-    }
-}
-
-/// A CriomOS `inputs.secrets.sopsFiles` attribute name in camelCase.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SopsAttributeName(String);
-
-impl SopsAttributeName {
-    /// Lower a kebab-case stem to camelCase: split on `-`, lowercase the first
-    /// segment, capitalize the leading letter of each subsequent segment, then
-    /// concatenate. `local-llm-api-token` -> `localLlmApiToken`.
-    fn from_kebab(stem: &str) -> Self {
-        let mut name = String::new();
-        for (index, segment) in stem.split('-').filter(|segment| !segment.is_empty()).enumerate() {
-            let mut characters = segment.chars();
-            match characters.next() {
-                None => {}
-                Some(first) if index == 0 => {
-                    name.extend(first.to_lowercase());
-                    name.push_str(&characters.as_str().to_lowercase());
-                }
-                Some(first) => {
-                    name.extend(first.to_uppercase());
-                    name.push_str(&characters.as_str().to_lowercase());
-                }
-            }
-        }
-        Self(name)
-    }
-
-    fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -3676,8 +3693,12 @@ enum Activation {
 }
 
 impl Activation {
+    /// `daemon_host` is the node the dispatching daemon runs on, so a System
+    /// activation can detect a self-targeting deploy and route around the
+    /// self-Switch deadlock; `None` when no daemon host context is available.
     fn from_command(
         command: &nexus::ActivateGenerationCommand,
+        daemon_host: Option<&ordinary::NodeName>,
     ) -> std::result::Result<Self, String> {
         let target = SshTarget::root_at_node(&command.cluster_name, &command.node_name)?;
         let store_path = command.closure_path.payload().clone();
@@ -3685,6 +3706,8 @@ impl Activation {
             nexus::ActivationProfile::System(action) => Ok(Self::System(SystemActivation {
                 deployment_identifier: command.deployment_identifier.clone(),
                 target,
+                node_name: command.node_name.clone(),
+                daemon_host: daemon_host.cloned(),
                 store_path,
                 action: *action,
             })),
@@ -3728,6 +3751,14 @@ struct SystemActivation {
     /// can then reconcile by polling that exact unit (report 150).
     deployment_identifier: ordinary::DeploymentIdentifier,
     target: SshTarget,
+    /// The target node this activation lands on. Compared against `daemon_host`
+    /// to detect a self-targeting deploy.
+    node_name: ordinary::NodeName,
+    /// The node the dispatching daemon runs on, when known. A `Switch` whose
+    /// target IS this host must NOT activate over a foreground ssh — that ssh is
+    /// killed when `switch-to-configuration switch` restarts the daemon,
+    /// deadlocking the deploy. `None` outside a daemon context (some tests).
+    daemon_host: Option<ordinary::NodeName>,
     store_path: String,
     action: ordinary::SystemAction,
 }
@@ -3801,8 +3832,18 @@ impl SystemActivation {
 
     /// BootOnce ssh call: wraps the boot-once script in `systemd-run --wait`.
     /// ssh holds open as a live stdout/stderr channel; if it dies the unit runs
-    /// to completion regardless (`systemd_run_invocation()`).
+    /// to completion regardless (`detached_invocation()`).
     fn systemd_run_invocation(&self, unit_name: &str) -> NixCommand {
+        self.detached_invocation(unit_name, self.boot_once_script())
+    }
+
+    /// Wrap an arbitrary activation `script` in a PID-1-owned transient unit
+    /// (`systemd-run --service-type=oneshot --wait`). The unit is owned by
+    /// systemd, not the dispatcher's ssh, so a restart of the daemon mid-script
+    /// (a self-Switch restarting `switch-to-configuration switch`) or a network
+    /// blip that kills the ssh leaves the unit running to completion on the
+    /// target. Shared by BootOnce and the deadlock-free self-Switch shape.
+    fn detached_invocation(&self, unit_name: &str, script: String) -> NixCommand {
         let remote_command = format!(
             "systemd-run \
              --unit={unit_name} \
@@ -3810,10 +3851,60 @@ impl SystemActivation {
              --wait \
              --service-type=oneshot \
              /bin/sh -c {script}",
-            script = ShellArgument::new(self.boot_once_script()).to_command_text(),
+            script = ShellArgument::new(script).to_command_text(),
         );
         self.target
             .remote_invocation(ShellCommand::from_raw(remote_command))
+    }
+
+    /// Whether this activation must run in the detached PID-1-owned shape rather
+    /// than a foreground ssh: a `Switch` whose target node IS the dispatching
+    /// daemon's own host. `switch-to-configuration switch` restarts the daemon,
+    /// which would kill a foreground ssh and deadlock the deploy; the detached
+    /// transient unit survives the restart (report 150 self-Switch). Always
+    /// false when the daemon host is unknown or the target is a different node.
+    fn runs_detached_self_switch(&self) -> bool {
+        matches!(self.action, ordinary::SystemAction::Switch)
+            && self
+                .daemon_host
+                .as_ref()
+                .is_some_and(|host| host.payload() == self.node_name.payload())
+    }
+
+    /// The deterministic transient unit name for a detached self-Switch:
+    /// `lojix-self-switch-deploy-<deployment-identifier>`. Distinct from the
+    /// BootOnce unit name (a self-Switch is `switch-to-configuration switch`,
+    /// not a boot-once entry), but derived from the same deployment identifier so
+    /// it is one deploy → one unit.
+    fn self_switch_unit_name(&self) -> String {
+        format!(
+            "lojix-self-switch-deploy-{}",
+            self.deployment_identifier.payload()
+        )
+    }
+
+    /// The activation script for a detached self-Switch: set the system profile,
+    /// `switch-to-configuration switch` — the same Switch semantics as the
+    /// foreground path's `ssh_invocation`, NOT a boot-once entry — then the EFI
+    /// reconcile (`bootctl set-default` the running generation, clear any stale
+    /// one-shot) the foreground Switch path runs via `reconcile_efi`. The whole
+    /// activation runs inside the transient unit, so the daemon restart `switch`
+    /// triggers cannot kill it mid-flight; the post-switch reconcile rides along
+    /// in the same PID-1-owned unit rather than a (now-dead) foreground ssh.
+    fn self_switch_script(&self) -> String {
+        let store = &self.store_path;
+        format!(
+            "export PATH=/run/current-system/sw/bin:/run/wrappers/bin:$PATH\n\
+             set -eu\n\
+             nix-env -p /nix/var/nix/profiles/system --set {store}\n\
+             {store}/bin/switch-to-configuration switch\n\
+             SYSTEM_LINK=$(readlink /nix/var/nix/profiles/system)\n\
+             GENERATION=$(echo \"$SYSTEM_LINK\" | sed -E 's/^system-([0-9]+)-link$/\\1/')\n\
+             ENTRY=\"nixos-generation-$GENERATION.conf\"\n\
+             [ -f \"/boot/loader/entries/$ENTRY\" ]\n\
+             bootctl set-default \"$ENTRY\"\n\
+             bootctl set-oneshot ''\n"
+        )
     }
 
     /// Whether this action reconciles EFI bootloader vars after activation.
@@ -3854,10 +3945,25 @@ impl SystemActivation {
     }
 
     async fn run(&self) -> std::result::Result<(), String> {
+        if self.runs_detached_self_switch() {
+            return self.run_self_switch().await;
+        }
         match self.action {
             ordinary::SystemAction::BootOnce => self.run_boot_once().await,
             _ => self.run_simple().await,
         }
+    }
+
+    /// Deadlock-free self-Switch: run the full Switch activation inside a
+    /// PID-1-owned transient unit (the BootOnce mechanism, carrying Switch
+    /// semantics) so `switch-to-configuration switch` restarting the dispatching
+    /// daemon does not kill the activation's foreground ssh (report 150).
+    async fn run_self_switch(&self) -> std::result::Result<(), String> {
+        let unit_name = self.self_switch_unit_name();
+        self.detached_invocation(&unit_name, self.self_switch_script())
+            .run()
+            .await
+            .map(|_| ())
     }
 
     async fn run_simple(&self) -> std::result::Result<(), String> {
@@ -4072,19 +4178,25 @@ impl NixCommand {
         )
     }
 
-    /// Resolve the toplevel `.drvPath` BEFORE the build. The eval must read the
-    /// store the build will realize into (Spirit ufjd / 0a9p / lc28, report
-    /// 150): a build-on-target node's config references model `.drv`s
-    /// (multi-tens-of-gigabyte GGUFs) that exist ONLY in the target's own store,
-    /// so a daemon-host-local eval cannot find them and fails. A
-    /// `BuildTarget::TargetStore` therefore adds the same `--eval-store auto
-    /// --store <uri>` redirect as `build_closure_in_store`, pointing the eval at
-    /// the target store where those paths already live — no model NAR transits
-    /// the daemon host. `Local` (target IS the daemon host) and `Remote` (the
-    /// builder machine realizes the closure, but the `.drv` is instantiated
-    /// against the daemon host's store, matching `build_closure_remote`) keep
-    /// the host-local eval. The `--override-input` flags and `.drvPath` selector
-    /// are preserved in every case.
+    /// Resolve the toplevel `.drvPath` BEFORE the build, INSTANTIATING against
+    /// the target store so target-only `.drv`s resolve (Spirit ufjd / 0a9p /
+    /// lc28, report 150; verified 2026-06-20). A build-on-target node's config
+    /// references model `.drv`s (multi-tens-of-gigabyte GGUFs) that exist ONLY
+    /// in the target's own store, so the eval must instantiate there or it fails
+    /// with `... .drv does not exist`. For `BuildTarget::TargetStore` the eval
+    /// adds `--store <uri>` ALONE — pointing instantiation at the target store —
+    /// and deliberately NOT `--eval-store auto`: `--eval-store auto` pins
+    /// instantiation local, which is exactly the failure mode (an `--eval-store
+    /// auto --store <uri>` eval still cannot find the target-only `.drv`). This
+    /// makes the eval flags DIFFERENT from the build flags
+    /// (`build_closure_in_store` keeps `--eval-store auto --store <uri>`:
+    /// eval-local, realize-remote — correct for the BUILD, wrong for the EVAL).
+    /// `Local` (target IS the daemon host) adds no store flags — the host store
+    /// already holds everything. `Remote` keeps the eval host-local too (no
+    /// store redirect): the remote builder is for the BUILD, not the eval, and
+    /// the `.drv` is instantiated against the daemon host's store, matching
+    /// `build_closure_remote`. The `--override-input` flags and `.drvPath`
+    /// selector are preserved in every case.
     fn eval_drv_path(
         attribute: &str,
         overrides: &[nexus::FlakeInputOverride],
@@ -4095,17 +4207,24 @@ impl NixCommand {
             "--refresh".to_string(),
             "--raw".to_string(),
         ];
-        if let nexus::BuildTarget::TargetStore(store) = target {
-            arguments.extend([
-                "--eval-store".to_string(),
-                "auto".to_string(),
-                "--store".to_string(),
-                store.payload().to_string(),
-            ]);
+        match target {
+            nexus::BuildTarget::TargetStore(store) => {
+                arguments.extend(Self::store_options(store.payload()));
+            }
+            nexus::BuildTarget::Local | nexus::BuildTarget::Remote(_) => {}
         }
         arguments.extend(Self::override_input_options(overrides));
         arguments.push(format!("{attribute}.drvPath"));
         Self::new("nix", arguments)
+    }
+
+    /// The shared `--store <uri>` argument pair, the one place the store-URI
+    /// argument is formatted for nix. Both the eval (instantiate against the
+    /// target store) and the build (realize into the target store) reuse it; the
+    /// `--eval-store auto` flag differs between them and is added by the caller,
+    /// not here.
+    fn store_options(store_uri: &str) -> Vec<String> {
+        vec!["--store".to_string(), store_uri.to_string()]
     }
 
     fn hash_path(path: &Path) -> Self {
@@ -4169,15 +4288,19 @@ impl NixCommand {
     }
 
     /// Build-on-target (Spirit ufjd / 0a9p / lc28, report 150): realize the
-    /// closure in the TARGET node's own store instead of the daemon host's.
-    /// `--eval-store auto` keeps evaluation cheap and LOCAL (the daemon host
-    /// reads the flake / `.drv`), while `--store <store_uri>` directs
-    /// REALIZATION — every output path build or substitute, including any
-    /// multi-tens-of-gigabyte model NAR — into the target store. The daemon
-    /// host therefore never holds the node's model-bearing closure. `store_uri`
-    /// is the `ssh-ng://root@<node>.<cluster>.criome` form
-    /// (`SshTarget::ssh_uri`). The `^*` output selector resolves the threaded
-    /// `.drv` to its realised outputs, same as the local build.
+    /// closure in the TARGET node's own store instead of the daemon host's. The
+    /// BUILD deliberately keeps DIFFERENT flags from the eval
+    /// (`eval_drv_path`): `--eval-store auto` keeps evaluation LOCAL (the
+    /// `.drv` was already instantiated by the eval step against the target
+    /// store, so the build's own re-eval reads cheaply on the daemon host),
+    /// while `--store <store_uri>` directs REALIZATION — every output path build
+    /// or substitute, including any multi-tens-of-gigabyte model NAR — into the
+    /// target store. So: eval-local, realize-remote. The daemon host therefore
+    /// never holds the node's model-bearing closure. `store_uri` is the
+    /// `ssh-ng://root@<node>.<cluster>.criome` form (`SshTarget::ssh_uri`). The
+    /// `^*` output selector resolves the threaded `.drv` to its realised
+    /// outputs, same as the local build. The `--store <uri>` pair comes from the
+    /// shared `store_options`, the single place that argument is formatted.
     fn build_closure_in_store(
         closure_path: &str,
         store_uri: &str,
@@ -4189,10 +4312,9 @@ impl NixCommand {
             "--print-out-paths".to_string(),
             "--eval-store".to_string(),
             "auto".to_string(),
-            "--store".to_string(),
-            store_uri.to_string(),
-            Self::output_installable(closure_path),
         ];
+        arguments.extend(Self::store_options(store_uri));
+        arguments.push(Self::output_installable(closure_path));
         arguments.extend(Self::substituter_options(substituters));
         Self::new("nix", arguments)
     }
@@ -4695,10 +4817,23 @@ mod tests {
     }
 
     fn system_activation(action: ordinary::SystemAction) -> SystemActivation {
-        match Activation::from_command(&activate_command(
-            nexus::ActivationProfile::System(action),
-            ordinary::ActivationKind::Switch,
-        ))
+        system_activation_on_host(action, None)
+    }
+
+    /// A System activation built with an explicit daemon-host context so a test
+    /// can target a self-Switch (`daemon_host == node-1`, the command's node) or
+    /// a foreign-target Switch (`daemon_host == None` or a different node).
+    fn system_activation_on_host(
+        action: ordinary::SystemAction,
+        daemon_host: Option<ordinary::NodeName>,
+    ) -> SystemActivation {
+        match Activation::from_command(
+            &activate_command(
+                nexus::ActivationProfile::System(action),
+                ordinary::ActivationKind::Switch,
+            ),
+            daemon_host.as_ref(),
+        )
         .expect("activation")
         {
             Activation::System(activation) => activation,
@@ -4785,6 +4920,78 @@ mod tests {
         // BootOnce is not a simple invocation; it uses the systemd-run shape.
         let activation = system_activation(ordinary::SystemAction::BootOnce);
         assert!(activation.ssh_invocation().is_none());
+    }
+
+    // ---- self-Switch is deadlock-free (PID-1-owned), report 150 ----
+
+    #[test]
+    fn self_host_switch_selects_the_detached_shape() {
+        // A Switch whose target node IS the dispatching daemon's own host must
+        // route to the detached PID-1-owned transient unit, NOT a foreground ssh
+        // that `switch-to-configuration switch` would kill by restarting the
+        // daemon. `activate_command` targets node-1, so a daemon hosted on node-1
+        // is a self-Switch.
+        let activation =
+            system_activation_on_host(ordinary::SystemAction::Switch, Some(node()));
+        assert!(
+            activation.runs_detached_self_switch(),
+            "self-host Switch must take the detached shape"
+        );
+        let invocation =
+            activation.detached_invocation(&activation.self_switch_unit_name(), activation.self_switch_script());
+        assert_eq!(invocation.program(), "ssh");
+        let argv = invocation.joined_arguments();
+        assert!(argv.contains("systemd-run"), "PID-1-owned unit: {argv}");
+        assert!(argv.contains("--service-type=oneshot"), "{argv}");
+        assert!(argv.contains("--wait"), "{argv}");
+        assert!(
+            argv.contains("--unit=lojix-self-switch-deploy-7"),
+            "deterministic self-switch unit name: {argv}"
+        );
+        // It carries Switch semantics (set profile + switch-to-configuration
+        // switch), NOT a boot-once entry (`set-oneshot <generation>`).
+        assert!(
+            argv.contains("switch-to-configuration switch"),
+            "self-switch runs the Switch action: {argv}"
+        );
+        assert!(
+            argv.contains("nix-env -p /nix/var/nix/profiles/system --set"),
+            "self-switch sets the system profile: {argv}"
+        );
+    }
+
+    #[test]
+    fn foreign_target_switch_keeps_the_foreground_path() {
+        // A Switch targeting a DIFFERENT node than the daemon host (or with no
+        // daemon-host context) must NOT take the detached shape — the foreground
+        // ssh is not at risk there.
+        let foreign = system_activation_on_host(
+            ordinary::SystemAction::Switch,
+            Some(ordinary::NodeName::new("some-other-node")),
+        );
+        assert!(!foreign.runs_detached_self_switch());
+        let no_context = system_activation(ordinary::SystemAction::Switch);
+        assert!(!no_context.runs_detached_self_switch());
+        // The foreground Switch invocation is still available and well-shaped.
+        let invocation = no_context.ssh_invocation().expect("foreground switch");
+        assert_eq!(invocation.program(), "ssh");
+        assert!(
+            invocation
+                .joined_arguments()
+                .contains("switch-to-configuration switch")
+        );
+    }
+
+    #[test]
+    fn self_host_boot_does_not_take_the_self_switch_shape() {
+        // Only Switch self-restarts the daemon; a self-host Boot/Test/BootOnce
+        // keeps its normal path (Boot uses the foreground ssh; BootOnce its own
+        // transient unit).
+        let boot = system_activation_on_host(ordinary::SystemAction::Boot, Some(node()));
+        assert!(!boot.runs_detached_self_switch());
+        let boot_once =
+            system_activation_on_host(ordinary::SystemAction::BootOnce, Some(node()));
+        assert!(!boot_once.runs_detached_self_switch());
     }
 
     // ---- Step 3: BootOnce transient-unit argv + script snapshot ----
@@ -4919,12 +5126,16 @@ mod tests {
     }
 
     #[test]
-    fn target_store_eval_resolves_drv_path_against_the_target_store() {
-        // The Eval step resolves `.drvPath` BEFORE the build. A build-on-target
-        // node's config references model `.drv`s that live ONLY in the target
-        // store, so the eval must read that store (`--eval-store auto --store
-        // <uri>`) or it fails with `store path ... does not exist` (report 150).
-        // The `--override-input` flags and the `.drvPath` selector are preserved.
+    fn target_store_eval_instantiates_against_the_target_store_no_eval_store_auto() {
+        // The Eval step resolves `.drvPath` BEFORE the build by INSTANTIATING
+        // against the target store. A build-on-target node's config references
+        // model `.drv`s that live ONLY in the target store, so the eval must add
+        // `--store <uri>` ALONE — NOT `--eval-store auto --store <uri>` —
+        // because `--eval-store auto` pins instantiation local and the
+        // target-only `.drv` then `... .drv does not exist` (verified
+        // 2026-06-20, report 150). This is the deliberate difference from the
+        // BUILD flags. The `--override-input` flags and `.drvPath` selector are
+        // preserved.
         let store = nexus::BuildTarget::TargetStore(nexus::TargetStore::new(
             "ssh-ng://root@node-1.alpha.criome",
         ));
@@ -4932,12 +5143,13 @@ mod tests {
         assert_eq!(invocation.program(), "nix");
         let argv = invocation.joined_arguments();
         assert!(
-            argv.contains("--eval-store auto"),
-            "eval must use the eval-store redirect: {argv}"
+            argv.contains("--store ssh-ng://root@node-1.alpha.criome"),
+            "eval must instantiate against the target store: {argv}"
         );
         assert!(
-            argv.contains("--store ssh-ng://root@node-1.alpha.criome"),
-            "eval must read the target store: {argv}"
+            !argv.contains("--eval-store"),
+            "eval must NOT pin instantiation local — `--eval-store auto` is the \
+             failure mode for target-only drvs: {argv}"
         );
         assert!(argv.contains("--refresh"), "{argv}");
         assert!(argv.contains("--raw"), "{argv}");
@@ -4958,6 +5170,28 @@ mod tests {
         assert!(
             !argv.contains("--eval-store"),
             "local eval adds no eval-store: {argv}"
+        );
+        assert!(argv.ends_with(".#toplevel.drvPath"), "{argv}");
+    }
+
+    #[test]
+    fn remote_eval_stays_host_local_with_no_store_redirect() {
+        // A `Remote` build offloads only the REALIZATION to the named builder
+        // machine; the eval stays host-local (the `.drv` is instantiated against
+        // the daemon host's store, matching `build_closure_remote`). So a Remote
+        // eval adds no `--store` / `--eval-store` flags at all.
+        let target = nexus::BuildTarget::Remote(nexus::BuilderNode::new(ordinary::NodeName::new(
+            "builder-1",
+        )));
+        let invocation = NixCommand::eval_drv_path(".#toplevel", &[], &target);
+        let argv = invocation.joined_arguments();
+        assert!(
+            !argv.contains("--store"),
+            "remote eval adds no store redirect: {argv}"
+        );
+        assert!(
+            !argv.contains("--eval-store"),
+            "remote eval adds no eval-store: {argv}"
         );
         assert!(argv.ends_with(".#toplevel.drvPath"), "{argv}");
     }
@@ -5004,8 +5238,11 @@ mod tests {
             mode,
             user: ordinary::UserName::new("li"),
         });
-        match Activation::from_command(&activate_command(profile, ordinary::ActivationKind::Switch))
-            .expect("activation")
+        match Activation::from_command(
+            &activate_command(profile, ordinary::ActivationKind::Switch),
+            None,
+        )
+        .expect("activation")
         {
             Activation::Home(activation) => activation,
             Activation::System(_) => panic!("expected Home activation"),
@@ -5042,27 +5279,28 @@ mod tests {
     }
 
     #[test]
-    fn kebab_secret_names_lower_to_camel_case_sops_attributes() {
+    fn sops_attribute_name_is_the_filename_stem_verbatim() {
+        // No case transform: the `.sops` filename stem becomes the attribute
+        // name exactly as written (the coordinated goldragon rename gives each
+        // file its exact camelCase consumer name). Only the `.sops` suffix is
+        // stripped.
         assert_eq!(
-            secret_file("router-wifi-sae-passwords.sops")
+            secret_file("routerWifiSaePasswords.sops")
                 .attribute_name()
-                .as_str(),
+                .expect("utf8 stem"),
             "routerWifiSaePasswords"
         );
         assert_eq!(
-            secret_file("local-llm-api-token.sops")
+            secret_file("localLlmApiToken.sops")
                 .attribute_name()
-                .as_str(),
+                .expect("utf8 stem"),
             "localLlmApiToken"
         );
+        // a single-token stem passes through unchanged
         assert_eq!(
-            secret_file("router-backup-wifi-password.sops")
-                .attribute_name()
-                .as_str(),
-            "routerBackupWifiPassword"
+            secret_file("token.sops").attribute_name().expect("utf8 stem"),
+            "token"
         );
-        // single-segment stem stays lowercase
-        assert_eq!(secret_file("token.sops").attribute_name().as_str(), "token");
     }
 
     #[test]
@@ -5092,17 +5330,19 @@ mod tests {
     }
 
     #[test]
-    fn generated_secrets_flake_maps_camel_case_attributes_to_copied_files() {
+    fn generated_secrets_flake_maps_verbatim_stems_to_copied_files() {
         let source_directory = std::env::temp_dir().join(format!(
             "lojix-secrets-source-{}",
             std::process::id()
         ));
         let secrets_directory = source_directory.join("secrets");
         fs::create_dir_all(&secrets_directory).expect("create source secrets dir");
-        // opaque placeholder ciphertext — never read back by the daemon
-        fs::write(secrets_directory.join("router-wifi-sae-passwords.sops"), b"opaque")
+        // opaque placeholder ciphertext — never read back by the daemon. Files
+        // are named with their exact camelCase consumer name (coordinated
+        // goldragon rename); the attribute is the stem verbatim.
+        fs::write(secrets_directory.join("routerWifiSaePasswords.sops"), b"opaque")
             .expect("write sops file");
-        fs::write(secrets_directory.join("local-llm-api-token.sops"), b"opaque")
+        fs::write(secrets_directory.join("localLlmApiToken.sops"), b"opaque")
             .expect("write sops file");
         // a non-.sops file in the directory is ignored
         fs::write(secrets_directory.join("README.md"), b"ignore me").expect("write readme");
@@ -5120,25 +5360,117 @@ mod tests {
         let flake = fs::read_to_string(generated.join("flake.nix")).expect("read flake");
         assert!(flake.contains("sopsFiles = {"), "{flake}");
         assert!(
-            flake.contains("localLlmApiToken = ./local-llm-api-token.sops;"),
+            flake.contains("localLlmApiToken = ./localLlmApiToken.sops;"),
             "{flake}"
         );
         assert!(
-            flake.contains("routerWifiSaePasswords = ./router-wifi-sae-passwords.sops;"),
+            flake.contains("routerWifiSaePasswords = ./routerWifiSaePasswords.sops;"),
             "{flake}"
         );
         assert!(!flake.contains("README"), "non-sops files excluded: {flake}");
         assert!(
-            generated.join("router-wifi-sae-passwords.sops").is_file(),
+            generated.join("routerWifiSaePasswords.sops").is_file(),
             "ciphertext copied into the generated input"
         );
         assert!(
-            generated.join("local-llm-api-token.sops").is_file(),
+            generated.join("localLlmApiToken.sops").is_file(),
             "ciphertext copied into the generated input"
         );
 
         let _ = fs::remove_dir_all(&source_directory);
         let _ = fs::remove_dir_all(&generated);
+    }
+
+    #[test]
+    fn regenerating_secrets_wipes_stale_ciphertext() {
+        // The generated dir is wiped each call, so a file removed from the
+        // cluster secrets leaves no stale ciphertext (which would drift the
+        // narHash). First generate with two files, then with one, and confirm
+        // the dropped file is gone from the generated input.
+        let source_directory = std::env::temp_dir().join(format!(
+            "lojix-secrets-stale-source-{}",
+            std::process::id()
+        ));
+        let secrets_directory = source_directory.join("secrets");
+        let _ = fs::remove_dir_all(&source_directory);
+        fs::create_dir_all(&secrets_directory).expect("create source secrets dir");
+        fs::write(secrets_directory.join("alpha.sops"), b"opaque").expect("write alpha");
+        fs::write(secrets_directory.join("beta.sops"), b"opaque").expect("write beta");
+
+        let generated =
+            std::env::temp_dir().join(format!("lojix-secrets-stale-gen-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&generated);
+        let source = ordinary::ProposalSource::new(
+            source_directory.join("datom.nota").to_string_lossy().to_string(),
+        );
+        let cluster = ClusterSecretsDirectory::from_proposal_source(&source);
+        GeneratedInputDirectory::new(generated.clone())
+            .write_secrets(&cluster)
+            .expect("first write");
+        assert!(generated.join("alpha.sops").is_file());
+        assert!(generated.join("beta.sops").is_file());
+
+        // Drop beta from the cluster secrets and regenerate.
+        fs::remove_file(secrets_directory.join("beta.sops")).expect("remove beta");
+        GeneratedInputDirectory::new(generated.clone())
+            .write_secrets(&cluster)
+            .expect("second write");
+        assert!(generated.join("alpha.sops").is_file());
+        assert!(
+            !generated.join("beta.sops").exists(),
+            "stale ciphertext must be wiped on regeneration"
+        );
+
+        let _ = fs::remove_dir_all(&source_directory);
+        let _ = fs::remove_dir_all(&generated);
+    }
+
+    #[test]
+    fn colliding_secret_attribute_names_are_a_typed_error() {
+        // Two files mapping to the same sopsFiles attribute name is a real
+        // conflict, not silent last-writer-wins. A case-insensitive or
+        // unicode-normalizing host filesystem can present two distinct `.sops`
+        // entries whose verbatim stems are byte-identical; `write_secrets` must
+        // reject. The guard is exercised by feeding two `ClusterSecretFile`s
+        // with the same stem through the same iteration `write_secrets` runs.
+        let files = [secret_file("shared.sops"), secret_file("shared.sops")];
+        let mut attributes: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut error = None;
+        for file in &files {
+            let file_name = file.file_name().expect("utf8");
+            let attribute_name = file.attribute_name().expect("utf8");
+            if let Some(existing) = attributes.insert(attribute_name.clone(), file_name.clone()) {
+                error = Some(crate::Error::SecretAttributeCollision {
+                    attribute_name,
+                    first: existing,
+                    second: file_name,
+                });
+                break;
+            }
+        }
+        assert!(matches!(
+            error,
+            Some(crate::Error::SecretAttributeCollision { .. })
+        ));
+    }
+
+    #[test]
+    fn non_utf8_secret_file_name_is_a_typed_error() {
+        // A non-UTF-8 `.sops` file name cannot name a Nix path; it is a typed
+        // error, not a silently-empty attribute name.
+        use std::os::unix::ffi::OsStrExt;
+        let raw = std::ffi::OsStr::from_bytes(b"bad\xff.sops");
+        let path = PathBuf::from("/cluster/secrets").join(raw);
+        let file = ClusterSecretFile::new(path);
+        assert!(matches!(
+            file.attribute_name(),
+            Err(crate::Error::SecretFileNameNotUtf8(_))
+        ));
+        assert!(matches!(
+            file.file_name(),
+            Err(crate::Error::SecretFileNameNotUtf8(_))
+        ));
     }
 
     #[test]
