@@ -82,7 +82,7 @@
   FlakeInputReference { url String nix_archive_hash String }
   FlakeInputOverride { name String reference FlakeInputReference }
   MaterializedInputs { overrides (Vec FlakeInputOverride) }
-  NixEvalCommand { ClusterName * NodeName * DeploymentKind * flake FlakeReference attribute String overrides (Vec FlakeInputOverride) }
+  NixEvalCommand { ClusterName * NodeName * DeploymentKind * flake FlakeReference attribute String overrides (Vec FlakeInputOverride) target BuildTarget }
   NixBuildCommand { GenerationIdentifier * ClosurePath * target BuildTarget substituters (Vec ExtraSubstituter) }
   CopyClosureCommand { GenerationIdentifier * ClusterName * NodeName * ClosurePath * source BuildTarget }
   HomeActivationProfile { mode HomeMode user UserName }

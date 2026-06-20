@@ -170,6 +170,7 @@ pub struct NixEvalCommand {
     pub flake: FlakeReference,
     pub attribute: String,
     pub overrides: Vec<FlakeInputOverride>,
+    pub target: BuildTarget,
 }
 
 #[rustfmt::skip]

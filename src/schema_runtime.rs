@@ -1012,7 +1012,7 @@ impl DeployPipeline {
         }
     }
 
-    fn nix_eval_command(&self) -> nexus::NixEvalCommand {
+    fn nix_eval_command(&self, configuration: &RuntimeConfiguration) -> nexus::NixEvalCommand {
         nexus::NixEvalCommand {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
@@ -1020,6 +1020,13 @@ impl DeployPipeline {
             flake: self.flake.clone(),
             attribute: self.target_attribute(),
             overrides: self.input_overrides.clone(),
+            // Build-on-target (Spirit ufjd / 0a9p / lc28, report 150): the eval
+            // step must resolve `.drvPath` against the SAME store the build will
+            // realize into. A target node that is not the daemon host references
+            // model `.drv`s that exist only in its own store, so a daemon-host
+            // local eval cannot find them. Mirroring `nix_build_command`'s target
+            // points the eval at the target store where those paths already live.
+            target: self.build_target(configuration),
         }
     }
 
@@ -1966,7 +1973,7 @@ impl SchemaRuntime {
             DeployStage::Submitted => {
                 self.set_stage(DeployStage::BuildingRecorded);
                 nexus::NexusAction::CommandEffect(nexus::EffectCommand::NixEval(
-                    pipeline.nix_eval_command(),
+                    pipeline.nix_eval_command(self.configuration.as_ref()),
                 ))
             }
             DeployStage::BuildingRecorded => {
@@ -2836,7 +2843,7 @@ impl SchemaRuntime {
 
     async fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> nexus::EffectResult {
         let attribute = format!("{}#{}", command.flake.payload(), command.attribute);
-        match NixCommand::eval_drv_path(&attribute, &command.overrides)
+        match NixCommand::eval_drv_path(&attribute, &command.overrides, &command.target)
             .run()
             .await
         {
@@ -4065,12 +4072,37 @@ impl NixCommand {
         )
     }
 
-    fn eval_drv_path(attribute: &str, overrides: &[nexus::FlakeInputOverride]) -> Self {
+    /// Resolve the toplevel `.drvPath` BEFORE the build. The eval must read the
+    /// store the build will realize into (Spirit ufjd / 0a9p / lc28, report
+    /// 150): a build-on-target node's config references model `.drv`s
+    /// (multi-tens-of-gigabyte GGUFs) that exist ONLY in the target's own store,
+    /// so a daemon-host-local eval cannot find them and fails. A
+    /// `BuildTarget::TargetStore` therefore adds the same `--eval-store auto
+    /// --store <uri>` redirect as `build_closure_in_store`, pointing the eval at
+    /// the target store where those paths already live — no model NAR transits
+    /// the daemon host. `Local` (target IS the daemon host) and `Remote` (the
+    /// builder machine realizes the closure, but the `.drv` is instantiated
+    /// against the daemon host's store, matching `build_closure_remote`) keep
+    /// the host-local eval. The `--override-input` flags and `.drvPath` selector
+    /// are preserved in every case.
+    fn eval_drv_path(
+        attribute: &str,
+        overrides: &[nexus::FlakeInputOverride],
+        target: &nexus::BuildTarget,
+    ) -> Self {
         let mut arguments = vec![
             "eval".to_string(),
             "--refresh".to_string(),
             "--raw".to_string(),
         ];
+        if let nexus::BuildTarget::TargetStore(store) = target {
+            arguments.extend([
+                "--eval-store".to_string(),
+                "auto".to_string(),
+                "--store".to_string(),
+                store.payload().to_string(),
+            ]);
+        }
         arguments.extend(Self::override_input_options(overrides));
         arguments.push(format!("{attribute}.drvPath"));
         Self::new("nix", arguments)
@@ -4884,6 +4916,50 @@ mod tests {
         // A target-store build NEVER offloads to the daemon machine file — that
         // would copy the result back into the daemon host store (report 150).
         assert!(!argv.contains("--builders"), "{argv}");
+    }
+
+    #[test]
+    fn target_store_eval_resolves_drv_path_against_the_target_store() {
+        // The Eval step resolves `.drvPath` BEFORE the build. A build-on-target
+        // node's config references model `.drv`s that live ONLY in the target
+        // store, so the eval must read that store (`--eval-store auto --store
+        // <uri>`) or it fails with `store path ... does not exist` (report 150).
+        // The `--override-input` flags and the `.drvPath` selector are preserved.
+        let store = nexus::BuildTarget::TargetStore(nexus::TargetStore::new(
+            "ssh-ng://root@node-1.alpha.criome",
+        ));
+        let invocation = NixCommand::eval_drv_path(".#toplevel", &[], &store);
+        assert_eq!(invocation.program(), "nix");
+        let argv = invocation.joined_arguments();
+        assert!(
+            argv.contains("--eval-store auto"),
+            "eval must use the eval-store redirect: {argv}"
+        );
+        assert!(
+            argv.contains("--store ssh-ng://root@node-1.alpha.criome"),
+            "eval must read the target store: {argv}"
+        );
+        assert!(argv.contains("--refresh"), "{argv}");
+        assert!(argv.contains("--raw"), "{argv}");
+        assert!(argv.ends_with(".#toplevel.drvPath"), "{argv}");
+    }
+
+    #[test]
+    fn local_eval_reads_the_daemon_host_store_with_no_redirect() {
+        // A daemon-host target (`Local`) keeps the host-local eval — its store
+        // already holds everything the config references, and a store redirect
+        // would be wrong. No `--store` / `--eval-store` flags are added.
+        let invocation = NixCommand::eval_drv_path(".#toplevel", &[], &nexus::BuildTarget::Local);
+        let argv = invocation.joined_arguments();
+        assert!(
+            !argv.contains("--store"),
+            "local eval adds no store: {argv}"
+        );
+        assert!(
+            !argv.contains("--eval-store"),
+            "local eval adds no eval-store: {argv}"
+        );
+        assert!(argv.ends_with(".#toplevel.drvPath"), "{argv}");
     }
 
     #[test]
