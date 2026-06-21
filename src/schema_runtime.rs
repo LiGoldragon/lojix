@@ -88,13 +88,7 @@ pub struct RuntimeConfiguration {
 /// and the config default all resolve through one type.
 #[derive(Debug, Clone)]
 pub struct TestDefaults {
-    cluster: ordinary::ClusterName,
     default_vm_host: ordinary::NodeName,
-    default_mode: ordinary::TestMode,
-    /// The cluster→flake resolution (Unit 2b): the flake whose
-    /// `#checks.<system>.vm-<node>` auto-pickup check the hermetic dispatch
-    /// builds, and whose generated runner the live path brings up.
-    test_flake: ordinary::FlakeReference,
     /// The cluster proposal NOTA file projected to validate `(OnHost h)`
     /// against the node's declared host-set and to resolve `All` to the
     /// cluster's test-VM nodes. Empty when host-set validation is not
@@ -103,52 +97,25 @@ pub struct TestDefaults {
 }
 
 impl TestDefaults {
-    /// Lower one `TestRequest` to the resolved test targets it names. A
-    /// `(Run …)` carries cluster/host/mode explicitly; a `(Check …)` fills all
-    /// three from these defaults — the routine `(Check mercury)` form (report
-    /// 54 decision D). `(Nodes [n …])` expands to one resolved run per named
-    /// node; `All` is a projection sweep deferred to Unit 2b and resolves to no
-    /// targets here (the caller rejects an empty resolution honestly rather
-    /// than faking a run). Returns the resolved targets so the caller mints an
-    /// identifier and records a Pending row per target.
-    fn lower(&self, request: meta::TestRequest) -> Vec<ResolvedTestRun> {
-        match request {
-            meta::TestRequest::Run(run) => self.lower_run(run),
-            meta::TestRequest::Check(check) => self.lower_check(check),
+    /// Lower an ordinary contained deployment request to the one concrete run
+    /// it names. The request already carries the profile, flake, and typed
+    /// contained target; defaults only provide the hermetic host placeholder.
+    fn lower(&self, request: ordinary::DeployContainedRequest) -> ResolvedTestRun {
+        let profile = request.node_profile;
+        let host = match &request.contained_target {
+            ordinary::ContainedTarget::HermeticVm => self.default_vm_host.clone(),
+            ordinary::ContainedTarget::VmHostGuest(target) => {
+                self.resolve_host(target.clone().into_payload())
+            }
+            ordinary::ContainedTarget::EphemeralDroplet(_) => self.default_vm_host.clone(),
+        };
+        ResolvedTestRun {
+            cluster: profile.cluster_name,
+            node: profile.node_name,
+            host,
+            target: request.contained_target,
+            flake: request.flake,
         }
-    }
-
-    /// Lower a full `(Run …)`: explicit cluster + host selection + mode, one
-    /// resolved run per node in the selection.
-    fn lower_run(&self, run: meta::TestRun) -> Vec<ResolvedTestRun> {
-        let host = self.resolve_host(run.host_selection);
-        let mode = run.test_mode;
-        self.nodes_of(run.node_selection)
-            .into_iter()
-            .map(|node| ResolvedTestRun {
-                cluster: run.cluster_name.clone(),
-                node,
-                host: host.clone(),
-                mode,
-                flake: self.test_flake.clone(),
-            })
-            .collect()
-    }
-
-    /// Lower a routine `(Check [n …])`: cluster, host, and mode all from these
-    /// defaults; one resolved run per named node.
-    fn lower_check(&self, check: meta::QuickCheck) -> Vec<ResolvedTestRun> {
-        check
-            .into_payload()
-            .into_iter()
-            .map(|node| ResolvedTestRun {
-                cluster: self.cluster.clone(),
-                node,
-                host: self.default_vm_host.clone(),
-                mode: self.default_mode,
-                flake: self.test_flake.clone(),
-            })
-            .collect()
     }
 
     /// Resolve a `HostSelection` against these defaults: `DefaultHost` reads
@@ -161,30 +128,6 @@ impl TestDefaults {
         }
     }
 
-    /// The explicit node list of a `NodeSelection`. `All` resolves to the
-    /// cluster's test-VM nodes by projecting the configured proposal source
-    /// (Unit 2b): every Pod node whose primary host (`super_node`) declares a
-    /// `VmHost` service. An unconfigured or unreadable proposal source resolves
-    /// `All` to no nodes, so the caller rejects an empty resolution honestly
-    /// rather than faking a sweep.
-    fn nodes_of(&self, selection: meta::NodeSelection) -> Vec<ordinary::NodeName> {
-        match selection {
-            meta::NodeSelection::Nodes(nodes) => nodes,
-            meta::NodeSelection::All => self.all_test_vm_nodes(),
-        }
-    }
-
-    /// Sweep the configured proposal for the cluster's test-VM-host nodes —
-    /// every node whose `Machine::host_set` (its primary `super_node`, plus the
-    /// additive `super_nodes` once Unit 1 lands on horizon main) is non-empty,
-    /// i.e. a Pod hosted on a vmhost. Empty when no proposal source is
-    /// configured or it fails to project.
-    fn all_test_vm_nodes(&self) -> Vec<ordinary::NodeName> {
-        ClusterProjection::from_source(&self.proposal_source)
-            .map(|projection| projection.hosted_pod_nodes())
-            .unwrap_or_default()
-    }
-
     /// The everyday test defaults the in-process tests use: cluster
     /// `goldragon`, default host `prometheus`, mode `Hermetic`, and the
     /// CriomOS-test-cluster flake the hermetic proof builds against. No
@@ -193,12 +136,7 @@ impl TestDefaults {
     /// supplies one).
     fn test_default() -> Self {
         Self {
-            cluster: ordinary::ClusterName::new("goldragon"),
             default_vm_host: ordinary::NodeName::new("prometheus"),
-            default_mode: ordinary::TestMode::Hermetic,
-            test_flake: ordinary::FlakeReference::new(
-                "github:LiGoldragon/CriomOS-test-cluster/horizon-test-vm",
-            ),
             proposal_source: ordinary::ProposalSource::new(""),
         }
     }
@@ -214,10 +152,7 @@ impl TestDefaults {
 impl From<&crate::TestDefaults> for TestDefaults {
     fn from(defaults: &crate::TestDefaults) -> Self {
         Self {
-            cluster: ordinary::ClusterName::new(defaults.cluster.clone()),
             default_vm_host: ordinary::NodeName::new(defaults.default_vm_host.clone()),
-            default_mode: defaults.default_mode.into(),
-            test_flake: ordinary::FlakeReference::new(defaults.test_flake.clone()),
             proposal_source: ordinary::ProposalSource::new(defaults.proposal_source.clone()),
         }
     }
@@ -287,7 +222,7 @@ struct ResolvedTestRun {
     cluster: ordinary::ClusterName,
     node: ordinary::NodeName,
     host: ordinary::NodeName,
-    mode: ordinary::TestMode,
+    target: ordinary::ContainedTarget,
     /// The flake whose `#checks.<system>.vm-<node>` the hermetic dispatch
     /// builds (and whose generated runner the live path brings up).
     flake: ordinary::FlakeReference,
@@ -304,7 +239,7 @@ impl ResolvedTestRun {
             cluster_name: self.cluster.clone(),
             node_name: self.node.clone(),
             host: self.host.clone(),
-            mode: self.mode,
+            target: self.target.clone(),
             phase: ordinary::TestRunPhase::Submitted,
             outcome: ordinary::TestOutcome::Pending,
             closure_path: None,
@@ -408,7 +343,7 @@ impl TestPipeline {
             cluster_name: self.run.cluster.clone(),
             node_name: self.run.node.clone(),
             host: self.run.host.clone(),
-            mode: self.run.mode,
+            target: self.run.target.clone(),
             phase,
             outcome,
             closure_path,
@@ -436,8 +371,8 @@ impl TestPipeline {
 /// actor to drive; `Rejected` is a typed up-front refusal and leaves no cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestSubmissionOutcome {
-    Accepted(meta::AcceptedTest),
-    Rejected(meta::RejectedTest),
+    Accepted(ordinary::AcceptedContainedDeploy),
+    Rejected(ordinary::RejectedDeployContained),
 }
 
 /// A projected cluster — the proposal NOTA file the daemon reads to validate
@@ -476,14 +411,14 @@ impl ClusterProjection {
         &self,
         host: &ordinary::NodeName,
         node: &ordinary::NodeName,
-    ) -> std::result::Result<(), meta::TestRejectionReason> {
+    ) -> std::result::Result<(), ordinary::DeployContainedRejectionReason> {
         let host_set = self
             .host_set_of(node)
-            .ok_or(meta::TestRejectionReason::NodeUnknown)?;
+            .ok_or(ordinary::DeployContainedRejectionReason::NodeUnknown)?;
         if host_set.iter().any(|declared| declared == host.payload()) {
             Ok(())
         } else {
-            Err(meta::TestRejectionReason::VmHostNotDeclaredForNode)
+            Err(ordinary::DeployContainedRejectionReason::VmHostNotDeclaredForNode)
         }
     }
 
@@ -502,19 +437,6 @@ impl ClusterProjection {
                 .map(|primary| vec![primary.as_str().to_string()])
                 .unwrap_or_default(),
         )
-    }
-
-    /// Every Pod node hosted on a vmhost — a node whose declared host-set is
-    /// non-empty (i.e. a `super_node` is set). The `All` selection sweeps these.
-    /// The hermetic check exists per declared node (report-53 auto-pickup), so a
-    /// hosted-Pod predicate is the right `All` set.
-    fn hosted_pod_nodes(&self) -> Vec<ordinary::NodeName> {
-        self.proposal
-            .nodes
-            .iter()
-            .filter(|(_, proposal)| proposal.machine.super_node.is_some())
-            .map(|(name, _)| ordinary::NodeName::new(name.as_str().to_string()))
-            .collect()
     }
 }
 
@@ -911,8 +833,8 @@ impl DeployPipeline {
             sema::DeploySubmission::System(deployment) => Self {
                 deployment_identifier,
                 generation_identifier,
-                cluster_name: deployment.cluster_name,
-                node_name: deployment.node_name,
+                cluster_name: deployment.production_node.cluster_name,
+                node_name: deployment.production_node.node_name,
                 deployment_kind: deployment.deployment_kind,
                 activation_kind: Self::system_activation_kind(deployment.system_action),
                 source: deployment.source,
@@ -929,8 +851,8 @@ impl DeployPipeline {
             sema::DeploySubmission::Home(deployment) => Self {
                 deployment_identifier,
                 generation_identifier,
-                cluster_name: deployment.cluster_name,
-                node_name: deployment.node_name,
+                cluster_name: deployment.production_node.cluster_name,
+                node_name: deployment.production_node.node_name,
                 deployment_kind: ordinary::DeploymentKind::HomeOnly,
                 activation_kind: ordinary::ActivationKind::Switch,
                 source: deployment.source,
@@ -1221,7 +1143,7 @@ impl From<ordinary::TestRunRecord> for sema::StoredTestRun {
             cluster_name: record.cluster_name,
             node_name: record.node_name,
             host: record.host,
-            mode: record.mode,
+            target: record.target,
             phase: record.phase,
             outcome: record.outcome,
             closure_path: record.closure_path,
@@ -1238,7 +1160,7 @@ impl From<sema::StoredTestRun> for ordinary::TestRunRecord {
             cluster_name: run.cluster_name,
             node_name: run.node_name,
             host: run.host,
-            mode: run.mode,
+            target: run.target,
             phase: run.phase,
             outcome: run.outcome,
             closure_path: run.closure_path,
@@ -1408,14 +1330,17 @@ impl SchemaRuntime {
     /// left set on `self` so the daemon hands this engine to the test-job actor,
     /// which drives the dispatch via [`Self::drive_submitted_test`]. The
     /// hermetic build / live cycle does NOT run here.
-    pub async fn submit_test(&mut self, request: meta::TestRequest) -> TestSubmissionOutcome {
-        let work = nexus::NexusWork::SignalArrived(nexus::SignalInput::MetaInput(
-            meta::Input::Test(meta::Test::new(request)),
+    pub async fn submit_contained(
+        &mut self,
+        request: ordinary::DeployContainedRequest,
+    ) -> TestSubmissionOutcome {
+        let work = nexus::NexusWork::SignalArrived(nexus::SignalInput::OrdinaryInput(
+            ordinary::Input::DeployContained(ordinary::DeployContained::new(request)),
         ))
         .with_origin_route(nexus::OriginRoute::new(0));
         match self.execute(work).await.into_root() {
-            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
-                meta::Output::Tested(accepted),
+            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(
+                ordinary::Output::ContainedDeployed(accepted),
             )) => {
                 // Stamp the accepted marker onto the cursor so the terminal
                 // outcome reply carries the acceptance marker (like deploy).
@@ -1425,11 +1350,11 @@ impl SchemaRuntime {
                 }
                 TestSubmissionOutcome::Accepted(accepted)
             }
-            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
-                meta::Output::TestRejected(rejected),
+            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(
+                ordinary::Output::DeployContainedRejected(rejected),
             )) => TestSubmissionOutcome::Rejected(rejected.into_payload()),
             _ => TestSubmissionOutcome::Rejected(
-                self.test_rejection(meta::TestRejectionReason::InternalError),
+                self.test_rejection(ordinary::DeployContainedRejectionReason::InternalError),
             ),
         }
     }
@@ -1445,15 +1370,17 @@ impl SchemaRuntime {
     /// pass. The returned `meta::Output` is the terminal `Tested`/`TestRejected`
     /// for logging/tests; the client already has its accepted handle and
     /// re-observes the outcome via `(Query (ByTestRun …))`.
-    pub async fn drive_submitted_test(&mut self) -> meta::Output {
+    pub async fn drive_submitted_test(&mut self) -> ordinary::Output {
         let Some(pipeline) = self.active_test.clone() else {
-            return meta::Output::TestRejected(meta::TestRejected::new(
-                self.test_rejection(meta::TestRejectionReason::InternalError),
-            ));
+            return ordinary::Output::DeployContainedRejected(
+                ordinary::DeployContainedRejected::new(
+                    self.test_rejection(ordinary::DeployContainedRejectionReason::InternalError),
+                ),
+            );
         };
         self.active_operation = Some(MetaOperation::Test);
-        let first_effect = match pipeline.run.mode {
-            ordinary::TestMode::Hermetic => {
+        let first_effect = match &pipeline.run.target {
+            ordinary::ContainedTarget::HermeticVm => {
                 nexus::EffectCommand::HermeticCheck(pipeline.run.hermetic_check_command())
             }
             // LIVE is BUILT but not run live here (gated). The bring-up effect
@@ -1461,11 +1388,18 @@ impl SchemaRuntime {
             // is the host-untouched user-namespace path (report 51 §3). A live
             // run is psyche-gated, so the daemon-integration proof exercises
             // Hermetic; this constructs the live first effect honestly.
-            ordinary::TestMode::Live => nexus::EffectCommand::BringUpTestVm(
+            ordinary::ContainedTarget::VmHostGuest(_) => nexus::EffectCommand::BringUpTestVm(
                 pipeline
                     .run
                     .bring_up_command(ordinary::ClosurePath::new(String::new())),
             ),
+            ordinary::ContainedTarget::EphemeralDroplet(_) => {
+                return ordinary::Output::DeployContainedRejected(
+                    ordinary::DeployContainedRejected::new(self.test_rejection(
+                        ordinary::DeployContainedRejectionReason::SubstrateUnavailable,
+                    )),
+                );
+            }
         };
         // The cursor's first effect is fired directly through `run_effect` and
         // routed by `decide_test_effect_completion`, then `drive_to_terminal`
@@ -1480,10 +1414,10 @@ impl SchemaRuntime {
     /// continuations through the generated runner. The hermetic path is a
     /// single effect then a terminal write, so this usually runs one or two
     /// hops; the live path threads bring-up → deploy → assert → teardown.
-    async fn drive_to_terminal(&mut self, mut action: nexus::NexusAction) -> meta::Output {
+    async fn drive_to_terminal(&mut self, mut action: nexus::NexusAction) -> ordinary::Output {
         loop {
             match action {
-                nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => {
+                nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(output)) => {
                     return output;
                 }
                 nexus::NexusAction::CommandSemaWrite(input) => {
@@ -1495,9 +1429,11 @@ impl SchemaRuntime {
                     action = self.decide_test_effect_completion(result);
                 }
                 _ => {
-                    return meta::Output::TestRejected(meta::TestRejected::new(
-                        self.test_rejection(meta::TestRejectionReason::InternalError),
-                    ));
+                    return ordinary::Output::DeployContainedRejected(
+                        ordinary::DeployContainedRejected::new(self.test_rejection(
+                            ordinary::DeployContainedRejectionReason::InternalError,
+                        )),
+                    );
                 }
             }
         }
@@ -1528,6 +1464,13 @@ impl SchemaRuntime {
 
     fn decide_ordinary_input(&mut self, input: ordinary::Input) -> nexus::NexusAction {
         match input {
+            ordinary::Input::DeployContained(request) => {
+                self.decide_contained_deploy(request.into_payload())
+            }
+            ordinary::Input::CheckContained(check) => {
+                self.check_contained_run(check.into_payload())
+            }
+            ordinary::Input::Release(release) => self.release_contained_run(release.into_payload()),
             ordinary::Input::Query(selection) => {
                 // A (ByTestRun …) selection reads the durable test-run table;
                 // every other selection reads the generation set. Routing here
@@ -1549,6 +1492,78 @@ impl SchemaRuntime {
             }
             ordinary::Input::Unwatch(close) => self.close_subscription(close.into_payload()),
         }
+    }
+
+    fn decide_contained_deploy(
+        &mut self,
+        request: ordinary::DeployContainedRequest,
+    ) -> nexus::NexusAction {
+        match self.resolve_and_validate(request) {
+            Ok(run) => {
+                self.active_operation = Some(MetaOperation::Test);
+                let identifier = ordinary::TestRunIdentifier::new(
+                    self.store.next_test_run_identifier().unwrap_or(1),
+                );
+                self.active_test = Some(TestPipeline::accepted(run.clone(), identifier.clone()));
+                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordTestRun(
+                    run.pending_record(identifier),
+                ))
+            }
+            Err(reason) => Self::reply_ordinary(ordinary::Output::DeployContainedRejected(
+                ordinary::DeployContainedRejected::new(self.test_rejection(reason)),
+            )),
+        }
+    }
+
+    fn check_contained_run(&mut self, check: ordinary::ContainedCheck) -> nexus::NexusAction {
+        let marker = Self::marker(self.store.commit_sequence().unwrap_or(0));
+        let identifier = check.into_payload();
+        let run = self.store.test_runs().ok().and_then(|runs| {
+            runs.into_iter()
+                .find(|run| run.test_run_identifier == identifier)
+        });
+        let reply = match run {
+            Some(run) => ordinary::Output::ContainedChecked(ordinary::ContainedChecked::new(
+                ordinary::ContainedCheckReport {
+                    test_run_identifier: run.test_run_identifier,
+                    phase: run.phase,
+                    outcome: run.outcome,
+                    database_marker: marker,
+                },
+            )),
+            None => ordinary::Output::CheckContainedRejected(
+                ordinary::CheckContainedRejected::new(ordinary::RejectedContainedCheck {
+                    contained_check_rejection_reason:
+                        ordinary::ContainedCheckRejectionReason::TestRunUnknown,
+                    database_marker: marker,
+                }),
+            ),
+        };
+        Self::reply_ordinary(reply)
+    }
+
+    fn release_contained_run(&mut self, release: ordinary::ContainedRelease) -> nexus::NexusAction {
+        let marker = Self::marker(self.store.commit_sequence().unwrap_or(0));
+        let identifier = release.into_payload();
+        let known = self.store.test_runs().is_ok_and(|runs| {
+            runs.into_iter()
+                .any(|run| run.test_run_identifier == identifier)
+        });
+        let reply = if known {
+            ordinary::Output::Released(ordinary::Released::new(ordinary::AppliedContainedRelease {
+                test_run_identifier: identifier,
+                released: true,
+                database_marker: marker,
+            }))
+        } else {
+            ordinary::Output::ReleaseRejected(ordinary::ReleaseRejected::new(
+                ordinary::RejectedRelease {
+                    release_rejection_reason: ordinary::ReleaseRejectionReason::TestRunUnknown,
+                    database_marker: marker,
+                },
+            ))
+        };
+        Self::reply_ordinary(reply)
     }
 
     fn open_subscription(&mut self) -> nexus::NexusAction {
@@ -1614,90 +1629,41 @@ impl SchemaRuntime {
                     request.into_payload(),
                 ))
             }
-            meta::Input::Test(request) => self.decide_test(request.into_payload()),
         }
     }
 
-    /// Synchronously SUBMIT a `Test` request (report 54, Unit 2b): lower it to
-    /// resolved targets through `TestDefaults`, validate host-set membership,
-    /// record the FIRST target's Pending row, set the in-flight cursor, and
-    /// reply `AcceptedTest`. The REAL hermetic/live dispatch runs on the
-    /// decoupled executor (`drive_submitted_test`), which rewrites the row to a
-    /// terminal `Passed`/`Failed` — never a faked pass.
-    ///
-    /// The `(Check …)` shorthand fills cluster/host/mode from the configured
-    /// `TestDefaults`; `(Run …)` carries them explicitly. Multi-target fan-out
-    /// (`(Nodes [a b])`/`All`) records this submit's first target and returns
-    /// the remaining targets so the daemon's executor admits one TestRun per
-    /// node (the daemon loops `submit_test` per resolved run).
-    fn decide_test(&mut self, request: meta::TestRequest) -> nexus::NexusAction {
-        match self.resolve_and_validate(request) {
-            Ok(mut resolved) => {
-                let run = resolved.remove(0);
-                self.active_operation = Some(MetaOperation::Test);
-                let identifier = ordinary::TestRunIdentifier::new(
-                    self.store.next_test_run_identifier().unwrap_or(1),
-                );
-                self.active_test = Some(TestPipeline::accepted(run.clone(), identifier.clone()));
-                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordTestRun(
-                    run.pending_record(identifier),
-                ))
-            }
-            Err(reason) => Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
-                self.test_rejection(reason),
-            ))),
-        }
-    }
-
-    /// Lower + validate one `Test` request to its resolved targets. Rejects an
-    /// unconfigured daemon (`NoTestDefaults`), an empty resolution
-    /// (`NodeUnknown` — a bare `All` on an unconfigured/empty cluster, or
-    /// `(Nodes [])`), a Live run while the live chain is unimplemented
-    /// (`LiveNotYetEnabled` — honest reject over a faked pass), or a host not in
-    /// the node's declared host-set (`VmHostNotDeclaredForNode`). On success the
-    /// FIRST element is this submit's target; the remainder are the fan-out
-    /// tail.
     fn resolve_and_validate(
         &self,
-        request: meta::TestRequest,
-    ) -> std::result::Result<Vec<ResolvedTestRun>, meta::TestRejectionReason> {
+        request: ordinary::DeployContainedRequest,
+    ) -> std::result::Result<ResolvedTestRun, ordinary::DeployContainedRejectionReason> {
         let defaults = self
             .configuration
             .test_defaults()
-            .ok_or(meta::TestRejectionReason::NoTestDefaults)?;
+            .ok_or(ordinary::DeployContainedRejectionReason::InternalError)?;
         let resolved = defaults.lower(request);
-        if resolved.is_empty() {
-            return Err(meta::TestRejectionReason::NodeUnknown);
+        if !matches!(resolved.target, ordinary::ContainedTarget::HermeticVm) {
+            return Err(match resolved.target {
+                ordinary::ContainedTarget::EphemeralDroplet(_) => {
+                    ordinary::DeployContainedRejectionReason::SubstrateUnavailable
+                }
+                ordinary::ContainedTarget::VmHostGuest(_)
+                | ordinary::ContainedTarget::HermeticVm => {
+                    ordinary::DeployContainedRejectionReason::LiveNotYetEnabled
+                }
+            });
         }
-        // LIVE honesty (report 54 Unit 2b fix 1): the live deploy-into-VM +
-        // assert chain is not yet implemented, so a Live run is rejected at
-        // submit rather than driven through a bracket that would write a
-        // `Passed` it never earned. Mirrors the Deploy `UnsupportedDeployAction`
-        // precedent. The HERMETIC path is fully real and unaffected.
-        if resolved
-            .iter()
-            .any(|run| matches!(run.mode, ordinary::TestMode::Live))
-        {
-            return Err(meta::TestRejectionReason::LiveNotYetEnabled);
-        }
-        // Host-set validation (report 54 §5.1, Unit 2b deferral 2): the
-        // resolved host must be a member of the node's declared host-set. When
-        // a proposal source is configured the daemon projects the cluster and
-        // rejects a host the node does not declare; with no proposal source the
-        // host is recorded unvalidated (the sandboxed hermetic check owns its
-        // own VM and needs no real host, so an unconfigured projection does not
-        // block the hermetic proof).
         if let Some(projection) = defaults.projection() {
-            for run in &resolved {
-                projection.validate_host_for_node(&run.host, &run.node)?;
-            }
+            projection.validate_host_for_node(&resolved.host, &resolved.node)?;
         }
         Ok(resolved)
     }
 
-    fn test_rejection(&self, reason: meta::TestRejectionReason) -> meta::RejectedTest {
-        meta::RejectedTest {
-            test_rejection_reason: reason,
+    fn test_rejection(
+        &self,
+        reason: ordinary::DeployContainedRejectionReason,
+    ) -> ordinary::RejectedDeployContained {
+        ordinary::RejectedDeployContained {
+            deploy_contained_rejection_reason: reason,
             database_marker: Self::marker(self.store.commit_sequence().unwrap_or(0)),
         }
     }
@@ -1799,7 +1765,9 @@ impl SchemaRuntime {
                 // decoupled executor (`drive_submitted_test`) re-enters to run
                 // the real dispatch and rewrite the row to a terminal outcome.
                 self.active_operation = None;
-                Self::reply_meta(meta::Output::Tested(meta::Tested::new(accepted)))
+                Self::reply_ordinary(ordinary::Output::ContainedDeployed(
+                    ordinary::ContainedDeployed::new(accepted),
+                ))
             }
             sema::SemaWriteOutput::WriteRejected(report) => self.reject_active_or_meta(report),
         }
@@ -1819,9 +1787,11 @@ impl SchemaRuntime {
     /// honest live terminal is the belt to that submit-time gate.
     fn decide_test_effect_completion(&mut self, result: nexus::EffectResult) -> nexus::NexusAction {
         let Some(pipeline) = self.active_test.clone() else {
-            return Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
-                self.test_rejection(meta::TestRejectionReason::InternalError),
-            )));
+            return Self::reply_ordinary(ordinary::Output::DeployContainedRejected(
+                ordinary::DeployContainedRejected::new(
+                    self.test_rejection(ordinary::DeployContainedRejectionReason::InternalError),
+                ),
+            ));
         };
         match result {
             nexus::EffectResult::HermeticCheckBuilt(built) => {
@@ -1889,12 +1859,14 @@ impl SchemaRuntime {
         self.active_operation = None;
         self.active_test = None;
         match output {
-            sema::SemaWriteOutput::TestRunRecorded(accepted) => {
-                Self::reply_meta(meta::Output::Tested(meta::Tested::new(accepted)))
-            }
-            _ => Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
-                self.test_rejection(meta::TestRejectionReason::InternalError),
-            ))),
+            sema::SemaWriteOutput::TestRunRecorded(accepted) => Self::reply_ordinary(
+                ordinary::Output::ContainedDeployed(ordinary::ContainedDeployed::new(accepted)),
+            ),
+            _ => Self::reply_ordinary(ordinary::Output::DeployContainedRejected(
+                ordinary::DeployContainedRejected::new(
+                    self.test_rejection(ordinary::DeployContainedRejectionReason::InternalError),
+                ),
+            )),
         }
     }
 
@@ -1922,14 +1894,17 @@ impl SchemaRuntime {
             failure.stage, failure.detail
         );
         let stage = Self::test_failure_stage(failure.stage);
-        let pipeline = match self.active_test.clone() {
-            Some(pipeline) => pipeline,
-            None => {
-                return Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
-                    self.test_rejection(meta::TestRejectionReason::InternalError),
-                )));
-            }
-        };
+        let pipeline =
+            match self.active_test.clone() {
+                Some(pipeline) => pipeline,
+                None => {
+                    return Self::reply_ordinary(ordinary::Output::DeployContainedRejected(
+                        ordinary::DeployContainedRejected::new(self.test_rejection(
+                            ordinary::DeployContainedRejectionReason::InternalError,
+                        )),
+                    ));
+                }
+            };
         self.record_test_terminal(
             &pipeline,
             ordinary::TestRunPhase::Failed,
@@ -2091,23 +2066,26 @@ impl SchemaRuntime {
                 }))
             }
             MetaOperation::Test => {
-                meta::Output::TestRejected(meta::TestRejected::new(meta::RejectedTest {
-                    test_rejection_reason: Self::test_reason(report.reason),
-                    database_marker: marker,
-                }))
+                return Self::reply_ordinary(ordinary::Output::DeployContainedRejected(
+                    ordinary::DeployContainedRejected::new(ordinary::RejectedDeployContained {
+                        deploy_contained_rejection_reason: Self::contained_reason(report.reason),
+                        database_marker: marker,
+                    }),
+                ));
             }
         };
         Self::reply_meta(output)
     }
 
-    /// Map a SEMA write-rejection reason to a typed test rejection. A reason
-    /// with no test-domain meaning is an internal invariant failure (the Deploy
-    /// precedent), never a misleading domain reason.
-    fn test_reason(reason: sema::RejectionReason) -> meta::TestRejectionReason {
+    fn contained_reason(reason: sema::RejectionReason) -> ordinary::DeployContainedRejectionReason {
         match reason {
-            sema::RejectionReason::ClusterUnknown => meta::TestRejectionReason::ClusterUnknown,
-            sema::RejectionReason::NodeUnknown => meta::TestRejectionReason::NodeUnknown,
-            _ => meta::TestRejectionReason::InternalError,
+            sema::RejectionReason::ClusterUnknown => {
+                ordinary::DeployContainedRejectionReason::ClusterUnknown
+            }
+            sema::RejectionReason::NodeUnknown => {
+                ordinary::DeployContainedRejectionReason::NodeUnknown
+            }
+            _ => ordinary::DeployContainedRejectionReason::InternalError,
         }
     }
 
@@ -2167,6 +2145,10 @@ impl SchemaRuntime {
 
     fn reply_meta(output: meta::Output) -> nexus::NexusAction {
         nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output))
+    }
+
+    fn reply_ordinary(output: ordinary::Output) -> nexus::NexusAction {
+        nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(output))
     }
 
     // ---- decide: effect completion (drives the deploy chain) ------------
@@ -2376,10 +2358,12 @@ impl SchemaRuntime {
             .upsert_test_run(sema::StoredTestRun::from(record))
             .and_then(|()| self.store.commit_sequence())
         {
-            Ok(commit_sequence) => sema::SemaWriteOutput::TestRunRecorded(meta::AcceptedTest {
-                test_run_identifier: identifier,
-                database_marker: Self::marker(commit_sequence),
-            }),
+            Ok(commit_sequence) => {
+                sema::SemaWriteOutput::TestRunRecorded(ordinary::AcceptedContainedDeploy {
+                    test_run_identifier: identifier,
+                    database_marker: Self::marker(commit_sequence),
+                })
+            }
             Err(_) => Self::write_rejected(0, sema::RejectionReason::NodeUnknown),
         }
     }
@@ -2523,8 +2507,8 @@ impl SchemaRuntime {
         }
         let Some(mut root) = roots.into_iter().find(|root| {
             root.generation_identifier == request.generation_identifier
-                && root.cluster_name == request.cluster_name
-                && root.node_name == request.node_name
+                && root.cluster_name == request.production_node.cluster_name
+                && root.node_name == request.production_node.node_name
         }) else {
             return Self::write_rejected(
                 current_sequence,
@@ -2560,8 +2544,8 @@ impl SchemaRuntime {
         let current_sequence = self.store.commit_sequence().unwrap_or(0);
         let Some(mut root) = roots.into_iter().find(|root| {
             root.label.as_ref() == Some(&request.pin_label)
-                && root.cluster_name == request.cluster_name
-                && root.node_name == request.node_name
+                && root.cluster_name == request.production_node.cluster_name
+                && root.node_name == request.production_node.node_name
         }) else {
             return Self::write_rejected(current_sequence, sema::RejectionReason::PinLabelUnknown);
         };
@@ -2595,8 +2579,8 @@ impl SchemaRuntime {
         let current_sequence = self.store.commit_sequence().unwrap_or(0);
         let Some(root) = roots.into_iter().find(|root| {
             root.generation_identifier == request.generation_identifier
-                && root.cluster_name == request.cluster_name
-                && root.node_name == request.node_name
+                && root.cluster_name == request.production_node.cluster_name
+                && root.node_name == request.production_node.node_name
         }) else {
             return Self::write_rejected(
                 current_sequence,
@@ -4540,8 +4524,10 @@ mod tests {
 
     fn system_submission(action: ordinary::SystemAction) -> sema::DeploySubmission {
         sema::DeploySubmission::System(meta::SystemDeployment {
-            cluster_name: ordinary::ClusterName::new("alpha"),
-            node_name: ordinary::NodeName::new("node-1"),
+            production_node: meta::ProductionNode {
+                cluster_name: ordinary::ClusterName::new("alpha"),
+                node_name: ordinary::NodeName::new("node-1"),
+            },
             deployment_kind: ordinary::DeploymentKind::OsOnly,
             source: ordinary::ProposalSource::new("/dev/null"),
             flake: ordinary::FlakeReference::new("github:owner/repo"),
@@ -4633,8 +4619,10 @@ mod tests {
             ordinary::SystemAction::BootOnce,
         ] {
             let request = meta::DeployRequest::System(meta::SystemDeployment {
-                cluster_name: cluster(),
-                node_name: node(),
+                production_node: meta::ProductionNode {
+                    cluster_name: cluster(),
+                    node_name: node(),
+                },
                 deployment_kind: ordinary::DeploymentKind::OsOnly,
                 source: ordinary::ProposalSource::new("/dev/null"),
                 flake: ordinary::FlakeReference::new("github:owner/repo"),
@@ -4654,8 +4642,10 @@ mod tests {
             meta::HomeMode::Activate,
         ] {
             let request = meta::DeployRequest::Home(meta::HomeDeployment {
-                cluster_name: cluster(),
-                node_name: node(),
+                production_node: meta::ProductionNode {
+                    cluster_name: cluster(),
+                    node_name: node(),
+                },
                 user_name: ordinary::UserName::new("li"),
                 source: ordinary::ProposalSource::new("/dev/null"),
                 flake: ordinary::FlakeReference::new("github:owner/repo"),
@@ -4937,14 +4927,15 @@ mod tests {
         // that `switch-to-configuration switch` would kill by restarting the
         // daemon. `activate_command` targets node-1, so a daemon hosted on node-1
         // is a self-Switch.
-        let activation =
-            system_activation_on_host(ordinary::SystemAction::Switch, Some(node()));
+        let activation = system_activation_on_host(ordinary::SystemAction::Switch, Some(node()));
         assert!(
             activation.runs_detached_self_switch(),
             "self-host Switch must take the detached shape"
         );
-        let invocation =
-            activation.detached_invocation(&activation.self_switch_unit_name(), activation.self_switch_script());
+        let invocation = activation.detached_invocation(
+            &activation.self_switch_unit_name(),
+            activation.self_switch_script(),
+        );
         assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
         assert!(argv.contains("systemd-run"), "PID-1-owned unit: {argv}");
@@ -4995,8 +4986,7 @@ mod tests {
         // transient unit).
         let boot = system_activation_on_host(ordinary::SystemAction::Boot, Some(node()));
         assert!(!boot.runs_detached_self_switch());
-        let boot_once =
-            system_activation_on_host(ordinary::SystemAction::BootOnce, Some(node()));
+        let boot_once = system_activation_on_host(ordinary::SystemAction::BootOnce, Some(node()));
         assert!(!boot_once.runs_detached_self_switch());
     }
 
@@ -5311,7 +5301,9 @@ mod tests {
         );
         // a single-token stem passes through unchanged
         assert_eq!(
-            secret_file("token.sops").attribute_name().expect("utf8 stem"),
+            secret_file("token.sops")
+                .attribute_name()
+                .expect("utf8 stem"),
             "token"
         );
     }
@@ -5344,26 +5336,31 @@ mod tests {
 
     #[test]
     fn generated_secrets_flake_maps_verbatim_stems_to_copied_files() {
-        let source_directory = std::env::temp_dir().join(format!(
-            "lojix-secrets-source-{}",
-            std::process::id()
-        ));
+        let source_directory =
+            std::env::temp_dir().join(format!("lojix-secrets-source-{}", std::process::id()));
         let secrets_directory = source_directory.join("secrets");
         fs::create_dir_all(&secrets_directory).expect("create source secrets dir");
         // opaque placeholder ciphertext — never read back by the daemon. Files
         // are named with their exact camelCase consumer name (coordinated
         // goldragon rename); the attribute is the stem verbatim.
-        fs::write(secrets_directory.join("routerWifiSaePasswords.sops"), b"opaque")
-            .expect("write sops file");
+        fs::write(
+            secrets_directory.join("routerWifiSaePasswords.sops"),
+            b"opaque",
+        )
+        .expect("write sops file");
         fs::write(secrets_directory.join("localLlmApiToken.sops"), b"opaque")
             .expect("write sops file");
         // a non-.sops file in the directory is ignored
         fs::write(secrets_directory.join("README.md"), b"ignore me").expect("write readme");
 
-        let generated = std::env::temp_dir().join(format!("lojix-secrets-gen-{}", std::process::id()));
+        let generated =
+            std::env::temp_dir().join(format!("lojix-secrets-gen-{}", std::process::id()));
         let _ = fs::remove_dir_all(&generated);
         let source = ordinary::ProposalSource::new(
-            source_directory.join("datom.nota").to_string_lossy().to_string(),
+            source_directory
+                .join("datom.nota")
+                .to_string_lossy()
+                .to_string(),
         );
         let cluster = ClusterSecretsDirectory::from_proposal_source(&source);
         GeneratedInputDirectory::new(generated.clone())
@@ -5380,7 +5377,10 @@ mod tests {
             flake.contains("routerWifiSaePasswords = ./routerWifiSaePasswords.sops;"),
             "{flake}"
         );
-        assert!(!flake.contains("README"), "non-sops files excluded: {flake}");
+        assert!(
+            !flake.contains("README"),
+            "non-sops files excluded: {flake}"
+        );
         assert!(
             generated.join("routerWifiSaePasswords.sops").is_file(),
             "ciphertext copied into the generated input"
@@ -5400,10 +5400,8 @@ mod tests {
         // cluster secrets leaves no stale ciphertext (which would drift the
         // narHash). First generate with two files, then with one, and confirm
         // the dropped file is gone from the generated input.
-        let source_directory = std::env::temp_dir().join(format!(
-            "lojix-secrets-stale-source-{}",
-            std::process::id()
-        ));
+        let source_directory =
+            std::env::temp_dir().join(format!("lojix-secrets-stale-source-{}", std::process::id()));
         let secrets_directory = source_directory.join("secrets");
         let _ = fs::remove_dir_all(&source_directory);
         fs::create_dir_all(&secrets_directory).expect("create source secrets dir");
@@ -5414,7 +5412,10 @@ mod tests {
             std::env::temp_dir().join(format!("lojix-secrets-stale-gen-{}", std::process::id()));
         let _ = fs::remove_dir_all(&generated);
         let source = ordinary::ProposalSource::new(
-            source_directory.join("datom.nota").to_string_lossy().to_string(),
+            source_directory
+                .join("datom.nota")
+                .to_string_lossy()
+                .to_string(),
         );
         let cluster = ClusterSecretsDirectory::from_proposal_source(&source);
         GeneratedInputDirectory::new(generated.clone())
@@ -5491,9 +5492,7 @@ mod tests {
         let generated =
             std::env::temp_dir().join(format!("lojix-secrets-empty-{}", std::process::id()));
         let _ = fs::remove_dir_all(&generated);
-        let source = ordinary::ProposalSource::new(
-            "/nonexistent/bootstrap/datom.nota".to_string(),
-        );
+        let source = ordinary::ProposalSource::new("/nonexistent/bootstrap/datom.nota".to_string());
         let cluster = ClusterSecretsDirectory::from_proposal_source(&source);
         GeneratedInputDirectory::new(generated.clone())
             .write_secrets(&cluster)

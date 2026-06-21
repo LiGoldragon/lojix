@@ -56,8 +56,10 @@ fn write_daemon_configuration(
 fn dune_system_deploy(action: ordinary::SystemAction) -> meta::Input {
     meta::Input::Deploy(meta::Deploy::new(meta::DeployRequest::System(
         meta::SystemDeployment {
-            cluster_name: ordinary::ClusterName::new("goldragon"),
-            node_name: ordinary::NodeName::new("dune"),
+            production_node: meta::ProductionNode {
+                cluster_name: ordinary::ClusterName::new("goldragon"),
+                node_name: ordinary::NodeName::new("dune"),
+            },
             deployment_kind: ordinary::DeploymentKind::OsOnly,
             source: ordinary::ProposalSource::new("/dev/null"),
             flake: ordinary::FlakeReference::new(FIXTURE_FLAKE),

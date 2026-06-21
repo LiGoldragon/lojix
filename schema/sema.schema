@@ -33,7 +33,8 @@
   DeploymentKind signal-lojix:lib:DeploymentKind
   ActivationKind signal-lojix:lib:ActivationKind
   GenerationSlot signal-lojix:lib:GenerationSlot
-  TestMode signal-lojix:lib:TestMode
+  ContainedTarget signal-lojix:lib:ContainedTarget
+  AcceptedContainedDeploy signal-lojix:lib:AcceptedContainedDeploy
   TestRunRecord signal-lojix:lib:TestRunRecord
   TestRunListing signal-lojix:lib:TestRunListing
   TestRunLookup signal-lojix:lib:TestRunLookup
@@ -46,7 +47,6 @@
   UnpinRequest meta-signal-lojix:lib:UnpinRequest
   RetireRequest meta-signal-lojix:lib:RetireRequest
   AcceptedDeploy meta-signal-lojix:lib:AcceptedDeploy
-  AcceptedTest meta-signal-lojix:lib:AcceptedTest
   AppliedPin meta-signal-lojix:lib:AppliedPin
   AppliedUnpin meta-signal-lojix:lib:AppliedUnpin
   AppliedRetire meta-signal-lojix:lib:AppliedRetire
@@ -70,7 +70,7 @@
   ContainerName String
   ContainerState [Starting Started Stopping Stopped Failed]
 
-  SemaWriteOutput [(DeploySubmitted AcceptedDeploy) (PhaseRecorded PhaseReceipt) (GenerationActivated AppliedActivation) (GenerationPinned AppliedPin) (GenerationUnpinned AppliedUnpin) (GenerationRetired AppliedRetire) (ContainerRecorded ContainerReceipt) (TestRunRecorded AcceptedTest) (WriteRejected RejectionReport)]
+  SemaWriteOutput [(DeploySubmitted AcceptedDeploy) (PhaseRecorded PhaseReceipt) (GenerationActivated AppliedActivation) (GenerationPinned AppliedPin) (GenerationUnpinned AppliedUnpin) (GenerationRetired AppliedRetire) (ContainerRecorded ContainerReceipt) (TestRunRecorded AcceptedContainedDeploy) (WriteRejected RejectionReport)]
   PhaseReceipt { EventLogPosition * StateMarker * }
   AppliedActivation { GenerationIdentifier * GenerationSlot * StateMarker * }
   ContainerReceipt { EventLogPosition * StateMarker * }
@@ -120,7 +120,7 @@
     ClusterName *
     NodeName *
     host NodeName
-    mode TestMode
+    target ContainedTarget
     phase TestRunPhase
     outcome TestOutcome
     closure_path (Optional ClosurePath)

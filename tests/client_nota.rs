@@ -26,8 +26,10 @@ fn ordinary_query() -> ordinary::Input {
 
 fn owner_pin() -> meta::Input {
     meta::Input::Pin(meta::Pin::new(meta::PinRequest {
-        cluster_name: ordinary::ClusterName::new("alpha"),
-        node_name: ordinary::NodeName::new("node-1"),
+        production_node: meta::ProductionNode {
+            cluster_name: ordinary::ClusterName::new("alpha"),
+            node_name: ordinary::NodeName::new("node-1"),
+        },
         generation_identifier: ordinary::GenerationIdentifier::new(42),
         pin_label: ordinary::PinLabel::new("keep"),
     }))

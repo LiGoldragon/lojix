@@ -32,6 +32,13 @@ fn run(engine: &mut SchemaRuntime, input: nexus::SignalInput) -> nexus::SignalOu
     }
 }
 
+fn production_node() -> meta::ProductionNode {
+    meta::ProductionNode {
+        cluster_name: ordinary::ClusterName::new("alpha"),
+        node_name: ordinary::NodeName::new("node-1"),
+    }
+}
+
 fn ordinary_reply(output: nexus::SignalOutput) -> ordinary::Output {
     match output {
         nexus::SignalOutput::OrdinaryOutput(output) => output,
@@ -106,8 +113,7 @@ fn check_host_key_material_reports_no_mismatches() {
 fn pin_unknown_generation_is_rejected() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::SignalInput::MetaInput(meta::Input::Pin(meta::Pin::new(meta::PinRequest {
-        cluster_name: ordinary::ClusterName::new("alpha"),
-        node_name: ordinary::NodeName::new("node-1"),
+        production_node: production_node(),
         generation_identifier: ordinary::GenerationIdentifier::new(42),
         pin_label: ordinary::PinLabel::new("keep"),
     })));
@@ -123,8 +129,7 @@ fn retire_unknown_generation_is_rejected() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::SignalInput::MetaInput(meta::Input::Retire(meta::Retire::new(
         meta::RetireRequest {
-            cluster_name: ordinary::ClusterName::new("alpha"),
-            node_name: ordinary::NodeName::new("node-1"),
+            production_node: production_node(),
             generation_identifier: ordinary::GenerationIdentifier::new(7),
         },
     )));
@@ -141,8 +146,7 @@ fn system_deployment(
     action: ordinary::SystemAction,
 ) -> meta::SystemDeployment {
     meta::SystemDeployment {
-        cluster_name: ordinary::ClusterName::new("alpha"),
-        node_name: ordinary::NodeName::new("node-1"),
+        production_node: production_node(),
         deployment_kind: ordinary::DeploymentKind::OsOnly,
         source: ordinary::ProposalSource::new("/dev/null"),
         flake: ordinary::FlakeReference::new("github:owner/repo"),
@@ -184,8 +188,7 @@ fn home_activate_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
         meta::DeployRequest::Home(meta::HomeDeployment {
-            cluster_name: ordinary::ClusterName::new("alpha"),
-            node_name: ordinary::NodeName::new("node-1"),
+            production_node: production_node(),
             user_name: ordinary::UserName::new("li"),
             source: ordinary::ProposalSource::new("/dev/null"),
             flake: ordinary::FlakeReference::new("github:owner/repo"),
@@ -217,8 +220,7 @@ fn home_build_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
         meta::DeployRequest::Home(meta::HomeDeployment {
-            cluster_name: ordinary::ClusterName::new("alpha"),
-            node_name: ordinary::NodeName::new("node-1"),
+            production_node: production_node(),
             user_name: ordinary::UserName::new("li"),
             source: ordinary::ProposalSource::new("/dev/null"),
             flake: ordinary::FlakeReference::new("github:owner/repo"),

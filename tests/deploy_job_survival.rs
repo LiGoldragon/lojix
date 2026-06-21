@@ -29,8 +29,10 @@ fn store() -> (TempDir, Arc<Store>) {
 /// fast at the first effect once the barrier opens (no node, no real flake).
 fn deploy_request() -> meta::DeployRequest {
     meta::DeployRequest::System(meta::SystemDeployment {
-        cluster_name: ordinary::ClusterName::new("alpha"),
-        node_name: ordinary::NodeName::new("node-1"),
+        production_node: meta::ProductionNode {
+            cluster_name: ordinary::ClusterName::new("alpha"),
+            node_name: ordinary::NodeName::new("node-1"),
+        },
         deployment_kind: ordinary::DeploymentKind::OsOnly,
         source: ordinary::ProposalSource::new("/dev/null"),
         flake: ordinary::FlakeReference::new("path:/does/not/exist"),

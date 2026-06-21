@@ -39,6 +39,7 @@ use crate::schema_runtime::{
 };
 use crate::{DaemonConfiguration, Error, Result, Store};
 use meta_signal_lojix::schema::lib as meta;
+use signal_lojix::schema::lib as ordinary;
 
 /// Which authority-tiered socket an arriving stream belongs to. Ordinary is the
 /// peer-callable `signal-lojix` surface; Owner is the `meta-signal-lojix`
@@ -317,13 +318,20 @@ impl RequestWorker {
     async fn serve_ordinary(&self, connection: &mut AcceptedConnection) -> Result<()> {
         let body = self.read_body(connection).await?;
         let (_, input) = signal_lojix::schema::lib::Input::decode_signal_frame(body.bytes())?;
-        let output = self
-            .execute_request(
-                ListenerRole::Ordinary,
-                nexus::SignalInput::OrdinaryInput(input),
-            )
-            .await;
-        let reply = Self::ordinary_reply(output)?;
+        let reply = match input {
+            ordinary::Input::DeployContained(request) => {
+                self.submit_contained(request.into_payload()).await
+            }
+            other => {
+                let output = self
+                    .execute_request(
+                        ListenerRole::Ordinary,
+                        nexus::SignalInput::OrdinaryInput(other),
+                    )
+                    .await;
+                Self::ordinary_reply(output)?
+            }
+        };
         self.codec
             .write_body_async(
                 connection.stream_mut(),
@@ -343,11 +351,6 @@ impl RequestWorker {
         // on this task (up9q surface a — only Deploy decouples).
         let reply = match input {
             meta::Input::Deploy(request) => self.submit_deploy(request.into_payload()).await,
-            // A `Test` decouples from this connection task exactly like a
-            // `Deploy` (Unit 2b): the test-job actor owns the dispatch pipeline
-            // (the real `nix build` of the hermetic check, or the gated live
-            // cycle), this task only submits and replies the accepted handle.
-            meta::Input::Test(request) => self.submit_test(request.into_payload()).await,
             other => {
                 let output = self
                     .execute_request(ListenerRole::Owner, nexus::SignalInput::MetaInput(other))
@@ -400,18 +403,24 @@ impl RequestWorker {
     /// — all before the build runs. Dropping this task (a client disconnect)
     /// cannot cancel the spawned pipeline; the result lands durably and is read
     /// over the ordinary `(ByTestRun …)` query.
-    async fn submit_test(&self, request: meta::TestRequest) -> meta::Output {
+    async fn submit_contained(
+        &self,
+        request: ordinary::DeployContainedRequest,
+    ) -> ordinary::Output {
         match self.test_jobs.ask(AdmitTest { request }).await {
             Ok(TestAdmission::Accepted(accepted)) => {
-                meta::Output::Tested(meta::Tested::new(accepted))
+                ordinary::Output::ContainedDeployed(ordinary::ContainedDeployed::new(accepted))
             }
-            Ok(TestAdmission::Rejected(rejected)) => {
-                meta::Output::TestRejected(meta::TestRejected::new(rejected))
-            }
-            Err(_) => meta::Output::TestRejected(meta::TestRejected::new(meta::RejectedTest {
-                test_rejection_reason: meta::TestRejectionReason::InternalError,
-                database_marker: Self::zero_marker(),
-            })),
+            Ok(TestAdmission::Rejected(rejected)) => ordinary::Output::DeployContainedRejected(
+                ordinary::DeployContainedRejected::new(rejected),
+            ),
+            Err(_) => ordinary::Output::DeployContainedRejected(
+                ordinary::DeployContainedRejected::new(ordinary::RejectedDeployContained {
+                    deploy_contained_rejection_reason:
+                        ordinary::DeployContainedRejectionReason::InternalError,
+                    database_marker: Self::zero_marker(),
+                }),
+            ),
         }
     }
 
@@ -738,11 +747,12 @@ impl TestJobs {
         self.active_count >= self.cap
     }
 
-    fn substrate_unavailable_rejection(&self) -> meta::RejectedTest {
+    fn substrate_unavailable_rejection(&self) -> ordinary::RejectedDeployContained {
         let commit_sequence = self.store.commit_sequence().unwrap_or(0);
-        meta::RejectedTest {
-            test_rejection_reason: meta::TestRejectionReason::SubstrateUnavailable,
-            database_marker: meta::DatabaseMarker {
+        ordinary::RejectedDeployContained {
+            deploy_contained_rejection_reason:
+                ordinary::DeployContainedRejectionReason::SubstrateUnavailable,
+            database_marker: ordinary::DatabaseMarker {
                 commit_sequence: signal_lojix::schema::lib::CommitSequence::new(commit_sequence),
                 state_digest: signal_lojix::schema::lib::StateDigest::new(commit_sequence),
             },
@@ -780,15 +790,15 @@ impl Actor for TestJobs {
 /// and on accept launch the dispatch pipeline. The reply is the immediate
 /// admission verdict the daemon sends the owner connection.
 pub struct AdmitTest {
-    pub request: meta::TestRequest,
+    pub request: ordinary::DeployContainedRequest,
 }
 
 /// The immediate admission verdict for an `AdmitTest` — the wire reply the
 /// daemon sends before any dispatch effect runs.
 #[derive(Debug, Clone, PartialEq, Eq, kameo::Reply)]
 pub enum TestAdmission {
-    Accepted(meta::AcceptedTest),
-    Rejected(meta::RejectedTest),
+    Accepted(ordinary::AcceptedContainedDeploy),
+    Rejected(ordinary::RejectedDeployContained),
 }
 
 impl Message<AdmitTest> for TestJobs {
@@ -806,7 +816,7 @@ impl Message<AdmitTest> for TestJobs {
             self.store.clone(),
             self.configuration.clone(),
         );
-        match engine.submit_test(message.request).await {
+        match engine.submit_contained(message.request).await {
             TestSubmissionOutcome::Accepted(accepted) => {
                 self.active_count += 1;
                 self.launch_pipeline(engine, context.actor_ref().clone());

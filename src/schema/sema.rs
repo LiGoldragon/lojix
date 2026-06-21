@@ -48,7 +48,9 @@ pub use signal_lojix::schema::lib::ActivationKind as ActivationKind;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::GenerationSlot as GenerationSlot;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::TestMode as TestMode;
+pub use signal_lojix::schema::lib::ContainedTarget as ContainedTarget;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::AcceptedContainedDeploy as AcceptedContainedDeploy;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::TestRunRecord as TestRunRecord;
 #[rustfmt::skip]
@@ -73,8 +75,6 @@ pub use meta_signal_lojix::schema::lib::UnpinRequest as UnpinRequest;
 pub use meta_signal_lojix::schema::lib::RetireRequest as RetireRequest;
 #[rustfmt::skip]
 pub use meta_signal_lojix::schema::lib::AcceptedDeploy as AcceptedDeploy;
-#[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::AcceptedTest as AcceptedTest;
 #[rustfmt::skip]
 pub use meta_signal_lojix::schema::lib::AppliedPin as AppliedPin;
 #[rustfmt::skip]
@@ -195,7 +195,7 @@ pub enum SemaWriteOutput {
     GenerationUnpinned(AppliedUnpin),
     GenerationRetired(AppliedRetire),
     ContainerRecorded(ContainerReceipt),
-    TestRunRecorded(AcceptedTest),
+    TestRunRecorded(AcceptedContainedDeploy),
     WriteRejected(RejectionReport),
 }
 
@@ -403,7 +403,7 @@ pub struct StoredTestRun {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub host: NodeName,
-    pub mode: TestMode,
+    pub target: ContainedTarget,
     pub phase: TestRunPhase,
     pub outcome: TestOutcome,
     pub closure_path: Option<ClosurePath>,
@@ -692,7 +692,7 @@ impl SemaWriteOutput {
     pub fn container_recorded(payload: ContainerReceipt) -> Self {
         Self::ContainerRecorded(payload)
     }
-    pub fn test_run_recorded(payload: AcceptedTest) -> Self {
+    pub fn test_run_recorded(payload: AcceptedContainedDeploy) -> Self {
         Self::TestRunRecorded(payload)
     }
     pub fn write_rejected(payload: RejectionReport) -> Self {
@@ -916,8 +916,8 @@ impl From<ContainerReceipt> for SemaWriteOutput {
 }
 
 #[rustfmt::skip]
-impl From<AcceptedTest> for SemaWriteOutput {
-    fn from(payload: AcceptedTest) -> Self {
+impl From<AcceptedContainedDeploy> for SemaWriteOutput {
+    fn from(payload: AcceptedContainedDeploy) -> Self {
         Self::TestRunRecorded(payload)
     }
 }

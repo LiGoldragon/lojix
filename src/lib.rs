@@ -224,32 +224,12 @@ pub struct TestDefaults {
     pub proposal_source: String,
 }
 
-/// The rkyv-stored test mode. A daemon-local mirror of the shared
-/// `signal-lojix` `TestMode`, so the binary startup configuration archives
-/// without depending on the wire crate's rkyv layout. Converts to/from the
-/// generated wire type at the lowering boundary.
+/// The rkyv-stored default contained-test mode. This stays daemon-local:
+/// contained targets are explicit wire values on `signal-lojix`.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestMode {
     Hermetic,
     Live,
-}
-
-impl From<TestMode> for signal_lojix::schema::lib::TestMode {
-    fn from(mode: TestMode) -> Self {
-        match mode {
-            TestMode::Hermetic => Self::Hermetic,
-            TestMode::Live => Self::Live,
-        }
-    }
-}
-
-impl From<signal_lojix::schema::lib::TestMode> for TestMode {
-    fn from(mode: signal_lojix::schema::lib::TestMode) -> Self {
-        match mode {
-            signal_lojix::schema::lib::TestMode::Hermetic => Self::Hermetic,
-            signal_lojix::schema::lib::TestMode::Live => Self::Live,
-        }
-    }
 }
 
 impl DaemonConfiguration {
