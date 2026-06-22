@@ -12,7 +12,7 @@ fn write_configuration_round_trips_through_rkyv() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos (goldragon prometheus Hermetic github:LiGoldragon/CriomOS-test-cluster /var/lib/lojix/cluster.nota) {}))",
+        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos (goldragon prometheus /var/lib/lojix/cluster.nota) {}))",
         output.display()
     );
 
@@ -35,10 +35,6 @@ fn write_configuration_round_trips_through_rkyv() {
     assert_eq!(configuration.daemon_host, "ouranos");
     assert_eq!(configuration.test_defaults.cluster, "goldragon");
     assert_eq!(configuration.test_defaults.default_vm_host, "prometheus");
-    assert_eq!(
-        configuration.test_defaults.test_flake,
-        "github:LiGoldragon/CriomOS-test-cluster"
-    );
     assert_eq!(
         configuration.test_defaults.proposal_source,
         "/var/lib/lojix/cluster.nota"

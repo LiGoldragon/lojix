@@ -74,7 +74,7 @@ pub struct RuntimeConfiguration {
     effect_barrier: Option<EffectBarrier>,
     /// The test-op defaults, projected from the daemon's binary startup
     /// configuration (report 54). `decide_meta_input` reads these to lower a
-    /// `(Check …)` shorthand into a full `TestRun` — cluster, host, and mode
+    /// `(Check …)` shorthand into a full `ContainedRun` — cluster, host, and mode
     /// all default from here. `None` when the daemon was configured without
     /// test defaults; a `(Check …)` then rejects with `NoTestDefaults` rather
     /// than guessing.
@@ -100,21 +100,30 @@ impl TestDefaults {
     /// Lower an ordinary contained deployment request to the one concrete run
     /// it names. The request already carries the profile, flake, and typed
     /// contained target; defaults only provide the hermetic host placeholder.
-    fn lower(&self, request: ordinary::DeployContainedRequest) -> ResolvedTestRun {
-        let profile = request.node_profile;
-        let host = match &request.contained_target {
+    fn lower(&self, request: ordinary::DeployContainedRequest) -> ResolvedContainedRun {
+        let ordinary::DeployContainedRequest {
+            node_profile,
+            contained_target,
+            source,
+            flake_reference,
+        } = request;
+        let proposal_source = source
+            .into_payload()
+            .unwrap_or_else(|| self.proposal_source.clone());
+        let host = match &contained_target {
             ordinary::ContainedTarget::HermeticVm => self.default_vm_host.clone(),
             ordinary::ContainedTarget::VmHostGuest(target) => {
                 self.resolve_host(target.clone().into_payload())
             }
             ordinary::ContainedTarget::EphemeralDroplet(_) => self.default_vm_host.clone(),
         };
-        ResolvedTestRun {
-            cluster: profile.cluster_name,
-            node: profile.node_name,
+        ResolvedContainedRun {
+            cluster: node_profile.cluster_name,
+            node: node_profile.node_name,
             host,
-            target: request.contained_target,
-            flake: request.flake,
+            target: contained_target,
+            proposal_source,
+            flake_reference,
         }
     }
 
@@ -139,13 +148,6 @@ impl TestDefaults {
             default_vm_host: ordinary::NodeName::new("prometheus"),
             proposal_source: ordinary::ProposalSource::new(""),
         }
-    }
-
-    /// The configured proposal projection, if a proposal source is set. The
-    /// host-set validation and the `All` sweep both read it; absent (empty)
-    /// when host-set validation is not configured.
-    fn projection(&self) -> Option<ClusterProjection> {
-        ClusterProjection::from_source(&self.proposal_source)
     }
 }
 
@@ -218,31 +220,35 @@ enum MetaOperation {
 /// spirit `State`->`Record` precedent: a distinct typed lowering, never an
 /// under-filled wire struct.
 #[derive(Debug, Clone)]
-struct ResolvedTestRun {
+struct ResolvedContainedRun {
     cluster: ordinary::ClusterName,
     node: ordinary::NodeName,
     host: ordinary::NodeName,
     target: ordinary::ContainedTarget,
+    proposal_source: ordinary::ProposalSource,
     /// The flake whose `#checks.<system>.vm-<node>` the hermetic dispatch
     /// builds (and whose generated runner the live path brings up).
-    flake: ordinary::FlakeReference,
+    flake_reference: ordinary::FlakeReference,
 }
 
-impl ResolvedTestRun {
+impl ResolvedContainedRun {
     /// The durable test-run row at acceptance: phase `Submitted`, outcome
     /// `Pending`, no closure yet. The decoupled executor rewrites it through
     /// the real phases (`BringingUp`/`Deploying`/…) to a terminal `Passed`
     /// (with the built closure) or `Failed(stage)` — never a faked pass.
-    fn pending_record(&self, identifier: ordinary::TestRunIdentifier) -> ordinary::TestRunRecord {
-        ordinary::TestRunRecord {
-            test_run_identifier: identifier,
+    fn pending_record(
+        &self,
+        identifier: ordinary::ContainedRunIdentifier,
+    ) -> ordinary::ContainedRunRecord {
+        ordinary::ContainedRunRecord {
+            contained_run_identifier: identifier,
             cluster_name: self.cluster.clone(),
             node_name: self.node.clone(),
             host: self.host.clone(),
             target: self.target.clone(),
-            phase: ordinary::TestRunPhase::Submitted,
-            outcome: ordinary::TestOutcome::Pending,
-            closure_path: None,
+            contained_run_phase: ordinary::ContainedRunPhase::Submitted,
+            contained_outcome: ordinary::ContainedOutcome::Pending,
+            contained_closure_path: None.into(),
         }
     }
 
@@ -255,7 +261,7 @@ impl ResolvedTestRun {
         nexus::HermeticCheckCommand {
             cluster_name: self.cluster.clone(),
             node_name: self.node.clone(),
-            flake: self.flake.clone(),
+            flake_reference: self.flake_reference.clone(),
             system: HermeticCheck::SYSTEM.to_string(),
         }
     }
@@ -293,8 +299,8 @@ impl ResolvedTestRun {
 /// [`DeployPipeline`].
 #[derive(Debug, Clone)]
 struct TestPipeline {
-    run: ResolvedTestRun,
-    identifier: ordinary::TestRunIdentifier,
+    run: ResolvedContainedRun,
+    identifier: ordinary::ContainedRunIdentifier,
     stage: TestStage,
     /// The accepted database marker, replayed on the terminal reply.
     accepted_marker: ordinary::DatabaseMarker,
@@ -316,7 +322,7 @@ enum TestStage {
 impl TestPipeline {
     /// The cursor at acceptance — stage `Submitted`, the marker stand-in filled
     /// at the durable write.
-    fn accepted(run: ResolvedTestRun, identifier: ordinary::TestRunIdentifier) -> Self {
+    fn accepted(run: ResolvedContainedRun, identifier: ordinary::ContainedRunIdentifier) -> Self {
         Self {
             run,
             identifier,
@@ -330,23 +336,23 @@ impl TestPipeline {
 
     /// The durable row at a given phase/outcome, carrying the run identity and
     /// (once built) the closure under test. Rewritten at every transition so a
-    /// `(Query (ByTestRun …))` reads the latest committed step (Unit 2b
+    /// `(Query (ByContainedRun …))` reads the latest committed step (Unit 2b
     /// observability).
     fn record_at(
         &self,
-        phase: ordinary::TestRunPhase,
-        outcome: ordinary::TestOutcome,
+        phase: ordinary::ContainedRunPhase,
+        outcome: ordinary::ContainedOutcome,
         closure_path: Option<ordinary::ClosurePath>,
-    ) -> ordinary::TestRunRecord {
-        ordinary::TestRunRecord {
-            test_run_identifier: self.identifier.clone(),
+    ) -> ordinary::ContainedRunRecord {
+        ordinary::ContainedRunRecord {
+            contained_run_identifier: self.identifier.clone(),
             cluster_name: self.run.cluster.clone(),
             node_name: self.run.node.clone(),
             host: self.run.host.clone(),
             target: self.run.target.clone(),
-            phase,
-            outcome,
-            closure_path,
+            contained_run_phase: phase,
+            contained_outcome: outcome,
+            contained_closure_path: closure_path.into(),
         }
     }
 
@@ -464,7 +470,7 @@ impl HermeticCheck {
     fn installable(&self) -> String {
         format!(
             "{}#checks.{}.vm-{}",
-            self.command.flake.payload(),
+            self.command.flake_reference.payload(),
             self.command.system,
             self.command.node_name.payload()
         )
@@ -837,12 +843,17 @@ impl DeployPipeline {
                 node_name: deployment.production_node.node_name,
                 deployment_kind: deployment.deployment_kind,
                 activation_kind: Self::system_activation_kind(deployment.system_action),
-                source: deployment.source,
-                flake: deployment.flake,
-                build_attribute: deployment.build_attribute,
+                source: deployment.proposal_source,
+                flake: deployment.flake_reference,
+                build_attribute: deployment.build_attribute.into_payload(),
                 action: DeployAction::System(deployment.system_action),
-                builder: deployment.builder.map(meta::Builder::into_payload),
-                substituters: Self::convert_substituters(deployment.substituters),
+                builder: deployment
+                    .builder_override
+                    .into_payload()
+                    .map(meta::Builder::into_payload),
+                substituters: Self::convert_substituters(
+                    deployment.extra_substituters.into_payload(),
+                ),
                 input_overrides: Vec::new(),
                 closure_path: None,
                 accepted_marker,
@@ -855,15 +866,20 @@ impl DeployPipeline {
                 node_name: deployment.production_node.node_name,
                 deployment_kind: ordinary::DeploymentKind::HomeOnly,
                 activation_kind: ordinary::ActivationKind::Switch,
-                source: deployment.source,
-                flake: deployment.flake,
+                source: deployment.proposal_source,
+                flake: deployment.flake_reference,
                 build_attribute: None,
                 action: DeployAction::Home {
                     mode: deployment.home_mode,
                     user: deployment.user_name,
                 },
-                builder: deployment.builder.map(meta::Builder::into_payload),
-                substituters: Self::convert_substituters(deployment.substituters),
+                builder: deployment
+                    .builder_override
+                    .into_payload()
+                    .map(meta::Builder::into_payload),
+                substituters: Self::convert_substituters(
+                    deployment.extra_substituters.into_payload(),
+                ),
                 input_overrides: Vec::new(),
                 closure_path: None,
                 accepted_marker,
@@ -910,8 +926,8 @@ impl DeployPipeline {
 
     fn flake_auth_request(&self) -> nexus::FlakeAuthRequest {
         nexus::FlakeAuthRequest {
-            source: self.source.clone(),
-            flake: self.flake.clone(),
+            proposal_source: self.source.clone(),
+            flake_reference: self.flake.clone(),
         }
     }
 
@@ -923,7 +939,7 @@ impl DeployPipeline {
         nexus::HorizonMaterializationCommand {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
-            source: self.source.clone(),
+            proposal_source: self.source.clone(),
             shape: self.materialization_shape(),
         }
     }
@@ -946,9 +962,9 @@ impl DeployPipeline {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             deployment_kind: self.deployment_kind,
-            flake: self.flake.clone(),
-            attribute: self.target_attribute(),
-            overrides: self.input_overrides.clone(),
+            flake_reference: self.flake.clone(),
+            attribute: self.target_attribute().into(),
+            overrides: self.input_overrides.clone().into(),
             // Build-on-target (Spirit ufjd / 0a9p / lc28, report 150): the eval
             // step must resolve `.drvPath` against the SAME store the build will
             // realize into. A target node that is not the daemon host references
@@ -980,7 +996,7 @@ impl DeployPipeline {
             generation_identifier: self.generation_identifier.clone(),
             closure_path,
             target: self.build_target(configuration),
-            substituters: self.substituters.clone(),
+            substituters: self.substituters.clone().into(),
         }
     }
 
@@ -1041,7 +1057,7 @@ impl DeployPipeline {
             node_name: self.node_name.clone(),
             deployment_phase: phase,
             event_log_position,
-            detail,
+            detail: detail.into(),
         }
     }
 
@@ -1081,9 +1097,9 @@ impl DeployPipeline {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             phase,
-            closure_path: self.closure_path.clone(),
-            resolved_target: self.resolved_target(),
-            boot_once_unit: self.boot_once_unit(),
+            deploy_job_closure_path: self.closure_path.clone().into(),
+            resolved_target: self.resolved_target().into(),
+            boot_once_unit: self.boot_once_unit().into(),
         }
     }
 }
@@ -1120,7 +1136,7 @@ impl sema::DeployJob {
     pub fn resumption(&self) -> DeployJobResumption {
         match self.phase {
             sema::DeployJobPhase::Activating => DeployJobResumption::PollActivationUnit {
-                unit: self.boot_once_unit.clone(),
+                unit: self.boot_once_unit.payload().clone(),
             },
             sema::DeployJobPhase::Submitted
             | sema::DeployJobPhase::Building
@@ -1133,37 +1149,37 @@ impl sema::DeployJob {
     }
 }
 
-impl From<ordinary::TestRunRecord> for sema::StoredTestRun {
+impl From<ordinary::ContainedRunRecord> for sema::StoredContainedRun {
     /// Project the wire test-run record onto the lojix-local durable row. The
     /// two carry identical fields (the LiveGeneration/Generation split): the
     /// daemon writes the durable row, the query reads it back as the wire shape.
-    fn from(record: ordinary::TestRunRecord) -> Self {
+    fn from(record: ordinary::ContainedRunRecord) -> Self {
         Self {
-            test_run_identifier: record.test_run_identifier,
+            contained_run_identifier: record.contained_run_identifier,
             cluster_name: record.cluster_name,
             node_name: record.node_name,
             host: record.host,
             target: record.target,
-            phase: record.phase,
-            outcome: record.outcome,
-            closure_path: record.closure_path,
+            phase: record.contained_run_phase,
+            outcome: record.contained_outcome,
+            contained_closure_path: record.contained_closure_path,
         }
     }
 }
 
-impl From<sema::StoredTestRun> for ordinary::TestRunRecord {
+impl From<sema::StoredContainedRun> for ordinary::ContainedRunRecord {
     /// Project the durable row back onto the wire record for the
-    /// `(ByTestRun …)` query reply.
-    fn from(run: sema::StoredTestRun) -> Self {
+    /// `(ByContainedRun …)` query reply.
+    fn from(run: sema::StoredContainedRun) -> Self {
         Self {
-            test_run_identifier: run.test_run_identifier,
+            contained_run_identifier: run.contained_run_identifier,
             cluster_name: run.cluster_name,
             node_name: run.node_name,
             host: run.host,
             target: run.target,
-            phase: run.phase,
-            outcome: run.outcome,
-            closure_path: run.closure_path,
+            contained_run_phase: run.phase,
+            contained_outcome: run.outcome,
+            contained_closure_path: run.contained_closure_path,
         }
     }
 }
@@ -1369,7 +1385,7 @@ impl SchemaRuntime {
     /// `Passed` (with the built closure) or `Failed(stage)` — never a faked
     /// pass. The returned `meta::Output` is the terminal `Tested`/`TestRejected`
     /// for logging/tests; the client already has its accepted handle and
-    /// re-observes the outcome via `(Query (ByTestRun …))`.
+    /// re-observes the outcome via `(Query (ByContainedRun …))`.
     pub async fn drive_submitted_test(&mut self) -> ordinary::Output {
         let Some(pipeline) = self.active_test.clone() else {
             return ordinary::Output::DeployContainedRejected(
@@ -1467,18 +1483,22 @@ impl SchemaRuntime {
             ordinary::Input::DeployContained(request) => {
                 self.decide_contained_deploy(request.into_payload())
             }
-            ordinary::Input::CheckContained(check) => {
-                self.check_contained_run(check.into_payload())
-            }
-            ordinary::Input::Release(release) => self.release_contained_run(release.into_payload()),
+            ordinary::Input::VerifyContained(check) => nexus::NexusAction::CommandSemaRead(
+                sema::SemaReadInput::VerifyContainedRun(check.into_payload()),
+            ),
+            ordinary::Input::Release(release) => nexus::NexusAction::CommandSemaWrite(
+                sema::SemaWriteInput::ReleaseContainedRun(release.into_payload()),
+            ),
             ordinary::Input::Query(selection) => {
-                // A (ByTestRun …) selection reads the durable test-run table;
+                // A (ByContainedRun …) selection reads the durable test-run table;
                 // every other selection reads the generation set. Routing here
                 // keeps one Query verb covering both read planes (report 54).
                 match selection.into_payload() {
-                    ordinary::Selection::ByTestRun(lookup) => nexus::NexusAction::CommandSemaRead(
-                        sema::SemaReadInput::QueryTestRuns(lookup),
-                    ),
+                    ordinary::Selection::ByContainedRun(lookup) => {
+                        nexus::NexusAction::CommandSemaRead(
+                            sema::SemaReadInput::QueryContainedRuns(lookup),
+                        )
+                    }
                     selection => nexus::NexusAction::CommandSemaRead(
                         sema::SemaReadInput::QueryGenerations(selection),
                     ),
@@ -1501,11 +1521,11 @@ impl SchemaRuntime {
         match self.resolve_and_validate(request) {
             Ok(run) => {
                 self.active_operation = Some(MetaOperation::Test);
-                let identifier = ordinary::TestRunIdentifier::new(
-                    self.store.next_test_run_identifier().unwrap_or(1),
+                let identifier = ordinary::ContainedRunIdentifier::new(
+                    self.store.next_contained_run_identifier().unwrap_or(1),
                 );
                 self.active_test = Some(TestPipeline::accepted(run.clone(), identifier.clone()));
-                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordTestRun(
+                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordContainedRun(
                     run.pending_record(identifier),
                 ))
             }
@@ -1515,55 +1535,54 @@ impl SchemaRuntime {
         }
     }
 
-    fn check_contained_run(&mut self, check: ordinary::ContainedCheck) -> nexus::NexusAction {
+    fn verify_contained_run(&self, check: ordinary::ContainedVerification) -> sema::SemaReadOutput {
         let marker = Self::marker(self.store.commit_sequence().unwrap_or(0));
-        let identifier = check.into_payload();
-        let run = self.store.test_runs().ok().and_then(|runs| {
+        let identifier = check.contained_run_identifier;
+        let run = self.store.contained_runs().ok().and_then(|runs| {
             runs.into_iter()
-                .find(|run| run.test_run_identifier == identifier)
+                .find(|run| run.contained_run_identifier == identifier)
         });
-        let reply = match run {
-            Some(run) => ordinary::Output::ContainedChecked(ordinary::ContainedChecked::new(
-                ordinary::ContainedCheckReport {
-                    test_run_identifier: run.test_run_identifier,
-                    phase: run.phase,
-                    outcome: run.outcome,
+        match run {
+            Some(run) => {
+                sema::SemaReadOutput::ContainedVerified(ordinary::ContainedVerificationReport {
+                    contained_run_identifier: run.contained_run_identifier,
+                    contained_run_phase: run.phase,
+                    contained_outcome: run.outcome,
+                    database_marker: marker,
+                })
+            }
+            None => sema::SemaReadOutput::ContainedVerificationRejected(
+                ordinary::RejectedContainedVerification {
+                    contained_verification_rejection_reason:
+                        ordinary::ContainedVerificationRejectionReason::ContainedRunUnknown,
                     database_marker: marker,
                 },
-            )),
-            None => ordinary::Output::CheckContainedRejected(
-                ordinary::CheckContainedRejected::new(ordinary::RejectedContainedCheck {
-                    contained_check_rejection_reason:
-                        ordinary::ContainedCheckRejectionReason::TestRunUnknown,
-                    database_marker: marker,
-                }),
             ),
-        };
-        Self::reply_ordinary(reply)
+        }
     }
 
-    fn release_contained_run(&mut self, release: ordinary::ContainedRelease) -> nexus::NexusAction {
+    fn release_contained_run(
+        &mut self,
+        release: ordinary::ContainedRelease,
+    ) -> sema::SemaWriteOutput {
         let marker = Self::marker(self.store.commit_sequence().unwrap_or(0));
         let identifier = release.into_payload();
-        let known = self.store.test_runs().is_ok_and(|runs| {
+        let known = self.store.contained_runs().is_ok_and(|runs| {
             runs.into_iter()
-                .any(|run| run.test_run_identifier == identifier)
+                .any(|run| run.contained_run_identifier == identifier)
         });
-        let reply = if known {
-            ordinary::Output::Released(ordinary::Released::new(ordinary::AppliedContainedRelease {
-                test_run_identifier: identifier,
+        if known {
+            sema::SemaWriteOutput::ContainedRunReleased(ordinary::AppliedContainedRelease {
+                contained_run_identifier: identifier,
                 released: true,
                 database_marker: marker,
-            }))
+            })
         } else {
-            ordinary::Output::ReleaseRejected(ordinary::ReleaseRejected::new(
-                ordinary::RejectedRelease {
-                    release_rejection_reason: ordinary::ReleaseRejectionReason::TestRunUnknown,
-                    database_marker: marker,
-                },
-            ))
-        };
-        Self::reply_ordinary(reply)
+            sema::SemaWriteOutput::ContainedReleaseRejected(ordinary::RejectedRelease {
+                release_rejection_reason: ordinary::ReleaseRejectionReason::ContainedRunUnknown,
+                database_marker: marker,
+            })
+        }
     }
 
     fn open_subscription(&mut self) -> nexus::NexusAction {
@@ -1635,7 +1654,7 @@ impl SchemaRuntime {
     fn resolve_and_validate(
         &self,
         request: ordinary::DeployContainedRequest,
-    ) -> std::result::Result<ResolvedTestRun, ordinary::DeployContainedRejectionReason> {
+    ) -> std::result::Result<ResolvedContainedRun, ordinary::DeployContainedRejectionReason> {
         let defaults = self
             .configuration
             .test_defaults()
@@ -1648,11 +1667,11 @@ impl SchemaRuntime {
                 }
                 ordinary::ContainedTarget::VmHostGuest(_)
                 | ordinary::ContainedTarget::HermeticVm => {
-                    ordinary::DeployContainedRejectionReason::LiveNotYetEnabled
+                    ordinary::DeployContainedRejectionReason::SubstrateUnavailable
                 }
             });
         }
-        if let Some(projection) = defaults.projection() {
+        if let Some(projection) = ClusterProjection::from_source(&resolved.proposal_source) {
             projection.validate_host_for_node(&resolved.host, &resolved.node)?;
         }
         Ok(resolved)
@@ -1711,8 +1730,16 @@ impl SchemaRuntime {
             sema::SemaReadOutput::KeyMaterialChecked(report) => {
                 ordinary::Output::KeyMaterialChecked(ordinary::KeyMaterialChecked::new(report))
             }
-            sema::SemaReadOutput::TestRunsQueried(listing) => {
-                ordinary::Output::TestRunsQueried(ordinary::TestRunsQueried::new(listing))
+            sema::SemaReadOutput::ContainedRunsQueried(listing) => {
+                ordinary::Output::ContainedRunsQueried(ordinary::ContainedRunsQueried::new(listing))
+            }
+            sema::SemaReadOutput::ContainedVerified(report) => {
+                ordinary::Output::ContainedVerified(ordinary::ContainedVerified::new(report))
+            }
+            sema::SemaReadOutput::ContainedVerificationRejected(rejected) => {
+                ordinary::Output::VerifyContainedRejected(ordinary::VerifyContainedRejected::new(
+                    rejected,
+                ))
             }
             sema::SemaReadOutput::EventLogRead(_) => {
                 ordinary::Output::QueryRejected(ordinary::QueryRejected::new(
@@ -1759,7 +1786,7 @@ impl SchemaRuntime {
                 Self::reply_meta(meta::Output::Retired(meta::Retired::new(applied)))
             }
             sema::SemaWriteOutput::ContainerRecorded(_) => self.advance_after_phase(),
-            sema::SemaWriteOutput::TestRunRecorded(accepted) => {
+            sema::SemaWriteOutput::ContainedRunRecorded(accepted) => {
                 // The accepted SUBMIT reply. `active_operation` is cleared (the
                 // synchronous submit is done) but `active_test` stays set: the
                 // decoupled executor (`drive_submitted_test`) re-enters to run
@@ -1769,6 +1796,12 @@ impl SchemaRuntime {
                     ordinary::ContainedDeployed::new(accepted),
                 ))
             }
+            sema::SemaWriteOutput::ContainedRunReleased(released) => Self::reply_ordinary(
+                ordinary::Output::Released(ordinary::Released::new(released)),
+            ),
+            sema::SemaWriteOutput::ContainedReleaseRejected(rejected) => Self::reply_ordinary(
+                ordinary::Output::ReleaseRejected(ordinary::ReleaseRejected::new(rejected)),
+            ),
             sema::SemaWriteOutput::WriteRejected(report) => self.reject_active_or_meta(report),
         }
     }
@@ -1783,8 +1816,9 @@ impl SchemaRuntime {
     /// container `Started` transition and advances to teardown; `TestVmTornDown`
     /// records `Stopped` and the terminal `Failed(Assert)` — the deploy + assert
     /// between bring-up and teardown is unimplemented, so the bracket cannot
-    /// pass. A Live run is rejected at submit (`LiveNotYetEnabled`), so this
-    /// honest live terminal is the belt to that submit-time gate.
+    /// pass. A non-hermetic contained target is rejected at submit with
+    /// `SubstrateUnavailable`, so this honest live terminal is the belt to that
+    /// submit-time gate.
     fn decide_test_effect_completion(&mut self, result: nexus::EffectResult) -> nexus::NexusAction {
         let Some(pipeline) = self.active_test.clone() else {
             return Self::reply_ordinary(ordinary::Output::DeployContainedRejected(
@@ -1799,8 +1833,8 @@ impl SchemaRuntime {
                 // closure. Record Completed/Passed with it — the durable proof.
                 self.record_test_terminal(
                     &pipeline,
-                    ordinary::TestRunPhase::Completed,
-                    ordinary::TestOutcome::Passed,
+                    ordinary::ContainedRunPhase::Completed,
+                    ordinary::ContainedOutcome::Passed,
                     Some(built.closure_path),
                 )
             }
@@ -1822,13 +1856,13 @@ impl SchemaRuntime {
                 // between them is not yet implemented, so nothing was asserted.
                 // Record `Failed(Assert)`, never `Passed` — a pass must be
                 // earned by a real assertion. Belt to the submit-time
-                // `LiveNotYetEnabled` reject: a Live run never reaches this arm
-                // today, and if a future caller drives a live bracket before the
-                // assert lands it still cannot fake a pass.
+                // `SubstrateUnavailable` reject: a non-hermetic run never
+                // reaches this arm today, and if a future caller drives a live
+                // bracket before the assert lands it still cannot fake a pass.
                 self.record_test_terminal(
                     &pipeline,
-                    ordinary::TestRunPhase::Failed,
-                    ordinary::TestOutcome::Failed(ordinary::FailureStage::Assert),
+                    ordinary::ContainedRunPhase::Failed,
+                    ordinary::ContainedOutcome::Failed(ordinary::FailureStage::Assert),
                     None,
                 )
             }
@@ -1845,21 +1879,21 @@ impl SchemaRuntime {
     /// Write the terminal durable test-run row (phase + outcome + closure) and
     /// reply the terminal `Tested`/`TestRejected`. Clears the in-flight test
     /// cursor. The row is rewritten in place (keyed by run identifier), so a
-    /// `(Query (ByTestRun …))` reads the terminal outcome — closing the
+    /// `(Query (ByContainedRun …))` reads the terminal outcome — closing the
     /// silent-daemon observability gap (report 54 §5.3).
     fn record_test_terminal(
         &mut self,
         pipeline: &TestPipeline,
-        phase: ordinary::TestRunPhase,
-        outcome: ordinary::TestOutcome,
+        phase: ordinary::ContainedRunPhase,
+        outcome: ordinary::ContainedOutcome,
         closure_path: Option<ordinary::ClosurePath>,
     ) -> nexus::NexusAction {
         let record = pipeline.record_at(phase, outcome, closure_path);
-        let output = self.record_test_run(record);
+        let output = self.record_contained_run(record);
         self.active_operation = None;
         self.active_test = None;
         match output {
-            sema::SemaWriteOutput::TestRunRecorded(accepted) => Self::reply_ordinary(
+            sema::SemaWriteOutput::ContainedRunRecorded(accepted) => Self::reply_ordinary(
                 ordinary::Output::ContainedDeployed(ordinary::ContainedDeployed::new(accepted)),
             ),
             _ => Self::reply_ordinary(ordinary::Output::DeployContainedRejected(
@@ -1907,8 +1941,8 @@ impl SchemaRuntime {
             };
         self.record_test_terminal(
             &pipeline,
-            ordinary::TestRunPhase::Failed,
-            ordinary::TestOutcome::Failed(stage),
+            ordinary::ContainedRunPhase::Failed,
+            ordinary::ContainedOutcome::Failed(stage),
             None,
         )
     }
@@ -2180,7 +2214,7 @@ impl SchemaRuntime {
                 }
             }
             nexus::EffectResult::HorizonMaterialized(inputs) => {
-                self.set_input_overrides(inputs.into_payload());
+                self.set_input_overrides(inputs.into_payload().into_payload());
                 self.record_phase(ordinary::DeploymentPhase::Building, None)
             }
             nexus::EffectResult::ClosureEvaluated(evaluated) => {
@@ -2342,25 +2376,31 @@ impl SchemaRuntime {
             sema::SemaWriteInput::RecordContainerTransition(transition) => {
                 self.record_container_transition(transition)
             }
-            sema::SemaWriteInput::RecordTestRun(record) => self.record_test_run(record),
+            sema::SemaWriteInput::RecordContainedRun(record) => self.record_contained_run(record),
+            sema::SemaWriteInput::ReleaseContainedRun(release) => {
+                self.release_contained_run(release)
+            }
         }
     }
 
     /// Persist one accepted test-run row (phase Submitted / outcome Pending)
     /// and reply the `AcceptedTest` handle. Mirrors `record_deploy_submitted`:
-    /// the row is durable from acceptance, so a `(Query (ByTestRun …))` reads
+    /// the row is durable from acceptance, so a `(Query (ByContainedRun …))` reads
     /// it immediately and a restarted daemon reconciles the in-flight test
     /// (Unit 2b). Unit 2a writes exactly this Pending row — no faked pass.
-    fn record_test_run(&mut self, record: ordinary::TestRunRecord) -> sema::SemaWriteOutput {
-        let identifier = record.test_run_identifier.clone();
+    fn record_contained_run(
+        &mut self,
+        record: ordinary::ContainedRunRecord,
+    ) -> sema::SemaWriteOutput {
+        let identifier = record.contained_run_identifier.clone();
         match self
             .store
-            .upsert_test_run(sema::StoredTestRun::from(record))
+            .upsert_contained_run(sema::StoredContainedRun::from(record))
             .and_then(|()| self.store.commit_sequence())
         {
             Ok(commit_sequence) => {
-                sema::SemaWriteOutput::TestRunRecorded(ordinary::AcceptedContainedDeploy {
-                    test_run_identifier: identifier,
+                sema::SemaWriteOutput::ContainedRunRecorded(ordinary::AcceptedContainedDeploy {
+                    contained_run_identifier: identifier,
                     database_marker: Self::marker(commit_sequence),
                 })
             }
@@ -2468,7 +2508,7 @@ impl SchemaRuntime {
             node_name: commit.node_name.clone(),
             generation_slot: commit.generation_slot,
             closure_path: commit.closure_path.clone(),
-            label: None,
+            label: None.into(),
         };
         // The live-set row and the gc-root row are written as TWO sequential
         // keyed asserts (inside `Store::record_activation`). A `CommitRequest`
@@ -2501,7 +2541,7 @@ impl SchemaRuntime {
         let current_sequence = self.store.commit_sequence().unwrap_or(0);
         let already_used = roots
             .iter()
-            .any(|root| root.label.as_ref() == Some(&request.pin_label));
+            .any(|root| root.label.payload().as_ref() == Some(&request.pin_label));
         if already_used {
             return Self::write_rejected(current_sequence, sema::RejectionReason::PinLabelInUse);
         }
@@ -2517,7 +2557,7 @@ impl SchemaRuntime {
         };
         let from_slot = root.generation_slot;
         root.generation_slot = ordinary::GenerationSlot::Pinned;
-        root.label = Some(request.pin_label.clone());
+        root.label = Some(request.pin_label.clone()).into();
         let committed = self
             .store
             .mutate_gc_root(root)
@@ -2543,7 +2583,7 @@ impl SchemaRuntime {
         };
         let current_sequence = self.store.commit_sequence().unwrap_or(0);
         let Some(mut root) = roots.into_iter().find(|root| {
-            root.label.as_ref() == Some(&request.pin_label)
+            root.label.payload().as_ref() == Some(&request.pin_label)
                 && root.cluster_name == request.production_node.cluster_name
                 && root.node_name == request.production_node.node_name
         }) else {
@@ -2552,7 +2592,7 @@ impl SchemaRuntime {
         let generation_identifier = root.generation_identifier.clone();
         let from_slot = root.generation_slot;
         root.generation_slot = ordinary::GenerationSlot::Recent;
-        root.label = None;
+        root.label = None.into();
         let committed = self
             .store
             .mutate_gc_root(root)
@@ -2656,47 +2696,53 @@ impl SchemaRuntime {
             sema::SemaReadInput::QueryGenerations(selection) => self.query_generations(selection),
             sema::SemaReadInput::ReadEventLog(range) => self.read_event_log(range),
             sema::SemaReadInput::CheckKeyMaterial(query) => self.check_key_material(query),
-            sema::SemaReadInput::QueryTestRuns(lookup) => self.query_test_runs(lookup),
+            sema::SemaReadInput::QueryContainedRuns(lookup) => self.query_contained_runs(lookup),
+            sema::SemaReadInput::VerifyContainedRun(check) => self.verify_contained_run(check),
         }
     }
 
-    /// Answer a `(ByTestRun …)` query from the durable test-run table (report
+    /// Answer a `(ByContainedRun …)` query from the durable test-run table (report
     /// 54 §5.3). Filters by cluster + node, and by run identifier when the
     /// lookup names one (`None` returns every run for that node). The matching
     /// rows are returned newest-first by run identifier so the routine
     /// `(Check …)` reader sees its latest run first.
-    fn query_test_runs(&self, lookup: ordinary::TestRunLookup) -> sema::SemaReadOutput {
-        let runs = match self.store.test_runs() {
+    fn query_contained_runs(&self, lookup: ordinary::ContainedRunLookup) -> sema::SemaReadOutput {
+        let runs = match self.store.contained_runs() {
             Ok(runs) => runs,
             Err(_) => return Self::read_missed(0, sema::RejectionReason::NodeUnknown),
         };
         let commit_sequence = self.store.commit_sequence().unwrap_or(0);
-        let mut matching: Vec<sema::StoredTestRun> = runs
+        let mut matching: Vec<sema::StoredContainedRun> = runs
             .into_iter()
-            .filter(|run| Self::test_run_matches(&lookup, run))
+            .filter(|run| Self::contained_run_matches(&lookup, run))
             .collect();
         matching.sort_by(|left, right| {
             right
-                .test_run_identifier
+                .contained_run_identifier
                 .payload()
-                .cmp(left.test_run_identifier.payload())
+                .cmp(left.contained_run_identifier.payload())
         });
-        sema::SemaReadOutput::TestRunsQueried(ordinary::TestRunListing {
+        sema::SemaReadOutput::ContainedRunsQueried(ordinary::ContainedRunListing {
             runs: matching
                 .into_iter()
-                .map(ordinary::TestRunRecord::from)
-                .collect(),
+                .map(ordinary::ContainedRunRecord::from)
+                .collect::<Vec<_>>()
+                .into(),
             database_marker: Self::marker(commit_sequence),
         })
     }
 
-    fn test_run_matches(lookup: &ordinary::TestRunLookup, run: &sema::StoredTestRun) -> bool {
+    fn contained_run_matches(
+        lookup: &ordinary::ContainedRunLookup,
+        run: &sema::StoredContainedRun,
+    ) -> bool {
         lookup.cluster_name == run.cluster_name
             && lookup.node_name == run.node_name
             && lookup
                 .run
+                .payload()
                 .as_ref()
-                .is_none_or(|identifier| identifier == &run.test_run_identifier)
+                .is_none_or(|identifier| identifier == &run.contained_run_identifier)
     }
 
     fn query_generations(&self, selection: ordinary::Selection) -> sema::SemaReadOutput {
@@ -2713,7 +2759,7 @@ impl SchemaRuntime {
             .map(Self::project_generation)
             .collect();
         sema::SemaReadOutput::GenerationsQueried(ordinary::GenerationListing {
-            generations,
+            generations: generations.into(),
             database_marker: Self::marker(commit_sequence),
         })
     }
@@ -2725,6 +2771,7 @@ impl SchemaRuntime {
                     && selector.node_name == live.node_name
                     && selector
                         .kind
+                        .payload()
                         .as_ref()
                         .is_none_or(|kind| kind == &live.deployment_kind)
             }
@@ -2733,8 +2780,8 @@ impl SchemaRuntime {
             }
             ordinary::Selection::ByEventLog(_) => true,
             // A test-run selection never reads the generation set — it is
-            // routed to QueryTestRuns before reaching here (decide_ordinary_input).
-            ordinary::Selection::ByTestRun(_) => false,
+            // routed to QueryContainedRuns before reaching here (decide_ordinary_input).
+            ordinary::Selection::ByContainedRun(_) => false,
         }
     }
 
@@ -2772,8 +2819,8 @@ impl SchemaRuntime {
             }
         }
         sema::SemaReadOutput::EventLogRead(sema::EventLogPage {
-            deployment_events,
-            retention_events,
+            deployment_events: deployment_events.into(),
+            retention_events: retention_events.into(),
             state_marker: Self::sema_marker(commit_sequence),
         })
     }
@@ -2782,7 +2829,7 @@ impl SchemaRuntime {
         let commit_sequence = self.store.commit_sequence().unwrap_or(0);
         sema::SemaReadOutput::KeyMaterialChecked(ordinary::KeyMaterialReport {
             node_name: query.node_name,
-            mismatches: Vec::new(),
+            mismatches: Vec::new().into(),
             database_marker: Self::marker(commit_sequence),
         })
     }
@@ -2808,12 +2855,12 @@ impl SchemaRuntime {
         }
         // Resolve the flake metadata to a locked revision through the proposal
         // source. `nix flake metadata --json <flake>` reports the resolved ref.
-        match NixCommand::flake_metadata(request.flake.payload())
+        match NixCommand::flake_metadata(request.flake_reference.payload())
             .run()
             .await
         {
             Ok(output) => nexus::EffectResult::FlakeResolved(nexus::ResolvedFlake {
-                flake: request.flake,
+                flake_reference: request.flake_reference,
                 revision: NixCommand::first_line(&output),
             }),
             Err(detail) => Self::effect_failed(nexus::EffectStage::FlakeAuth, detail),
@@ -2833,8 +2880,12 @@ impl SchemaRuntime {
     }
 
     async fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> nexus::EffectResult {
-        let attribute = format!("{}#{}", command.flake.payload(), command.attribute);
-        match NixCommand::eval_drv_path(&attribute, &command.overrides, &command.target)
+        let attribute = format!(
+            "{}#{}",
+            command.flake_reference.payload(),
+            command.attribute.payload()
+        );
+        match NixCommand::eval_drv_path(&attribute, command.overrides.payload(), &command.target)
             .run()
             .await
         {
@@ -2857,17 +2908,18 @@ impl SchemaRuntime {
         // `--store <uri>` redirect ALONE (NO `--eval-store auto`) so eval and
         // build both operate on the target store.
         let invocation = match &command.target {
-            nexus::BuildTarget::Local => {
-                NixCommand::build_closure(command.closure_path.payload(), &command.substituters)
-            }
+            nexus::BuildTarget::Local => NixCommand::build_closure(
+                command.closure_path.payload(),
+                command.substituters.payload(),
+            ),
             nexus::BuildTarget::Remote(_) => NixCommand::build_closure_remote(
                 command.closure_path.payload(),
-                &command.substituters,
+                command.substituters.payload(),
             ),
             nexus::BuildTarget::TargetStore(store) => NixCommand::build_closure_in_store(
                 command.closure_path.payload(),
                 store.payload(),
-                &command.substituters,
+                command.substituters.payload(),
             ),
         };
         match invocation.run().await {
@@ -3039,12 +3091,14 @@ impl HorizonMaterialization {
     }
 
     async fn run_inner(&self) -> Result<nexus::MaterializedInputs> {
-        let proposal = ProjectableProposal::from(ProposalFile::new(&self.command.source).load()?);
+        let proposal =
+            ProjectableProposal::from(ProposalFile::new(&self.command.proposal_source).load()?);
         let viewpoint = HorizonViewpoint::from_command(&self.command)?;
         let horizon = proposal.project(&viewpoint)?;
         let root = MaterializationRoot::new(self.configuration.materialization_root(&self.command));
         root.prepare()?;
-        let secrets_source = ClusterSecretsDirectory::from_proposal_source(&self.command.source);
+        let secrets_source =
+            ClusterSecretsDirectory::from_proposal_source(&self.command.proposal_source);
         MaterializedInputSet::new(root, horizon, self.command.shape.clone(), secrets_source)
             .write()
             .await
@@ -3189,7 +3243,7 @@ impl MaterializedInputSet {
                 .to_override(GeneratedInputName::Secrets)
                 .await?,
         );
-        Ok(nexus::MaterializedInputs::new(inputs))
+        Ok(nexus::MaterializedInputs::new(inputs.into()))
     }
 }
 
@@ -4529,12 +4583,12 @@ mod tests {
                 node_name: ordinary::NodeName::new("node-1"),
             },
             deployment_kind: ordinary::DeploymentKind::OsOnly,
-            source: ordinary::ProposalSource::new("/dev/null"),
-            flake: ordinary::FlakeReference::new("github:owner/repo"),
+            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
             system_action: action,
-            builder: None,
-            substituters: Vec::new(),
-            build_attribute: None,
+            builder_override: None.into(),
+            extra_substituters: Vec::new().into(),
+            build_attribute: None.into(),
         })
     }
 
@@ -4624,12 +4678,12 @@ mod tests {
                     node_name: node(),
                 },
                 deployment_kind: ordinary::DeploymentKind::OsOnly,
-                source: ordinary::ProposalSource::new("/dev/null"),
-                flake: ordinary::FlakeReference::new("github:owner/repo"),
+                proposal_source: ordinary::ProposalSource::new("/dev/null"),
+                flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
                 system_action: action,
-                builder: None,
-                substituters: Vec::new(),
-                build_attribute: None,
+                builder_override: None.into(),
+                extra_substituters: Vec::new().into(),
+                build_attribute: None.into(),
             });
             assert!(
                 SchemaRuntime::unsupported_deploy_reason(&request).is_none(),
@@ -4647,11 +4701,11 @@ mod tests {
                     node_name: node(),
                 },
                 user_name: ordinary::UserName::new("li"),
-                source: ordinary::ProposalSource::new("/dev/null"),
-                flake: ordinary::FlakeReference::new("github:owner/repo"),
+                proposal_source: ordinary::ProposalSource::new("/dev/null"),
+                flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
                 home_mode: mode,
-                builder: None,
-                substituters: Vec::new(),
+                builder_override: None.into(),
+                extra_substituters: Vec::new().into(),
             });
             assert!(
                 SchemaRuntime::unsupported_deploy_reason(&request).is_none(),

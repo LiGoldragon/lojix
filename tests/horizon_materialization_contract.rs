@@ -9,7 +9,8 @@ fn nexus_schema_names_horizon_materialization_and_eval_overrides() {
     assert!(schema.contains("HorizonMaterializationCommand"));
     assert!(schema.contains("(MaterializeHorizon HorizonMaterializationCommand)"));
     assert!(schema.contains("NixEvalCommand"));
-    assert!(schema.contains("overrides (Vec FlakeInputOverride)"));
+    assert!(schema.contains("Overrides (Vector FlakeInputOverride)"));
+    assert!(schema.contains("NixEvalCommand { ClusterName NodeName DeploymentKind FlakeReference Attribute Overrides target.BuildTarget }"));
 }
 
 #[test]

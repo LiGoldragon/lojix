@@ -1,7 +1,7 @@
 //! Contained deploy/test POC tests.
 //!
 //! The safe test surface is ordinary `signal-lojix`: a test submits
-//! `DeployContained`, observes with `CheckContained` or `Query(ByTestRun)`, and
+//! `DeployContained`, observes with `VerifyContained` or `Query(ByContainedRun)`, and
 //! releases with `Release`. Production deployment stays on `meta-signal-lojix`.
 
 use lojix::schema::nexus::{self, NexusEngine};
@@ -60,11 +60,11 @@ impl ContainedClusterTest {
                         node_profile: ordinary::NodeProfile {
                             cluster_name: self.cluster.clone(),
                             node_name: node,
-                            kind: None,
+                            kind: None.into(),
                         },
                         contained_target: ordinary::ContainedTarget::HermeticVm,
-                        source: self.source.clone(),
-                        flake: self.flake.clone(),
+                        source: Some(self.source.clone()).into(),
+                        flake_reference: self.flake.clone(),
                     },
                 ))
             })
@@ -77,11 +77,13 @@ fn contained_request(node: &str) -> ordinary::DeployContainedRequest {
         node_profile: ordinary::NodeProfile {
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new(node),
-            kind: None,
+            kind: None.into(),
         },
         contained_target: ordinary::ContainedTarget::HermeticVm,
-        source: ordinary::ProposalSource::new("test"),
-        flake: ordinary::FlakeReference::new("github:LiGoldragon/CriomOS-test-cluster/main"),
+        source: Some(ordinary::ProposalSource::new("test")).into(),
+        flake_reference: ordinary::FlakeReference::new(
+            "github:LiGoldragon/CriomOS-test-cluster/main",
+        ),
     }
 }
 
@@ -95,17 +97,19 @@ fn deploy_contained(engine: &mut SchemaRuntime, node: &str) -> ordinary::Accepte
     }
 }
 
-fn query_runs(engine: &mut SchemaRuntime, node: &str) -> Vec<ordinary::TestRunRecord> {
+fn query_runs(engine: &mut SchemaRuntime, node: &str) -> Vec<ordinary::ContainedRunRecord> {
     let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::Query(ordinary::Query::new(
-        ordinary::Selection::ByTestRun(ordinary::TestRunLookup {
+        ordinary::Selection::ByContainedRun(ordinary::ContainedRunLookup {
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new(node),
-            run: None,
+            run: None.into(),
         }),
     )));
     match ordinary_reply(run(engine, input)) {
-        ordinary::Output::TestRunsQueried(listing) => listing.into_payload().runs,
-        other => panic!("expected TestRunsQueried, got {other:?}"),
+        ordinary::Output::ContainedRunsQueried(listing) => {
+            listing.into_payload().runs.into_payload()
+        }
+        other => panic!("expected ContainedRunsQueried, got {other:?}"),
     }
 }
 
@@ -114,15 +118,21 @@ fn deploy_contained_is_ordinary_and_records_pending_run() {
     let mut engine = SchemaRuntime::new();
     let accepted = deploy_contained(&mut engine, "criome");
 
-    assert_eq!(*accepted.test_run_identifier.payload(), 1);
+    assert_eq!(*accepted.contained_run_identifier.payload(), 1);
     let runs = query_runs(&mut engine, "criome");
     assert_eq!(runs.len(), 1);
     assert!(matches!(
         runs[0].target,
         ordinary::ContainedTarget::HermeticVm
     ));
-    assert_eq!(runs[0].phase, ordinary::TestRunPhase::Submitted);
-    assert_eq!(runs[0].outcome, ordinary::TestOutcome::Pending);
+    assert_eq!(
+        runs[0].contained_run_phase,
+        ordinary::ContainedRunPhase::Submitted
+    );
+    assert_eq!(
+        runs[0].contained_outcome,
+        ordinary::ContainedOutcome::Pending
+    );
 }
 
 #[test]
@@ -130,23 +140,30 @@ fn check_and_release_use_the_contained_run_handle() {
     let mut engine = SchemaRuntime::new();
     let accepted = deploy_contained(&mut engine, "spirit");
 
-    let check = nexus::SignalInput::OrdinaryInput(ordinary::Input::CheckContained(
-        ordinary::CheckContained::new(ordinary::ContainedCheck::new(
-            accepted.test_run_identifier.clone(),
-        )),
+    let check = nexus::SignalInput::OrdinaryInput(ordinary::Input::VerifyContained(
+        ordinary::VerifyContained::new(ordinary::ContainedVerification {
+            contained_run_identifier: accepted.contained_run_identifier.clone(),
+            verification_body: ordinary::VerificationBody::Gate,
+        }),
     ));
     match ordinary_reply(run(&mut engine, check)) {
-        ordinary::Output::ContainedChecked(report) => {
+        ordinary::Output::ContainedVerified(report) => {
             let report = report.into_payload();
-            assert_eq!(report.phase, ordinary::TestRunPhase::Submitted);
-            assert_eq!(report.outcome, ordinary::TestOutcome::Pending);
+            assert_eq!(
+                report.contained_run_phase,
+                ordinary::ContainedRunPhase::Submitted
+            );
+            assert_eq!(
+                report.contained_outcome,
+                ordinary::ContainedOutcome::Pending
+            );
         }
-        other => panic!("expected ContainedChecked, got {other:?}"),
+        other => panic!("expected ContainedVerified, got {other:?}"),
     }
 
     let release =
         nexus::SignalInput::OrdinaryInput(ordinary::Input::Release(ordinary::Release::new(
-            ordinary::ContainedRelease::new(accepted.test_run_identifier),
+            ordinary::ContainedRelease::new(accepted.contained_run_identifier),
         )));
     match ordinary_reply(run(&mut engine, release)) {
         ordinary::Output::Released(released) => assert!(released.into_payload().released),
@@ -169,7 +186,7 @@ fn non_hermetic_targets_are_typed_rejections_in_the_poc() {
         ordinary::Output::DeployContainedRejected(rejected) => {
             assert_eq!(
                 rejected.into_payload().deploy_contained_rejection_reason,
-                ordinary::DeployContainedRejectionReason::LiveNotYetEnabled
+                ordinary::DeployContainedRejectionReason::SubstrateUnavailable
             );
         }
         other => panic!("expected DeployContainedRejected, got {other:?}"),

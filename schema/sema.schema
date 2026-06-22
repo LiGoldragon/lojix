@@ -29,17 +29,24 @@
   ClosurePath signal-lojix:lib:ClosurePath
   DeploymentIdentifier signal-lojix:lib:DeploymentIdentifier
   GenerationIdentifier signal-lojix:lib:GenerationIdentifier
-  TestRunIdentifier signal-lojix:lib:TestRunIdentifier
+  ContainedRunIdentifier signal-lojix:lib:ContainedRunIdentifier
   DeploymentKind signal-lojix:lib:DeploymentKind
   ActivationKind signal-lojix:lib:ActivationKind
   GenerationSlot signal-lojix:lib:GenerationSlot
   ContainedTarget signal-lojix:lib:ContainedTarget
+  ContainedClosurePath signal-lojix:lib:ContainedClosurePath
   AcceptedContainedDeploy signal-lojix:lib:AcceptedContainedDeploy
-  TestRunRecord signal-lojix:lib:TestRunRecord
-  TestRunListing signal-lojix:lib:TestRunListing
-  TestRunLookup signal-lojix:lib:TestRunLookup
-  TestRunPhase signal-lojix:lib:TestRunPhase
-  TestOutcome signal-lojix:lib:TestOutcome
+  ContainedVerification signal-lojix:lib:ContainedVerification
+  ContainedVerificationReport signal-lojix:lib:ContainedVerificationReport
+  RejectedContainedVerification signal-lojix:lib:RejectedContainedVerification
+  ContainedRelease signal-lojix:lib:ContainedRelease
+  AppliedContainedRelease signal-lojix:lib:AppliedContainedRelease
+  RejectedRelease signal-lojix:lib:RejectedRelease
+  ContainedRunRecord signal-lojix:lib:ContainedRunRecord
+  ContainedRunListing signal-lojix:lib:ContainedRunListing
+  ContainedRunLookup signal-lojix:lib:ContainedRunLookup
+  ContainedRunPhase signal-lojix:lib:ContainedRunPhase
+  ContainedOutcome signal-lojix:lib:ContainedOutcome
   FailureStage signal-lojix:lib:FailureStage
   SystemDeployment meta-signal-lojix:lib:SystemDeployment
   HomeDeployment meta-signal-lojix:lib:HomeDeployment
@@ -54,45 +61,52 @@
 [SemaReadInput SemaWriteInput]
 [SemaReadOutput SemaWriteOutput]
 {
-  SemaReadInput [(QueryGenerations Selection) (ReadEventLog EventLogRange) (CheckKeyMaterial KeyMaterialQuery) (QueryTestRuns TestRunLookup)]
+  SemaReadInput [(QueryGenerations Selection) (ReadEventLog EventLogRange) (CheckKeyMaterial KeyMaterialQuery) (QueryContainedRuns ContainedRunLookup) (VerifyContainedRun ContainedVerification)]
 
-  SemaReadOutput [(GenerationsQueried GenerationListing) (EventLogRead EventLogPage) (KeyMaterialChecked KeyMaterialReport) (TestRunsQueried TestRunListing) (ReadMissed RejectionReport)]
-  EventLogPage { deployment_events (Vec DeploymentPhaseEvent) retention_events (Vec CacheRetentionTransitionEvent) StateMarker * }
+  SemaReadOutput [(GenerationsQueried GenerationListing) (EventLogRead EventLogPage) (KeyMaterialChecked KeyMaterialReport) (ContainedRunsQueried ContainedRunListing) (ContainedVerified ContainedVerificationReport) (ContainedVerificationRejected RejectedContainedVerification) (ReadMissed RejectionReport)]
+  DeploymentEvents (Vector DeploymentPhaseEvent)
+  RetentionEvents (Vector CacheRetentionTransitionEvent)
+  EventLogPage { DeploymentEvents RetentionEvents StateMarker }
 
-  ;; RecordTestRun persists one already-lowered test-run row (the Unit-2a stub
+  ;; RecordContainedRun persists one already-lowered contained-run row (the Unit-2a stub
   ;; writes it at phase Submitted / outcome Pending) and replies the accepted
   ;; handle, mirroring RecordDeploySubmitted -> DeploySubmitted. Unit 2b
   ;; rewrites the row at each phase transition as the real dispatch runs.
-  SemaWriteInput [(RecordDeploySubmitted DeploySubmission) (RecordPhaseTransition DeploymentPhaseEvent) (RecordGenerationActivated ActivationCommit) (PinGeneration PinRequest) (UnpinGeneration UnpinRequest) (RetireGeneration RetireRequest) (RecordContainerTransition ContainerTransition) (RecordTestRun TestRunRecord)]
+  SemaWriteInput [(RecordDeploySubmitted DeploySubmission) (RecordPhaseTransition DeploymentPhaseEvent) (RecordGenerationActivated ActivationCommit) (PinGeneration PinRequest) (UnpinGeneration UnpinRequest) (RetireGeneration RetireRequest) (RecordContainerTransition ContainerTransition) (RecordContainedRun ContainedRunRecord) (ReleaseContainedRun ContainedRelease)]
   DeploySubmission [(System SystemDeployment) (Home HomeDeployment)]
-  ActivationCommit { GenerationIdentifier * ClusterName * NodeName * GenerationSlot * ClosurePath * }
-  ContainerTransition { ClusterName * NodeName * container ContainerName state ContainerState }
+  ActivationCommit { GenerationIdentifier ClusterName NodeName GenerationSlot ClosurePath }
+  ContainerTransition { ClusterName NodeName container.ContainerName state.ContainerState }
   ContainerName String
   ContainerState [Starting Started Stopping Stopped Failed]
 
-  SemaWriteOutput [(DeploySubmitted AcceptedDeploy) (PhaseRecorded PhaseReceipt) (GenerationActivated AppliedActivation) (GenerationPinned AppliedPin) (GenerationUnpinned AppliedUnpin) (GenerationRetired AppliedRetire) (ContainerRecorded ContainerReceipt) (TestRunRecorded AcceptedContainedDeploy) (WriteRejected RejectionReport)]
-  PhaseReceipt { EventLogPosition * StateMarker * }
-  AppliedActivation { GenerationIdentifier * GenerationSlot * StateMarker * }
-  ContainerReceipt { EventLogPosition * StateMarker * }
+  SemaWriteOutput [(DeploySubmitted AcceptedDeploy) (PhaseRecorded PhaseReceipt) (GenerationActivated AppliedActivation) (GenerationPinned AppliedPin) (GenerationUnpinned AppliedUnpin) (GenerationRetired AppliedRetire) (ContainerRecorded ContainerReceipt) (ContainedRunRecorded AcceptedContainedDeploy) (ContainedRunReleased AppliedContainedRelease) (ContainedReleaseRejected RejectedRelease) (WriteRejected RejectionReport)]
+  PhaseReceipt { EventLogPosition StateMarker }
+  AppliedActivation { GenerationIdentifier GenerationSlot StateMarker }
+  ContainerReceipt { EventLogPosition StateMarker }
 
-  RejectionReport { reason RejectionReason marker StateMarker }
+  RejectionReport { reason.RejectionReason marker.StateMarker }
   RejectionReason [GenerationUnknown NodeUnknown ClusterUnknown PlanNotApproved PinLabelInUse PinLabelUnknown GenerationActive GenerationPinned EventLogPositionOutOfRange ProposalSourceUnreachable]
-  StateMarker { CommitSequence * StateDigest * }
+  StateMarker { CommitSequence StateDigest }
   CommitSequence Integer
   StateDigest Integer
 
-  LiveSetTable { entries (Vec LiveGeneration) }
-  LiveGeneration { DeploymentIdentifier * GenerationIdentifier * ClusterName * NodeName * DeploymentKind * ActivationKind * GenerationSlot * ClosurePath * }
+  LiveSetEntries (Vector LiveGeneration)
+  LiveSetTable { LiveSetEntries }
+  LiveGeneration { DeploymentIdentifier GenerationIdentifier ClusterName NodeName DeploymentKind ActivationKind GenerationSlot ClosurePath }
 
-  GcRootsTable { roots (Vec GcRoot) }
-  GcRoot { GenerationIdentifier * ClusterName * NodeName * GenerationSlot * ClosurePath * label (Optional PinLabel) }
+  GcRoots (Vector GcRoot)
+  GcRootsTable { GcRoots }
+  Label (Optional PinLabel)
+  GcRoot { GenerationIdentifier ClusterName NodeName GenerationSlot ClosurePath Label }
 
-  EventLogTable { entries (Vec EventLogEntry) }
-  EventLogEntry { EventLogPosition * record LoggedEvent }
+  EventLogEntries (Vector EventLogEntry)
+  EventLogTable { EventLogEntries }
+  EventLogEntry { EventLogPosition record.LoggedEvent }
   LoggedEvent [(Deployment DeploymentPhaseEvent) (CacheRetention CacheRetentionTransitionEvent) (Container ContainerLifecycleRecord)]
 
-  ContainerLifecycleTable { records (Vec ContainerLifecycleRecord) }
-  ContainerLifecycleRecord { ClusterName * NodeName * container ContainerName state ContainerState EventLogPosition * }
+  ContainerLifecycleRecords (Vector ContainerLifecycleRecord)
+  ContainerLifecycleTable { ContainerLifecycleRecords }
+  ContainerLifecycleRecord { ClusterName NodeName container.ContainerName state.ContainerState EventLogPosition }
 
   ;; The durable in-flight deploy-job row (up9q). One row per submitted deploy,
   ;; keyed by DeploymentIdentifier. Written on submit and rewritten at every
@@ -101,28 +115,33 @@
   ;; mirrors DeployJobPhase; resolved_target / boot_once_unit are populated as
   ;; the pipeline learns them so a resumed Activating job can poll the
   ;; transient unit instead of re-activating.
-  DeployJobTable { jobs (Vec DeployJob) }
-  DeployJob { DeploymentIdentifier * GenerationIdentifier * ClusterName * NodeName * phase DeployJobPhase closure_path (Optional ClosurePath) resolved_target (Optional String) boot_once_unit (Optional String) }
+  DeployJobs (Vector DeployJob)
+  DeployJobTable { DeployJobs }
+  DeployJobClosurePath (Optional ClosurePath)
+  ResolvedTarget (Optional String)
+  BootOnceUnit (Optional String)
+  DeployJob { DeploymentIdentifier GenerationIdentifier ClusterName NodeName phase.DeployJobPhase DeployJobClosurePath ResolvedTarget BootOnceUnit }
   DeployJobPhase [Submitted Building Built Copying Activating Activated Failed]
 
-  ;; The durable test-run table (report 54 §5.3), mirroring DeployJobTable. One
-  ;; row per submitted test, keyed by TestRunIdentifier, written on accept at
+  ;; The durable contained-run table (report 54 §5.3), mirroring DeployJobTable. One
+  ;; row per submitted test, keyed by ContainedRunIdentifier, written on accept at
   ;; phase Submitted / outcome Pending and rewritten at every phase transition
   ;; (Unit 2b) so a restarted daemon reconciles an in-flight test and the
-  ;; (Query (ByTestRun …)) read answers from the persisted rows. StoredTestRun
+  ;; (Query (ByContainedRun …)) read answers from the persisted rows. StoredContainedRun
   ;; is the lojix-LOCAL durable row (the EngineRecord key owner) mirroring the
-  ;; ordinary-contract TestRunRecord field-for-field — the same local/wire
+  ;; ordinary-contract ContainedRunRecord field-for-field — the same local/wire
   ;; split LiveGeneration/Generation already uses, because EngineRecord cannot
   ;; be implemented on an imported wire type (the orphan rule).
-  TestRunTable { runs (Vec StoredTestRun) }
-  StoredTestRun {
-    TestRunIdentifier *
-    ClusterName *
-    NodeName *
-    host NodeName
-    target ContainedTarget
-    phase TestRunPhase
-    outcome TestOutcome
-    closure_path (Optional ClosurePath)
+  StoredContainedRuns (Vector StoredContainedRun)
+  ContainedRunTable { StoredContainedRuns }
+  StoredContainedRun {
+    ContainedRunIdentifier
+    ClusterName
+    NodeName
+    host.NodeName
+    target.ContainedTarget
+    phase.ContainedRunPhase
+    outcome.ContainedOutcome
+    ContainedClosurePath
   }
 }

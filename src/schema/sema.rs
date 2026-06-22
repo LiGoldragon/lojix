@@ -40,7 +40,7 @@ pub use signal_lojix::schema::lib::DeploymentIdentifier as DeploymentIdentifier;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::GenerationIdentifier as GenerationIdentifier;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::TestRunIdentifier as TestRunIdentifier;
+pub use signal_lojix::schema::lib::ContainedRunIdentifier as ContainedRunIdentifier;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::DeploymentKind as DeploymentKind;
 #[rustfmt::skip]
@@ -50,17 +50,31 @@ pub use signal_lojix::schema::lib::GenerationSlot as GenerationSlot;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::ContainedTarget as ContainedTarget;
 #[rustfmt::skip]
+pub use signal_lojix::schema::lib::ContainedClosurePath as ContainedClosurePath;
+#[rustfmt::skip]
 pub use signal_lojix::schema::lib::AcceptedContainedDeploy as AcceptedContainedDeploy;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::TestRunRecord as TestRunRecord;
+pub use signal_lojix::schema::lib::ContainedVerification as ContainedVerification;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::TestRunListing as TestRunListing;
+pub use signal_lojix::schema::lib::ContainedVerificationReport as ContainedVerificationReport;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::TestRunLookup as TestRunLookup;
+pub use signal_lojix::schema::lib::RejectedContainedVerification as RejectedContainedVerification;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::TestRunPhase as TestRunPhase;
+pub use signal_lojix::schema::lib::ContainedRelease as ContainedRelease;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::TestOutcome as TestOutcome;
+pub use signal_lojix::schema::lib::AppliedContainedRelease as AppliedContainedRelease;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::RejectedRelease as RejectedRelease;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::ContainedRunRecord as ContainedRunRecord;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::ContainedRunListing as ContainedRunListing;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::ContainedRunLookup as ContainedRunLookup;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::ContainedRunPhase as ContainedRunPhase;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::ContainedOutcome as ContainedOutcome;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::FailureStage as FailureStage;
 #[rustfmt::skip]
@@ -93,7 +107,8 @@ pub enum SemaReadInput {
     QueryGenerations(Selection),
     ReadEventLog(EventLogRange),
     CheckKeyMaterial(KeyMaterialQuery),
-    QueryTestRuns(TestRunLookup),
+    QueryContainedRuns(ContainedRunLookup),
+    VerifyContainedRun(ContainedVerification),
 }
 
 #[rustfmt::skip]
@@ -103,16 +118,28 @@ pub enum SemaReadOutput {
     GenerationsQueried(GenerationListing),
     EventLogRead(EventLogPage),
     KeyMaterialChecked(KeyMaterialReport),
-    TestRunsQueried(TestRunListing),
+    ContainedRunsQueried(ContainedRunListing),
+    ContainedVerified(ContainedVerificationReport),
+    ContainedVerificationRejected(RejectedContainedVerification),
     ReadMissed(RejectionReport),
 }
 
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentEvents(Vec<DeploymentPhaseEvent>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RetentionEvents(Vec<CacheRetentionTransitionEvent>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct EventLogPage {
-    pub deployment_events: Vec<DeploymentPhaseEvent>,
-    pub retention_events: Vec<CacheRetentionTransitionEvent>,
+    pub deployment_events: DeploymentEvents,
+    pub retention_events: RetentionEvents,
     pub state_marker: StateMarker,
 }
 
@@ -127,7 +154,8 @@ pub enum SemaWriteInput {
     UnpinGeneration(UnpinRequest),
     RetireGeneration(RetireRequest),
     RecordContainerTransition(ContainerTransition),
-    RecordTestRun(TestRunRecord),
+    RecordContainedRun(ContainedRunRecord),
+    ReleaseContainedRun(ContainedRelease),
 }
 
 #[rustfmt::skip]
@@ -195,7 +223,9 @@ pub enum SemaWriteOutput {
     GenerationUnpinned(AppliedUnpin),
     GenerationRetired(AppliedRetire),
     ContainerRecorded(ContainerReceipt),
-    TestRunRecorded(AcceptedContainedDeploy),
+    ContainedRunRecorded(AcceptedContainedDeploy),
+    ContainedRunReleased(AppliedContainedRelease),
+    ContainedReleaseRejected(RejectedRelease),
     WriteRejected(RejectionReport),
 }
 
@@ -278,7 +308,12 @@ pub struct StateDigest(Integer);
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct LiveSetTable(Vec<LiveGeneration>);
+pub struct LiveSetEntries(Vec<LiveGeneration>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LiveSetTable(LiveSetEntries);
 
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
@@ -297,7 +332,17 @@ pub struct LiveGeneration {
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct GcRootsTable(Vec<GcRoot>);
+pub struct GcRoots(Vec<GcRoot>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct GcRootsTable(GcRoots);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Label(Option<PinLabel>);
 
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
@@ -308,13 +353,18 @@ pub struct GcRoot {
     pub node_name: NodeName,
     pub generation_slot: GenerationSlot,
     pub closure_path: ClosurePath,
-    pub label: Option<PinLabel>,
+    pub label: Label,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct EventLogTable(Vec<EventLogEntry>);
+pub struct EventLogEntries(Vec<EventLogEntry>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct EventLogTable(EventLogEntries);
 
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
@@ -336,7 +386,12 @@ pub enum LoggedEvent {
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ContainerLifecycleTable(Vec<ContainerLifecycleRecord>);
+pub struct ContainerLifecycleRecords(Vec<ContainerLifecycleRecord>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ContainerLifecycleTable(ContainerLifecycleRecords);
 
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
@@ -352,7 +407,27 @@ pub struct ContainerLifecycleRecord {
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct DeployJobTable(Vec<DeployJob>);
+pub struct DeployJobs(Vec<DeployJob>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeployJobTable(DeployJobs);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeployJobClosurePath(Option<ClosurePath>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedTarget(Option<String>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BootOnceUnit(Option<String>);
 
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
@@ -363,9 +438,9 @@ pub struct DeployJob {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub phase: DeployJobPhase,
-    pub closure_path: Option<ClosurePath>,
-    pub resolved_target: Option<String>,
-    pub boot_once_unit: Option<String>,
+    pub deploy_job_closure_path: DeployJobClosurePath,
+    pub resolved_target: ResolvedTarget,
+    pub boot_once_unit: BootOnceUnit,
 }
 
 #[rustfmt::skip]
@@ -393,20 +468,25 @@ pub enum DeployJobPhase {
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct TestRunTable(Vec<StoredTestRun>);
+pub struct StoredContainedRuns(Vec<StoredContainedRun>);
 
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct StoredTestRun {
-    pub test_run_identifier: TestRunIdentifier,
+pub struct ContainedRunTable(StoredContainedRuns);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StoredContainedRun {
+    pub contained_run_identifier: ContainedRunIdentifier,
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub host: NodeName,
     pub target: ContainedTarget,
-    pub phase: TestRunPhase,
-    pub outcome: TestOutcome,
-    pub closure_path: Option<ClosurePath>,
+    pub phase: ContainedRunPhase,
+    pub outcome: ContainedOutcome,
+    pub contained_closure_path: ContainedClosurePath,
 }
 
 #[rustfmt::skip]
@@ -423,6 +503,44 @@ pub enum Input {
 pub enum Output {
     SemaReadOutput(SemaReadOutput),
     SemaWriteOutput(SemaWriteOutput),
+}
+
+#[rustfmt::skip]
+impl DeploymentEvents {
+    pub fn new(payload: Vec<DeploymentPhaseEvent>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Vec<DeploymentPhaseEvent> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Vec<DeploymentPhaseEvent> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Vec<DeploymentPhaseEvent>> for DeploymentEvents {
+    fn from(payload: Vec<DeploymentPhaseEvent>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl RetentionEvents {
+    pub fn new(payload: Vec<CacheRetentionTransitionEvent>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Vec<CacheRetentionTransitionEvent> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Vec<CacheRetentionTransitionEvent> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Vec<CacheRetentionTransitionEvent>> for RetentionEvents {
+    fn from(payload: Vec<CacheRetentionTransitionEvent>) -> Self {
+        Self::new(payload)
+    }
 }
 
 #[rustfmt::skip]
@@ -483,7 +601,7 @@ impl From<Integer> for StateDigest {
 }
 
 #[rustfmt::skip]
-impl LiveSetTable {
+impl LiveSetEntries {
     pub fn new(payload: Vec<LiveGeneration>) -> Self {
         Self(payload)
     }
@@ -495,14 +613,33 @@ impl LiveSetTable {
     }
 }
 #[rustfmt::skip]
-impl From<Vec<LiveGeneration>> for LiveSetTable {
+impl From<Vec<LiveGeneration>> for LiveSetEntries {
     fn from(payload: Vec<LiveGeneration>) -> Self {
         Self::new(payload)
     }
 }
 
 #[rustfmt::skip]
-impl GcRootsTable {
+impl LiveSetTable {
+    pub fn new(payload: LiveSetEntries) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &LiveSetEntries {
+        &self.0
+    }
+    pub fn into_payload(self) -> LiveSetEntries {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<LiveSetEntries> for LiveSetTable {
+    fn from(payload: LiveSetEntries) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl GcRoots {
     pub fn new(payload: Vec<GcRoot>) -> Self {
         Self(payload)
     }
@@ -514,14 +651,52 @@ impl GcRootsTable {
     }
 }
 #[rustfmt::skip]
-impl From<Vec<GcRoot>> for GcRootsTable {
+impl From<Vec<GcRoot>> for GcRoots {
     fn from(payload: Vec<GcRoot>) -> Self {
         Self::new(payload)
     }
 }
 
 #[rustfmt::skip]
-impl EventLogTable {
+impl GcRootsTable {
+    pub fn new(payload: GcRoots) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &GcRoots {
+        &self.0
+    }
+    pub fn into_payload(self) -> GcRoots {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<GcRoots> for GcRootsTable {
+    fn from(payload: GcRoots) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl Label {
+    pub fn new(payload: Option<PinLabel>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Option<PinLabel> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Option<PinLabel> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Option<PinLabel>> for Label {
+    fn from(payload: Option<PinLabel>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl EventLogEntries {
     pub fn new(payload: Vec<EventLogEntry>) -> Self {
         Self(payload)
     }
@@ -533,14 +708,33 @@ impl EventLogTable {
     }
 }
 #[rustfmt::skip]
-impl From<Vec<EventLogEntry>> for EventLogTable {
+impl From<Vec<EventLogEntry>> for EventLogEntries {
     fn from(payload: Vec<EventLogEntry>) -> Self {
         Self::new(payload)
     }
 }
 
 #[rustfmt::skip]
-impl ContainerLifecycleTable {
+impl EventLogTable {
+    pub fn new(payload: EventLogEntries) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &EventLogEntries {
+        &self.0
+    }
+    pub fn into_payload(self) -> EventLogEntries {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<EventLogEntries> for EventLogTable {
+    fn from(payload: EventLogEntries) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl ContainerLifecycleRecords {
     pub fn new(payload: Vec<ContainerLifecycleRecord>) -> Self {
         Self(payload)
     }
@@ -552,14 +746,33 @@ impl ContainerLifecycleTable {
     }
 }
 #[rustfmt::skip]
-impl From<Vec<ContainerLifecycleRecord>> for ContainerLifecycleTable {
+impl From<Vec<ContainerLifecycleRecord>> for ContainerLifecycleRecords {
     fn from(payload: Vec<ContainerLifecycleRecord>) -> Self {
         Self::new(payload)
     }
 }
 
 #[rustfmt::skip]
-impl DeployJobTable {
+impl ContainerLifecycleTable {
+    pub fn new(payload: ContainerLifecycleRecords) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &ContainerLifecycleRecords {
+        &self.0
+    }
+    pub fn into_payload(self) -> ContainerLifecycleRecords {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<ContainerLifecycleRecords> for ContainerLifecycleTable {
+    fn from(payload: ContainerLifecycleRecords) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl DeployJobs {
     pub fn new(payload: Vec<DeployJob>) -> Self {
         Self(payload)
     }
@@ -571,27 +784,122 @@ impl DeployJobTable {
     }
 }
 #[rustfmt::skip]
-impl From<Vec<DeployJob>> for DeployJobTable {
+impl From<Vec<DeployJob>> for DeployJobs {
     fn from(payload: Vec<DeployJob>) -> Self {
         Self::new(payload)
     }
 }
 
 #[rustfmt::skip]
-impl TestRunTable {
-    pub fn new(payload: Vec<StoredTestRun>) -> Self {
+impl DeployJobTable {
+    pub fn new(payload: DeployJobs) -> Self {
         Self(payload)
     }
-    pub fn payload(&self) -> &Vec<StoredTestRun> {
+    pub fn payload(&self) -> &DeployJobs {
         &self.0
     }
-    pub fn into_payload(self) -> Vec<StoredTestRun> {
+    pub fn into_payload(self) -> DeployJobs {
         self.0
     }
 }
 #[rustfmt::skip]
-impl From<Vec<StoredTestRun>> for TestRunTable {
-    fn from(payload: Vec<StoredTestRun>) -> Self {
+impl From<DeployJobs> for DeployJobTable {
+    fn from(payload: DeployJobs) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl DeployJobClosurePath {
+    pub fn new(payload: Option<ClosurePath>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Option<ClosurePath> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Option<ClosurePath> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Option<ClosurePath>> for DeployJobClosurePath {
+    fn from(payload: Option<ClosurePath>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl ResolvedTarget {
+    pub fn new(payload: Option<String>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Option<String> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Option<String> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Option<String>> for ResolvedTarget {
+    fn from(payload: Option<String>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl BootOnceUnit {
+    pub fn new(payload: Option<String>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Option<String> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Option<String> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Option<String>> for BootOnceUnit {
+    fn from(payload: Option<String>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl StoredContainedRuns {
+    pub fn new(payload: Vec<StoredContainedRun>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Vec<StoredContainedRun> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Vec<StoredContainedRun> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Vec<StoredContainedRun>> for StoredContainedRuns {
+    fn from(payload: Vec<StoredContainedRun>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl ContainedRunTable {
+    pub fn new(payload: StoredContainedRuns) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &StoredContainedRuns {
+        &self.0
+    }
+    pub fn into_payload(self) -> StoredContainedRuns {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<StoredContainedRuns> for ContainedRunTable {
+    fn from(payload: StoredContainedRuns) -> Self {
         Self::new(payload)
     }
 }
@@ -607,8 +915,11 @@ impl SemaReadInput {
     pub fn check_key_material(payload: KeyMaterialQuery) -> Self {
         Self::CheckKeyMaterial(payload)
     }
-    pub fn query_test_runs(payload: TestRunLookup) -> Self {
-        Self::QueryTestRuns(payload)
+    pub fn query_contained_runs(payload: ContainedRunLookup) -> Self {
+        Self::QueryContainedRuns(payload)
+    }
+    pub fn verify_contained_run(payload: ContainedVerification) -> Self {
+        Self::VerifyContainedRun(payload)
     }
 }
 
@@ -623,8 +934,16 @@ impl SemaReadOutput {
     pub fn key_material_checked(payload: KeyMaterialReport) -> Self {
         Self::KeyMaterialChecked(payload)
     }
-    pub fn test_runs_queried(payload: TestRunListing) -> Self {
-        Self::TestRunsQueried(payload)
+    pub fn contained_runs_queried(payload: ContainedRunListing) -> Self {
+        Self::ContainedRunsQueried(payload)
+    }
+    pub fn contained_verified(payload: ContainedVerificationReport) -> Self {
+        Self::ContainedVerified(payload)
+    }
+    pub fn contained_verification_rejected(
+        payload: RejectedContainedVerification,
+    ) -> Self {
+        Self::ContainedVerificationRejected(payload)
     }
     pub fn read_missed(payload: RejectionReport) -> Self {
         Self::ReadMissed(payload)
@@ -654,8 +973,11 @@ impl SemaWriteInput {
     pub fn record_container_transition(payload: ContainerTransition) -> Self {
         Self::RecordContainerTransition(payload)
     }
-    pub fn record_test_run(payload: TestRunRecord) -> Self {
-        Self::RecordTestRun(payload)
+    pub fn record_contained_run(payload: ContainedRunRecord) -> Self {
+        Self::RecordContainedRun(payload)
+    }
+    pub fn release_contained_run(payload: ContainedRelease) -> Self {
+        Self::ReleaseContainedRun(payload)
     }
 }
 
@@ -692,8 +1014,14 @@ impl SemaWriteOutput {
     pub fn container_recorded(payload: ContainerReceipt) -> Self {
         Self::ContainerRecorded(payload)
     }
-    pub fn test_run_recorded(payload: AcceptedContainedDeploy) -> Self {
-        Self::TestRunRecorded(payload)
+    pub fn contained_run_recorded(payload: AcceptedContainedDeploy) -> Self {
+        Self::ContainedRunRecorded(payload)
+    }
+    pub fn contained_run_released(payload: AppliedContainedRelease) -> Self {
+        Self::ContainedRunReleased(payload)
+    }
+    pub fn contained_release_rejected(payload: RejectedRelease) -> Self {
+        Self::ContainedReleaseRejected(payload)
     }
     pub fn write_rejected(payload: RejectionReport) -> Self {
         Self::WriteRejected(payload)
@@ -755,9 +1083,16 @@ impl From<KeyMaterialQuery> for SemaReadInput {
 }
 
 #[rustfmt::skip]
-impl From<TestRunLookup> for SemaReadInput {
-    fn from(payload: TestRunLookup) -> Self {
-        Self::QueryTestRuns(payload)
+impl From<ContainedRunLookup> for SemaReadInput {
+    fn from(payload: ContainedRunLookup) -> Self {
+        Self::QueryContainedRuns(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<ContainedVerification> for SemaReadInput {
+    fn from(payload: ContainedVerification) -> Self {
+        Self::VerifyContainedRun(payload)
     }
 }
 
@@ -783,9 +1118,23 @@ impl From<KeyMaterialReport> for SemaReadOutput {
 }
 
 #[rustfmt::skip]
-impl From<TestRunListing> for SemaReadOutput {
-    fn from(payload: TestRunListing) -> Self {
-        Self::TestRunsQueried(payload)
+impl From<ContainedRunListing> for SemaReadOutput {
+    fn from(payload: ContainedRunListing) -> Self {
+        Self::ContainedRunsQueried(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<ContainedVerificationReport> for SemaReadOutput {
+    fn from(payload: ContainedVerificationReport) -> Self {
+        Self::ContainedVerified(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<RejectedContainedVerification> for SemaReadOutput {
+    fn from(payload: RejectedContainedVerification) -> Self {
+        Self::ContainedVerificationRejected(payload)
     }
 }
 
@@ -846,9 +1195,16 @@ impl From<ContainerTransition> for SemaWriteInput {
 }
 
 #[rustfmt::skip]
-impl From<TestRunRecord> for SemaWriteInput {
-    fn from(payload: TestRunRecord) -> Self {
-        Self::RecordTestRun(payload)
+impl From<ContainedRunRecord> for SemaWriteInput {
+    fn from(payload: ContainedRunRecord) -> Self {
+        Self::RecordContainedRun(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<ContainedRelease> for SemaWriteInput {
+    fn from(payload: ContainedRelease) -> Self {
+        Self::ReleaseContainedRun(payload)
     }
 }
 
@@ -918,7 +1274,21 @@ impl From<ContainerReceipt> for SemaWriteOutput {
 #[rustfmt::skip]
 impl From<AcceptedContainedDeploy> for SemaWriteOutput {
     fn from(payload: AcceptedContainedDeploy) -> Self {
-        Self::TestRunRecorded(payload)
+        Self::ContainedRunRecorded(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<AppliedContainedRelease> for SemaWriteOutput {
+    fn from(payload: AppliedContainedRelease) -> Self {
+        Self::ContainedRunReleased(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<RejectedRelease> for SemaWriteOutput {
+    fn from(payload: RejectedRelease) -> Self {
+        Self::ContainedReleaseRejected(payload)
     }
 }
 
@@ -1026,7 +1396,8 @@ pub enum SemaReadInputRoute {
     QueryGenerations,
     ReadEventLog,
     CheckKeyMaterial,
-    QueryTestRuns,
+    QueryContainedRuns,
+    VerifyContainedRun,
 }
 
 #[rustfmt::skip]
@@ -1036,7 +1407,8 @@ impl SemaReadInput {
             Self::QueryGenerations(_) => SemaReadInputRoute::QueryGenerations,
             Self::ReadEventLog(_) => SemaReadInputRoute::ReadEventLog,
             Self::CheckKeyMaterial(_) => SemaReadInputRoute::CheckKeyMaterial,
-            Self::QueryTestRuns(_) => SemaReadInputRoute::QueryTestRuns,
+            Self::QueryContainedRuns(_) => SemaReadInputRoute::QueryContainedRuns,
+            Self::VerifyContainedRun(_) => SemaReadInputRoute::VerifyContainedRun,
         }
     }
 }
@@ -1057,7 +1429,9 @@ pub enum SemaReadOutputRoute {
     GenerationsQueried,
     EventLogRead,
     KeyMaterialChecked,
-    TestRunsQueried,
+    ContainedRunsQueried,
+    ContainedVerified,
+    ContainedVerificationRejected,
     ReadMissed,
 }
 
@@ -1068,7 +1442,11 @@ impl SemaReadOutput {
             Self::GenerationsQueried(_) => SemaReadOutputRoute::GenerationsQueried,
             Self::EventLogRead(_) => SemaReadOutputRoute::EventLogRead,
             Self::KeyMaterialChecked(_) => SemaReadOutputRoute::KeyMaterialChecked,
-            Self::TestRunsQueried(_) => SemaReadOutputRoute::TestRunsQueried,
+            Self::ContainedRunsQueried(_) => SemaReadOutputRoute::ContainedRunsQueried,
+            Self::ContainedVerified(_) => SemaReadOutputRoute::ContainedVerified,
+            Self::ContainedVerificationRejected(_) => {
+                SemaReadOutputRoute::ContainedVerificationRejected
+            }
             Self::ReadMissed(_) => SemaReadOutputRoute::ReadMissed,
         }
     }
@@ -1094,7 +1472,8 @@ pub enum SemaWriteInputRoute {
     UnpinGeneration,
     RetireGeneration,
     RecordContainerTransition,
-    RecordTestRun,
+    RecordContainedRun,
+    ReleaseContainedRun,
 }
 
 #[rustfmt::skip]
@@ -1112,7 +1491,8 @@ impl SemaWriteInput {
             Self::RecordContainerTransition(_) => {
                 SemaWriteInputRoute::RecordContainerTransition
             }
-            Self::RecordTestRun(_) => SemaWriteInputRoute::RecordTestRun,
+            Self::RecordContainedRun(_) => SemaWriteInputRoute::RecordContainedRun,
+            Self::ReleaseContainedRun(_) => SemaWriteInputRoute::ReleaseContainedRun,
         }
     }
 }
@@ -1137,7 +1517,9 @@ pub enum SemaWriteOutputRoute {
     GenerationUnpinned,
     GenerationRetired,
     ContainerRecorded,
-    TestRunRecorded,
+    ContainedRunRecorded,
+    ContainedRunReleased,
+    ContainedReleaseRejected,
     WriteRejected,
 }
 
@@ -1152,7 +1534,11 @@ impl SemaWriteOutput {
             Self::GenerationUnpinned(_) => SemaWriteOutputRoute::GenerationUnpinned,
             Self::GenerationRetired(_) => SemaWriteOutputRoute::GenerationRetired,
             Self::ContainerRecorded(_) => SemaWriteOutputRoute::ContainerRecorded,
-            Self::TestRunRecorded(_) => SemaWriteOutputRoute::TestRunRecorded,
+            Self::ContainedRunRecorded(_) => SemaWriteOutputRoute::ContainedRunRecorded,
+            Self::ContainedRunReleased(_) => SemaWriteOutputRoute::ContainedRunReleased,
+            Self::ContainedReleaseRejected(_) => {
+                SemaWriteOutputRoute::ContainedReleaseRejected
+            }
             Self::WriteRejected(_) => SemaWriteOutputRoute::WriteRejected,
         }
     }
@@ -1205,7 +1591,12 @@ impl SemaObjectName {
                     SemaWriteInputRoute::RecordContainerTransition => {
                         "SemaWriteInputRecordContainerTransition"
                     }
-                    SemaWriteInputRoute::RecordTestRun => "SemaWriteInputRecordTestRun",
+                    SemaWriteInputRoute::RecordContainedRun => {
+                        "SemaWriteInputRecordContainedRun"
+                    }
+                    SemaWriteInputRoute::ReleaseContainedRun => {
+                        "SemaWriteInputReleaseContainedRun"
+                    }
                 }
             }
             Self::ReadInput(route) => {
@@ -1217,7 +1608,12 @@ impl SemaObjectName {
                     SemaReadInputRoute::CheckKeyMaterial => {
                         "SemaReadInputCheckKeyMaterial"
                     }
-                    SemaReadInputRoute::QueryTestRuns => "SemaReadInputQueryTestRuns",
+                    SemaReadInputRoute::QueryContainedRuns => {
+                        "SemaReadInputQueryContainedRuns"
+                    }
+                    SemaReadInputRoute::VerifyContainedRun => {
+                        "SemaReadInputVerifyContainedRun"
+                    }
                 }
             }
             Self::WriteOutput(route) => {
@@ -1241,8 +1637,14 @@ impl SemaObjectName {
                     SemaWriteOutputRoute::ContainerRecorded => {
                         "SemaWriteOutputContainerRecorded"
                     }
-                    SemaWriteOutputRoute::TestRunRecorded => {
-                        "SemaWriteOutputTestRunRecorded"
+                    SemaWriteOutputRoute::ContainedRunRecorded => {
+                        "SemaWriteOutputContainedRunRecorded"
+                    }
+                    SemaWriteOutputRoute::ContainedRunReleased => {
+                        "SemaWriteOutputContainedRunReleased"
+                    }
+                    SemaWriteOutputRoute::ContainedReleaseRejected => {
+                        "SemaWriteOutputContainedReleaseRejected"
                     }
                     SemaWriteOutputRoute::WriteRejected => "SemaWriteOutputWriteRejected",
                 }
@@ -1256,8 +1658,14 @@ impl SemaObjectName {
                     SemaReadOutputRoute::KeyMaterialChecked => {
                         "SemaReadOutputKeyMaterialChecked"
                     }
-                    SemaReadOutputRoute::TestRunsQueried => {
-                        "SemaReadOutputTestRunsQueried"
+                    SemaReadOutputRoute::ContainedRunsQueried => {
+                        "SemaReadOutputContainedRunsQueried"
+                    }
+                    SemaReadOutputRoute::ContainedVerified => {
+                        "SemaReadOutputContainedVerified"
+                    }
+                    SemaReadOutputRoute::ContainedVerificationRejected => {
+                        "SemaReadOutputContainedVerificationRejected"
                     }
                     SemaReadOutputRoute::ReadMissed => "SemaReadOutputReadMissed",
                 }

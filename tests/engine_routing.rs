@@ -60,12 +60,14 @@ fn query_empty_live_set_returns_empty_listing() {
         ordinary::Selection::ByNode(ordinary::NodeSelector {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
-            kind: None,
+            kind: None.into(),
         }),
     )));
     let output = ordinary_reply(run(&mut engine, input));
     match output {
-        ordinary::Output::Queried(listing) => assert!(listing.payload().generations.is_empty()),
+        ordinary::Output::Queried(listing) => {
+            assert!(listing.payload().generations.payload().is_empty())
+        }
         other => panic!("expected Queried, got {other:?}"),
     }
 }
@@ -75,9 +77,9 @@ fn watch_deployments_mints_subscription_token() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::WatchDeployments(
         ordinary::WatchDeployments::new(ordinary::DeploymentWatch {
-            deployment: None,
-            cluster: None,
-            node: None,
+            deployment: None.into(),
+            cluster: None.into(),
+            node: None.into(),
         }),
     ));
     let output = ordinary_reply(run(&mut engine, input));
@@ -96,14 +98,14 @@ fn check_host_key_material_reports_no_mismatches() {
         ordinary::CheckHostKeyMaterial::new(ordinary::KeyMaterialQuery {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
-            source: ordinary::ProposalSource::new("github:owner/repo"),
+            proposal_source: ordinary::ProposalSource::new("github:owner/repo"),
         }),
     ));
     let output = ordinary_reply(run(&mut engine, input));
     match output {
         ordinary::Output::KeyMaterialChecked(report) => {
             assert_eq!(report.payload().node_name.payload(), "node-1");
-            assert!(report.payload().mismatches.is_empty());
+            assert!(report.payload().mismatches.payload().is_empty());
         }
         other => panic!("expected KeyMaterialChecked, got {other:?}"),
     }
@@ -148,12 +150,12 @@ fn system_deployment(
     meta::SystemDeployment {
         production_node: production_node(),
         deployment_kind: ordinary::DeploymentKind::OsOnly,
-        source: ordinary::ProposalSource::new("/dev/null"),
-        flake: ordinary::FlakeReference::new("github:owner/repo"),
+        proposal_source: ordinary::ProposalSource::new("/dev/null"),
+        flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
         system_action: action,
-        builder: None,
-        substituters: Vec::new(),
-        build_attribute: build_attribute.map(meta::FlakeAttribute::new),
+        builder_override: None.into(),
+        extra_substituters: Vec::new().into(),
+        build_attribute: build_attribute.map(meta::FlakeAttribute::new).into(),
     }
 }
 
@@ -190,11 +192,11 @@ fn home_activate_enters_effect_pipeline() {
         meta::DeployRequest::Home(meta::HomeDeployment {
             production_node: production_node(),
             user_name: ordinary::UserName::new("li"),
-            source: ordinary::ProposalSource::new("/dev/null"),
-            flake: ordinary::FlakeReference::new("github:owner/repo"),
+            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
             home_mode: meta::HomeMode::Activate,
-            builder: None,
-            substituters: Vec::new(),
+            builder_override: None.into(),
+            extra_substituters: Vec::new().into(),
         }),
     )));
     assert_eq!(
@@ -222,11 +224,11 @@ fn home_build_enters_effect_pipeline() {
         meta::DeployRequest::Home(meta::HomeDeployment {
             production_node: production_node(),
             user_name: ordinary::UserName::new("li"),
-            source: ordinary::ProposalSource::new("/dev/null"),
-            flake: ordinary::FlakeReference::new("github:owner/repo"),
+            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
             home_mode: meta::HomeMode::Build,
-            builder: None,
-            substituters: Vec::new(),
+            builder_override: None.into(),
+            extra_substituters: Vec::new().into(),
         }),
     )));
     assert_eq!(
@@ -246,8 +248,8 @@ fn production_eval_materializes_horizon_inputs_and_returns_deployed() {
 
     let mut engine = SchemaRuntime::new();
     let mut deployment = system_deployment(None, ordinary::SystemAction::Eval);
-    deployment.source = ordinary::ProposalSource::new(cluster_path.display().to_string());
-    deployment.flake =
+    deployment.proposal_source = ordinary::ProposalSource::new(cluster_path.display().to_string());
+    deployment.flake_reference =
         ordinary::FlakeReference::new(format!("path:{}", directory.path().join("flake").display()));
     let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
         meta::DeployRequest::System(deployment),

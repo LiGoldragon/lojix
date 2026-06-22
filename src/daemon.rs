@@ -402,7 +402,7 @@ impl RequestWorker {
     /// live cycle) on the daemon runtime, and replies the `AcceptedTest` handle
     /// — all before the build runs. Dropping this task (a client disconnect)
     /// cannot cancel the spawned pipeline; the result lands durably and is read
-    /// over the ordinary `(ByTestRun …)` query.
+    /// over the ordinary `(ByContainedRun …)` query.
     async fn submit_contained(
         &self,
         request: ordinary::DeployContainedRequest,
@@ -719,7 +719,7 @@ impl Message<ReconcilePersistedJobs> for DeployJobs {
 /// `nix build` of `vm-<node>`, or the gated live cycle — as an independent
 /// runtime task, so a dropped client cannot cancel an in-flight test. The
 /// pipeline rewrites the durable row to a terminal `Passed`/`Failed`, read over
-/// the ordinary `(ByTestRun …)` query.
+/// the ordinary `(ByContainedRun …)` query.
 pub struct TestJobs {
     store: Arc<Store>,
     configuration: Arc<RuntimeConfiguration>,

@@ -102,16 +102,21 @@ pub struct ExtraSubstituter {
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Substituters(Vec<ExtraSubstituter>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct FlakeAuthRequest {
-    pub source: ProposalSource,
-    pub flake: FlakeReference,
+    pub proposal_source: ProposalSource,
+    pub flake_reference: FlakeReference,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedFlake {
-    pub flake: FlakeReference,
+    pub flake_reference: FlakeReference,
     pub revision: String,
 }
 
@@ -135,7 +140,7 @@ pub enum MaterializationShape {
 pub struct HorizonMaterializationCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub source: ProposalSource,
+    pub proposal_source: ProposalSource,
     pub shape: MaterializationShape,
 }
 
@@ -158,7 +163,17 @@ pub struct FlakeInputOverride {
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct MaterializedInputs(Vec<FlakeInputOverride>);
+pub struct Overrides(Vec<FlakeInputOverride>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MaterializedInputs(Overrides);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Attribute(String);
 
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
@@ -167,9 +182,9 @@ pub struct NixEvalCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub deployment_kind: DeploymentKind,
-    pub flake: FlakeReference,
-    pub attribute: String,
-    pub overrides: Vec<FlakeInputOverride>,
+    pub flake_reference: FlakeReference,
+    pub attribute: Attribute,
+    pub overrides: Overrides,
     pub target: BuildTarget,
 }
 
@@ -180,7 +195,7 @@ pub struct NixBuildCommand {
     pub generation_identifier: GenerationIdentifier,
     pub closure_path: ClosurePath,
     pub target: BuildTarget,
-    pub substituters: Vec<ExtraSubstituter>,
+    pub substituters: Substituters,
 }
 
 #[rustfmt::skip]
@@ -237,7 +252,7 @@ pub struct PathInfoGcCommand {
 pub struct HermeticCheckCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub flake: FlakeReference,
+    pub flake_reference: FlakeReference,
     pub system: String,
 }
 
@@ -471,6 +486,25 @@ impl From<String> for TargetStore {
 }
 
 #[rustfmt::skip]
+impl Substituters {
+    pub fn new(payload: Vec<ExtraSubstituter>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Vec<ExtraSubstituter> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Vec<ExtraSubstituter> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Vec<ExtraSubstituter>> for Substituters {
+    fn from(payload: Vec<ExtraSubstituter>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl HomeMaterialization {
     pub fn new(payload: UserName) -> Self {
         Self(payload)
@@ -490,7 +524,7 @@ impl From<UserName> for HomeMaterialization {
 }
 
 #[rustfmt::skip]
-impl MaterializedInputs {
+impl Overrides {
     pub fn new(payload: Vec<FlakeInputOverride>) -> Self {
         Self(payload)
     }
@@ -502,8 +536,46 @@ impl MaterializedInputs {
     }
 }
 #[rustfmt::skip]
-impl From<Vec<FlakeInputOverride>> for MaterializedInputs {
+impl From<Vec<FlakeInputOverride>> for Overrides {
     fn from(payload: Vec<FlakeInputOverride>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl MaterializedInputs {
+    pub fn new(payload: Overrides) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Overrides {
+        &self.0
+    }
+    pub fn into_payload(self) -> Overrides {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Overrides> for MaterializedInputs {
+    fn from(payload: Overrides) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl Attribute {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for Attribute {
+    fn from(payload: String) -> Self {
         Self::new(payload)
     }
 }
@@ -594,7 +666,7 @@ impl EffectResult {
     pub fn flake_resolved(payload: ResolvedFlake) -> Self {
         Self::FlakeResolved(payload)
     }
-    pub fn horizon_materialized(payload: Vec<FlakeInputOverride>) -> Self {
+    pub fn horizon_materialized(payload: Overrides) -> Self {
         Self::HorizonMaterialized(MaterializedInputs::new(payload))
     }
     pub fn closure_evaluated(payload: EvaluatedClosure) -> Self {

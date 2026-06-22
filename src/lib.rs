@@ -25,7 +25,7 @@ use sema_engine::{
 };
 
 use crate::schema::sema::{
-    ContainerLifecycleRecord, DeployJob, EventLogEntry, GcRoot, LiveGeneration, StoredTestRun,
+    ContainerLifecycleRecord, DeployJob, EventLogEntry, GcRoot, LiveGeneration, StoredContainedRun,
 };
 
 pub mod client;
@@ -49,7 +49,7 @@ const GC_ROOTS_TABLE: TableName = TableName::new("gc-roots");
 const EVENT_LOG_TABLE: TableName = TableName::new("event-log");
 const CONTAINER_LIFECYCLE_TABLE: TableName = TableName::new("container-lifecycle");
 const DEPLOY_JOB_TABLE: TableName = TableName::new("deploy-job");
-const TEST_RUN_TABLE: TableName = TableName::new("test-run");
+const CONTAINED_RUN_TABLE: TableName = TableName::new("test-run");
 
 /// The stable per-family schema identities. Each table is its own record
 /// family with a distinct, reopen-stable `FamilyName` + `SchemaHash`. The hash
@@ -61,13 +61,13 @@ const GC_ROOTS_FAMILY: &str = "GcRootsFamily";
 const EVENT_LOG_FAMILY: &str = "EventLogFamily";
 const CONTAINER_LIFECYCLE_FAMILY: &str = "ContainerLifecycleFamily";
 const DEPLOY_JOB_FAMILY: &str = "DeployJobFamily";
-const TEST_RUN_FAMILY: &str = "TestRunFamily";
+const CONTAINED_RUN_FAMILY: &str = "ContainedRunFamily";
 const LIVE_SET_SCHEMA_HASH: [u8; 32] = [1; 32];
 const GC_ROOTS_SCHEMA_HASH: [u8; 32] = [2; 32];
 const EVENT_LOG_SCHEMA_HASH: [u8; 32] = [3; 32];
 const CONTAINER_LIFECYCLE_SCHEMA_HASH: [u8; 32] = [4; 32];
 const DEPLOY_JOB_SCHEMA_HASH: [u8; 32] = [5; 32];
-const TEST_RUN_SCHEMA_HASH: [u8; 32] = [6; 32];
+const CONTAINED_RUN_SCHEMA_HASH: [u8; 32] = [6; 32];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -198,38 +198,17 @@ pub struct DaemonConfiguration {
     pub test_defaults: TestDefaults,
 }
 
-/// The config-default test-op selection a `(Check <node>)` shorthand expands
-/// into (report 54 decision D — cluster, host, and mode all default from
-/// config, so `(Check mercury)` is the routine form). `default_vm_host` is the
-/// host the test VM is brought up on when the request says `DefaultHost`;
-/// `default_mode` is the everyday dispatch mode (`Hermetic`). `TestMode` is the
-/// shared signal type, so the wire op, the durable record, and this config
-/// default all name one type.
-///
-/// `test_flake` is the cluster→flake resolution (report 54 §5.2, Unit 2b): the
-/// flake whose `#checks.<system>.vm-<node>` auto-pickup check the hermetic
-/// dispatch builds, and whose generated runner the live path brings up. For
-/// the CriomOS-test-cluster proof this is
-/// `github:LiGoldragon/CriomOS-test-cluster`. `proposal_source` is the cluster
-/// proposal NOTA file the daemon projects to validate `(OnHost h)` against the
-/// node's declared host-set and to resolve `All` to the cluster's test-VM
-/// nodes — empty when host-set validation is not configured (the hermetic
-/// build never needs it; the sandboxed check owns its own VM).
+/// The config-default contained-test selection. `default_vm_host` is the host
+/// the test VM is brought up on when the request says `DefaultHost`;
+/// `proposal_source` is the cluster proposal NOTA file the daemon projects to
+/// validate `(OnHost h)` against the node's declared host-set. The ordinary
+/// request owns the contained target and flake reference, so startup config
+/// does not hide a mode or flake default.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TestDefaults {
     pub cluster: String,
     pub default_vm_host: String,
-    pub default_mode: TestMode,
-    pub test_flake: String,
     pub proposal_source: String,
-}
-
-/// The rkyv-stored default contained-test mode. This stays daemon-local:
-/// contained targets are explicit wire values on `signal-lojix`.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TestMode {
-    Hermetic,
-    Live,
 }
 
 impl DaemonConfiguration {
@@ -270,7 +249,7 @@ pub struct Store {
     event_log: TableReference<EventLogEntry>,
     containers: TableReference<ContainerLifecycleRecord>,
     deploy_jobs: TableReference<DeployJob>,
-    test_runs: TableReference<StoredTestRun>,
+    contained_runs: TableReference<StoredContainedRun>,
     path: PathBuf,
     /// The ephemeral subscription-token counter. Subscriptions are connection
     /// state, not durable state — they do NOT persist across restart — so an
@@ -321,10 +300,10 @@ impl Store {
             FamilyName::new(DEPLOY_JOB_FAMILY),
             SchemaHash::new(DEPLOY_JOB_SCHEMA_HASH),
         ))?;
-        let test_runs = database.register_table(TableDescriptor::new(
-            TEST_RUN_TABLE,
-            FamilyName::new(TEST_RUN_FAMILY),
-            SchemaHash::new(TEST_RUN_SCHEMA_HASH),
+        let contained_runs = database.register_table(TableDescriptor::new(
+            CONTAINED_RUN_TABLE,
+            FamilyName::new(CONTAINED_RUN_FAMILY),
+            SchemaHash::new(CONTAINED_RUN_SCHEMA_HASH),
         ))?;
         Ok(Self {
             database,
@@ -333,7 +312,7 @@ impl Store {
             event_log,
             containers,
             deploy_jobs,
-            test_runs,
+            contained_runs,
             path,
             subscription_sequence: AtomicU64::new(0),
         })
@@ -560,13 +539,13 @@ impl Store {
         Ok(())
     }
 
-    /// The persisted test-run rows — read by the ordinary `(ByTestRun …)`
+    /// The persisted test-run rows — read by the ordinary `(ByContainedRun …)`
     /// query and on daemon start so an in-flight test reconciles rather than
-    /// being lost (report 54 §5.3). A row is keyed by its `TestRunIdentifier`.
-    pub fn test_runs(&self) -> Result<Vec<StoredTestRun>> {
+    /// being lost (report 54 §5.3). A row is keyed by its `ContainedRunIdentifier`.
+    pub fn contained_runs(&self) -> Result<Vec<StoredContainedRun>> {
         Ok(self
             .database
-            .match_records(QueryPlan::all(self.test_runs))?
+            .match_records(QueryPlan::all(self.contained_runs))?
             .records()
             .to_vec())
     }
@@ -574,11 +553,11 @@ impl Store {
     /// The next test-run identifier: one past the maximum persisted, or 1 when
     /// empty. Restart-safe — derived from the durable rows, not a RAM counter,
     /// mirroring `next_deployment_identifier`.
-    pub fn next_test_run_identifier(&self) -> Result<u64> {
+    pub fn next_contained_run_identifier(&self) -> Result<u64> {
         Ok(self
-            .test_runs()?
+            .contained_runs()?
             .iter()
-            .map(|run| *run.test_run_identifier.payload())
+            .map(|run| *run.contained_run_identifier.payload())
             .max()
             .map(|maximum| maximum + 1)
             .unwrap_or(1))
@@ -588,16 +567,18 @@ impl Store {
     /// on the first (accept) write, `mutate` to overwrite the existing row at
     /// each later phase transition (Unit 2b), so the persisted outcome always
     /// reflects the latest committed step. Mirrors `upsert_deploy_job`.
-    pub fn upsert_test_run(&self, run: StoredTestRun) -> Result<()> {
-        let key = *run.test_run_identifier.payload();
+    pub fn upsert_contained_run(&self, run: StoredContainedRun) -> Result<()> {
+        let key = *run.contained_run_identifier.payload();
         let present = self
-            .test_runs()?
+            .contained_runs()?
             .iter()
-            .any(|existing| *existing.test_run_identifier.payload() == key);
+            .any(|existing| *existing.contained_run_identifier.payload() == key);
         if present {
-            self.database.mutate(Mutation::new(self.test_runs, run))?;
+            self.database
+                .mutate(Mutation::new(self.contained_runs, run))?;
         } else {
-            self.database.assert(Assertion::new(self.test_runs, run))?;
+            self.database
+                .assert(Assertion::new(self.contained_runs, run))?;
         }
         Ok(())
     }
@@ -633,8 +614,8 @@ impl EngineRecord for DeployJob {
     }
 }
 
-impl EngineRecord for StoredTestRun {
+impl EngineRecord for StoredContainedRun {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.test_run_identifier.payload().to_string())
+        RecordKey::new(self.contained_run_identifier.payload().to_string())
     }
 }

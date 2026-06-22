@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use lojix::{DaemonConfiguration, TestDefaults, TestMode};
+use lojix::{DaemonConfiguration, TestDefaults};
 use nota_next::{NotaDecode, NotaDecodeError, NotaSource};
 use thiserror::Error;
 use triad_runtime::{ArgumentError, ComponentArgument, ComponentCommand};
@@ -43,19 +43,11 @@ struct ConfigurationWriteRequest {
 struct WriterTestDefaults {
     cluster: WriterCluster,
     default_vm_host: WriterCluster,
-    default_mode: WriterTestMode,
-    test_flake: WriterCluster,
     proposal_source: WriterPath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
 struct WriterCluster(String);
-
-#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
-enum WriterTestMode {
-    Hermetic,
-    Live,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
 enum ConfigurationWriterInput {
@@ -123,8 +115,6 @@ impl ConfigurationWriteRequest {
             test_defaults: TestDefaults {
                 cluster: self.test_defaults.cluster.0,
                 default_vm_host: self.test_defaults.default_vm_host.0,
-                default_mode: self.test_defaults.default_mode.into(),
-                test_flake: self.test_defaults.test_flake.0,
                 proposal_source: self.test_defaults.proposal_source.0,
             },
         };
@@ -138,15 +128,6 @@ impl ConfigurationWriteRequest {
 impl WriterPath {
     fn path_buf(&self) -> PathBuf {
         PathBuf::from(&self.0)
-    }
-}
-
-impl From<WriterTestMode> for TestMode {
-    fn from(mode: WriterTestMode) -> Self {
-        match mode {
-            WriterTestMode::Hermetic => Self::Hermetic,
-            WriterTestMode::Live => Self::Live,
-        }
     }
 }
 

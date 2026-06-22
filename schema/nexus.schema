@@ -69,26 +69,29 @@
   SignalInput [(OrdinaryInput OrdinaryInput) (MetaInput MetaInput)]
   SignalOutput [(OrdinaryOutput OrdinaryOutput) (MetaOutput MetaOutput)]
 
-  BuilderNode { NodeName * }
-  TargetStore { store_uri String }
+  BuilderNode { NodeName }
+  TargetStore { storeUri.String }
   BuildTarget [Local (Remote BuilderNode) (TargetStore TargetStore)]
-  ExtraSubstituter { url String public_key String }
+  ExtraSubstituter { url.String publicKey.String }
+  Substituters (Vector ExtraSubstituter)
 
-  FlakeAuthRequest { source ProposalSource flake FlakeReference }
-  ResolvedFlake { flake FlakeReference revision String }
-  HomeMaterialization { UserName * }
+  FlakeAuthRequest { ProposalSource FlakeReference }
+  ResolvedFlake { FlakeReference revision.String }
+  HomeMaterialization { UserName }
   MaterializationShape [FullOs OsOnly (Home HomeMaterialization)]
-  HorizonMaterializationCommand { ClusterName * NodeName * source ProposalSource shape MaterializationShape }
-  FlakeInputReference { url String nix_archive_hash String }
-  FlakeInputOverride { name String reference FlakeInputReference }
-  MaterializedInputs { overrides (Vec FlakeInputOverride) }
-  NixEvalCommand { ClusterName * NodeName * DeploymentKind * flake FlakeReference attribute String overrides (Vec FlakeInputOverride) target BuildTarget }
-  NixBuildCommand { GenerationIdentifier * ClosurePath * target BuildTarget substituters (Vec ExtraSubstituter) }
-  CopyClosureCommand { GenerationIdentifier * ClusterName * NodeName * ClosurePath * source BuildTarget }
-  HomeActivationProfile { mode HomeMode user UserName }
+  HorizonMaterializationCommand { ClusterName NodeName ProposalSource shape.MaterializationShape }
+  FlakeInputReference { url.String nixArchiveHash.String }
+  FlakeInputOverride { name.String reference.FlakeInputReference }
+  Overrides (Vector FlakeInputOverride)
+  MaterializedInputs { Overrides }
+  Attribute String
+  NixEvalCommand { ClusterName NodeName DeploymentKind FlakeReference Attribute Overrides target.BuildTarget }
+  NixBuildCommand { GenerationIdentifier ClosurePath target.BuildTarget Substituters }
+  CopyClosureCommand { GenerationIdentifier ClusterName NodeName ClosurePath source.BuildTarget }
+  HomeActivationProfile { mode.HomeMode user.UserName }
   ActivationProfile [(System SystemAction) (Home HomeActivationProfile)]
-  ActivateGenerationCommand { DeploymentIdentifier * GenerationIdentifier * ClusterName * NodeName * ClosurePath * ActivationKind * profile ActivationProfile }
-  PathInfoGcCommand { ClusterName * NodeName * }
+  ActivateGenerationCommand { DeploymentIdentifier GenerationIdentifier ClusterName NodeName ClosurePath ActivationKind profile.ActivationProfile }
+  PathInfoGcCommand { ClusterName NodeName }
 
   ;; HERMETIC test dispatch (report 54 §5.2). Build the pre-declared
   ;; auto-pickup nixos test `<flake>#checks.<system>.vm-<node>` (the
@@ -96,8 +99,8 @@
   ;; host). Pass/fail IS the build exit status; the realised out-path is the
   ;; check's closure. The daemon is a pure dispatcher selecting a check by
   ;; name — no nix authoring at runtime.
-  HermeticCheckCommand { ClusterName * NodeName * flake FlakeReference system String }
-  CheckBuilt { ClusterName * NodeName * ClosurePath * }
+  HermeticCheckCommand { ClusterName NodeName FlakeReference system.String }
+  CheckBuilt { ClusterName NodeName ClosurePath }
 
   ;; LIVE test dispatch (report 54 §5.2, report 47 v2 / report 51 §3). Two
   ;; daemon-owned effects bracket the existing deploy chain: BringUpTestVm
@@ -108,19 +111,19 @@
   ;; TearDownTestVm stops the user units so the tap + route vanish with the
   ;; namespace, host netns byte-identical. BUILT but NOT run live here (the
   ;; first Prometheus cycle is psyche-gated).
-  BringUpTestVmCommand { ClusterName * NodeName * host NodeName runner ClosurePath guest_ip String }
-  TearDownTestVmCommand { ClusterName * NodeName * host NodeName }
-  TestVmBroughtUp { ClusterName * NodeName * host NodeName }
-  TestVmTornDown { ClusterName * NodeName * host NodeName }
+  BringUpTestVmCommand { ClusterName NodeName host.NodeName runner.ClosurePath guestIp.String }
+  TearDownTestVmCommand { ClusterName NodeName host.NodeName }
+  TestVmBroughtUp { ClusterName NodeName host.NodeName }
+  TestVmTornDown { ClusterName NodeName host.NodeName }
 
   EffectCommand [(ResolveFlakeAuth FlakeAuthRequest) (MaterializeHorizon HorizonMaterializationCommand) (NixEval NixEvalCommand) (NixBuild NixBuildCommand) (CopyClosure CopyClosureCommand) (ActivateGeneration ActivateGenerationCommand) (PathInfoGc PathInfoGcCommand) (HermeticCheck HermeticCheckCommand) (BringUpTestVm BringUpTestVmCommand) (TearDownTestVm TearDownTestVmCommand)]
 
-  EvaluatedClosure { GenerationIdentifier * ClosurePath * }
-  BuiltClosure { GenerationIdentifier * ClosurePath * }
-  CopiedClosure { GenerationIdentifier * NodeName * ClosurePath * }
-  ActivatedGeneration { GenerationIdentifier * NodeName * GenerationSlot * }
-  GarbageCollected { ClusterName * NodeName * reclaimed_paths Integer }
-  EffectFailure { stage EffectStage detail String }
+  EvaluatedClosure { GenerationIdentifier ClosurePath }
+  BuiltClosure { GenerationIdentifier ClosurePath }
+  CopiedClosure { GenerationIdentifier NodeName ClosurePath }
+  ActivatedGeneration { GenerationIdentifier NodeName GenerationSlot }
+  GarbageCollected { ClusterName NodeName reclaimedPaths.Integer }
+  EffectFailure { stage.EffectStage detail.String }
   EffectStage [FlakeAuth MaterializeHorizon Eval Build CopyClosure Activate Gc HermeticCheck BringUpTestVm TearDownTestVm]
 
   EffectResult [(FlakeResolved ResolvedFlake) (HorizonMaterialized MaterializedInputs) (ClosureEvaluated EvaluatedClosure) (ClosureBuilt BuiltClosure) (ClosureCopied CopiedClosure) (GenerationActivated ActivatedGeneration) (PathsCollected GarbageCollected) (HermeticCheckBuilt CheckBuilt) (TestVmBroughtUp TestVmBroughtUp) (TestVmTornDown TestVmTornDown) (EffectFailed EffectFailure)]

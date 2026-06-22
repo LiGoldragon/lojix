@@ -410,7 +410,7 @@ checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 [[package]]
 name = "meta-signal-lojix"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?branch=system-operator-contained-test-poc#0bb3ca4e0d1ab998ec475639ad79e083ff8d0269"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?branch=system-operator-contained-test-poc#141273d8c11e6d695d81d8d1e16e1325e0e106b0"
 dependencies = [
  "nota-next",
  "rkyv",
@@ -620,7 +620,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 [[package]]
 name = "schema-cc"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/schema-next.git?rev=abae95f9#abae95f999c09491c706f39b6fdef48a3530b7f1"
+source = "git+https://github.com/LiGoldragon/schema-next.git?branch=main#4b7e830a7001708737a617bd8eedac8002cc1fc6"
 dependencies = [
  "nota-next",
  "prettyplease",
@@ -633,7 +633,7 @@ dependencies = [
 [[package]]
 name = "schema-next"
 version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/schema-next.git?rev=abae95f9#abae95f999c09491c706f39b6fdef48a3530b7f1"
+source = "git+https://github.com/LiGoldragon/schema-next.git?branch=main#4b7e830a7001708737a617bd8eedac8002cc1fc6"
 dependencies = [
  "blake3",
  "nota-next",
@@ -645,7 +645,7 @@ dependencies = [
 [[package]]
 name = "schema-rust-next"
 version = "0.5.3"
-source = "git+https://github.com/LiGoldragon/schema-rust-next.git?branch=system-operator-contained-test-poc#2d34bcf36937deca1ce8ddf586ef2ed90a048b4b"
+source = "git+https://github.com/LiGoldragon/schema-rust-next.git?branch=system-operator-contained-test-poc#e5f33eed03eb7d5edc24a35adf0cf7611dffbdd4"
 dependencies = [
  "prettyplease",
  "proc-macro2",
@@ -768,7 +768,7 @@ dependencies = [
 [[package]]
 name = "signal-lojix"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=system-operator-contained-test-poc#7a48193f2b80b77395b374515759c265ca103cfc"
+source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=system-operator-contained-test-poc#e2c599568ada19949b99cdfb3a50241993d97c8f"
 dependencies = [
  "nota-next",
  "rkyv",

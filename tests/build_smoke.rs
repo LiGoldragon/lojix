@@ -37,8 +37,6 @@ fn write_daemon_configuration(
         test_defaults: lojix::TestDefaults {
             cluster: "goldragon".to_string(),
             default_vm_host: "prometheus".to_string(),
-            default_mode: lojix::TestMode::Hermetic,
-            test_flake: "github:LiGoldragon/CriomOS-test-cluster".to_string(),
             proposal_source: String::new(),
         },
     };
@@ -61,12 +59,12 @@ fn dune_system_deploy(action: ordinary::SystemAction) -> meta::Input {
                 node_name: ordinary::NodeName::new("dune"),
             },
             deployment_kind: ordinary::DeploymentKind::OsOnly,
-            source: ordinary::ProposalSource::new("/dev/null"),
-            flake: ordinary::FlakeReference::new(FIXTURE_FLAKE),
+            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            flake_reference: ordinary::FlakeReference::new(FIXTURE_FLAKE),
             system_action: action,
-            builder: None,
-            substituters: Vec::new(),
-            build_attribute: Some(meta::FlakeAttribute::new(FIXTURE_ATTRIBUTE)),
+            builder_override: None.into(),
+            extra_substituters: Vec::new().into(),
+            build_attribute: Some(meta::FlakeAttribute::new(FIXTURE_ATTRIBUTE)).into(),
         },
     )))
 }
@@ -381,7 +379,7 @@ fn concurrent_requests_are_served_in_parallel() {
         ordinary::NodeSelector {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
-            kind: None,
+            kind: None.into(),
         },
     )));
     let frame = FrameBody::new(query.encode_signal_frame().expect("encode query"));

@@ -34,12 +34,12 @@ fn deploy_request() -> meta::DeployRequest {
             node_name: ordinary::NodeName::new("node-1"),
         },
         deployment_kind: ordinary::DeploymentKind::OsOnly,
-        source: ordinary::ProposalSource::new("/dev/null"),
-        flake: ordinary::FlakeReference::new("path:/does/not/exist"),
+        proposal_source: ordinary::ProposalSource::new("/dev/null"),
+        flake_reference: ordinary::FlakeReference::new("path:/does/not/exist"),
         system_action: ordinary::SystemAction::Switch,
-        builder: None,
-        substituters: Vec::new(),
-        build_attribute: None,
+        builder_override: None.into(),
+        extra_substituters: Vec::new().into(),
+        build_attribute: None.into(),
     })
 }
 
@@ -97,7 +97,7 @@ async fn submit_deploy_accepts_and_persists_submitted_row_before_pipeline() {
     let job = job_row(&store, 1).expect("submitted job row");
     assert_eq!(job.phase, DeployJobPhase::Submitted);
     assert_eq!(
-        job.resolved_target.as_deref(),
+        job.resolved_target.payload().as_deref(),
         Some("root@node-1.alpha.criome")
     );
 }
@@ -259,9 +259,9 @@ fn deploy_job_resumption_decides_per_phase() {
         cluster_name: ordinary::ClusterName::new("alpha"),
         node_name: ordinary::NodeName::new("node-1"),
         phase,
-        closure_path: None,
-        resolved_target: Some("root@node-1.alpha.criome".to_string()),
-        boot_once_unit: boot_once_unit.map(str::to_string),
+        deploy_job_closure_path: None.into(),
+        resolved_target: Some("root@node-1.alpha.criome".to_string()).into(),
+        boot_once_unit: boot_once_unit.map(str::to_string).into(),
     };
 
     // Activating polls the persisted BootOnce unit rather than re-activating.
@@ -307,9 +307,9 @@ async fn reconcile_on_start_clears_a_stale_pre_activation_job_row() {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
             phase: DeployJobPhase::Building,
-            closure_path: None,
-            resolved_target: Some("root@node-1.alpha.criome".to_string()),
-            boot_once_unit: None,
+            deploy_job_closure_path: None.into(),
+            resolved_target: Some("root@node-1.alpha.criome".to_string()).into(),
+            boot_once_unit: None.into(),
         })
         .expect("seed crashed-daemon job row");
     assert!(

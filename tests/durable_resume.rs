@@ -38,7 +38,7 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
             node_name: node,
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path: closure,
-            label: None,
+            label: None.into(),
         },
     )
 }

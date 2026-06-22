@@ -19,7 +19,7 @@ fn ordinary_query() -> ordinary::Input {
         ordinary::NodeSelector {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
-            kind: None,
+            kind: None.into(),
         },
     )))
 }
@@ -95,68 +95,81 @@ fn meta_client_decodes_inline_pin() {
     assert_eq!(client.input(), &input);
 }
 
-/// The routine test shorthand: `meta-lojix '(Test (Check [mercury]))'`. The CLI
-/// decodes it through the generated meta parser (no hand-parsing); the daemon
-/// lowers the cluster/host/mode from TestDefaults (report 54).
+/// The contained deploy surface is ordinary: the caller names the node profile,
+/// contained target, optional proposal source override, and flake reference.
 #[cfg(feature = "nota-text")]
-fn owner_test_check() -> meta::Input {
-    meta::Input::Test(meta::Test::new(meta::TestRequest::Check(
-        meta::QuickCheck::new(vec![ordinary::NodeName::new("mercury")]),
-    )))
+fn ordinary_deploy_contained() -> ordinary::Input {
+    ordinary::Input::DeployContained(ordinary::DeployContained::new(
+        ordinary::DeployContainedRequest {
+            node_profile: ordinary::NodeProfile {
+                cluster_name: ordinary::ClusterName::new("goldragon"),
+                node_name: ordinary::NodeName::new("mercury"),
+                kind: None.into(),
+            },
+            contained_target: ordinary::ContainedTarget::HermeticVm,
+            source: Some(ordinary::ProposalSource::new("/var/lib/lojix/cluster.nota")).into(),
+            flake_reference: ordinary::FlakeReference::new(
+                "github:LiGoldragon/CriomOS-test-cluster/main",
+            ),
+        },
+    ))
 }
 
-/// The full test form: explicit node selection, host, and mode.
+/// Verification is also ordinary and carries a typed body.
 #[cfg(feature = "nota-text")]
-fn owner_test_run() -> meta::Input {
-    meta::Input::Test(meta::Test::new(meta::TestRequest::Run(meta::TestRun {
-        cluster_name: ordinary::ClusterName::new("goldragon"),
-        node_selection: meta::NodeSelection::Nodes(vec![ordinary::NodeName::new("mercury")]),
-        host_selection: ordinary::HostSelection::OnHost(ordinary::NodeName::new("prometheus")),
-        test_mode: ordinary::TestMode::Hermetic,
-    })))
+fn ordinary_verify_contained() -> ordinary::Input {
+    ordinary::Input::VerifyContained(ordinary::VerifyContained::new(
+        ordinary::ContainedVerification {
+            contained_run_identifier: ordinary::ContainedRunIdentifier::new(42),
+            verification_body: ordinary::VerificationBody::Gate,
+        },
+    ))
 }
 
-/// The test-run read: `lojix '(Query (ByTestRun (goldragon mercury None)))'`.
+/// The test-run read: `lojix '(Query (ByContainedRun (goldragon mercury None)))'`.
 #[cfg(feature = "nota-text")]
-fn ordinary_query_test_run() -> ordinary::Input {
-    ordinary::Input::Query(ordinary::Query::new(ordinary::Selection::ByTestRun(
-        ordinary::TestRunLookup {
+fn ordinary_query_contained_run() -> ordinary::Input {
+    ordinary::Input::Query(ordinary::Query::new(ordinary::Selection::ByContainedRun(
+        ordinary::ContainedRunLookup {
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new("mercury"),
-            run: None,
+            run: None.into(),
         },
     )))
 }
 
 #[test]
 #[cfg(feature = "nota-text")]
-fn meta_client_decodes_inline_test_check() {
-    let input = owner_test_check();
+fn ordinary_client_decodes_inline_deploy_contained() {
+    let input = ordinary_deploy_contained();
     let argument = argument_from_single(input.to_string());
 
-    let client = MetaClient::from_argument(argument).expect("decode meta Test Check NOTA");
+    let client =
+        OrdinaryClient::from_argument(argument).expect("decode ordinary DeployContained NOTA");
 
     assert_eq!(client.input(), &input);
 }
 
 #[test]
 #[cfg(feature = "nota-text")]
-fn meta_client_decodes_inline_test_run() {
-    let input = owner_test_run();
+fn ordinary_client_decodes_inline_verify_contained() {
+    let input = ordinary_verify_contained();
     let argument = argument_from_single(input.to_string());
 
-    let client = MetaClient::from_argument(argument).expect("decode meta Test Run NOTA");
+    let client =
+        OrdinaryClient::from_argument(argument).expect("decode ordinary VerifyContained NOTA");
 
     assert_eq!(client.input(), &input);
 }
 
 #[test]
 #[cfg(feature = "nota-text")]
-fn ordinary_client_decodes_inline_by_test_run_query() {
-    let input = ordinary_query_test_run();
+fn ordinary_client_decodes_inline_by_contained_run_query() {
+    let input = ordinary_query_contained_run();
     let argument = argument_from_single(input.to_string());
 
-    let client = OrdinaryClient::from_argument(argument).expect("decode ordinary ByTestRun NOTA");
+    let client =
+        OrdinaryClient::from_argument(argument).expect("decode ordinary ByContainedRun NOTA");
 
     assert_eq!(client.input(), &input);
 }
@@ -217,7 +230,7 @@ fn meta_client_decodes_signal_frame() {
 #[cfg(feature = "nota-text")]
 fn ordinary_output_renders_nota() {
     let output = ordinary::Output::Queried(ordinary::Queried::new(ordinary::GenerationListing {
-        generations: Vec::new(),
+        generations: Vec::new().into(),
         database_marker: ordinary::DatabaseMarker {
             commit_sequence: ordinary::CommitSequence::new(7),
             state_digest: ordinary::StateDigest::new(7),
