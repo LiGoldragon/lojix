@@ -151,15 +151,18 @@ fn check_and_release_use_the_contained_run_handle() {
             let report = report.into_payload();
             assert_eq!(
                 report.contained_run_phase,
-                ordinary::ContainedRunPhase::Submitted
+                ordinary::ContainedRunPhase::Completed
             );
-            assert_eq!(
-                report.contained_outcome,
-                ordinary::ContainedOutcome::Pending
-            );
+            assert_eq!(report.contained_outcome, ordinary::ContainedOutcome::Passed);
         }
         other => panic!("expected ContainedVerified, got {other:?}"),
     }
+    let runs = query_runs(&mut engine, "spirit");
+    assert_eq!(
+        runs[0].contained_run_phase,
+        ordinary::ContainedRunPhase::Completed
+    );
+    assert_eq!(runs[0].contained_outcome, ordinary::ContainedOutcome::Passed);
 
     let release =
         nexus::SignalInput::OrdinaryInput(ordinary::Input::Release(ordinary::Release::new(
@@ -168,6 +171,39 @@ fn check_and_release_use_the_contained_run_handle() {
     match ordinary_reply(run(&mut engine, release)) {
         ordinary::Output::Released(released) => assert!(released.into_payload().released),
         other => panic!("expected Released, got {other:?}"),
+    }
+}
+
+#[test]
+fn verify_contained_steps_fail_closed_when_gate_case_is_not_1_of_1() {
+    let mut engine = SchemaRuntime::new();
+    let accepted = deploy_contained(&mut engine, "criome");
+    let check = nexus::SignalInput::OrdinaryInput(ordinary::Input::VerifyContained(
+        ordinary::VerifyContained::new(ordinary::ContainedVerification {
+            contained_run_identifier: accepted.contained_run_identifier,
+            verification_body: ordinary::VerificationBody::steps(vec![
+                ordinary::VerificationStep::gate_case(ordinary::GateCaseStep {
+                    component_kind: ordinary::ComponentKind::Criome,
+                    gate_outcome: ordinary::GateOutcome::AuthorizedShips,
+                    threshold_spec: ordinary::ThresholdSpec::NoGate,
+                }),
+            ]),
+        }),
+    ));
+
+    match ordinary_reply(run(&mut engine, check)) {
+        ordinary::Output::ContainedVerified(report) => {
+            let report = report.into_payload();
+            assert_eq!(
+                report.contained_run_phase,
+                ordinary::ContainedRunPhase::Failed
+            );
+            assert_eq!(
+                report.contained_outcome,
+                ordinary::ContainedOutcome::Failed(ordinary::FailureStage::Assert)
+            );
+        }
+        other => panic!("expected ContainedVerified, got {other:?}"),
     }
 }
 

@@ -56,6 +56,8 @@ pub use signal_lojix::schema::lib::AcceptedContainedDeploy as AcceptedContainedD
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::ContainedVerification as ContainedVerification;
 #[rustfmt::skip]
+pub use signal_lojix::schema::lib::VerificationBody as VerificationBody;
+#[rustfmt::skip]
 pub use signal_lojix::schema::lib::ContainedVerificationReport as ContainedVerificationReport;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::RejectedContainedVerification as RejectedContainedVerification;
@@ -119,9 +121,18 @@ pub enum SemaReadOutput {
     EventLogRead(EventLogPage),
     KeyMaterialChecked(KeyMaterialReport),
     ContainedRunsQueried(ContainedRunListing),
+    ContainedVerificationPrepared(ContainedVerificationPlan),
     ContainedVerified(ContainedVerificationReport),
     ContainedVerificationRejected(RejectedContainedVerification),
     ReadMissed(RejectionReport),
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ContainedVerificationPlan {
+    pub contained_run_record: ContainedRunRecord,
+    pub contained_verification: ContainedVerification,
 }
 
 #[rustfmt::skip]
@@ -937,6 +948,9 @@ impl SemaReadOutput {
     pub fn contained_runs_queried(payload: ContainedRunListing) -> Self {
         Self::ContainedRunsQueried(payload)
     }
+    pub fn contained_verification_prepared(payload: ContainedVerificationPlan) -> Self {
+        Self::ContainedVerificationPrepared(payload)
+    }
     pub fn contained_verified(payload: ContainedVerificationReport) -> Self {
         Self::ContainedVerified(payload)
     }
@@ -1121,6 +1135,13 @@ impl From<KeyMaterialReport> for SemaReadOutput {
 impl From<ContainedRunListing> for SemaReadOutput {
     fn from(payload: ContainedRunListing) -> Self {
         Self::ContainedRunsQueried(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<ContainedVerificationPlan> for SemaReadOutput {
+    fn from(payload: ContainedVerificationPlan) -> Self {
+        Self::ContainedVerificationPrepared(payload)
     }
 }
 
@@ -1430,6 +1451,7 @@ pub enum SemaReadOutputRoute {
     EventLogRead,
     KeyMaterialChecked,
     ContainedRunsQueried,
+    ContainedVerificationPrepared,
     ContainedVerified,
     ContainedVerificationRejected,
     ReadMissed,
@@ -1443,6 +1465,9 @@ impl SemaReadOutput {
             Self::EventLogRead(_) => SemaReadOutputRoute::EventLogRead,
             Self::KeyMaterialChecked(_) => SemaReadOutputRoute::KeyMaterialChecked,
             Self::ContainedRunsQueried(_) => SemaReadOutputRoute::ContainedRunsQueried,
+            Self::ContainedVerificationPrepared(_) => {
+                SemaReadOutputRoute::ContainedVerificationPrepared
+            }
             Self::ContainedVerified(_) => SemaReadOutputRoute::ContainedVerified,
             Self::ContainedVerificationRejected(_) => {
                 SemaReadOutputRoute::ContainedVerificationRejected
@@ -1660,6 +1685,9 @@ impl SemaObjectName {
                     }
                     SemaReadOutputRoute::ContainedRunsQueried => {
                         "SemaReadOutputContainedRunsQueried"
+                    }
+                    SemaReadOutputRoute::ContainedVerificationPrepared => {
+                        "SemaReadOutputContainedVerificationPrepared"
                     }
                     SemaReadOutputRoute::ContainedVerified => {
                         "SemaReadOutputContainedVerified"

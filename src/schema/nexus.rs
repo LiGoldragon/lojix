@@ -36,6 +36,12 @@ pub use signal_lojix::schema::lib::FlakeReference as FlakeReference;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::ProposalSource as ProposalSource;
 #[rustfmt::skip]
+pub use signal_lojix::schema::lib::ContainedRunIdentifier as ContainedRunIdentifier;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::ContainedRunRecord as ContainedRunRecord;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::VerificationBody as VerificationBody;
+#[rustfmt::skip]
 pub use signal_lojix::schema::lib::UserName as UserName;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::GenerationIdentifier as GenerationIdentifier;
@@ -306,6 +312,23 @@ pub struct TestVmTornDown {
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct GateVerificationCommand {
+    pub contained_run_record: ContainedRunRecord,
+    pub verification_body: VerificationBody,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct GateVerificationVerdict {
+    pub contained_run_identifier: ContainedRunIdentifier,
+    pub passed: Boolean,
+    pub detail: String,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum EffectCommand {
     ResolveFlakeAuth(FlakeAuthRequest),
     MaterializeHorizon(HorizonMaterializationCommand),
@@ -317,6 +340,7 @@ pub enum EffectCommand {
     HermeticCheck(HermeticCheckCommand),
     BringUpTestVm(BringUpTestVmCommand),
     TearDownTestVm(TearDownTestVmCommand),
+    VerifyContainedGate(GateVerificationCommand),
 }
 
 #[rustfmt::skip]
@@ -393,6 +417,7 @@ pub enum EffectStage {
     HermeticCheck,
     BringUpTestVm,
     TearDownTestVm,
+    VerifyContainedGate,
 }
 
 #[rustfmt::skip]
@@ -409,6 +434,7 @@ pub enum EffectResult {
     HermeticCheckBuilt(CheckBuilt),
     TestVmBroughtUp(TestVmBroughtUp),
     TestVmTornDown(TestVmTornDown),
+    ContainedGateVerified(GateVerificationVerdict),
     EffectFailed(EffectFailure),
 }
 
@@ -659,6 +685,9 @@ impl EffectCommand {
     pub fn tear_down_test_vm(payload: TearDownTestVmCommand) -> Self {
         Self::TearDownTestVm(payload)
     }
+    pub fn verify_contained_gate(payload: GateVerificationCommand) -> Self {
+        Self::VerifyContainedGate(payload)
+    }
 }
 
 #[rustfmt::skip]
@@ -692,6 +721,9 @@ impl EffectResult {
     }
     pub fn test_vm_torn_down(payload: TestVmTornDown) -> Self {
         Self::TestVmTornDown(payload)
+    }
+    pub fn contained_gate_verified(payload: GateVerificationVerdict) -> Self {
+        Self::ContainedGateVerified(payload)
     }
     pub fn effect_failed(payload: EffectFailure) -> Self {
         Self::EffectFailed(payload)
@@ -881,6 +913,13 @@ impl From<TearDownTestVmCommand> for EffectCommand {
 }
 
 #[rustfmt::skip]
+impl From<GateVerificationCommand> for EffectCommand {
+    fn from(payload: GateVerificationCommand) -> Self {
+        Self::VerifyContainedGate(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl From<ResolvedFlake> for EffectResult {
     fn from(payload: ResolvedFlake) -> Self {
         Self::FlakeResolved(payload)
@@ -947,6 +986,13 @@ impl From<TestVmBroughtUp> for EffectResult {
 impl From<TestVmTornDown> for EffectResult {
     fn from(payload: TestVmTornDown) -> Self {
         Self::TestVmTornDown(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<GateVerificationVerdict> for EffectResult {
+    fn from(payload: GateVerificationVerdict) -> Self {
+        Self::ContainedGateVerified(payload)
     }
 }
 

@@ -54,6 +54,9 @@
   ClosurePath signal-lojix:lib:ClosurePath
   FlakeReference signal-lojix:lib:FlakeReference
   ProposalSource signal-lojix:lib:ProposalSource
+  ContainedRunIdentifier signal-lojix:lib:ContainedRunIdentifier
+  ContainedRunRecord signal-lojix:lib:ContainedRunRecord
+  VerificationBody signal-lojix:lib:VerificationBody
   UserName signal-lojix:lib:UserName
   GenerationIdentifier signal-lojix:lib:GenerationIdentifier
   DeploymentIdentifier signal-lojix:lib:DeploymentIdentifier
@@ -115,8 +118,10 @@
   TearDownTestVmCommand { ClusterName NodeName host.NodeName }
   TestVmBroughtUp { ClusterName NodeName host.NodeName }
   TestVmTornDown { ClusterName NodeName host.NodeName }
+  GateVerificationCommand { ContainedRunRecord VerificationBody }
+  GateVerificationVerdict { ContainedRunIdentifier passed.Boolean detail.String }
 
-  EffectCommand [(ResolveFlakeAuth FlakeAuthRequest) (MaterializeHorizon HorizonMaterializationCommand) (NixEval NixEvalCommand) (NixBuild NixBuildCommand) (CopyClosure CopyClosureCommand) (ActivateGeneration ActivateGenerationCommand) (PathInfoGc PathInfoGcCommand) (HermeticCheck HermeticCheckCommand) (BringUpTestVm BringUpTestVmCommand) (TearDownTestVm TearDownTestVmCommand)]
+  EffectCommand [(ResolveFlakeAuth FlakeAuthRequest) (MaterializeHorizon HorizonMaterializationCommand) (NixEval NixEvalCommand) (NixBuild NixBuildCommand) (CopyClosure CopyClosureCommand) (ActivateGeneration ActivateGenerationCommand) (PathInfoGc PathInfoGcCommand) (HermeticCheck HermeticCheckCommand) (BringUpTestVm BringUpTestVmCommand) (TearDownTestVm TearDownTestVmCommand) (VerifyContainedGate GateVerificationCommand)]
 
   EvaluatedClosure { GenerationIdentifier ClosurePath }
   BuiltClosure { GenerationIdentifier ClosurePath }
@@ -124,9 +129,9 @@
   ActivatedGeneration { GenerationIdentifier NodeName GenerationSlot }
   GarbageCollected { ClusterName NodeName reclaimedPaths.Integer }
   EffectFailure { stage.EffectStage detail.String }
-  EffectStage [FlakeAuth MaterializeHorizon Eval Build CopyClosure Activate Gc HermeticCheck BringUpTestVm TearDownTestVm]
+  EffectStage [FlakeAuth MaterializeHorizon Eval Build CopyClosure Activate Gc HermeticCheck BringUpTestVm TearDownTestVm VerifyContainedGate]
 
-  EffectResult [(FlakeResolved ResolvedFlake) (HorizonMaterialized MaterializedInputs) (ClosureEvaluated EvaluatedClosure) (ClosureBuilt BuiltClosure) (ClosureCopied CopiedClosure) (GenerationActivated ActivatedGeneration) (PathsCollected GarbageCollected) (HermeticCheckBuilt CheckBuilt) (TestVmBroughtUp TestVmBroughtUp) (TestVmTornDown TestVmTornDown) (EffectFailed EffectFailure)]
+  EffectResult [(FlakeResolved ResolvedFlake) (HorizonMaterialized MaterializedInputs) (ClosureEvaluated EvaluatedClosure) (ClosureBuilt BuiltClosure) (ClosureCopied CopiedClosure) (GenerationActivated ActivatedGeneration) (PathsCollected GarbageCollected) (HermeticCheckBuilt CheckBuilt) (TestVmBroughtUp TestVmBroughtUp) (TestVmTornDown TestVmTornDown) (ContainedGateVerified GateVerificationVerdict) (EffectFailed EffectFailure)]
 
   NexusWork [(SignalArrived SignalInput) (SemaReadCompleted SemaReadOutput) (SemaWriteCompleted SemaWriteOutput) (EffectCompleted EffectResult)]
   NexusAction [(CommandSemaRead SemaReadInput) (CommandSemaWrite SemaWriteInput) (CommandEffect EffectCommand) (ReplyToSignal SignalOutput) (Continue NexusWork)]

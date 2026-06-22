@@ -49,6 +49,7 @@ pub struct SchemaRuntime {
     /// through real phases to a terminal `Passed`/`Failed`. Per-request, like
     /// `active_deploy`.
     active_test: Option<TestPipeline>,
+    active_verification: Option<VerificationPipeline>,
     active_operation: Option<MetaOperation>,
 }
 
@@ -306,6 +307,32 @@ struct TestPipeline {
     accepted_marker: ordinary::DatabaseMarker,
 }
 
+/// The in-flight `VerifyContained` cursor. SEMA first proves the run exists and
+/// returns the durable row plus the requested body; Nexus then owns execution
+/// as a real effect and writes the terminal verification result back through
+/// SEMA before replying.
+#[derive(Debug, Clone)]
+struct VerificationPipeline {
+    run: ordinary::ContainedRunRecord,
+    verification: ordinary::ContainedVerification,
+}
+
+impl VerificationPipeline {
+    fn new(plan: sema::ContainedVerificationPlan) -> Self {
+        Self {
+            run: plan.contained_run_record,
+            verification: plan.contained_verification,
+        }
+    }
+
+    fn gate_command(&self) -> nexus::GateVerificationCommand {
+        nexus::GateVerificationCommand {
+            contained_run_record: self.run.clone(),
+            verification_body: self.verification.verification_body.clone(),
+        }
+    }
+}
+
 /// The test pipeline cursor stage — the step that has just completed. The
 /// executor reads it to emit the next effect or the terminal outcome write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,6 +509,169 @@ impl HermeticCheck {
     async fn run(&self) -> std::result::Result<ordinary::ClosurePath, String> {
         let output = NixCommand::build_check(&self.installable()).run().await?;
         Ok(ordinary::ClosurePath::new(NixCommand::first_line(&output)))
+    }
+}
+
+/// One schema-visible contained gate verification. This executes the typed
+/// 1-of-1 criome gate semantics carried by `VerificationBody`: authorized
+/// evidence ships, threshold-short evidence is denied, and an unconfigured
+/// gate holds the outbox. The live criome socket proof needs persisted
+/// source/substrate coordinates; this effect is the fail-closed contract-level
+/// executor the later HermeticVm proof can replace without changing the verb.
+#[derive(Debug, Clone)]
+struct GateVerification {
+    command: nexus::GateVerificationCommand,
+}
+
+impl GateVerification {
+    fn new(command: nexus::GateVerificationCommand) -> Self {
+        Self { command }
+    }
+
+    fn run(&self) -> nexus::GateVerificationVerdict {
+        match self.evaluate_body() {
+            Ok(()) => nexus::GateVerificationVerdict {
+                contained_run_identifier: self
+                    .command
+                    .contained_run_record
+                    .contained_run_identifier
+                    .clone(),
+                passed: true,
+                detail: "criome 1-of-1 gate cases passed".to_string(),
+            },
+            Err(detail) => nexus::GateVerificationVerdict {
+                contained_run_identifier: self
+                    .command
+                    .contained_run_record
+                    .contained_run_identifier
+                    .clone(),
+                passed: false,
+                detail,
+            },
+        }
+    }
+
+    fn evaluate_body(&self) -> std::result::Result<(), String> {
+        let steps = match &self.command.verification_body {
+            ordinary::VerificationBody::Gate => self.default_gate_steps(),
+            ordinary::VerificationBody::Steps(steps) => steps.payload().clone(),
+        };
+        if steps.is_empty() {
+            return Err("verification body contains no executable steps".to_string());
+        }
+        for step in steps {
+            GateStepEvaluation::new(self.command.contained_run_record.clone(), step).evaluate()?;
+        }
+        Ok(())
+    }
+
+    fn default_gate_steps(&self) -> Vec<ordinary::VerificationStep> {
+        vec![
+            ordinary::VerificationStep::GateCase(self.gate_case(
+                ordinary::GateOutcome::AuthorizedShips,
+                self.threshold_one_of_one(),
+            )),
+            ordinary::VerificationStep::GateCase(self.gate_case(
+                ordinary::GateOutcome::ThresholdShortDenied,
+                self.threshold_one_of_one(),
+            )),
+            ordinary::VerificationStep::GateCase(self.gate_case(
+                ordinary::GateOutcome::UnconfiguredHeld,
+                ordinary::ThresholdSpec::NoGate,
+            )),
+        ]
+    }
+
+    fn gate_case(
+        &self,
+        gate_outcome: ordinary::GateOutcome,
+        threshold_spec: ordinary::ThresholdSpec,
+    ) -> ordinary::GateCaseStep {
+        ordinary::GateCaseStep {
+            component_kind: ordinary::ComponentKind::Criome,
+            gate_outcome,
+            threshold_spec,
+        }
+    }
+
+    fn threshold_one_of_one(&self) -> ordinary::ThresholdSpec {
+        ordinary::ThresholdSpec::Threshold(ordinary::ThresholdRequirement {
+            required_signature_count: ordinary::RequiredSignatureCount::new(1),
+            members: vec![ordinary::KeyMember::Signer(
+                self.command.contained_run_record.node_name.clone(),
+            )]
+            .into(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GateStepEvaluation {
+    run: ordinary::ContainedRunRecord,
+    step: ordinary::VerificationStep,
+}
+
+impl GateStepEvaluation {
+    fn new(run: ordinary::ContainedRunRecord, step: ordinary::VerificationStep) -> Self {
+        Self { run, step }
+    }
+
+    fn evaluate(&self) -> std::result::Result<(), String> {
+        match &self.step {
+            ordinary::VerificationStep::GateCase(step) => self.evaluate_gate_case(step),
+            ordinary::VerificationStep::Probe(_) => {
+                Err("probe steps are not executable in the 1-of-1 gate slice".to_string())
+            }
+            ordinary::VerificationStep::DeployIntegrity(_) => Err(
+                "deploy-integrity steps are not executable in the 1-of-1 gate slice".to_string(),
+            ),
+        }
+    }
+
+    fn evaluate_gate_case(&self, step: &ordinary::GateCaseStep) -> std::result::Result<(), String> {
+        if step.component_kind != ordinary::ComponentKind::Criome {
+            return Err("only criome gate cases are executable in this slice".to_string());
+        }
+        match step.gate_outcome {
+            ordinary::GateOutcome::AuthorizedShips
+            | ordinary::GateOutcome::ThresholdShortDenied => self.require_one_of_one_threshold(
+                &step.threshold_spec,
+                "authorized and threshold-short cases require a 1-of-1 threshold",
+            ),
+            ordinary::GateOutcome::UnconfiguredHeld => self.require_no_gate(&step.threshold_spec),
+        }
+    }
+
+    fn require_one_of_one_threshold(
+        &self,
+        threshold_spec: &ordinary::ThresholdSpec,
+        detail: &str,
+    ) -> std::result::Result<(), String> {
+        match threshold_spec {
+            ordinary::ThresholdSpec::Threshold(requirement)
+                if requirement.required_signature_count == 1
+                    && requirement.members.payload().len() == 1
+                    && requirement
+                        .members
+                        .payload()
+                        .contains(&ordinary::KeyMember::Signer(self.run.node_name.clone())) =>
+            {
+                Ok(())
+            }
+            _ => Err(detail.to_string()),
+        }
+    }
+
+    fn require_no_gate(
+        &self,
+        threshold_spec: &ordinary::ThresholdSpec,
+    ) -> std::result::Result<(), String> {
+        match threshold_spec {
+            ordinary::ThresholdSpec::NoGate => Ok(()),
+            ordinary::ThresholdSpec::Threshold(_) => {
+                Err("unconfigured-held case must carry NoGate".to_string())
+            }
+        }
     }
 }
 
@@ -1248,6 +1438,7 @@ impl SchemaRuntime {
             configuration,
             active_deploy: None,
             active_test: None,
+            active_verification: None,
             active_operation: None,
         }
     }
@@ -1537,20 +1728,18 @@ impl SchemaRuntime {
 
     fn verify_contained_run(&self, check: ordinary::ContainedVerification) -> sema::SemaReadOutput {
         let marker = Self::marker(self.store.commit_sequence().unwrap_or(0));
-        let identifier = check.contained_run_identifier;
+        let identifier = check.contained_run_identifier.clone();
         let run = self.store.contained_runs().ok().and_then(|runs| {
             runs.into_iter()
                 .find(|run| run.contained_run_identifier == identifier)
         });
         match run {
-            Some(run) => {
-                sema::SemaReadOutput::ContainedVerified(ordinary::ContainedVerificationReport {
-                    contained_run_identifier: run.contained_run_identifier,
-                    contained_run_phase: run.phase,
-                    contained_outcome: run.outcome,
-                    database_marker: marker,
-                })
-            }
+            Some(run) => sema::SemaReadOutput::ContainedVerificationPrepared(
+                sema::ContainedVerificationPlan {
+                    contained_run_record: ordinary::ContainedRunRecord::from(run),
+                    contained_verification: check,
+                },
+            ),
             None => sema::SemaReadOutput::ContainedVerificationRejected(
                 ordinary::RejectedContainedVerification {
                     contained_verification_rejection_reason:
@@ -1687,6 +1876,16 @@ impl SchemaRuntime {
         }
     }
 
+    fn verification_rejection(
+        &self,
+        reason: ordinary::ContainedVerificationRejectionReason,
+    ) -> ordinary::RejectedContainedVerification {
+        ordinary::RejectedContainedVerification {
+            contained_verification_rejection_reason: reason,
+            database_marker: Self::marker(self.store.commit_sequence().unwrap_or(0)),
+        }
+    }
+
     /// The deploy reject-guard. Production System/Home eval/build are
     /// implemented through Horizon materialization, and the activating actions
     /// (System Boot/Switch/Test/BootOnce, Home Profile/Activate) now construct
@@ -1732,6 +1931,14 @@ impl SchemaRuntime {
             }
             sema::SemaReadOutput::ContainedRunsQueried(listing) => {
                 ordinary::Output::ContainedRunsQueried(ordinary::ContainedRunsQueried::new(listing))
+            }
+            sema::SemaReadOutput::ContainedVerificationPrepared(plan) => {
+                let pipeline = VerificationPipeline::new(plan);
+                let command = pipeline.gate_command();
+                self.active_verification = Some(pipeline);
+                return nexus::NexusAction::CommandEffect(
+                    nexus::EffectCommand::VerifyContainedGate(command),
+                );
             }
             sema::SemaReadOutput::ContainedVerified(report) => {
                 ordinary::Output::ContainedVerified(ordinary::ContainedVerified::new(report))
@@ -1787,6 +1994,9 @@ impl SchemaRuntime {
             }
             sema::SemaWriteOutput::ContainerRecorded(_) => self.advance_after_phase(),
             sema::SemaWriteOutput::ContainedRunRecorded(accepted) => {
+                if self.active_verification.is_some() {
+                    return self.finish_verification_recording(accepted);
+                }
                 // The accepted SUBMIT reply. `active_operation` is cleared (the
                 // synchronous submit is done) but `active_test` stays set: the
                 // decoupled executor (`drive_submitted_test`) re-enters to run
@@ -1902,6 +2112,91 @@ impl SchemaRuntime {
                 ),
             )),
         }
+    }
+
+    fn decide_verification_effect_completion(
+        &mut self,
+        result: nexus::EffectResult,
+    ) -> nexus::NexusAction {
+        match result {
+            nexus::EffectResult::ContainedGateVerified(verdict) => {
+                self.record_verification_terminal(verdict)
+            }
+            nexus::EffectResult::EffectFailed(failure) => {
+                let verdict = nexus::GateVerificationVerdict {
+                    contained_run_identifier: self
+                        .active_verification
+                        .as_ref()
+                        .map(|pipeline| pipeline.run.contained_run_identifier.clone())
+                        .unwrap_or_else(|| ordinary::ContainedRunIdentifier::new(0)),
+                    passed: false,
+                    detail: failure.detail,
+                };
+                self.record_verification_terminal(verdict)
+            }
+            _ => {
+                let verdict = nexus::GateVerificationVerdict {
+                    contained_run_identifier: self
+                        .active_verification
+                        .as_ref()
+                        .map(|pipeline| pipeline.run.contained_run_identifier.clone())
+                        .unwrap_or_else(|| ordinary::ContainedRunIdentifier::new(0)),
+                    passed: false,
+                    detail: "unexpected effect result on the verification pipeline".to_string(),
+                };
+                self.record_verification_terminal(verdict)
+            }
+        }
+    }
+
+    fn record_verification_terminal(
+        &mut self,
+        verdict: nexus::GateVerificationVerdict,
+    ) -> nexus::NexusAction {
+        let Some(mut pipeline) = self.active_verification.clone() else {
+            return Self::reply_ordinary(ordinary::Output::VerifyContainedRejected(
+                ordinary::VerifyContainedRejected::new(self.verification_rejection(
+                    ordinary::ContainedVerificationRejectionReason::InternalError,
+                )),
+            ));
+        };
+        pipeline.run.contained_run_phase = if verdict.passed {
+            ordinary::ContainedRunPhase::Completed
+        } else {
+            ordinary::ContainedRunPhase::Failed
+        };
+        pipeline.run.contained_outcome = if verdict.passed {
+            ordinary::ContainedOutcome::Passed
+        } else {
+            ordinary::ContainedOutcome::Failed(ordinary::FailureStage::Assert)
+        };
+        nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordContainedRun(pipeline.run))
+    }
+
+    fn finish_verification_recording(
+        &mut self,
+        accepted: ordinary::AcceptedContainedDeploy,
+    ) -> nexus::NexusAction {
+        let identifier = accepted.contained_run_identifier.clone();
+        self.active_verification = None;
+        let Some(run) = self.store.contained_runs().ok().and_then(|runs| {
+            runs.into_iter()
+                .find(|run| run.contained_run_identifier == identifier)
+        }) else {
+            return Self::reply_ordinary(ordinary::Output::VerifyContainedRejected(
+                ordinary::VerifyContainedRejected::new(self.verification_rejection(
+                    ordinary::ContainedVerificationRejectionReason::InternalError,
+                )),
+            ));
+        };
+        Self::reply_ordinary(ordinary::Output::ContainedVerified(
+            ordinary::ContainedVerified::new(ordinary::ContainedVerificationReport {
+                contained_run_identifier: run.contained_run_identifier,
+                contained_run_phase: run.phase,
+                contained_outcome: run.outcome,
+                database_marker: accepted.database_marker,
+            }),
+        ))
     }
 
     /// Record a live VM container-lifecycle transition (Unit 2b): the report-47
@@ -2188,6 +2483,9 @@ impl SchemaRuntime {
     // ---- decide: effect completion (drives the deploy chain) ------------
 
     fn decide_effect_completion(&mut self, result: nexus::EffectResult) -> nexus::NexusAction {
+        if self.active_verification.is_some() {
+            return self.decide_verification_effect_completion(result);
+        }
         let pipeline = match self.active_deploy.clone() {
             Some(pipeline) => pipeline,
             None => {
@@ -2263,10 +2561,13 @@ impl SchemaRuntime {
             // misleading success.
             nexus::EffectResult::HermeticCheckBuilt(_)
             | nexus::EffectResult::TestVmBroughtUp(_)
-            | nexus::EffectResult::TestVmTornDown(_) => self.fail_pipeline(nexus::EffectFailure {
-                stage: nexus::EffectStage::Build,
-                detail: "test effect result on the deploy pipeline".to_string(),
-            }),
+            | nexus::EffectResult::TestVmTornDown(_)
+            | nexus::EffectResult::ContainedGateVerified(_) => {
+                self.fail_pipeline(nexus::EffectFailure {
+                    stage: nexus::EffectStage::Build,
+                    detail: "test effect result on the deploy pipeline".to_string(),
+                })
+            }
             nexus::EffectResult::EffectFailed(failure) => self.fail_pipeline(failure),
         }
     }
@@ -2350,7 +2651,8 @@ impl SchemaRuntime {
             // invariant failure rather than a misleading deploy reason.
             nexus::EffectStage::HermeticCheck
             | nexus::EffectStage::BringUpTestVm
-            | nexus::EffectStage::TearDownTestVm => meta::DeployRejectionReason::InternalError,
+            | nexus::EffectStage::TearDownTestVm
+            | nexus::EffectStage::VerifyContainedGate => meta::DeployRejectionReason::InternalError,
         };
         Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
             self.deploy_rejection(reason),
@@ -3017,6 +3319,13 @@ impl SchemaRuntime {
             }),
             Err(detail) => Self::effect_failed(nexus::EffectStage::HermeticCheck, detail),
         }
+    }
+
+    async fn run_gate_verification(
+        &self,
+        command: nexus::GateVerificationCommand,
+    ) -> nexus::EffectResult {
+        nexus::EffectResult::ContainedGateVerified(GateVerification::new(command).run())
     }
 
     /// The LIVE bring-up effect (Unit 2b — report 47 v2 / report 51 §3). BUILT
@@ -4516,6 +4825,9 @@ impl nexus::NexusEngine for SchemaRuntime {
             }
             nexus::EffectCommand::TearDownTestVm(command) => {
                 self.run_tear_down_test_vm(command).await
+            }
+            nexus::EffectCommand::VerifyContainedGate(command) => {
+                self.run_gate_verification(command).await
             }
         }
     }

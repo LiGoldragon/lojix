@@ -37,6 +37,7 @@
   ContainedClosurePath signal-lojix:lib:ContainedClosurePath
   AcceptedContainedDeploy signal-lojix:lib:AcceptedContainedDeploy
   ContainedVerification signal-lojix:lib:ContainedVerification
+  VerificationBody signal-lojix:lib:VerificationBody
   ContainedVerificationReport signal-lojix:lib:ContainedVerificationReport
   RejectedContainedVerification signal-lojix:lib:RejectedContainedVerification
   ContainedRelease signal-lojix:lib:ContainedRelease
@@ -63,7 +64,8 @@
 {
   SemaReadInput [(QueryGenerations Selection) (ReadEventLog EventLogRange) (CheckKeyMaterial KeyMaterialQuery) (QueryContainedRuns ContainedRunLookup) (VerifyContainedRun ContainedVerification)]
 
-  SemaReadOutput [(GenerationsQueried GenerationListing) (EventLogRead EventLogPage) (KeyMaterialChecked KeyMaterialReport) (ContainedRunsQueried ContainedRunListing) (ContainedVerified ContainedVerificationReport) (ContainedVerificationRejected RejectedContainedVerification) (ReadMissed RejectionReport)]
+  SemaReadOutput [(GenerationsQueried GenerationListing) (EventLogRead EventLogPage) (KeyMaterialChecked KeyMaterialReport) (ContainedRunsQueried ContainedRunListing) (ContainedVerificationPrepared ContainedVerificationPlan) (ContainedVerified ContainedVerificationReport) (ContainedVerificationRejected RejectedContainedVerification) (ReadMissed RejectionReport)]
+  ContainedVerificationPlan { ContainedRunRecord ContainedVerification }
   DeploymentEvents (Vector DeploymentPhaseEvent)
   RetentionEvents (Vector CacheRetentionTransitionEvent)
   EventLogPage { DeploymentEvents RetentionEvents StateMarker }
