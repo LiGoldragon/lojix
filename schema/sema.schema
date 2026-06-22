@@ -30,6 +30,8 @@
   DeploymentIdentifier signal-lojix:lib:DeploymentIdentifier
   GenerationIdentifier signal-lojix:lib:GenerationIdentifier
   ContainedRunIdentifier signal-lojix:lib:ContainedRunIdentifier
+  ProposalSource signal-lojix:lib:ProposalSource
+  FlakeReference signal-lojix:lib:FlakeReference
   DeploymentKind signal-lojix:lib:DeploymentKind
   ActivationKind signal-lojix:lib:ActivationKind
   GenerationSlot signal-lojix:lib:GenerationSlot
@@ -142,6 +144,8 @@
     NodeName
     host.NodeName
     target.ContainedTarget
+    ProposalSource
+    FlakeReference
     phase.ContainedRunPhase
     outcome.ContainedOutcome
     ContainedClosurePath

@@ -768,7 +768,7 @@ dependencies = [
 [[package]]
 name = "signal-lojix"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=system-operator-contained-test-poc#e2c599568ada19949b99cdfb3a50241993d97c8f"
+source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=system-operator-contained-test-poc#b6de573806d008e36046f61f20c3e84cc26580f6"
 dependencies = [
  "nota-next",
  "rkyv",

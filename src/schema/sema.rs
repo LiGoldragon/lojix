@@ -42,6 +42,10 @@ pub use signal_lojix::schema::lib::GenerationIdentifier as GenerationIdentifier;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::ContainedRunIdentifier as ContainedRunIdentifier;
 #[rustfmt::skip]
+pub use signal_lojix::schema::lib::ProposalSource as ProposalSource;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::FlakeReference as FlakeReference;
+#[rustfmt::skip]
 pub use signal_lojix::schema::lib::DeploymentKind as DeploymentKind;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::ActivationKind as ActivationKind;
@@ -495,6 +499,8 @@ pub struct StoredContainedRun {
     pub node_name: NodeName,
     pub host: NodeName,
     pub target: ContainedTarget,
+    pub proposal_source: ProposalSource,
+    pub flake_reference: FlakeReference,
     pub phase: ContainedRunPhase,
     pub outcome: ContainedOutcome,
     pub contained_closure_path: ContainedClosurePath,

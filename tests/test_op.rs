@@ -126,6 +126,14 @@ fn deploy_contained_is_ordinary_and_records_pending_run() {
         ordinary::ContainedTarget::HermeticVm
     ));
     assert_eq!(
+        runs[0].proposal_source,
+        ordinary::ProposalSource::new("test")
+    );
+    assert_eq!(
+        runs[0].flake_reference,
+        ordinary::FlakeReference::new("github:LiGoldragon/CriomOS-test-cluster/main")
+    );
+    assert_eq!(
         runs[0].contained_run_phase,
         ordinary::ContainedRunPhase::Submitted
     );
@@ -162,7 +170,10 @@ fn check_and_release_use_the_contained_run_handle() {
         runs[0].contained_run_phase,
         ordinary::ContainedRunPhase::Completed
     );
-    assert_eq!(runs[0].contained_outcome, ordinary::ContainedOutcome::Passed);
+    assert_eq!(
+        runs[0].contained_outcome,
+        ordinary::ContainedOutcome::Passed
+    );
 
     let release =
         nexus::SignalInput::OrdinaryInput(ordinary::Input::Release(ordinary::Release::new(
