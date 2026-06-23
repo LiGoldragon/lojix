@@ -32,11 +32,13 @@ default   = []
 nota-text = ["signal-lojix/nota-text", "meta-signal-lojix/nota-text"]
 
 [dependencies]
+criome            = { git = "https://github.com/LiGoldragon/criome.git", branch = "main" }
 horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", branch = "main" }
 kameo             = "0.20"
 nota-next         = { git = "https://github.com/LiGoldragon/nota-next.git", branch = "main" }
 meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix.git", branch = "system-operator-contained-test-poc" }
 signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix.git", branch = "system-operator-contained-test-poc" }
+signal-criome     = { git = "https://github.com/LiGoldragon/signal-criome.git", branch = "main" }
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 rustix            = { version = "1", default-features = false, features = ["process"] }
 sema-engine       = { git = "https://github.com/LiGoldragon/sema-engine.git", branch = "main" }

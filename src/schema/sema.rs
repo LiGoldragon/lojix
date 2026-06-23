@@ -42,6 +42,8 @@ pub use signal_lojix::schema::lib::GenerationIdentifier as GenerationIdentifier;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::ContainedRunIdentifier as ContainedRunIdentifier;
 #[rustfmt::skip]
+pub use signal_lojix::schema::lib::ClusterRunIdentifier as ClusterRunIdentifier;
+#[rustfmt::skip]
 pub use signal_lojix::schema::lib::ProposalSource as ProposalSource;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::FlakeReference as FlakeReference;
@@ -78,11 +80,27 @@ pub use signal_lojix::schema::lib::ContainedRunListing as ContainedRunListing;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::ContainedRunLookup as ContainedRunLookup;
 #[rustfmt::skip]
+pub use signal_lojix::schema::lib::ClusterRunRecord as ClusterRunRecord;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::ClusterRunListing as ClusterRunListing;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::ClusterRunLookup as ClusterRunLookup;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::ClusterRunReport as ClusterRunReport;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::ContainedRunIdentifiers as ContainedRunIdentifiers;
+#[rustfmt::skip]
 pub use signal_lojix::schema::lib::ContainedRunPhase as ContainedRunPhase;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::ContainedOutcome as ContainedOutcome;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::FailureStage as FailureStage;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::ClusterRunPhase as ClusterRunPhase;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::ClusterOutcome as ClusterOutcome;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::ClusterFailureStage as ClusterFailureStage;
 #[rustfmt::skip]
 pub use meta_signal_lojix::schema::lib::SystemDeployment as SystemDeployment;
 #[rustfmt::skip]
@@ -114,6 +132,7 @@ pub enum SemaReadInput {
     ReadEventLog(EventLogRange),
     CheckKeyMaterial(KeyMaterialQuery),
     QueryContainedRuns(ContainedRunLookup),
+    QueryClusterRuns(ClusterRunLookup),
     VerifyContainedRun(ContainedVerification),
 }
 
@@ -125,6 +144,7 @@ pub enum SemaReadOutput {
     EventLogRead(EventLogPage),
     KeyMaterialChecked(KeyMaterialReport),
     ContainedRunsQueried(ContainedRunListing),
+    ClusterRunsQueried(ClusterRunListing),
     ContainedVerificationPrepared(ContainedVerificationPlan),
     ContainedVerified(ContainedVerificationReport),
     ContainedVerificationRejected(RejectedContainedVerification),
@@ -170,6 +190,7 @@ pub enum SemaWriteInput {
     RetireGeneration(RetireRequest),
     RecordContainerTransition(ContainerTransition),
     RecordContainedRun(ContainedRunRecord),
+    RecordClusterRun(ClusterRunRecord),
     ReleaseContainedRun(ContainedRelease),
 }
 
@@ -239,6 +260,7 @@ pub enum SemaWriteOutput {
     GenerationRetired(AppliedRetire),
     ContainerRecorded(ContainerReceipt),
     ContainedRunRecorded(AcceptedContainedDeploy),
+    ClusterRunRecorded(ClusterRunReport),
     ContainedRunReleased(AppliedContainedRelease),
     ContainedReleaseRejected(RejectedRelease),
     WriteRejected(RejectionReport),
@@ -504,6 +526,27 @@ pub struct StoredContainedRun {
     pub phase: ContainedRunPhase,
     pub outcome: ContainedOutcome,
     pub contained_closure_path: ContainedClosurePath,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StoredClusterRuns(Vec<StoredClusterRun>);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ClusterRunTable(StoredClusterRuns);
+
+#[rustfmt::skip]
+#[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StoredClusterRun {
+    pub cluster_run_identifier: ClusterRunIdentifier,
+    pub cluster_name: ClusterName,
+    pub member_runs: ContainedRunIdentifiers,
+    pub phase: ClusterRunPhase,
+    pub outcome: ClusterOutcome,
 }
 
 #[rustfmt::skip]
@@ -922,6 +965,44 @@ impl From<StoredContainedRuns> for ContainedRunTable {
 }
 
 #[rustfmt::skip]
+impl StoredClusterRuns {
+    pub fn new(payload: Vec<StoredClusterRun>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Vec<StoredClusterRun> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Vec<StoredClusterRun> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Vec<StoredClusterRun>> for StoredClusterRuns {
+    fn from(payload: Vec<StoredClusterRun>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl ClusterRunTable {
+    pub fn new(payload: StoredClusterRuns) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &StoredClusterRuns {
+        &self.0
+    }
+    pub fn into_payload(self) -> StoredClusterRuns {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<StoredClusterRuns> for ClusterRunTable {
+    fn from(payload: StoredClusterRuns) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl SemaReadInput {
     pub fn query_generations(payload: Selection) -> Self {
         Self::QueryGenerations(payload)
@@ -934,6 +1015,9 @@ impl SemaReadInput {
     }
     pub fn query_contained_runs(payload: ContainedRunLookup) -> Self {
         Self::QueryContainedRuns(payload)
+    }
+    pub fn query_cluster_runs(payload: ClusterRunLookup) -> Self {
+        Self::QueryClusterRuns(payload)
     }
     pub fn verify_contained_run(payload: ContainedVerification) -> Self {
         Self::VerifyContainedRun(payload)
@@ -953,6 +1037,9 @@ impl SemaReadOutput {
     }
     pub fn contained_runs_queried(payload: ContainedRunListing) -> Self {
         Self::ContainedRunsQueried(payload)
+    }
+    pub fn cluster_runs_queried(payload: ClusterRunListing) -> Self {
+        Self::ClusterRunsQueried(payload)
     }
     pub fn contained_verification_prepared(payload: ContainedVerificationPlan) -> Self {
         Self::ContainedVerificationPrepared(payload)
@@ -996,6 +1083,9 @@ impl SemaWriteInput {
     pub fn record_contained_run(payload: ContainedRunRecord) -> Self {
         Self::RecordContainedRun(payload)
     }
+    pub fn record_cluster_run(payload: ClusterRunRecord) -> Self {
+        Self::RecordClusterRun(payload)
+    }
     pub fn release_contained_run(payload: ContainedRelease) -> Self {
         Self::ReleaseContainedRun(payload)
     }
@@ -1036,6 +1126,9 @@ impl SemaWriteOutput {
     }
     pub fn contained_run_recorded(payload: AcceptedContainedDeploy) -> Self {
         Self::ContainedRunRecorded(payload)
+    }
+    pub fn cluster_run_recorded(payload: ClusterRunReport) -> Self {
+        Self::ClusterRunRecorded(payload)
     }
     pub fn contained_run_released(payload: AppliedContainedRelease) -> Self {
         Self::ContainedRunReleased(payload)
@@ -1110,6 +1203,13 @@ impl From<ContainedRunLookup> for SemaReadInput {
 }
 
 #[rustfmt::skip]
+impl From<ClusterRunLookup> for SemaReadInput {
+    fn from(payload: ClusterRunLookup) -> Self {
+        Self::QueryClusterRuns(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl From<ContainedVerification> for SemaReadInput {
     fn from(payload: ContainedVerification) -> Self {
         Self::VerifyContainedRun(payload)
@@ -1141,6 +1241,13 @@ impl From<KeyMaterialReport> for SemaReadOutput {
 impl From<ContainedRunListing> for SemaReadOutput {
     fn from(payload: ContainedRunListing) -> Self {
         Self::ContainedRunsQueried(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<ClusterRunListing> for SemaReadOutput {
+    fn from(payload: ClusterRunListing) -> Self {
+        Self::ClusterRunsQueried(payload)
     }
 }
 
@@ -1229,6 +1336,13 @@ impl From<ContainedRunRecord> for SemaWriteInput {
 }
 
 #[rustfmt::skip]
+impl From<ClusterRunRecord> for SemaWriteInput {
+    fn from(payload: ClusterRunRecord) -> Self {
+        Self::RecordClusterRun(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl From<ContainedRelease> for SemaWriteInput {
     fn from(payload: ContainedRelease) -> Self {
         Self::ReleaseContainedRun(payload)
@@ -1302,6 +1416,13 @@ impl From<ContainerReceipt> for SemaWriteOutput {
 impl From<AcceptedContainedDeploy> for SemaWriteOutput {
     fn from(payload: AcceptedContainedDeploy) -> Self {
         Self::ContainedRunRecorded(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<ClusterRunReport> for SemaWriteOutput {
+    fn from(payload: ClusterRunReport) -> Self {
+        Self::ClusterRunRecorded(payload)
     }
 }
 
@@ -1424,6 +1545,7 @@ pub enum SemaReadInputRoute {
     ReadEventLog,
     CheckKeyMaterial,
     QueryContainedRuns,
+    QueryClusterRuns,
     VerifyContainedRun,
 }
 
@@ -1435,6 +1557,7 @@ impl SemaReadInput {
             Self::ReadEventLog(_) => SemaReadInputRoute::ReadEventLog,
             Self::CheckKeyMaterial(_) => SemaReadInputRoute::CheckKeyMaterial,
             Self::QueryContainedRuns(_) => SemaReadInputRoute::QueryContainedRuns,
+            Self::QueryClusterRuns(_) => SemaReadInputRoute::QueryClusterRuns,
             Self::VerifyContainedRun(_) => SemaReadInputRoute::VerifyContainedRun,
         }
     }
@@ -1457,6 +1580,7 @@ pub enum SemaReadOutputRoute {
     EventLogRead,
     KeyMaterialChecked,
     ContainedRunsQueried,
+    ClusterRunsQueried,
     ContainedVerificationPrepared,
     ContainedVerified,
     ContainedVerificationRejected,
@@ -1471,6 +1595,7 @@ impl SemaReadOutput {
             Self::EventLogRead(_) => SemaReadOutputRoute::EventLogRead,
             Self::KeyMaterialChecked(_) => SemaReadOutputRoute::KeyMaterialChecked,
             Self::ContainedRunsQueried(_) => SemaReadOutputRoute::ContainedRunsQueried,
+            Self::ClusterRunsQueried(_) => SemaReadOutputRoute::ClusterRunsQueried,
             Self::ContainedVerificationPrepared(_) => {
                 SemaReadOutputRoute::ContainedVerificationPrepared
             }
@@ -1504,6 +1629,7 @@ pub enum SemaWriteInputRoute {
     RetireGeneration,
     RecordContainerTransition,
     RecordContainedRun,
+    RecordClusterRun,
     ReleaseContainedRun,
 }
 
@@ -1523,6 +1649,7 @@ impl SemaWriteInput {
                 SemaWriteInputRoute::RecordContainerTransition
             }
             Self::RecordContainedRun(_) => SemaWriteInputRoute::RecordContainedRun,
+            Self::RecordClusterRun(_) => SemaWriteInputRoute::RecordClusterRun,
             Self::ReleaseContainedRun(_) => SemaWriteInputRoute::ReleaseContainedRun,
         }
     }
@@ -1549,6 +1676,7 @@ pub enum SemaWriteOutputRoute {
     GenerationRetired,
     ContainerRecorded,
     ContainedRunRecorded,
+    ClusterRunRecorded,
     ContainedRunReleased,
     ContainedReleaseRejected,
     WriteRejected,
@@ -1566,6 +1694,7 @@ impl SemaWriteOutput {
             Self::GenerationRetired(_) => SemaWriteOutputRoute::GenerationRetired,
             Self::ContainerRecorded(_) => SemaWriteOutputRoute::ContainerRecorded,
             Self::ContainedRunRecorded(_) => SemaWriteOutputRoute::ContainedRunRecorded,
+            Self::ClusterRunRecorded(_) => SemaWriteOutputRoute::ClusterRunRecorded,
             Self::ContainedRunReleased(_) => SemaWriteOutputRoute::ContainedRunReleased,
             Self::ContainedReleaseRejected(_) => {
                 SemaWriteOutputRoute::ContainedReleaseRejected
@@ -1625,6 +1754,9 @@ impl SemaObjectName {
                     SemaWriteInputRoute::RecordContainedRun => {
                         "SemaWriteInputRecordContainedRun"
                     }
+                    SemaWriteInputRoute::RecordClusterRun => {
+                        "SemaWriteInputRecordClusterRun"
+                    }
                     SemaWriteInputRoute::ReleaseContainedRun => {
                         "SemaWriteInputReleaseContainedRun"
                     }
@@ -1641,6 +1773,9 @@ impl SemaObjectName {
                     }
                     SemaReadInputRoute::QueryContainedRuns => {
                         "SemaReadInputQueryContainedRuns"
+                    }
+                    SemaReadInputRoute::QueryClusterRuns => {
+                        "SemaReadInputQueryClusterRuns"
                     }
                     SemaReadInputRoute::VerifyContainedRun => {
                         "SemaReadInputVerifyContainedRun"
@@ -1671,6 +1806,9 @@ impl SemaObjectName {
                     SemaWriteOutputRoute::ContainedRunRecorded => {
                         "SemaWriteOutputContainedRunRecorded"
                     }
+                    SemaWriteOutputRoute::ClusterRunRecorded => {
+                        "SemaWriteOutputClusterRunRecorded"
+                    }
                     SemaWriteOutputRoute::ContainedRunReleased => {
                         "SemaWriteOutputContainedRunReleased"
                     }
@@ -1691,6 +1829,9 @@ impl SemaObjectName {
                     }
                     SemaReadOutputRoute::ContainedRunsQueried => {
                         "SemaReadOutputContainedRunsQueried"
+                    }
+                    SemaReadOutputRoute::ClusterRunsQueried => {
+                        "SemaReadOutputClusterRunsQueried"
                     }
                     SemaReadOutputRoute::ContainedVerificationPrepared => {
                         "SemaReadOutputContainedVerificationPrepared"

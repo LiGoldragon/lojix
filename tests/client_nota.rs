@@ -138,6 +138,41 @@ fn ordinary_query_contained_run() -> ordinary::Input {
     )))
 }
 
+/// Cluster testing is a daemon-owned ordinary root: the caller gives the
+/// co-live member set, one contained target, one source, one flake, and one
+/// typed verification body for the aggregate run.
+#[cfg(feature = "nota-text")]
+fn ordinary_run_contained_cluster() -> ordinary::Input {
+    ordinary::Input::RunContainedCluster(ordinary::RunContainedCluster::new(
+        ordinary::RunContainedClusterRequest {
+            cluster_name: ordinary::ClusterName::new("goldragon"),
+            cluster_members: vec![
+                ordinary::ClusterMember::Member(ordinary::NodeName::new("criome")),
+                ordinary::ClusterMember::Member(ordinary::NodeName::new("spirit")),
+                ordinary::ClusterMember::Member(ordinary::NodeName::new("router")),
+            ]
+            .into(),
+            contained_target: ordinary::ContainedTarget::HermeticVm,
+            source: Some(ordinary::ProposalSource::new("/var/lib/lojix/cluster.nota")).into(),
+            flake_reference: ordinary::FlakeReference::new(
+                "github:LiGoldragon/CriomOS-test-cluster/main",
+            ),
+            verification_body: ordinary::VerificationBody::Gate,
+        },
+    ))
+}
+
+/// The aggregate cluster-run read: `lojix '(Query (ByClusterRun (goldragon None)))'`.
+#[cfg(feature = "nota-text")]
+fn ordinary_query_cluster_run() -> ordinary::Input {
+    ordinary::Input::Query(ordinary::Query::new(ordinary::Selection::ByClusterRun(
+        ordinary::ClusterRunLookup {
+            cluster_name: ordinary::ClusterName::new("goldragon"),
+            cluster_run: None.into(),
+        },
+    )))
+}
+
 #[test]
 #[cfg(feature = "nota-text")]
 fn ordinary_client_decodes_inline_deploy_contained() {
@@ -170,6 +205,30 @@ fn ordinary_client_decodes_inline_by_contained_run_query() {
 
     let client =
         OrdinaryClient::from_argument(argument).expect("decode ordinary ByContainedRun NOTA");
+
+    assert_eq!(client.input(), &input);
+}
+
+#[test]
+#[cfg(feature = "nota-text")]
+fn ordinary_client_decodes_inline_run_contained_cluster() {
+    let input = ordinary_run_contained_cluster();
+    let argument = argument_from_single(input.to_string());
+
+    let client =
+        OrdinaryClient::from_argument(argument).expect("decode ordinary RunContainedCluster NOTA");
+
+    assert_eq!(client.input(), &input);
+}
+
+#[test]
+#[cfg(feature = "nota-text")]
+fn ordinary_client_decodes_inline_by_cluster_run_query() {
+    let input = ordinary_query_cluster_run();
+    let argument = argument_from_single(input.to_string());
+
+    let client =
+        OrdinaryClient::from_argument(argument).expect("decode ordinary ByClusterRun NOTA");
 
     assert_eq!(client.input(), &input);
 }

@@ -30,6 +30,7 @@
   DeploymentIdentifier signal-lojix:lib:DeploymentIdentifier
   GenerationIdentifier signal-lojix:lib:GenerationIdentifier
   ContainedRunIdentifier signal-lojix:lib:ContainedRunIdentifier
+  ClusterRunIdentifier signal-lojix:lib:ClusterRunIdentifier
   ProposalSource signal-lojix:lib:ProposalSource
   FlakeReference signal-lojix:lib:FlakeReference
   DeploymentKind signal-lojix:lib:DeploymentKind
@@ -48,9 +49,17 @@
   ContainedRunRecord signal-lojix:lib:ContainedRunRecord
   ContainedRunListing signal-lojix:lib:ContainedRunListing
   ContainedRunLookup signal-lojix:lib:ContainedRunLookup
+  ClusterRunRecord signal-lojix:lib:ClusterRunRecord
+  ClusterRunListing signal-lojix:lib:ClusterRunListing
+  ClusterRunLookup signal-lojix:lib:ClusterRunLookup
+  ClusterRunReport signal-lojix:lib:ClusterRunReport
+  ContainedRunIdentifiers signal-lojix:lib:ContainedRunIdentifiers
   ContainedRunPhase signal-lojix:lib:ContainedRunPhase
   ContainedOutcome signal-lojix:lib:ContainedOutcome
   FailureStage signal-lojix:lib:FailureStage
+  ClusterRunPhase signal-lojix:lib:ClusterRunPhase
+  ClusterOutcome signal-lojix:lib:ClusterOutcome
+  ClusterFailureStage signal-lojix:lib:ClusterFailureStage
   SystemDeployment meta-signal-lojix:lib:SystemDeployment
   HomeDeployment meta-signal-lojix:lib:HomeDeployment
   PinRequest meta-signal-lojix:lib:PinRequest
@@ -64,9 +73,9 @@
 [SemaReadInput SemaWriteInput]
 [SemaReadOutput SemaWriteOutput]
 {
-  SemaReadInput [(QueryGenerations Selection) (ReadEventLog EventLogRange) (CheckKeyMaterial KeyMaterialQuery) (QueryContainedRuns ContainedRunLookup) (VerifyContainedRun ContainedVerification)]
+  SemaReadInput [(QueryGenerations Selection) (ReadEventLog EventLogRange) (CheckKeyMaterial KeyMaterialQuery) (QueryContainedRuns ContainedRunLookup) (QueryClusterRuns ClusterRunLookup) (VerifyContainedRun ContainedVerification)]
 
-  SemaReadOutput [(GenerationsQueried GenerationListing) (EventLogRead EventLogPage) (KeyMaterialChecked KeyMaterialReport) (ContainedRunsQueried ContainedRunListing) (ContainedVerificationPrepared ContainedVerificationPlan) (ContainedVerified ContainedVerificationReport) (ContainedVerificationRejected RejectedContainedVerification) (ReadMissed RejectionReport)]
+  SemaReadOutput [(GenerationsQueried GenerationListing) (EventLogRead EventLogPage) (KeyMaterialChecked KeyMaterialReport) (ContainedRunsQueried ContainedRunListing) (ClusterRunsQueried ClusterRunListing) (ContainedVerificationPrepared ContainedVerificationPlan) (ContainedVerified ContainedVerificationReport) (ContainedVerificationRejected RejectedContainedVerification) (ReadMissed RejectionReport)]
   ContainedVerificationPlan { ContainedRunRecord ContainedVerification }
   DeploymentEvents (Vector DeploymentPhaseEvent)
   RetentionEvents (Vector CacheRetentionTransitionEvent)
@@ -76,14 +85,14 @@
   ;; writes it at phase Submitted / outcome Pending) and replies the accepted
   ;; handle, mirroring RecordDeploySubmitted -> DeploySubmitted. Unit 2b
   ;; rewrites the row at each phase transition as the real dispatch runs.
-  SemaWriteInput [(RecordDeploySubmitted DeploySubmission) (RecordPhaseTransition DeploymentPhaseEvent) (RecordGenerationActivated ActivationCommit) (PinGeneration PinRequest) (UnpinGeneration UnpinRequest) (RetireGeneration RetireRequest) (RecordContainerTransition ContainerTransition) (RecordContainedRun ContainedRunRecord) (ReleaseContainedRun ContainedRelease)]
+  SemaWriteInput [(RecordDeploySubmitted DeploySubmission) (RecordPhaseTransition DeploymentPhaseEvent) (RecordGenerationActivated ActivationCommit) (PinGeneration PinRequest) (UnpinGeneration UnpinRequest) (RetireGeneration RetireRequest) (RecordContainerTransition ContainerTransition) (RecordContainedRun ContainedRunRecord) (RecordClusterRun ClusterRunRecord) (ReleaseContainedRun ContainedRelease)]
   DeploySubmission [(System SystemDeployment) (Home HomeDeployment)]
   ActivationCommit { GenerationIdentifier ClusterName NodeName GenerationSlot ClosurePath }
   ContainerTransition { ClusterName NodeName container.ContainerName state.ContainerState }
   ContainerName String
   ContainerState [Starting Started Stopping Stopped Failed]
 
-  SemaWriteOutput [(DeploySubmitted AcceptedDeploy) (PhaseRecorded PhaseReceipt) (GenerationActivated AppliedActivation) (GenerationPinned AppliedPin) (GenerationUnpinned AppliedUnpin) (GenerationRetired AppliedRetire) (ContainerRecorded ContainerReceipt) (ContainedRunRecorded AcceptedContainedDeploy) (ContainedRunReleased AppliedContainedRelease) (ContainedReleaseRejected RejectedRelease) (WriteRejected RejectionReport)]
+  SemaWriteOutput [(DeploySubmitted AcceptedDeploy) (PhaseRecorded PhaseReceipt) (GenerationActivated AppliedActivation) (GenerationPinned AppliedPin) (GenerationUnpinned AppliedUnpin) (GenerationRetired AppliedRetire) (ContainerRecorded ContainerReceipt) (ContainedRunRecorded AcceptedContainedDeploy) (ClusterRunRecorded ClusterRunReport) (ContainedRunReleased AppliedContainedRelease) (ContainedReleaseRejected RejectedRelease) (WriteRejected RejectionReport)]
   PhaseReceipt { EventLogPosition StateMarker }
   AppliedActivation { GenerationIdentifier GenerationSlot StateMarker }
   ContainerReceipt { EventLogPosition StateMarker }
@@ -149,5 +158,15 @@
     phase.ContainedRunPhase
     outcome.ContainedOutcome
     ContainedClosurePath
+  }
+
+  StoredClusterRuns (Vector StoredClusterRun)
+  ClusterRunTable { StoredClusterRuns }
+  StoredClusterRun {
+    ClusterRunIdentifier
+    ClusterName
+    memberRuns.ContainedRunIdentifiers
+    phase.ClusterRunPhase
+    outcome.ClusterOutcome
   }
 }

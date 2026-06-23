@@ -39,6 +39,7 @@ fn write_daemon_configuration(
             default_vm_host: "prometheus".to_string(),
             proposal_source: String::new(),
         },
+        criome_gate: lojix::CriomeGateConfiguration::Disabled,
     };
     let path = directory.join("daemon-configuration.rkyv");
     configuration

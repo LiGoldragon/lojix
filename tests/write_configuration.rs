@@ -12,7 +12,7 @@ fn write_configuration_round_trips_through_rkyv() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos (goldragon prometheus /var/lib/lojix/cluster.nota) {}))",
+        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos (goldragon prometheus /var/lib/lojix/cluster.nota) Disabled {}))",
         output.display()
     );
 
@@ -39,4 +39,8 @@ fn write_configuration_round_trips_through_rkyv() {
         configuration.test_defaults.proposal_source,
         "/var/lib/lojix/cluster.nota"
     );
+    assert!(matches!(
+        configuration.criome_gate,
+        lojix::CriomeGateConfiguration::Disabled
+    ));
 }

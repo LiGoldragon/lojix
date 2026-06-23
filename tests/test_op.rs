@@ -4,9 +4,15 @@
 //! `DeployContained`, observes with `VerifyContained` or `Query(ByContainedRun)`, and
 //! releases with `Release`. Production deployment stays on `meta-signal-lojix`.
 
+use std::sync::Arc;
+
+use criome::daemon::CriomeDaemon;
+use criome::tables::StoreLocation;
 use lojix::schema::nexus::{self, NexusEngine};
-use lojix::schema_runtime::SchemaRuntime;
+use lojix::schema_runtime::{RuntimeConfiguration, SchemaRuntime};
+use lojix::{CriomeGateConfiguration, DaemonConfiguration, Store, TestDefaults};
 use signal_lojix::schema::lib as ordinary;
+use tempfile::TempDir;
 
 fn run(engine: &mut SchemaRuntime, input: nexus::SignalInput) -> nexus::SignalOutput {
     let work = nexus::NexusWork::SignalArrived(input).with_origin_route(nexus::OriginRoute::new(0));
@@ -50,26 +56,33 @@ impl ContainedClusterTest {
         self
     }
 
-    fn deploy_inputs(&self) -> Vec<ordinary::Input> {
-        self.nodes
-            .iter()
-            .cloned()
-            .map(|node| {
-                ordinary::Input::DeployContained(ordinary::DeployContained::new(
-                    ordinary::DeployContainedRequest {
-                        node_profile: ordinary::NodeProfile {
-                            cluster_name: self.cluster.clone(),
-                            node_name: node,
-                            kind: None.into(),
-                        },
-                        contained_target: ordinary::ContainedTarget::HermeticVm,
-                        source: Some(self.source.clone()).into(),
-                        flake_reference: self.flake.clone(),
-                    },
-                ))
-            })
-            .collect()
+    fn request(&self) -> ordinary::RunContainedClusterRequest {
+        ordinary::RunContainedClusterRequest {
+            cluster_name: self.cluster.clone(),
+            cluster_members: self
+                .nodes
+                .iter()
+                .cloned()
+                .map(ordinary::ClusterMember::Member)
+                .collect::<Vec<_>>()
+                .into(),
+            contained_target: ordinary::ContainedTarget::HermeticVm,
+            source: Some(self.source.clone()).into(),
+            flake_reference: self.flake.clone(),
+            verification_body: ordinary::VerificationBody::Gate,
+        }
     }
+
+    fn cluster_input(&self) -> ordinary::Input {
+        ordinary::Input::RunContainedCluster(ordinary::RunContainedCluster::new(self.request()))
+    }
+}
+
+fn cluster_test() -> ContainedClusterTest {
+    ContainedClusterTest::new("goldragon", "github:LiGoldragon/CriomOS-test-cluster/main")
+        .hermetic("criome")
+        .hermetic("spirit")
+        .hermetic("router")
 }
 
 fn contained_request(node: &str) -> ordinary::DeployContainedRequest {
@@ -111,6 +124,61 @@ fn query_runs(engine: &mut SchemaRuntime, node: &str) -> Vec<ordinary::Contained
         }
         other => panic!("expected ContainedRunsQueried, got {other:?}"),
     }
+}
+
+fn query_clusters(engine: &mut SchemaRuntime) -> ordinary::ClusterRunListing {
+    let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::Query(ordinary::Query::new(
+        ordinary::Selection::ByClusterRun(ordinary::ClusterRunLookup {
+            cluster_name: ordinary::ClusterName::new("goldragon"),
+            cluster_run: None.into(),
+        }),
+    )));
+    match ordinary_reply(run(engine, input)) {
+        ordinary::Output::ClusterRunsQueried(listing) => listing.into_payload(),
+        other => panic!("expected ClusterRunsQueried, got {other:?}"),
+    }
+}
+
+fn engine_with_criome_socket(socket_path: &str) -> SchemaRuntime {
+    let directory = std::env::temp_dir().join(format!(
+        "lojix-criome-gate-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).expect("create test directory");
+    let store = Arc::new(Store::open(directory.join("lojix.sema")).expect("open store"));
+    let configuration = RuntimeConfiguration::from_daemon_configuration(&DaemonConfiguration {
+        ordinary_socket_path: directory.join("ordinary.sock").display().to_string(),
+        ordinary_socket_mode: 0o660,
+        owner_socket_path: directory.join("owner.sock").display().to_string(),
+        owner_socket_mode: 0o600,
+        state_directory_path: directory.join("state").display().to_string(),
+        daemon_host: "ouranos".to_string(),
+        test_defaults: TestDefaults {
+            cluster: "goldragon".to_string(),
+            default_vm_host: "prometheus".to_string(),
+            proposal_source: String::new(),
+        },
+        criome_gate: CriomeGateConfiguration::LocalWitness {
+            socket_path: socket_path.to_string(),
+        },
+    });
+    SchemaRuntime::with_store_and_configuration(store, Arc::new(configuration))
+}
+
+fn spawn_local_criome(directory: &TempDir) -> std::path::PathBuf {
+    let socket = directory.path().join("criome.sock");
+    let store = StoreLocation::new(directory.path().join("criome.sema"));
+    let bound = CriomeDaemon::new(socket.clone(), store)
+        .bind()
+        .expect("criome daemon binds its Unix socket");
+    std::thread::spawn(move || {
+        let _ = bound.serve_forever();
+    });
+    socket
 }
 
 #[test]
@@ -219,6 +287,59 @@ fn verify_contained_steps_fail_closed_when_gate_case_is_not_1_of_1() {
 }
 
 #[test]
+fn enabled_criome_gate_fails_closed_when_socket_is_missing() {
+    let mut engine = engine_with_criome_socket("/tmp/lojix-missing-criome.sock");
+    let accepted = deploy_contained(&mut engine, "criome");
+    let check = nexus::SignalInput::OrdinaryInput(ordinary::Input::VerifyContained(
+        ordinary::VerifyContained::new(ordinary::ContainedVerification {
+            contained_run_identifier: accepted.contained_run_identifier,
+            verification_body: ordinary::VerificationBody::Gate,
+        }),
+    ));
+
+    match ordinary_reply(run(&mut engine, check)) {
+        ordinary::Output::ContainedVerified(report) => {
+            let report = report.into_payload();
+            assert_eq!(
+                report.contained_run_phase,
+                ordinary::ContainedRunPhase::Failed
+            );
+            assert_eq!(
+                report.contained_outcome,
+                ordinary::ContainedOutcome::Failed(ordinary::FailureStage::Assert)
+            );
+        }
+        other => panic!("expected ContainedVerified, got {other:?}"),
+    }
+}
+
+#[test]
+fn enabled_criome_gate_accepts_live_1_of_1_socket() {
+    let directory = tempfile::tempdir().expect("criome temp dir");
+    let criome_socket = spawn_local_criome(&directory);
+    let mut engine = engine_with_criome_socket(&criome_socket.display().to_string());
+    let accepted = deploy_contained(&mut engine, "criome");
+    let check = nexus::SignalInput::OrdinaryInput(ordinary::Input::VerifyContained(
+        ordinary::VerifyContained::new(ordinary::ContainedVerification {
+            contained_run_identifier: accepted.contained_run_identifier,
+            verification_body: ordinary::VerificationBody::Gate,
+        }),
+    ));
+
+    match ordinary_reply(run(&mut engine, check)) {
+        ordinary::Output::ContainedVerified(report) => {
+            let report = report.into_payload();
+            assert_eq!(
+                report.contained_run_phase,
+                ordinary::ContainedRunPhase::Completed
+            );
+            assert_eq!(report.contained_outcome, ordinary::ContainedOutcome::Passed);
+        }
+        other => panic!("expected ContainedVerified, got {other:?}"),
+    }
+}
+
+#[test]
 fn non_hermetic_targets_are_typed_rejections_in_the_poc() {
     let mut engine = SchemaRuntime::new();
     let mut request = contained_request("router");
@@ -241,18 +362,44 @@ fn non_hermetic_targets_are_typed_rejections_in_the_poc() {
 }
 
 #[test]
-fn criome_spirit_router_cluster_interface_is_compact() {
-    let inputs =
-        ContainedClusterTest::new("goldragon", "github:LiGoldragon/CriomOS-test-cluster/main")
-            .hermetic("criome")
-            .hermetic("spirit")
-            .hermetic("router")
-            .deploy_inputs();
+fn criome_spirit_router_cluster_runs_as_daemon_owned_root() {
+    let mut engine = SchemaRuntime::new();
+    let input = nexus::SignalInput::OrdinaryInput(cluster_test().cluster_input());
 
-    assert_eq!(inputs.len(), 3);
+    match ordinary_reply(run(&mut engine, input)) {
+        ordinary::Output::ContainedClusterRan(report) => {
+            let report = report.into_payload();
+            assert_eq!(*report.cluster_run_identifier.payload(), 1);
+            assert_eq!(
+                report.cluster_run_phase,
+                ordinary::ClusterRunPhase::Completed
+            );
+            assert_eq!(report.cluster_outcome, ordinary::ClusterOutcome::Passed);
+        }
+        other => panic!("expected ContainedClusterRan, got {other:?}"),
+    }
+
+    let listing = query_clusters(&mut engine);
+    let cluster_runs = listing.cluster_runs.into_payload();
+    let member_runs = listing.runs.into_payload();
+    assert_eq!(cluster_runs.len(), 1);
+    assert_eq!(member_runs.len(), 3);
+    assert_eq!(
+        cluster_runs[0].member_runs.payload(),
+        &vec![
+            ordinary::ContainedRunIdentifier::new(1),
+            ordinary::ContainedRunIdentifier::new(2),
+            ordinary::ContainedRunIdentifier::new(3),
+        ]
+    );
     assert!(
-        inputs
+        member_runs
             .iter()
-            .all(|input| matches!(input, ordinary::Input::DeployContained(_)))
+            .all(|run| run.contained_run_phase == ordinary::ContainedRunPhase::Completed)
+    );
+    assert!(
+        member_runs
+            .iter()
+            .all(|run| run.contained_outcome == ordinary::ContainedOutcome::Passed)
     );
 }

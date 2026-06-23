@@ -25,7 +25,8 @@ use sema_engine::{
 };
 
 use crate::schema::sema::{
-    ContainerLifecycleRecord, DeployJob, EventLogEntry, GcRoot, LiveGeneration, StoredContainedRun,
+    ContainerLifecycleRecord, DeployJob, EventLogEntry, GcRoot, LiveGeneration, StoredClusterRun,
+    StoredContainedRun,
 };
 
 pub mod client;
@@ -50,6 +51,7 @@ const EVENT_LOG_TABLE: TableName = TableName::new("event-log");
 const CONTAINER_LIFECYCLE_TABLE: TableName = TableName::new("container-lifecycle");
 const DEPLOY_JOB_TABLE: TableName = TableName::new("deploy-job");
 const CONTAINED_RUN_TABLE: TableName = TableName::new("test-run");
+const CLUSTER_RUN_TABLE: TableName = TableName::new("cluster-run");
 
 /// The stable per-family schema identities. Each table is its own record
 /// family with a distinct, reopen-stable `FamilyName` + `SchemaHash`. The hash
@@ -62,12 +64,14 @@ const EVENT_LOG_FAMILY: &str = "EventLogFamily";
 const CONTAINER_LIFECYCLE_FAMILY: &str = "ContainerLifecycleFamily";
 const DEPLOY_JOB_FAMILY: &str = "DeployJobFamily";
 const CONTAINED_RUN_FAMILY: &str = "ContainedRunFamily";
+const CLUSTER_RUN_FAMILY: &str = "ClusterRunFamily";
 const LIVE_SET_SCHEMA_HASH: [u8; 32] = [1; 32];
 const GC_ROOTS_SCHEMA_HASH: [u8; 32] = [2; 32];
 const EVENT_LOG_SCHEMA_HASH: [u8; 32] = [3; 32];
 const CONTAINER_LIFECYCLE_SCHEMA_HASH: [u8; 32] = [4; 32];
 const DEPLOY_JOB_SCHEMA_HASH: [u8; 32] = [5; 32];
 const CONTAINED_RUN_SCHEMA_HASH: [u8; 32] = [6; 32];
+const CLUSTER_RUN_SCHEMA_HASH: [u8; 32] = [7; 32];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -196,6 +200,10 @@ pub struct DaemonConfiguration {
     /// rest of the configuration — NOT a runtime `Configure` op, NOT a flag,
     /// consistent with the daemons-take-binary-config-only override.
     pub test_defaults: TestDefaults,
+    /// Optional criome-backed gate verification. Disabled by default; when armed,
+    /// contained gate verification proves the local criome socket path with the
+    /// same 1-of-1 witness shape spirit uses.
+    pub criome_gate: CriomeGateConfiguration,
 }
 
 /// The config-default contained-test selection. `default_vm_host` is the host
@@ -209,6 +217,12 @@ pub struct TestDefaults {
     pub cluster: String,
     pub default_vm_host: String,
     pub proposal_source: String,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub enum CriomeGateConfiguration {
+    Disabled,
+    LocalWitness { socket_path: String },
 }
 
 impl DaemonConfiguration {
@@ -250,6 +264,7 @@ pub struct Store {
     containers: TableReference<ContainerLifecycleRecord>,
     deploy_jobs: TableReference<DeployJob>,
     contained_runs: TableReference<StoredContainedRun>,
+    cluster_runs: TableReference<StoredClusterRun>,
     path: PathBuf,
     /// The ephemeral subscription-token counter. Subscriptions are connection
     /// state, not durable state — they do NOT persist across restart — so an
@@ -305,6 +320,11 @@ impl Store {
             FamilyName::new(CONTAINED_RUN_FAMILY),
             SchemaHash::new(CONTAINED_RUN_SCHEMA_HASH),
         ))?;
+        let cluster_runs = database.register_table(TableDescriptor::new(
+            CLUSTER_RUN_TABLE,
+            FamilyName::new(CLUSTER_RUN_FAMILY),
+            SchemaHash::new(CLUSTER_RUN_SCHEMA_HASH),
+        ))?;
         Ok(Self {
             database,
             live_set,
@@ -313,6 +333,7 @@ impl Store {
             containers,
             deploy_jobs,
             contained_runs,
+            cluster_runs,
             path,
             subscription_sequence: AtomicU64::new(0),
         })
@@ -582,6 +603,45 @@ impl Store {
         }
         Ok(())
     }
+
+    /// The persisted cluster-run rows — read by `(Query (ByClusterRun …))` and
+    /// by restart reconciliation once multi-effect cluster execution lands.
+    pub fn cluster_runs(&self) -> Result<Vec<StoredClusterRun>> {
+        Ok(self
+            .database
+            .match_records(QueryPlan::all(self.cluster_runs))?
+            .records()
+            .to_vec())
+    }
+
+    /// The next cluster-run identifier: one past the maximum persisted, or 1
+    /// when empty. Restart-safe like contained and deployment identifiers.
+    pub fn next_cluster_run_identifier(&self) -> Result<u64> {
+        Ok(self
+            .cluster_runs()?
+            .iter()
+            .map(|run| *run.cluster_run_identifier.payload())
+            .max()
+            .map(|maximum| maximum + 1)
+            .unwrap_or(1))
+    }
+
+    /// Write or rewrite one cluster-run row keyed by its cluster run identifier.
+    pub fn upsert_cluster_run(&self, run: StoredClusterRun) -> Result<()> {
+        let key = *run.cluster_run_identifier.payload();
+        let present = self
+            .cluster_runs()?
+            .iter()
+            .any(|existing| *existing.cluster_run_identifier.payload() == key);
+        if present {
+            self.database
+                .mutate(Mutation::new(self.cluster_runs, run))?;
+        } else {
+            self.database
+                .assert(Assertion::new(self.cluster_runs, run))?;
+        }
+        Ok(())
+    }
 }
 
 impl EngineRecord for LiveGeneration {
@@ -617,5 +677,11 @@ impl EngineRecord for DeployJob {
 impl EngineRecord for StoredContainedRun {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.contained_run_identifier.payload().to_string())
+    }
+}
+
+impl EngineRecord for StoredClusterRun {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.cluster_run_identifier.payload().to_string())
     }
 }

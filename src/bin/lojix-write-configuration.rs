@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use lojix::{DaemonConfiguration, TestDefaults};
+use lojix::{CriomeGateConfiguration, DaemonConfiguration, TestDefaults};
 use nota_next::{NotaDecode, NotaDecodeError, NotaSource};
 use thiserror::Error;
 use triad_runtime::{ArgumentError, ComponentArgument, ComponentCommand};
@@ -33,6 +33,7 @@ struct ConfigurationWriteRequest {
     state_directory_path: WriterPath,
     daemon_host: WriterCluster,
     test_defaults: WriterTestDefaults,
+    criome_gate: WriterCriomeGateConfiguration,
     output_path: WriterPath,
 }
 
@@ -44,6 +45,12 @@ struct WriterTestDefaults {
     cluster: WriterCluster,
     default_vm_host: WriterCluster,
     proposal_source: WriterPath,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+enum WriterCriomeGateConfiguration {
+    Disabled,
+    LocalWitness(WriterPath),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
@@ -117,11 +124,23 @@ impl ConfigurationWriteRequest {
                 default_vm_host: self.test_defaults.default_vm_host.0,
                 proposal_source: self.test_defaults.proposal_source.0,
             },
+            criome_gate: self.criome_gate.into_configuration(),
         };
         configuration
             .write_rkyv_file(&output_path)
             .map_err(ConfigurationWriterError::WriteConfiguration)?;
         Ok(output_path)
+    }
+}
+
+impl WriterCriomeGateConfiguration {
+    fn into_configuration(self) -> CriomeGateConfiguration {
+        match self {
+            Self::Disabled => CriomeGateConfiguration::Disabled,
+            Self::LocalWitness(path) => CriomeGateConfiguration::LocalWitness {
+                socket_path: path.0,
+            },
+        }
     }
 }
 

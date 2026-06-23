@@ -21,6 +21,7 @@ fn daemon_configuration_round_trips_through_rkyv_file() {
             default_vm_host: "prometheus".to_string(),
             proposal_source: String::new(),
         },
+        criome_gate: lojix::CriomeGateConfiguration::Disabled,
     };
 
     configuration

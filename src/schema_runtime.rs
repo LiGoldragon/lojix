@@ -15,6 +15,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use criome::language::{AttestedMomentStatement, OperationStatement};
+use criome::master_key::MasterKey;
+use criome::transport::CriomeClient;
 use horizon_lib::name::{
     ClusterName as HorizonClusterName, CriomeDomainName, NodeName as HorizonNodeName,
     UserName as HorizonUserName,
@@ -22,6 +25,7 @@ use horizon_lib::name::{
 use horizon_lib::{ClusterProposal, Horizon, Viewpoint};
 use meta_signal_lojix::schema::lib as meta;
 use nota_next::NotaSource;
+use signal_criome as criome_signal;
 use signal_lojix::schema::lib as ordinary;
 use tokio::process::Command;
 
@@ -80,6 +84,7 @@ pub struct RuntimeConfiguration {
     /// test defaults; a `(Check …)` then rejects with `NoTestDefaults` rather
     /// than guessing.
     test_defaults: Option<TestDefaults>,
+    criome_gate: CriomeGateRuntime,
 }
 
 /// The runtime projection of the config-default test selection. A daemon-side
@@ -158,6 +163,236 @@ impl From<&crate::TestDefaults> for TestDefaults {
             default_vm_host: ordinary::NodeName::new(defaults.default_vm_host.clone()),
             proposal_source: ordinary::ProposalSource::new(defaults.proposal_source.clone()),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CriomeGateRuntime {
+    Disabled,
+    LocalWitness { socket: PathBuf },
+}
+
+impl CriomeGateRuntime {
+    fn from_configuration(configuration: &crate::CriomeGateConfiguration) -> Self {
+        match configuration {
+            crate::CriomeGateConfiguration::Disabled => Self::Disabled,
+            crate::CriomeGateConfiguration::LocalWitness { socket_path } => Self::LocalWitness {
+                socket: PathBuf::from(socket_path),
+            },
+        }
+    }
+
+    fn verify(&self) -> std::result::Result<(), String> {
+        match self {
+            Self::Disabled => Ok(()),
+            Self::LocalWitness { socket } => CriomeWitness::new(socket.clone())?.run(),
+        }
+    }
+}
+
+struct CriomeWitnessPolicy {
+    signer_identity: criome_signal::Identity,
+    signer_key: MasterKey,
+    timekeeper_identity: criome_signal::Identity,
+    timekeeper_key: MasterKey,
+}
+
+impl CriomeWitnessPolicy {
+    fn new() -> std::result::Result<Self, String> {
+        Ok(Self {
+            signer_identity: criome_signal::Identity::developer("lojix-local-signer".to_string()),
+            signer_key: MasterKey::generate().map_err(|error| error.to_string())?,
+            timekeeper_identity: criome_signal::Identity::cluster(
+                "lojix-local-timekeeper".to_string(),
+            ),
+            timekeeper_key: MasterKey::generate().map_err(|error| error.to_string())?,
+        })
+    }
+
+    fn registration(
+        &self,
+        identity: &criome_signal::Identity,
+        key: &MasterKey,
+    ) -> criome_signal::IdentityRegistration {
+        criome_signal::IdentityRegistration::new(
+            identity.clone(),
+            key.public_key(),
+            key.fingerprint(),
+            criome_signal::KeyPurpose::ReleaseAuthorization,
+            None,
+        )
+    }
+
+    fn contract(&self) -> criome_signal::Contract {
+        criome_signal::Contract::new(criome_signal::Rule::Threshold(
+            criome_signal::Threshold::new(
+                criome_signal::RequiredSignatureThreshold::new(1),
+                vec![criome_signal::PolicyMember::KeyMember(
+                    self.signer_identity.clone(),
+                )],
+            ),
+        ))
+    }
+
+    fn stamp(&self) -> std::result::Result<criome_signal::AttestedMoment, String> {
+        let proposition = criome_signal::AttestedMomentProposition::new(
+            criome_signal::TimeWindow {
+                opens_at: criome_signal::TimestampNanos::new(10),
+                closes_at: criome_signal::TimestampNanos::new(20),
+            },
+            criome_signal::RequiredSignatureThreshold::new(1),
+            vec![self.timekeeper_identity.clone()],
+        );
+        let statement = AttestedMomentStatement::new(&proposition)
+            .to_signing_bytes()
+            .map_err(|error| error.to_string())?;
+        let signature = criome_signal::TimeSignature {
+            signer: self.timekeeper_identity.clone(),
+            envelope: criome_signal::SignatureEnvelope {
+                scheme: criome_signal::SignatureScheme::Bls12_381MinPk,
+                public_key: self.timekeeper_key.public_key(),
+                signature: self.timekeeper_key.sign(&statement),
+            },
+        };
+        Ok(criome_signal::AttestedMoment::new(
+            proposition,
+            vec![signature],
+        ))
+    }
+
+    fn evidence(
+        &self,
+        operation: criome_signal::OperationDigest,
+        signer_count: usize,
+    ) -> std::result::Result<criome_signal::Evidence, String> {
+        let stamp = self.stamp()?;
+        let signatures = if signer_count == 0 {
+            Vec::new()
+        } else {
+            let statement = OperationStatement::new(&self.signer_identity, &operation, &stamp)
+                .to_signing_bytes()
+                .map_err(|error| error.to_string())?;
+            vec![criome_signal::StampedSignatureEnvelope {
+                stamp: stamp.clone(),
+                envelope: criome_signal::SignatureEnvelope {
+                    scheme: criome_signal::SignatureScheme::Bls12_381MinPk,
+                    public_key: self.signer_key.public_key(),
+                    signature: self.signer_key.sign(&statement),
+                },
+            }]
+        };
+        Ok(criome_signal::Evidence::new(
+            criome_signal::ComponentKind::Spirit,
+            operation,
+            stamp,
+            signatures,
+            Vec::new(),
+        ))
+    }
+}
+
+struct CriomeWitness {
+    socket: PathBuf,
+    policy: CriomeWitnessPolicy,
+}
+
+impl CriomeWitness {
+    fn new(socket: PathBuf) -> std::result::Result<Self, String> {
+        Ok(Self {
+            socket,
+            policy: CriomeWitnessPolicy::new()?,
+        })
+    }
+
+    fn run(&self) -> std::result::Result<(), String> {
+        let contract = self.seed()?;
+        let object = self.object();
+        let operation = self.operation();
+        let authorized = self.evaluate(criome_signal::AuthorizationEvaluation {
+            contract: contract.clone(),
+            object: object.clone(),
+            evidence: self.policy.evidence(operation.clone(), 1)?,
+        })?;
+        if authorized != criome_signal::EvaluationDecision::Authorized {
+            return Err(format!("criome authorized witness returned {authorized:?}"));
+        }
+        let rejected = self.evaluate(criome_signal::AuthorizationEvaluation {
+            contract,
+            object,
+            evidence: self.policy.evidence(operation, 0)?,
+        })?;
+        if rejected == criome_signal::EvaluationDecision::Authorized {
+            return Err("criome threshold-short witness authorized".to_string());
+        }
+        Ok(())
+    }
+
+    fn seed(&self) -> std::result::Result<criome_signal::ContractDigest, String> {
+        let client = CriomeClient::new(&self.socket);
+        for (identity, key) in [
+            (&self.policy.signer_identity, &self.policy.signer_key),
+            (
+                &self.policy.timekeeper_identity,
+                &self.policy.timekeeper_key,
+            ),
+        ] {
+            let reply = client
+                .send(criome_signal::CriomeRequest::RegisterIdentity(
+                    self.policy.registration(identity, key),
+                ))
+                .map_err(|error| error.to_string())?;
+            if !matches!(reply, criome_signal::CriomeReply::IdentityReceipt(_)) {
+                return Err(format!("criome identity registration returned {reply:?}"));
+            }
+        }
+        let reply = client
+            .send(criome_signal::CriomeRequest::AdmitContract(
+                self.policy.contract(),
+            ))
+            .map_err(|error| error.to_string())?;
+        match reply {
+            criome_signal::CriomeReply::ContractAdmitted(admitted) => Ok(admitted.into_payload()),
+            other => Err(format!("criome contract admission returned {other:?}")),
+        }
+    }
+
+    fn evaluate(
+        &self,
+        evaluation: criome_signal::AuthorizationEvaluation,
+    ) -> std::result::Result<criome_signal::EvaluationDecision, String> {
+        let reply = CriomeClient::new(&self.socket)
+            .send(criome_signal::CriomeRequest::EvaluateAuthorization(
+                evaluation,
+            ))
+            .map_err(|error| error.to_string())?;
+        match reply {
+            criome_signal::CriomeReply::AuthorizationEvaluated(evaluated) => Ok(evaluated.decision),
+            other => Err(format!(
+                "criome authorization evaluation returned {other:?}"
+            )),
+        }
+    }
+
+    fn object(&self) -> criome_signal::AuthorizedObjectReference {
+        criome_signal::AuthorizedObjectReference {
+            component: criome_signal::ComponentKind::Spirit,
+            digest: criome_signal::ObjectDigest::from_bytes(&Self::head_bytes()),
+            kind: criome_signal::AuthorizedObjectKind::Head,
+        }
+    }
+
+    fn operation(&self) -> criome_signal::OperationDigest {
+        criome_signal::OperationDigest::from_bytes(&Self::head_bytes())
+    }
+
+    fn head_bytes() -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        let mut index = 0u8;
+        while (index as usize) < bytes.len() {
+            bytes[index as usize] = index.wrapping_mul(7).wrapping_add(13);
+            index += 1;
+        }
+        bytes
     }
 }
 
@@ -412,6 +647,146 @@ pub enum TestSubmissionOutcome {
     Rejected(ordinary::RejectedDeployContained),
 }
 
+#[derive(Debug, Clone)]
+struct ContainedClusterPlan {
+    identifier: ordinary::ClusterRunIdentifier,
+    cluster_name: ordinary::ClusterName,
+    member_records: Vec<ordinary::ContainedRunRecord>,
+    verification_body: ordinary::VerificationBody,
+}
+
+impl ContainedClusterPlan {
+    fn from_request(
+        defaults: &TestDefaults,
+        identifier: ordinary::ClusterRunIdentifier,
+        first_member_identifier: u64,
+        request: ordinary::RunContainedClusterRequest,
+    ) -> std::result::Result<Self, ordinary::RunContainedClusterRejectionReason> {
+        if !matches!(
+            request.contained_target,
+            ordinary::ContainedTarget::HermeticVm
+        ) {
+            return Err(ordinary::RunContainedClusterRejectionReason::SubstrateUnavailable);
+        }
+        let members = request.cluster_members.into_payload();
+        if members.is_empty() {
+            return Err(ordinary::RunContainedClusterRejectionReason::EmptyCluster);
+        }
+        let mut member_records = Vec::with_capacity(members.len());
+        for (offset, member) in members.into_iter().enumerate() {
+            let node_profile = Self::member_profile(&request.cluster_name, member)?;
+            let run = defaults.lower(ordinary::DeployContainedRequest {
+                node_profile,
+                contained_target: request.contained_target.clone(),
+                source: request.source.clone(),
+                flake_reference: request.flake_reference.clone(),
+            });
+            let member_identifier =
+                ordinary::ContainedRunIdentifier::new(first_member_identifier + offset as u64);
+            member_records.push(run.pending_record(member_identifier));
+        }
+        Ok(Self {
+            identifier,
+            cluster_name: request.cluster_name,
+            member_records,
+            verification_body: request.verification_body,
+        })
+    }
+
+    fn member_profile(
+        cluster_name: &ordinary::ClusterName,
+        member: ordinary::ClusterMember,
+    ) -> std::result::Result<ordinary::NodeProfile, ordinary::RunContainedClusterRejectionReason>
+    {
+        match member {
+            ordinary::ClusterMember::Member(node_name) => Ok(ordinary::NodeProfile {
+                cluster_name: cluster_name.clone(),
+                node_name,
+                kind: None.into(),
+            }),
+            ordinary::ClusterMember::Profile(profile) if profile.cluster_name == *cluster_name => {
+                Ok(profile)
+            }
+            ordinary::ClusterMember::Profile(_) => {
+                Err(ordinary::RunContainedClusterRejectionReason::MemberProfileClusterMismatch)
+            }
+        }
+    }
+
+    fn verified_member_records(
+        &self,
+        criome_gate: &CriomeGateRuntime,
+    ) -> Vec<ordinary::ContainedRunRecord> {
+        let criome_result = criome_gate.verify();
+        self.member_records
+            .iter()
+            .cloned()
+            .map(|mut record| {
+                let verdict = match &criome_result {
+                    Ok(()) => GateVerification::new(nexus::GateVerificationCommand {
+                        contained_run_record: record.clone(),
+                        verification_body: self.verification_body.clone(),
+                    })
+                    .run(&CriomeGateRuntime::Disabled),
+                    Err(detail) => nexus::GateVerificationVerdict {
+                        contained_run_identifier: record.contained_run_identifier.clone(),
+                        passed: false,
+                        detail: detail.clone(),
+                    },
+                };
+                record.contained_run_phase = if verdict.passed {
+                    ordinary::ContainedRunPhase::Completed
+                } else {
+                    ordinary::ContainedRunPhase::Failed
+                };
+                record.contained_outcome = if verdict.passed {
+                    ordinary::ContainedOutcome::Passed
+                } else {
+                    ordinary::ContainedOutcome::Failed(ordinary::FailureStage::Assert)
+                };
+                record
+            })
+            .collect()
+    }
+
+    fn verified_record(
+        &self,
+        member_records: &[ordinary::ContainedRunRecord],
+    ) -> ordinary::ClusterRunRecord {
+        let passed = member_records
+            .iter()
+            .all(|record| record.contained_outcome == ordinary::ContainedOutcome::Passed);
+        self.record_at(
+            member_records,
+            ordinary::ClusterRunPhase::Completed,
+            if passed {
+                ordinary::ClusterOutcome::Passed
+            } else {
+                ordinary::ClusterOutcome::Failed(ordinary::ClusterFailureStage::Verify)
+            },
+        )
+    }
+
+    fn record_at(
+        &self,
+        member_records: &[ordinary::ContainedRunRecord],
+        phase: ordinary::ClusterRunPhase,
+        outcome: ordinary::ClusterOutcome,
+    ) -> ordinary::ClusterRunRecord {
+        ordinary::ClusterRunRecord {
+            cluster_run_identifier: self.identifier.clone(),
+            cluster_name: self.cluster_name.clone(),
+            member_runs: member_records
+                .iter()
+                .map(|record| record.contained_run_identifier.clone())
+                .collect::<Vec<_>>()
+                .into(),
+            cluster_run_phase: phase,
+            cluster_outcome: outcome,
+        }
+    }
+}
+
 /// A projected cluster — the proposal NOTA file the daemon reads to validate
 /// `(OnHost h)` against a node's declared host-set and to resolve `All` to the
 /// cluster's test-VM-host nodes (Unit 2b host/node selection). Wraps the parsed
@@ -532,8 +907,8 @@ impl GateVerification {
         Self { command }
     }
 
-    fn run(&self) -> nexus::GateVerificationVerdict {
-        match self.evaluate_body() {
+    fn run(&self, criome_gate: &CriomeGateRuntime) -> nexus::GateVerificationVerdict {
+        match criome_gate.verify().and_then(|()| self.evaluate_body()) {
             Ok(()) => nexus::GateVerificationVerdict {
                 contained_run_identifier: self
                     .command
@@ -800,6 +1175,7 @@ impl RuntimeConfiguration {
             daemon_host: ordinary::NodeName::new(configuration.daemon_host.clone()),
             effect_barrier: None,
             test_defaults: Some(TestDefaults::from(&configuration.test_defaults)),
+            criome_gate: CriomeGateRuntime::from_configuration(&configuration.criome_gate),
         }
     }
 
@@ -809,6 +1185,7 @@ impl RuntimeConfiguration {
             daemon_host: ordinary::NodeName::new("daemon-host"),
             effect_barrier: None,
             test_defaults: Some(TestDefaults::test_default()),
+            criome_gate: CriomeGateRuntime::Disabled,
         }
     }
 
@@ -820,6 +1197,7 @@ impl RuntimeConfiguration {
             daemon_host: ordinary::NodeName::new("daemon-host"),
             effect_barrier: Some(barrier),
             test_defaults: Some(TestDefaults::test_default()),
+            criome_gate: CriomeGateRuntime::Disabled,
         }
     }
 
@@ -866,6 +1244,10 @@ impl RuntimeConfiguration {
     /// The configured test-op defaults, if the daemon was started with them.
     fn test_defaults(&self) -> Option<&TestDefaults> {
         self.test_defaults.as_ref()
+    }
+
+    fn criome_gate(&self) -> &CriomeGateRuntime {
+        &self.criome_gate
     }
 
     fn materialization_root(&self, command: &nexus::HorizonMaterializationCommand) -> PathBuf {
@@ -1382,6 +1764,30 @@ impl From<sema::StoredContainedRun> for ordinary::ContainedRunRecord {
     }
 }
 
+impl From<ordinary::ClusterRunRecord> for sema::StoredClusterRun {
+    fn from(record: ordinary::ClusterRunRecord) -> Self {
+        Self {
+            cluster_run_identifier: record.cluster_run_identifier,
+            cluster_name: record.cluster_name,
+            member_runs: record.member_runs,
+            phase: record.cluster_run_phase,
+            outcome: record.cluster_outcome,
+        }
+    }
+}
+
+impl From<sema::StoredClusterRun> for ordinary::ClusterRunRecord {
+    fn from(run: sema::StoredClusterRun) -> Self {
+        Self {
+            cluster_run_identifier: run.cluster_run_identifier,
+            cluster_name: run.cluster_name,
+            member_runs: run.member_runs,
+            cluster_run_phase: run.phase,
+            cluster_outcome: run.outcome,
+        }
+    }
+}
+
 impl From<ordinary::DeploymentPhase> for sema::DeployJobPhase {
     /// Mirror the wire phase onto the durable job-row phase cursor. The two
     /// enums carry the same variants; the job row tracks the same lifecycle the
@@ -1682,6 +2088,9 @@ impl SchemaRuntime {
             ordinary::Input::DeployContained(request) => {
                 self.decide_contained_deploy(request.into_payload())
             }
+            ordinary::Input::RunContainedCluster(request) => {
+                self.decide_contained_cluster_run(request.into_payload())
+            }
             ordinary::Input::VerifyContained(check) => nexus::NexusAction::CommandSemaRead(
                 sema::SemaReadInput::VerifyContainedRun(check.into_payload()),
             ),
@@ -1698,6 +2107,11 @@ impl SchemaRuntime {
                             sema::SemaReadInput::QueryContainedRuns(lookup),
                         )
                     }
+                    ordinary::Selection::ByClusterRun(lookup) => {
+                        nexus::NexusAction::CommandSemaRead(sema::SemaReadInput::QueryClusterRuns(
+                            lookup,
+                        ))
+                    }
                     selection => nexus::NexusAction::CommandSemaRead(
                         sema::SemaReadInput::QueryGenerations(selection),
                     ),
@@ -1711,6 +2125,52 @@ impl SchemaRuntime {
             }
             ordinary::Input::Unwatch(close) => self.close_subscription(close.into_payload()),
         }
+    }
+
+    fn decide_contained_cluster_run(
+        &mut self,
+        request: ordinary::RunContainedClusterRequest,
+    ) -> nexus::NexusAction {
+        let Some(defaults) = self.configuration.test_defaults() else {
+            return Self::reply_ordinary(ordinary::Output::RunContainedClusterRejected(
+                ordinary::RunContainedClusterRejected::new(self.cluster_rejection(
+                    ordinary::RunContainedClusterRejectionReason::InternalError,
+                )),
+            ));
+        };
+        let identifier = ordinary::ClusterRunIdentifier::new(
+            self.store.next_cluster_run_identifier().unwrap_or(1),
+        );
+        let first_member_identifier = self.store.next_contained_run_identifier().unwrap_or(1);
+        let plan = match ContainedClusterPlan::from_request(
+            defaults,
+            identifier,
+            first_member_identifier,
+            request,
+        ) {
+            Ok(plan) => plan,
+            Err(reason) => {
+                return Self::reply_ordinary(ordinary::Output::RunContainedClusterRejected(
+                    ordinary::RunContainedClusterRejected::new(self.cluster_rejection(reason)),
+                ));
+            }
+        };
+        let member_records = plan.verified_member_records(self.configuration.criome_gate());
+        for record in member_records.iter().cloned() {
+            if !matches!(
+                self.record_contained_run(record),
+                sema::SemaWriteOutput::ContainedRunRecorded(_)
+            ) {
+                return Self::reply_ordinary(ordinary::Output::RunContainedClusterRejected(
+                    ordinary::RunContainedClusterRejected::new(self.cluster_rejection(
+                        ordinary::RunContainedClusterRejectionReason::InternalError,
+                    )),
+                ));
+            }
+        }
+        nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordClusterRun(
+            plan.verified_record(&member_records),
+        ))
     }
 
     fn decide_contained_deploy(
@@ -1884,6 +2344,16 @@ impl SchemaRuntime {
         }
     }
 
+    fn cluster_rejection(
+        &self,
+        reason: ordinary::RunContainedClusterRejectionReason,
+    ) -> ordinary::RejectedContainedClusterRun {
+        ordinary::RejectedContainedClusterRun {
+            run_contained_cluster_rejection_reason: reason,
+            database_marker: Self::marker(self.store.commit_sequence().unwrap_or(0)),
+        }
+    }
+
     fn verification_rejection(
         &self,
         reason: ordinary::ContainedVerificationRejectionReason,
@@ -1939,6 +2409,9 @@ impl SchemaRuntime {
             }
             sema::SemaReadOutput::ContainedRunsQueried(listing) => {
                 ordinary::Output::ContainedRunsQueried(ordinary::ContainedRunsQueried::new(listing))
+            }
+            sema::SemaReadOutput::ClusterRunsQueried(listing) => {
+                ordinary::Output::ClusterRunsQueried(ordinary::ClusterRunsQueried::new(listing))
             }
             sema::SemaReadOutput::ContainedVerificationPrepared(plan) => {
                 let pipeline = VerificationPipeline::new(plan);
@@ -2014,6 +2487,9 @@ impl SchemaRuntime {
                     ordinary::ContainedDeployed::new(accepted),
                 ))
             }
+            sema::SemaWriteOutput::ClusterRunRecorded(report) => Self::reply_ordinary(
+                ordinary::Output::ContainedClusterRan(ordinary::ContainedClusterRan::new(report)),
+            ),
             sema::SemaWriteOutput::ContainedRunReleased(released) => Self::reply_ordinary(
                 ordinary::Output::Released(ordinary::Released::new(released)),
             ),
@@ -2687,6 +3163,7 @@ impl SchemaRuntime {
                 self.record_container_transition(transition)
             }
             sema::SemaWriteInput::RecordContainedRun(record) => self.record_contained_run(record),
+            sema::SemaWriteInput::RecordClusterRun(record) => self.record_cluster_run(record),
             sema::SemaWriteInput::ReleaseContainedRun(release) => {
                 self.release_contained_run(release)
             }
@@ -2715,6 +3192,28 @@ impl SchemaRuntime {
                 })
             }
             Err(_) => Self::write_rejected(0, sema::RejectionReason::NodeUnknown),
+        }
+    }
+
+    fn record_cluster_run(&mut self, record: ordinary::ClusterRunRecord) -> sema::SemaWriteOutput {
+        let report = ordinary::ClusterRunReport {
+            cluster_run_identifier: record.cluster_run_identifier.clone(),
+            cluster_run_phase: record.cluster_run_phase,
+            cluster_outcome: record.cluster_outcome.clone(),
+            database_marker: Self::marker(self.store.commit_sequence().unwrap_or(0)),
+        };
+        match self
+            .store
+            .upsert_cluster_run(sema::StoredClusterRun::from(record))
+            .and_then(|()| self.store.commit_sequence())
+        {
+            Ok(commit_sequence) => {
+                sema::SemaWriteOutput::ClusterRunRecorded(ordinary::ClusterRunReport {
+                    database_marker: Self::marker(commit_sequence),
+                    ..report
+                })
+            }
+            Err(_) => Self::write_rejected(0, sema::RejectionReason::ClusterUnknown),
         }
     }
 
@@ -3007,6 +3506,7 @@ impl SchemaRuntime {
             sema::SemaReadInput::ReadEventLog(range) => self.read_event_log(range),
             sema::SemaReadInput::CheckKeyMaterial(query) => self.check_key_material(query),
             sema::SemaReadInput::QueryContainedRuns(lookup) => self.query_contained_runs(lookup),
+            sema::SemaReadInput::QueryClusterRuns(lookup) => self.query_cluster_runs(lookup),
             sema::SemaReadInput::VerifyContainedRun(check) => self.verify_contained_run(check),
         }
     }
@@ -3055,6 +3555,58 @@ impl SchemaRuntime {
                 .is_none_or(|identifier| identifier == &run.contained_run_identifier)
     }
 
+    fn query_cluster_runs(&self, lookup: ordinary::ClusterRunLookup) -> sema::SemaReadOutput {
+        let cluster_runs = match self.store.cluster_runs() {
+            Ok(runs) => runs,
+            Err(_) => return Self::read_missed(0, sema::RejectionReason::ClusterUnknown),
+        };
+        let contained_runs = match self.store.contained_runs() {
+            Ok(runs) => runs,
+            Err(_) => return Self::read_missed(0, sema::RejectionReason::NodeUnknown),
+        };
+        let commit_sequence = self.store.commit_sequence().unwrap_or(0);
+        let mut matching: Vec<sema::StoredClusterRun> = cluster_runs
+            .into_iter()
+            .filter(|run| Self::cluster_run_matches(&lookup, run))
+            .collect();
+        matching.sort_by(|left, right| {
+            right
+                .cluster_run_identifier
+                .payload()
+                .cmp(left.cluster_run_identifier.payload())
+        });
+        let member_identifiers: Vec<ordinary::ContainedRunIdentifier> = matching
+            .iter()
+            .flat_map(|run| run.member_runs.payload().iter().cloned())
+            .collect();
+        let member_records = contained_runs
+            .into_iter()
+            .filter(|run| member_identifiers.contains(&run.contained_run_identifier))
+            .map(ordinary::ContainedRunRecord::from)
+            .collect::<Vec<_>>();
+        sema::SemaReadOutput::ClusterRunsQueried(ordinary::ClusterRunListing {
+            cluster_runs: matching
+                .into_iter()
+                .map(ordinary::ClusterRunRecord::from)
+                .collect::<Vec<_>>()
+                .into(),
+            runs: member_records.into(),
+            database_marker: Self::marker(commit_sequence),
+        })
+    }
+
+    fn cluster_run_matches(
+        lookup: &ordinary::ClusterRunLookup,
+        run: &sema::StoredClusterRun,
+    ) -> bool {
+        lookup.cluster_name == run.cluster_name
+            && lookup
+                .cluster_run
+                .payload()
+                .as_ref()
+                .is_none_or(|identifier| identifier == &run.cluster_run_identifier)
+    }
+
     fn query_generations(&self, selection: ordinary::Selection) -> sema::SemaReadOutput {
         let matching = self
             .store
@@ -3092,6 +3644,7 @@ impl SchemaRuntime {
             // A test-run selection never reads the generation set — it is
             // routed to QueryContainedRuns before reaching here (decide_ordinary_input).
             ordinary::Selection::ByContainedRun(_) => false,
+            ordinary::Selection::ByClusterRun(_) => false,
         }
     }
 
@@ -3333,7 +3886,9 @@ impl SchemaRuntime {
         &self,
         command: nexus::GateVerificationCommand,
     ) -> nexus::EffectResult {
-        nexus::EffectResult::ContainedGateVerified(GateVerification::new(command).run())
+        nexus::EffectResult::ContainedGateVerified(
+            GateVerification::new(command).run(self.configuration.criome_gate()),
+        )
     }
 
     /// The LIVE bring-up effect (Unit 2b — report 47 v2 / report 51 §3). BUILT
