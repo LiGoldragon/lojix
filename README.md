@@ -13,8 +13,8 @@ The new deploy stack — one crate, two binaries:
 Storage lives in `sema-engine` (the typed database engine library);
 wire framing is `signal-core`. The contract repo is `signal-lojix`.
 
-**Status: in development.** First implementation lands on the
-`horizon-re-engineering` feature branch alongside the parallel horizon
+**Status: in development.** New work lands on the
+`horizon-leaner-shape` feature arc alongside the parallel Horizon
 schema refactor. See `ARCHITECTURE.md` for the planned shape and
 `~/primary/protocols/active-repositories.md` for the broader context.
 
