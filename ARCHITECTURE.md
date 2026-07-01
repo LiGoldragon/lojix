@@ -38,6 +38,14 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 > realization step toward the Sema-on-Sema future per
 > `~/primary/ESSENCE.md` §"Today and eventually".
 
+## 0.5 · Direction
+
+`lojix` is the new production deploy stack — the daemon-based successor to the monolithic `lojix-cli`. The active goalpost is feature parity with `lojix-cli` and then production cutover so the cluster runs on `lojix-daemon`; the legacy CLI stays at its current schema and retires once CriomOS migrates to consume this daemon's projection.
+
+The production cutover bar is specific: full-OS deploy (System and Home, not eval/build only), deploys that survive SSH disconnect (job actor decoupled from the request stream so a dropped client does not abort the deploy), every operation described in schema types with no untyped escape hatch, durable-first state built and self-resuming before the first cutover, and end-to-end validation against a full routed microVM with its own Criome domain and reachable IP (Spirit `se72`).
+
+This stack sits on today's substrate as a realization step toward the Sema-on-Sema future — "Today, not eventually." See §7 for the detailed direction bullets governing testing/deployment discipline, typed Nix interface, ergonomic test authoring, credential custody, and GitHub-auth.
+
 ## 0 · Crate shape
 
 One crate, two binaries (per `~/primary/AGENTS.md` §"Binary naming —
