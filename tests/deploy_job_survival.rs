@@ -1,5 +1,5 @@
 //! up9b client->daemon disconnect-survival tests: a meta `Deploy` records the
-//! submission, replies the `AcceptedDeploy` handle immediately, and runs its
+//! submission, replies the `DeployHandle` handle immediately, and runs its
 //! pipeline on the daemon-owned deploy-job actor — decoupled from the request
 //! task that submitted it. These are unit/integration tests with no node: the
 //! pipeline parks on a test `EffectBarrier` (no `nix` shells out), so ordering
@@ -25,16 +25,17 @@ fn store() -> (TempDir, Arc<Store>) {
     (directory, Arc::new(store))
 }
 
-/// A System deploy whose proposal source does not exist, so the pipeline fails
+/// A host deploy whose proposal source does not exist, so the pipeline fails
 /// fast at the first effect once the barrier opens (no node, no real flake).
 fn deploy_request() -> meta::DeployRequest {
-    meta::DeployRequest::System(meta::SystemDeployment {
+    meta::DeployRequest::Host(meta::HostDeployment {
         cluster_name: ordinary::ClusterName::new("alpha"),
         node_name: ordinary::NodeName::new("node-1"),
-        deployment_kind: ordinary::DeploymentKind::OsOnly,
+        host_composition: ordinary::HostComposition::BaseHost,
         source: ordinary::ProposalSource::new("/dev/null"),
         flake: ordinary::FlakeReference::new("path:/does/not/exist"),
-        system_action: ordinary::SystemAction::Switch,
+        host_deploy_action: ordinary::HostDeployAction::ActivateNow,
+        source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
         builder: None,
         substituters: Vec::new(),
         build_attribute: None,
@@ -258,6 +259,12 @@ fn deploy_job_resumption_decides_per_phase() {
         node_name: ordinary::NodeName::new("node-1"),
         phase,
         closure_path: None,
+        source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
+        requested_ref: ordinary::FlakeReference::new("github:owner/repo/main"),
+        resolved_ref: Some(ordinary::FlakeReference::new(
+            "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )),
+        resolved_revision: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
         resolved_target: Some("root@node-1.alpha.criome".to_string()),
         boot_once_unit: boot_once_unit.map(str::to_string),
     };
@@ -306,6 +313,12 @@ async fn reconcile_on_start_clears_a_stale_pre_activation_job_row() {
             node_name: ordinary::NodeName::new("node-1"),
             phase: DeployJobPhase::Building,
             closure_path: None,
+            source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
+            requested_ref: ordinary::FlakeReference::new("github:owner/repo/main"),
+            resolved_ref: Some(ordinary::FlakeReference::new(
+                "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )),
+            resolved_revision: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
             resolved_target: Some("root@node-1.alpha.criome".to_string()),
             boot_once_unit: None,
         })

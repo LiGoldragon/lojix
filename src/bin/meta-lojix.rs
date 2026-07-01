@@ -1,7 +1,8 @@
 //! meta-lojix CLI — the owner-only meta-socket client, the privileged sibling
 //! of `lojix`. Takes exactly one NOTA argument, decodes it as a
-//! `meta-signal-lojix` policy request (Deploy / Pin / Unpin / Retire),
-//! exchanges it on the owner/meta socket, and prints the reply. Mirrors `lojix`
+//! `meta-signal-lojix` policy request (Deploy / Pin / Unpin / Retire / Test),
+//! exchanges it on the owner/meta socket, and prints the typed reply. A
+//! `DeployAccepted` reply is admission, not terminal deploy success. Mirrors `lojix`
 //! but typed on the meta contract. Per Spirit `ssk2` (two CLIs, one per socket)
 //! and the `meta-` naming rule `8bwo`.
 

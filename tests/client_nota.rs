@@ -19,7 +19,7 @@ fn ordinary_query() -> ordinary::Input {
         ordinary::NodeSelector {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
-            kind: None,
+            artifact: None,
         },
     )))
 }

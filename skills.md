@@ -6,9 +6,9 @@ repo root.
 
 ## Repo intent
 
-This repo is the **implementation home** for the new deploy stack that
-replaces today's monolithic `lojix-cli`. The architectural decisions
-are settled (per `ARCHITECTURE.md`); what remains is implementation.
+This repo is the **implementation home** for the daemon-based deploy
+stack. The architectural decisions are settled (per `ARCHITECTURE.md`);
+what remains is implementation and validation.
 
 The library half (`lojix`) holds shared types, schema-derived
 Nexus/SEMA runtime code, the actor-native socket shell, and
@@ -63,9 +63,8 @@ these):
 - `goldragon` — cluster proposal source (Nota records read by
   horizon-rs).
 - `clavifaber` — per-host key material; separate component.
-- `lojix-cli` — legacy monolithic orchestrator. Stays at the current
-  schema for the duration of the horizon re-engineering arc; retires
-  after CriomOS migrates to consume this daemon's projection.
+- `meta-signal-lojix` — owner/meta deploy and retention mutation
+  contract consumed by `meta-lojix` and `lojix-daemon`.
 
 ## Status (2026-06-10)
 
@@ -73,8 +72,9 @@ these):
 - The generated Nexus runner and handwritten effect hooks are async;
   the daemon awaits `NexusEngine::execute` directly and does not wrap
   engine execution in `spawn_blocking`.
-- Production System/Home build requests enter the materialization path;
-  activating deploys still reject.
+- Production host and user-environment deploy requests enter the
+  materialization path; activating actions enter the copy/activate
+  pipeline instead of being rejected as unsupported.
 - A live ignored smoke exercises local `nix flake metadata` + `nix eval`
   through generated Horizon inputs without building a closure.
 - There is no Nix flake check surface yet.

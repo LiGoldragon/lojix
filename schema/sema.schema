@@ -27,11 +27,14 @@
   NodeName signal-lojix:lib:NodeName
   PinLabel signal-lojix:lib:PinLabel
   ClosurePath signal-lojix:lib:ClosurePath
+  FlakeReference signal-lojix:lib:FlakeReference
+  SourceRevisionPolicy signal-lojix:lib:SourceRevisionPolicy
+  SourceRevisionRecord signal-lojix:lib:SourceRevisionRecord
   DeploymentIdentifier signal-lojix:lib:DeploymentIdentifier
   GenerationIdentifier signal-lojix:lib:GenerationIdentifier
   TestRunIdentifier signal-lojix:lib:TestRunIdentifier
-  DeploymentKind signal-lojix:lib:DeploymentKind
-  ActivationKind signal-lojix:lib:ActivationKind
+  GenerationArtifact signal-lojix:lib:GenerationArtifact
+  ActivationEffect signal-lojix:lib:ActivationEffect
   GenerationSlot signal-lojix:lib:GenerationSlot
   TestMode signal-lojix:lib:TestMode
   TestRunRecord signal-lojix:lib:TestRunRecord
@@ -40,12 +43,12 @@
   TestRunPhase signal-lojix:lib:TestRunPhase
   TestOutcome signal-lojix:lib:TestOutcome
   FailureStage signal-lojix:lib:FailureStage
-  SystemDeployment meta-signal-lojix:lib:SystemDeployment
-  HomeDeployment meta-signal-lojix:lib:HomeDeployment
+  HostDeployment meta-signal-lojix:lib:HostDeployment
+  UserEnvironmentDeployment meta-signal-lojix:lib:UserEnvironmentDeployment
   PinRequest meta-signal-lojix:lib:PinRequest
   UnpinRequest meta-signal-lojix:lib:UnpinRequest
   RetireRequest meta-signal-lojix:lib:RetireRequest
-  AcceptedDeploy meta-signal-lojix:lib:AcceptedDeploy
+  DeployHandle meta-signal-lojix:lib:DeployHandle
   AcceptedTest meta-signal-lojix:lib:AcceptedTest
   AppliedPin meta-signal-lojix:lib:AppliedPin
   AppliedUnpin meta-signal-lojix:lib:AppliedUnpin
@@ -64,13 +67,13 @@
   ;; handle, mirroring RecordDeploySubmitted -> DeploySubmitted. Unit 2b
   ;; rewrites the row at each phase transition as the real dispatch runs.
   SemaWriteInput [(RecordDeploySubmitted DeploySubmission) (RecordPhaseTransition DeploymentPhaseEvent) (RecordGenerationActivated ActivationCommit) (PinGeneration PinRequest) (UnpinGeneration UnpinRequest) (RetireGeneration RetireRequest) (RecordContainerTransition ContainerTransition) (RecordTestRun TestRunRecord)]
-  DeploySubmission [(System SystemDeployment) (Home HomeDeployment)]
-  ActivationCommit { GenerationIdentifier * ClusterName * NodeName * GenerationSlot * ClosurePath * }
+  DeploySubmission [(Host HostDeployment) (UserEnvironment UserEnvironmentDeployment)]
+  ActivationCommit { GenerationIdentifier * ClusterName * NodeName * GenerationSlot * ClosurePath * SourceRevisionRecord * }
   ContainerTransition { ClusterName * NodeName * container ContainerName state ContainerState }
   ContainerName String
   ContainerState [Starting Started Stopping Stopped Failed]
 
-  SemaWriteOutput [(DeploySubmitted AcceptedDeploy) (PhaseRecorded PhaseReceipt) (GenerationActivated AppliedActivation) (GenerationPinned AppliedPin) (GenerationUnpinned AppliedUnpin) (GenerationRetired AppliedRetire) (ContainerRecorded ContainerReceipt) (TestRunRecorded AcceptedTest) (WriteRejected RejectionReport)]
+  SemaWriteOutput [(DeploySubmitted DeployHandle) (PhaseRecorded PhaseReceipt) (GenerationActivated AppliedActivation) (GenerationPinned AppliedPin) (GenerationUnpinned AppliedUnpin) (GenerationRetired AppliedRetire) (ContainerRecorded ContainerReceipt) (TestRunRecorded AcceptedTest) (WriteRejected RejectionReport)]
   PhaseReceipt { EventLogPosition * StateMarker * }
   AppliedActivation { GenerationIdentifier * GenerationSlot * StateMarker * }
   ContainerReceipt { EventLogPosition * StateMarker * }
@@ -82,7 +85,7 @@
   StateDigest Integer
 
   LiveSetTable { entries (Vec LiveGeneration) }
-  LiveGeneration { DeploymentIdentifier * GenerationIdentifier * ClusterName * NodeName * DeploymentKind * ActivationKind * GenerationSlot * ClosurePath * }
+  LiveGeneration { DeploymentIdentifier * GenerationIdentifier * ClusterName * NodeName * GenerationArtifact * ActivationEffect * GenerationSlot * ClosurePath * SourceRevisionRecord * }
 
   GcRootsTable { roots (Vec GcRoot) }
   GcRoot { GenerationIdentifier * ClusterName * NodeName * GenerationSlot * ClosurePath * label (Optional PinLabel) }
@@ -98,11 +101,12 @@
   ;; keyed by DeploymentIdentifier. Written on submit and rewritten at every
   ;; phase transition, so a daemon restart reads the persisted cursor and
   ;; reconciles the in-flight deploy rather than losing it. The phase cursor
-  ;; mirrors DeployJobPhase; resolved_target / boot_once_unit are populated as
-  ;; the pipeline learns them so a resumed Activating job can poll the
-  ;; transient unit instead of re-activating.
+  ;; mirrors DeployJobPhase; requested_ref / source_revision_policy are recorded
+  ;; at acceptance, resolved_ref / resolved_revision after flake metadata, and
+  ;; resolved_target / boot_once_unit are populated so a resumed Activating job
+  ;; can poll the transient unit instead of re-activating.
   DeployJobTable { jobs (Vec DeployJob) }
-  DeployJob { DeploymentIdentifier * GenerationIdentifier * ClusterName * NodeName * phase DeployJobPhase closure_path (Optional ClosurePath) resolved_target (Optional String) boot_once_unit (Optional String) }
+  DeployJob { DeploymentIdentifier * GenerationIdentifier * ClusterName * NodeName * phase DeployJobPhase closure_path (Optional ClosurePath) source_revision_policy SourceRevisionPolicy requested_ref FlakeReference resolved_ref (Optional FlakeReference) resolved_revision (Optional String) resolved_target (Optional String) boot_once_unit (Optional String) }
   DeployJobPhase [Submitted Building Built Copying Activating Activated Failed]
 
   ;; The durable test-run table (report 54 §5.3), mirroring DeployJobTable. One

@@ -15,6 +15,7 @@ use horizon_lib::proposal::{ClusterProposal, ClusterTrust, NodeProposal, NodePub
 use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
 use horizon_lib::species::{Arch, Bootloader, Keyboard, MachineSpecies, NodeSpecies};
 use lojix::schema::nexus::{self, NexusEngine};
+use lojix::schema::sema;
 use lojix::schema_runtime::SchemaRuntime;
 use meta_signal_lojix::schema::lib as meta;
 use nota_next::NotaEncode;
@@ -53,13 +54,50 @@ fn query_empty_live_set_returns_empty_listing() {
         ordinary::Selection::ByNode(ordinary::NodeSelector {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
-            kind: None,
+            artifact: None,
         }),
     )));
     let output = ordinary_reply(run(&mut engine, input));
     match output {
         ordinary::Output::Queried(listing) => assert!(listing.payload().generations.is_empty()),
         other => panic!("expected Queried, got {other:?}"),
+    }
+}
+
+#[test]
+fn query_by_event_log_returns_typed_deployment_events() {
+    let mut engine = SchemaRuntime::new();
+    engine
+        .store()
+        .append_event_log_entry(sema::EventLogEntry {
+            event_log_position: ordinary::EventLogPosition::new(0),
+            record: sema::LoggedEvent::Deployment(ordinary::DeploymentPhaseEvent {
+                deployment_identifier: ordinary::DeploymentIdentifier::new(7),
+                generation_identifier: ordinary::GenerationIdentifier::new(9),
+                cluster_name: ordinary::ClusterName::new("alpha"),
+                node_name: ordinary::NodeName::new("node-1"),
+                deployment_phase: ordinary::DeploymentPhase::Submitted,
+                event_log_position: ordinary::EventLogPosition::new(0),
+                detail: None,
+                source_revision: None,
+            }),
+        })
+        .expect("append event");
+
+    let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::Query(ordinary::Query::new(
+        ordinary::Selection::ByEventLog(ordinary::EventLogRange {
+            from: ordinary::EventLogPosition::new(0),
+            until: ordinary::EventLogPosition::new(1),
+        }),
+    )));
+    let output = ordinary_reply(run(&mut engine, input));
+    match output {
+        ordinary::Output::DeploymentEventsQueried(page) => {
+            let page = page.payload();
+            assert_eq!(page.deployment_events.len(), 1);
+            assert!(page.retention_events.is_empty());
+        }
+        other => panic!("expected DeploymentEventsQueried, got {other:?}"),
     }
 }
 
@@ -135,18 +173,19 @@ fn retire_unknown_generation_is_rejected() {
     }
 }
 
-/// A System deploy submission with the given `build_attribute` and action.
-fn system_deployment(
+/// A host deploy submission with the given `build_attribute` and action.
+fn host_deployment(
     build_attribute: Option<&str>,
-    action: ordinary::SystemAction,
-) -> meta::SystemDeployment {
-    meta::SystemDeployment {
+    action: ordinary::HostDeployAction,
+) -> meta::HostDeployment {
+    meta::HostDeployment {
         cluster_name: ordinary::ClusterName::new("alpha"),
         node_name: ordinary::NodeName::new("node-1"),
-        deployment_kind: ordinary::DeploymentKind::OsOnly,
+        host_composition: ordinary::HostComposition::BaseHost,
         source: ordinary::ProposalSource::new("/dev/null"),
         flake: ordinary::FlakeReference::new("github:owner/repo"),
-        system_action: action,
+        host_deploy_action: action,
+        source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
         builder: None,
         substituters: Vec::new(),
         build_attribute: build_attribute.map(meta::FlakeAttribute::new),
@@ -161,7 +200,7 @@ fn deploy_rejection_reason(output: nexus::SignalOutput) -> meta::DeployRejection
 }
 
 // ---- Deploy guard: every declared action now enters the effect pipeline
-// (S4a opened the activating actions — System Boot/Switch/Test/BootOnce, Home
+// (S4a opened the activating actions — host SetBootProfile/ActivateNow/TestActivation/ScheduleBootOnce, user-environment
 // Profile/Activate — by making copy + activate target-safe). These tests drive
 // the cursor with intentionally bogus proposal sources, so an opened action
 // reaches the pipeline and fails at the IO stage with ProposalSourceUnreachable
@@ -171,7 +210,10 @@ fn deploy_rejection_reason(output: nexus::SignalOutput) -> meta::DeployRejection
 fn activating_deploy_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
-        meta::DeployRequest::System(system_deployment(None, ordinary::SystemAction::Switch)),
+        meta::DeployRequest::Host(host_deployment(
+            None,
+            ordinary::HostDeployAction::ActivateNow,
+        )),
     )));
     assert_eq!(
         deploy_rejection_reason(run(&mut engine, input)),
@@ -180,16 +222,17 @@ fn activating_deploy_enters_effect_pipeline() {
 }
 
 #[test]
-fn home_activate_enters_effect_pipeline() {
+fn user_environment_activate_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
-        meta::DeployRequest::Home(meta::HomeDeployment {
+        meta::DeployRequest::UserEnvironment(meta::UserEnvironmentDeployment {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
             user_name: ordinary::UserName::new("li"),
             source: ordinary::ProposalSource::new("/dev/null"),
             flake: ordinary::FlakeReference::new("github:owner/repo"),
-            home_mode: meta::HomeMode::Activate,
+            user_environment_action: meta::UserEnvironmentAction::ActivateNow,
+            source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
             builder: None,
             substituters: Vec::new(),
         }),
@@ -204,7 +247,7 @@ fn home_activate_enters_effect_pipeline() {
 fn production_deploy_without_build_attribute_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
-        meta::DeployRequest::System(system_deployment(None, ordinary::SystemAction::Build)),
+        meta::DeployRequest::Host(host_deployment(None, ordinary::HostDeployAction::Realize)),
     )));
     assert_eq!(
         deploy_rejection_reason(run(&mut engine, input)),
@@ -213,16 +256,17 @@ fn production_deploy_without_build_attribute_enters_effect_pipeline() {
 }
 
 #[test]
-fn home_build_enters_effect_pipeline() {
+fn user_environment_realize_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
-        meta::DeployRequest::Home(meta::HomeDeployment {
+        meta::DeployRequest::UserEnvironment(meta::UserEnvironmentDeployment {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
             user_name: ordinary::UserName::new("li"),
             source: ordinary::ProposalSource::new("/dev/null"),
             flake: ordinary::FlakeReference::new("github:owner/repo"),
-            home_mode: meta::HomeMode::Build,
+            user_environment_action: meta::UserEnvironmentAction::Realize,
+            source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
             builder: None,
             substituters: Vec::new(),
         }),
@@ -235,7 +279,7 @@ fn home_build_enters_effect_pipeline() {
 
 #[test]
 #[ignore = "runs real `nix flake metadata` and `nix eval`; cheap but external"]
-fn production_eval_materializes_horizon_inputs_and_returns_deployed() {
+fn production_eval_materializes_horizon_inputs_and_returns_deploy_accepted() {
     let directory = tempfile::tempdir().expect("tempdir");
     let cluster_path = directory.path().join("cluster.nota");
     std::fs::write(&cluster_path, fixture_cluster_proposal().to_nota()).expect("write cluster");
@@ -243,23 +287,23 @@ fn production_eval_materializes_horizon_inputs_and_returns_deployed() {
     FixtureFlake::new(flake_directory).write();
 
     let mut engine = SchemaRuntime::new();
-    let mut deployment = system_deployment(None, ordinary::SystemAction::Eval);
+    let mut deployment = host_deployment(None, ordinary::HostDeployAction::Evaluate);
     deployment.source = ordinary::ProposalSource::new(cluster_path.display().to_string());
     deployment.flake =
         ordinary::FlakeReference::new(format!("path:{}", directory.path().join("flake").display()));
     let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
-        meta::DeployRequest::System(deployment),
+        meta::DeployRequest::Host(deployment),
     )));
 
     match meta_reply(run(&mut engine, input)) {
-        meta::Output::Deployed(accepted) => {
+        meta::Output::DeployAccepted(accepted) => {
             assert_eq!(*accepted.payload().deployment_identifier.payload(), 1);
             assert_eq!(
                 *accepted.payload().database_marker.commit_sequence.payload(),
                 1
             );
         }
-        other => panic!("expected Deployed, got {other:?}"),
+        other => panic!("expected DeployAccepted, got {other:?}"),
     }
 }
 

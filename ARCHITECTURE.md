@@ -8,7 +8,7 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 > The daemon uses the actor-native `triad-runtime` multi-listener for
 > two authority-tiered sockets and awaits the generated async Nexus
 > runner directly; child-process effects use `tokio::process`. Production
-> System/Home build requests without `build_attribute` now enter a
+> host and user-environment build requests without `build_attribute` now enter a
 > Horizon materialization effect that projects the cluster proposal with
 > `horizon-rs`, writes generated `horizon` / `system` / `deployment`
 > flake inputs under daemon state, and passes content-addressed
@@ -40,9 +40,9 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 
 ## 0.5 · Direction
 
-`lojix` is the new production deploy stack — the daemon-based successor to the monolithic `lojix-cli`. The active goalpost is feature parity with `lojix-cli` and then production cutover so the cluster runs on `lojix-daemon`; the legacy CLI stays at its current schema and retires once CriomOS migrates to consume this daemon's projection.
+`lojix` is the production deploy stack: a daemon-based orchestrator with direct typed ordinary and owner/meta contracts. The active goalpost is production cutover so the cluster runs on `lojix-daemon` and all consumers use the direct contracts without compatibility translation layers or aliases.
 
-The production cutover bar is specific: full-OS deploy (System and Home, not eval/build only), deploys that survive SSH disconnect (job actor decoupled from the request stream so a dropped client does not abort the deploy), every operation described in schema types with no untyped escape hatch, durable-first state built and self-resuming before the first cutover, and end-to-end validation against a full routed microVM with its own Criome domain and reachable IP (Spirit `se72`).
+The production cutover bar is specific: complete-host and user-environment deploys (not eval/build only), deploys that survive SSH disconnect (job actor decoupled from the request stream so a dropped client does not abort the deploy), every operation described in schema types with no untyped escape hatch, durable-first state built and self-resuming before the first cutover, and end-to-end validation against a full routed microVM with its own Criome domain and reachable IP (Spirit `se72`).
 
 This stack sits on today's substrate as a realization step toward the Sema-on-Sema future — "Today, not eventually." See §7 for the detailed direction bullets governing testing/deployment discipline, typed Nix interface, ergonomic test authoring, credential custody, and GitHub-auth.
 
@@ -261,7 +261,7 @@ Each daemon actor is a Kameo actor per
 - **`lojix-daemon` owns GitHub-authenticated flake input resolution.**
   The GitHub API rate-limit stale-activation failure is a deploy-path
   problem owned by `lojix-daemon`, not a package problem: an
-  authenticated wrapper around the nix invocation fetches the GitHub
+  authenticated execution environment for the nix invocation fetches the GitHub
   API key from the secret store and injects it into the nix call
   (via `NIX_CONFIG` access-tokens). A small Rust library encapsulates
   the secret-fetch and auth-injection so the rest of `lojix-daemon`
@@ -284,8 +284,6 @@ Each daemon actor is a Kameo actor per
 - `horizon-rs` at `github:LiGoldragon/horizon-rs` is the projection
   of cluster proposals; this stack reads horizon per request, never
   edits it.
-- `lojix-cli` at `github:LiGoldragon/lojix-cli` is the legacy
-  monolithic orchestrator; stays at the current schema for the
-  duration of the horizon re-engineering arc; retires after
-  CriomOS migrates to consume this daemon's projection. It does
-  not become a client of this daemon.
+- Deploy clients use direct typed `signal-lojix` and
+  `meta-signal-lojix` records. Schema changes update consumers rather
+  than adding compatibility translation.

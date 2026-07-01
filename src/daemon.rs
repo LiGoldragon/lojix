@@ -368,14 +368,14 @@ impl RequestWorker {
     /// immediate wire reply (up9q surface a). The actor checks the deploy-job
     /// cap, runs the synchronous submit (issue identifier, persist the
     /// `Submitted` job row), spawns the pipeline on the daemon runtime, and
-    /// replies the `AcceptedDeploy` handle — all before any pipeline effect
+    /// replies the `DeployHandle` handle — all before any pipeline effect
     /// runs. When the cap is full it replies `DeploymentInFlight`. This task's
     /// only remaining work is writing this reply frame; dropping it (a client
     /// disconnect) cannot cancel the spawned pipeline.
     async fn submit_deploy(&self, request: meta::DeployRequest) -> meta::Output {
         match self.deploy_jobs.ask(AdmitDeploy { request }).await {
             Ok(DeployAdmission::Accepted(accepted)) => {
-                meta::Output::Deployed(meta::Deployed::new(accepted))
+                meta::Output::DeployAccepted(meta::DeployAccepted::new(accepted))
             }
             Ok(DeployAdmission::Rejected(rejected)) => {
                 meta::Output::DeployRejected(meta::DeployRejected::new(rejected))
@@ -642,7 +642,7 @@ pub struct AdmitDeploy {
 /// daemon sends the owner connection before any pipeline effect runs.
 #[derive(Debug, Clone, PartialEq, Eq, kameo::Reply)]
 pub enum DeployAdmission {
-    Accepted(meta::AcceptedDeploy),
+    Accepted(meta::DeployHandle),
     Rejected(meta::RejectedDeploy),
 }
 

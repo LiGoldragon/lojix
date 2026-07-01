@@ -19,11 +19,3 @@ fn runtime_no_longer_rejects_absent_build_attribute_as_unsupported() {
     assert!(runtime.contains("needs_horizon_materialization"));
     assert!(runtime.contains("EffectCommand::MaterializeHorizon"));
 }
-
-#[test]
-fn os_only_materialization_matches_legacy_firmware_policy() {
-    let runtime = include_str!("../src/schema_runtime.rs");
-    assert!(runtime.contains(
-        "nexus::MaterializationShape::OsOnly => Some(Self {\n                include_home: false,\n                include_all_firmware: false,\n            })"
-    ));
-}

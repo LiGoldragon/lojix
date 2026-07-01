@@ -36,6 +36,10 @@ pub use signal_lojix::schema::lib::FlakeReference as FlakeReference;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::ProposalSource as ProposalSource;
 #[rustfmt::skip]
+pub use signal_lojix::schema::lib::SourceRevisionPolicy as SourceRevisionPolicy;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::SourceRevisionRecord as SourceRevisionRecord;
+#[rustfmt::skip]
 pub use signal_lojix::schema::lib::UserName as UserName;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::GenerationIdentifier as GenerationIdentifier;
@@ -44,13 +48,15 @@ pub use signal_lojix::schema::lib::DeploymentIdentifier as DeploymentIdentifier;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::GenerationSlot as GenerationSlot;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::ActivationKind as ActivationKind;
+pub use signal_lojix::schema::lib::ActivationEffect as ActivationEffect;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::SystemAction as SystemAction;
+pub use signal_lojix::schema::lib::HostDeployAction as HostDeployAction;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::DeploymentKind as DeploymentKind;
+pub use signal_lojix::schema::lib::HostComposition as HostComposition;
 #[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::HomeMode as HomeMode;
+pub use signal_lojix::schema::lib::GenerationArtifact as GenerationArtifact;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::UserEnvironmentAction as UserEnvironmentAction;
 
 #[rustfmt::skip]
 #[cfg(feature = "nota-text")]
@@ -105,28 +111,26 @@ pub struct ExtraSubstituter {
 pub struct FlakeAuthRequest {
     pub source: ProposalSource,
     pub flake: FlakeReference,
+    pub source_revision_policy: SourceRevisionPolicy,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ResolvedFlake {
-    pub flake: FlakeReference,
-    pub revision: String,
-}
+pub struct ResolvedFlake(SourceRevisionRecord);
 
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct HomeMaterialization(UserName);
+pub struct UserEnvironmentMaterialization(UserName);
 
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum MaterializationShape {
-    FullOs,
-    OsOnly,
-    Home(HomeMaterialization),
+    CompleteHost,
+    BaseHost,
+    UserEnvironment(UserEnvironmentMaterialization),
 }
 
 #[rustfmt::skip]
@@ -166,8 +170,9 @@ pub struct MaterializedInputs(Vec<FlakeInputOverride>);
 pub struct NixEvalCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub deployment_kind: DeploymentKind,
+    pub generation_artifact: GenerationArtifact,
     pub flake: FlakeReference,
+    pub source_revision: SourceRevisionRecord,
     pub attribute: String,
     pub overrides: Vec<FlakeInputOverride>,
     pub target: BuildTarget,
@@ -197,8 +202,8 @@ pub struct CopyClosureCommand {
 #[rustfmt::skip]
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct HomeActivationProfile {
-    pub mode: HomeMode,
+pub struct UserEnvironmentActivationProfile {
+    pub action: UserEnvironmentAction,
     pub user: UserName,
 }
 
@@ -206,8 +211,8 @@ pub struct HomeActivationProfile {
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum ActivationProfile {
-    System(SystemAction),
-    Home(HomeActivationProfile),
+    Host(HostDeployAction),
+    UserEnvironment(UserEnvironmentActivationProfile),
 }
 
 #[rustfmt::skip]
@@ -219,7 +224,7 @@ pub struct ActivateGenerationCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub closure_path: ClosurePath,
-    pub activation_kind: ActivationKind,
+    pub activation_effect: ActivationEffect,
     pub profile: ActivationProfile,
 }
 
@@ -471,7 +476,26 @@ impl From<String> for TargetStore {
 }
 
 #[rustfmt::skip]
-impl HomeMaterialization {
+impl ResolvedFlake {
+    pub fn new(payload: SourceRevisionRecord) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &SourceRevisionRecord {
+        &self.0
+    }
+    pub fn into_payload(self) -> SourceRevisionRecord {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<SourceRevisionRecord> for ResolvedFlake {
+    fn from(payload: SourceRevisionRecord) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl UserEnvironmentMaterialization {
     pub fn new(payload: UserName) -> Self {
         Self(payload)
     }
@@ -483,7 +507,7 @@ impl HomeMaterialization {
     }
 }
 #[rustfmt::skip]
-impl From<UserName> for HomeMaterialization {
+impl From<UserName> for UserEnvironmentMaterialization {
     fn from(payload: UserName) -> Self {
         Self::new(payload)
     }
@@ -540,18 +564,18 @@ impl BuildTarget {
 
 #[rustfmt::skip]
 impl MaterializationShape {
-    pub fn home(payload: UserName) -> Self {
-        Self::Home(HomeMaterialization::new(payload))
+    pub fn user_environment(payload: UserName) -> Self {
+        Self::UserEnvironment(UserEnvironmentMaterialization::new(payload))
     }
 }
 
 #[rustfmt::skip]
 impl ActivationProfile {
-    pub fn system(payload: SystemAction) -> Self {
-        Self::System(payload)
+    pub fn host(payload: HostDeployAction) -> Self {
+        Self::Host(payload)
     }
-    pub fn home(payload: HomeActivationProfile) -> Self {
-        Self::Home(payload)
+    pub fn user_environment(payload: UserEnvironmentActivationProfile) -> Self {
+        Self::UserEnvironment(payload)
     }
 }
 
@@ -591,8 +615,8 @@ impl EffectCommand {
 
 #[rustfmt::skip]
 impl EffectResult {
-    pub fn flake_resolved(payload: ResolvedFlake) -> Self {
-        Self::FlakeResolved(payload)
+    pub fn flake_resolved(payload: SourceRevisionRecord) -> Self {
+        Self::FlakeResolved(ResolvedFlake::new(payload))
     }
     pub fn horizon_materialized(payload: Vec<FlakeInputOverride>) -> Self {
         Self::HorizonMaterialized(MaterializedInputs::new(payload))
@@ -718,23 +742,23 @@ impl From<TargetStore> for BuildTarget {
 }
 
 #[rustfmt::skip]
-impl From<HomeMaterialization> for MaterializationShape {
-    fn from(payload: HomeMaterialization) -> Self {
-        Self::Home(payload)
+impl From<UserEnvironmentMaterialization> for MaterializationShape {
+    fn from(payload: UserEnvironmentMaterialization) -> Self {
+        Self::UserEnvironment(payload)
     }
 }
 
 #[rustfmt::skip]
-impl From<SystemAction> for ActivationProfile {
-    fn from(payload: SystemAction) -> Self {
-        Self::System(payload)
+impl From<HostDeployAction> for ActivationProfile {
+    fn from(payload: HostDeployAction) -> Self {
+        Self::Host(payload)
     }
 }
 
 #[rustfmt::skip]
-impl From<HomeActivationProfile> for ActivationProfile {
-    fn from(payload: HomeActivationProfile) -> Self {
-        Self::Home(payload)
+impl From<UserEnvironmentActivationProfile> for ActivationProfile {
+    fn from(payload: UserEnvironmentActivationProfile) -> Self {
+        Self::UserEnvironment(payload)
     }
 }
 

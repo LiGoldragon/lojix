@@ -36,15 +36,21 @@ pub use signal_lojix::schema::lib::PinLabel as PinLabel;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::ClosurePath as ClosurePath;
 #[rustfmt::skip]
+pub use signal_lojix::schema::lib::FlakeReference as FlakeReference;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::SourceRevisionPolicy as SourceRevisionPolicy;
+#[rustfmt::skip]
+pub use signal_lojix::schema::lib::SourceRevisionRecord as SourceRevisionRecord;
+#[rustfmt::skip]
 pub use signal_lojix::schema::lib::DeploymentIdentifier as DeploymentIdentifier;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::GenerationIdentifier as GenerationIdentifier;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::TestRunIdentifier as TestRunIdentifier;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::DeploymentKind as DeploymentKind;
+pub use signal_lojix::schema::lib::GenerationArtifact as GenerationArtifact;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::ActivationKind as ActivationKind;
+pub use signal_lojix::schema::lib::ActivationEffect as ActivationEffect;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::GenerationSlot as GenerationSlot;
 #[rustfmt::skip]
@@ -62,9 +68,9 @@ pub use signal_lojix::schema::lib::TestOutcome as TestOutcome;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::FailureStage as FailureStage;
 #[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::SystemDeployment as SystemDeployment;
+pub use meta_signal_lojix::schema::lib::HostDeployment as HostDeployment;
 #[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::HomeDeployment as HomeDeployment;
+pub use meta_signal_lojix::schema::lib::UserEnvironmentDeployment as UserEnvironmentDeployment;
 #[rustfmt::skip]
 pub use meta_signal_lojix::schema::lib::PinRequest as PinRequest;
 #[rustfmt::skip]
@@ -72,7 +78,7 @@ pub use meta_signal_lojix::schema::lib::UnpinRequest as UnpinRequest;
 #[rustfmt::skip]
 pub use meta_signal_lojix::schema::lib::RetireRequest as RetireRequest;
 #[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::AcceptedDeploy as AcceptedDeploy;
+pub use meta_signal_lojix::schema::lib::DeployHandle as DeployHandle;
 #[rustfmt::skip]
 pub use meta_signal_lojix::schema::lib::AcceptedTest as AcceptedTest;
 #[rustfmt::skip]
@@ -134,8 +140,8 @@ pub enum SemaWriteInput {
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum DeploySubmission {
-    System(SystemDeployment),
-    Home(HomeDeployment),
+    Host(HostDeployment),
+    UserEnvironment(UserEnvironmentDeployment),
 }
 
 #[rustfmt::skip]
@@ -147,6 +153,7 @@ pub struct ActivationCommit {
     pub node_name: NodeName,
     pub generation_slot: GenerationSlot,
     pub closure_path: ClosurePath,
+    pub source_revision_record: SourceRevisionRecord,
 }
 
 #[rustfmt::skip]
@@ -188,7 +195,7 @@ pub enum ContainerState {
 #[cfg_attr(feature = "nota-text", derive(nota_next::NotaDecode, nota_next::NotaEncode))]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum SemaWriteOutput {
-    DeploySubmitted(AcceptedDeploy),
+    DeploySubmitted(DeployHandle),
     PhaseRecorded(PhaseReceipt),
     GenerationActivated(AppliedActivation),
     GenerationPinned(AppliedPin),
@@ -288,10 +295,11 @@ pub struct LiveGeneration {
     pub generation_identifier: GenerationIdentifier,
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub deployment_kind: DeploymentKind,
-    pub activation_kind: ActivationKind,
+    pub generation_artifact: GenerationArtifact,
+    pub activation_effect: ActivationEffect,
     pub generation_slot: GenerationSlot,
     pub closure_path: ClosurePath,
+    pub source_revision_record: SourceRevisionRecord,
 }
 
 #[rustfmt::skip]
@@ -364,6 +372,10 @@ pub struct DeployJob {
     pub node_name: NodeName,
     pub phase: DeployJobPhase,
     pub closure_path: Option<ClosurePath>,
+    pub source_revision_policy: SourceRevisionPolicy,
+    pub requested_ref: FlakeReference,
+    pub resolved_ref: Option<FlakeReference>,
+    pub resolved_revision: Option<String>,
     pub resolved_target: Option<String>,
     pub boot_once_unit: Option<String>,
 }
@@ -661,17 +673,17 @@ impl SemaWriteInput {
 
 #[rustfmt::skip]
 impl DeploySubmission {
-    pub fn system(payload: SystemDeployment) -> Self {
-        Self::System(payload)
+    pub fn host(payload: HostDeployment) -> Self {
+        Self::Host(payload)
     }
-    pub fn home(payload: HomeDeployment) -> Self {
-        Self::Home(payload)
+    pub fn user_environment(payload: UserEnvironmentDeployment) -> Self {
+        Self::UserEnvironment(payload)
     }
 }
 
 #[rustfmt::skip]
 impl SemaWriteOutput {
-    pub fn deploy_submitted(payload: AcceptedDeploy) -> Self {
+    pub fn deploy_submitted(payload: DeployHandle) -> Self {
         Self::DeploySubmitted(payload)
     }
     pub fn phase_recorded(payload: PhaseReceipt) -> Self {
@@ -853,22 +865,22 @@ impl From<TestRunRecord> for SemaWriteInput {
 }
 
 #[rustfmt::skip]
-impl From<SystemDeployment> for DeploySubmission {
-    fn from(payload: SystemDeployment) -> Self {
-        Self::System(payload)
+impl From<HostDeployment> for DeploySubmission {
+    fn from(payload: HostDeployment) -> Self {
+        Self::Host(payload)
     }
 }
 
 #[rustfmt::skip]
-impl From<HomeDeployment> for DeploySubmission {
-    fn from(payload: HomeDeployment) -> Self {
-        Self::Home(payload)
+impl From<UserEnvironmentDeployment> for DeploySubmission {
+    fn from(payload: UserEnvironmentDeployment) -> Self {
+        Self::UserEnvironment(payload)
     }
 }
 
 #[rustfmt::skip]
-impl From<AcceptedDeploy> for SemaWriteOutput {
-    fn from(payload: AcceptedDeploy) -> Self {
+impl From<DeployHandle> for SemaWriteOutput {
+    fn from(payload: DeployHandle) -> Self {
         Self::DeploySubmitted(payload)
     }
 }

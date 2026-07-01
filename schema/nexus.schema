@@ -54,14 +54,17 @@
   ClosurePath signal-lojix:lib:ClosurePath
   FlakeReference signal-lojix:lib:FlakeReference
   ProposalSource signal-lojix:lib:ProposalSource
+  SourceRevisionPolicy signal-lojix:lib:SourceRevisionPolicy
+  SourceRevisionRecord signal-lojix:lib:SourceRevisionRecord
   UserName signal-lojix:lib:UserName
   GenerationIdentifier signal-lojix:lib:GenerationIdentifier
   DeploymentIdentifier signal-lojix:lib:DeploymentIdentifier
   GenerationSlot signal-lojix:lib:GenerationSlot
-  ActivationKind signal-lojix:lib:ActivationKind
-  SystemAction signal-lojix:lib:SystemAction
-  DeploymentKind signal-lojix:lib:DeploymentKind
-  HomeMode meta-signal-lojix:lib:HomeMode
+  ActivationEffect signal-lojix:lib:ActivationEffect
+  HostDeployAction signal-lojix:lib:HostDeployAction
+  HostComposition signal-lojix:lib:HostComposition
+  GenerationArtifact signal-lojix:lib:GenerationArtifact
+  UserEnvironmentAction signal-lojix:lib:UserEnvironmentAction
 }
 [NexusWork]
 [NexusAction]
@@ -74,20 +77,20 @@
   BuildTarget [Local (Remote BuilderNode) (TargetStore TargetStore)]
   ExtraSubstituter { url String public_key String }
 
-  FlakeAuthRequest { source ProposalSource flake FlakeReference }
-  ResolvedFlake { flake FlakeReference revision String }
-  HomeMaterialization { UserName * }
-  MaterializationShape [FullOs OsOnly (Home HomeMaterialization)]
+  FlakeAuthRequest { source ProposalSource flake FlakeReference source_revision_policy SourceRevisionPolicy }
+  ResolvedFlake { source_revision SourceRevisionRecord }
+  UserEnvironmentMaterialization { UserName * }
+  MaterializationShape [CompleteHost BaseHost (UserEnvironment UserEnvironmentMaterialization)]
   HorizonMaterializationCommand { ClusterName * NodeName * source ProposalSource shape MaterializationShape }
   FlakeInputReference { url String nix_archive_hash String }
   FlakeInputOverride { name String reference FlakeInputReference }
   MaterializedInputs { overrides (Vec FlakeInputOverride) }
-  NixEvalCommand { ClusterName * NodeName * DeploymentKind * flake FlakeReference attribute String overrides (Vec FlakeInputOverride) target BuildTarget }
+  NixEvalCommand { ClusterName * NodeName * GenerationArtifact * flake FlakeReference source_revision SourceRevisionRecord attribute String overrides (Vec FlakeInputOverride) target BuildTarget }
   NixBuildCommand { GenerationIdentifier * ClosurePath * target BuildTarget substituters (Vec ExtraSubstituter) }
   CopyClosureCommand { GenerationIdentifier * ClusterName * NodeName * ClosurePath * source BuildTarget }
-  HomeActivationProfile { mode HomeMode user UserName }
-  ActivationProfile [(System SystemAction) (Home HomeActivationProfile)]
-  ActivateGenerationCommand { DeploymentIdentifier * GenerationIdentifier * ClusterName * NodeName * ClosurePath * ActivationKind * profile ActivationProfile }
+  UserEnvironmentActivationProfile { action UserEnvironmentAction user UserName }
+  ActivationProfile [(Host HostDeployAction) (UserEnvironment UserEnvironmentActivationProfile)]
+  ActivateGenerationCommand { DeploymentIdentifier * GenerationIdentifier * ClusterName * NodeName * ClosurePath * ActivationEffect * profile ActivationProfile }
   PathInfoGcCommand { ClusterName * NodeName * }
 
   ;; HERMETIC test dispatch (report 54 §5.2). Build the pre-declared

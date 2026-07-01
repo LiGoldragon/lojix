@@ -2,7 +2,7 @@
 //!
 //! Drives a real `Deploy` through the engine's full Nexus pipeline
 //! (SignalArrived -> RecordDeploySubmitted -> ResolveFlakeAuth -> Building ->
-//! NixEval -> [NixBuild] -> Deployed) with REAL `nix` IO via
+//! NixEval -> [NixBuild] -> DeployAccepted) with REAL `nix` IO via
 //! `tokio::process::Command`. The target is the self-contained fixture
 //! `github:LiGoldragon/CriomOS-test-cluster#dune-nspawn-toplevel` (a
 //! `fixtureSystem "dune"` toplevel with its fixture horizon baked in), so it
@@ -49,19 +49,20 @@ fn write_daemon_configuration(
     path
 }
 
-/// A System deploy of the self-contained `dune` fixture closure, with the
+/// A host deploy of the self-contained `dune` fixture closure, with the
 /// `build_attribute` override naming the directly-buildable flake output (no
 /// horizon materialization). The proposal source is unused on this path
 /// (no projection), so it is a placeholder.
-fn dune_system_deploy(action: ordinary::SystemAction) -> meta::Input {
-    meta::Input::Deploy(meta::Deploy::new(meta::DeployRequest::System(
-        meta::SystemDeployment {
+fn dune_host_deploy(action: ordinary::HostDeployAction) -> meta::Input {
+    meta::Input::Deploy(meta::Deploy::new(meta::DeployRequest::Host(
+        meta::HostDeployment {
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new("dune"),
-            deployment_kind: ordinary::DeploymentKind::OsOnly,
+            host_composition: ordinary::HostComposition::BaseHost,
             source: ordinary::ProposalSource::new("/dev/null"),
             flake: ordinary::FlakeReference::new(FIXTURE_FLAKE),
-            system_action: action,
+            host_deploy_action: action,
+            source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
             builder: None,
             substituters: Vec::new(),
             build_attribute: Some(meta::FlakeAttribute::new(FIXTURE_ATTRIBUTE)),
@@ -87,30 +88,30 @@ fn drive(input: meta::Input) -> meta::Output {
 #[test]
 #[ignore = "hits the network and runs `nix eval`; run with --ignored"]
 fn eval_dune_fixture_through_the_engine() {
-    match drive(dune_system_deploy(ordinary::SystemAction::Eval)) {
-        meta::Output::Deployed(accepted) => {
+    match drive(dune_host_deploy(ordinary::HostDeployAction::Evaluate)) {
+        meta::Output::DeployAccepted(accepted) => {
             eprintln!(
-                "EVAL reached Deployed: deployment {} at commit {}",
+                "EVAL reached DeployAccepted: deployment {} at commit {}",
                 accepted.payload().deployment_identifier.payload(),
                 accepted.payload().database_marker.commit_sequence.payload(),
             );
         }
-        other => panic!("eval did not reach Deployed: {other:?}"),
+        other => panic!("eval did not reach DeployAccepted: {other:?}"),
     }
 }
 
 #[test]
 #[ignore = "hits the network and BUILDS the closure via `nix build` (slow); run with --ignored"]
 fn build_dune_fixture_through_the_engine() {
-    match drive(dune_system_deploy(ordinary::SystemAction::Build)) {
-        meta::Output::Deployed(accepted) => {
+    match drive(dune_host_deploy(ordinary::HostDeployAction::Realize)) {
+        meta::Output::DeployAccepted(accepted) => {
             eprintln!(
-                "BUILD reached Deployed: deployment {} realised at commit {}",
+                "BUILD reached DeployAccepted: deployment {} realised at commit {}",
                 accepted.payload().deployment_identifier.payload(),
                 accepted.payload().database_marker.commit_sequence.payload(),
             );
         }
-        other => panic!("build did not reach Deployed: {other:?}"),
+        other => panic!("build did not reach DeployAccepted: {other:?}"),
     }
 }
 
@@ -172,7 +173,7 @@ fn daemon_binary_socket_roundtrip_eval() {
     };
 
     let codec = LengthPrefixedCodec::default();
-    let input = dune_system_deploy(ordinary::SystemAction::Eval);
+    let input = dune_host_deploy(ordinary::HostDeployAction::Evaluate);
     let frame = FrameBody::new(input.encode_signal_frame().expect("encode request"));
     codec
         .write_body(&mut stream, &frame)
@@ -184,13 +185,13 @@ fn daemon_binary_socket_roundtrip_eval() {
     daemon.wait().ok();
 
     match output {
-        meta::Output::Deployed(accepted) => {
+        meta::Output::DeployAccepted(accepted) => {
             eprintln!(
-                "DAEMON SOCKET roundtrip reached Deployed: deployment {}",
+                "DAEMON SOCKET roundtrip reached DeployAccepted: deployment {}",
                 accepted.payload().deployment_identifier.payload(),
             );
         }
-        other => panic!("daemon socket roundtrip did not reach Deployed: {other:?}"),
+        other => panic!("daemon socket roundtrip did not reach DeployAccepted: {other:?}"),
     }
 }
 
@@ -287,7 +288,7 @@ fn oversized_frame_is_bounded_and_daemon_survives() {
     // The daemon must still serve a valid request afterwards.
     let mut stream = connect(&owner_socket, &mut daemon, deadline);
     let codec = LengthPrefixedCodec::default();
-    let input = dune_system_deploy(ordinary::SystemAction::Eval);
+    let input = dune_host_deploy(ordinary::HostDeployAction::Evaluate);
     let frame = FrameBody::new(input.encode_signal_frame().expect("encode request"));
     codec
         .write_body(&mut stream, &frame)
@@ -301,7 +302,7 @@ fn oversized_frame_is_bounded_and_daemon_survives() {
     daemon.wait().ok();
 
     assert!(
-        matches!(output, meta::Output::Deployed(_)),
+        matches!(output, meta::Output::DeployAccepted(_)),
         "daemon should serve a valid request after a hostile frame, got {output:?}",
     );
 }
@@ -360,12 +361,12 @@ fn concurrent_requests_are_served_in_parallel() {
     let deploy = thread::spawn(move || {
         let mut stream = connect(&owner_socket_path, deadline);
         let codec = LengthPrefixedCodec::default();
-        let input = dune_system_deploy(ordinary::SystemAction::Eval);
+        let input = dune_host_deploy(ordinary::HostDeployAction::Evaluate);
         let frame = FrameBody::new(input.encode_signal_frame().expect("encode deploy"));
         codec.write_body(&mut stream, &frame).expect("write deploy");
         let reply = codec.read_body(&mut stream).expect("read deploy reply");
         let (_, output) = meta::Output::decode_signal_frame(reply.bytes()).expect("decode deploy");
-        matches!(output, meta::Output::Deployed(_))
+        matches!(output, meta::Output::DeployAccepted(_))
     });
 
     // Let the deploy reach its `nix` work, then time an ordinary query: if the
@@ -379,7 +380,7 @@ fn concurrent_requests_are_served_in_parallel() {
         ordinary::NodeSelector {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
-            kind: None,
+            artifact: None,
         },
     )));
     let frame = FrameBody::new(query.encode_signal_frame().expect("encode query"));
@@ -393,7 +394,7 @@ fn concurrent_requests_are_served_in_parallel() {
     let (_, query_output) =
         ordinary::Output::decode_signal_frame(reply.bytes()).expect("decode query");
 
-    let deployed = deploy.join().expect("deploy thread");
+    let deploy_accepted = deploy.join().expect("deploy thread");
     daemon.kill().ok();
     daemon.wait().ok();
 
@@ -401,7 +402,10 @@ fn concurrent_requests_are_served_in_parallel() {
         matches!(query_output, ordinary::Output::Queried(_)),
         "expected a Queried reply, got {query_output:?}",
     );
-    assert!(deployed, "the owner deploy should still reach Deployed");
+    assert!(
+        deploy_accepted,
+        "the owner deploy should still reach DeployAccepted"
+    );
     assert!(
         query_latency < Duration::from_secs(4),
         "the ordinary query must be served concurrently with the in-flight deploy, \

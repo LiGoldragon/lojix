@@ -7,7 +7,7 @@
 //! pipeline (port plan §4.3): the write completion drives a chain of
 //! `RunEffect` continuations — resolve flake auth, eval, build, copy, activate
 //! — recording a phase transition between stages and finally replying
-//! `Deployed`. `run_effect` does real `nix` IO through `tokio::process::Command`
+//! `DeployAccepted`. `run_effect` does real `nix` IO through `tokio::process::Command`
 //! so actor-native request tasks await child processes directly instead of
 //! routing generated Nexus execution through a blocking-pool bridge.
 
@@ -660,13 +660,13 @@ impl LiveTestVm {
 
 /// The synchronous outcome of [`SchemaRuntime::submit_deploy`] — the verdict the
 /// daemon replies to the owner connection immediately, before the deploy
-/// pipeline runs (up9q). `Accepted` carries the `AcceptedDeploy` handle (the
+/// pipeline runs (up9q). `Accepted` carries the `DeployHandle` handle (the
 /// durable deployment identifier + marker) and leaves the in-flight cursor set
 /// for the deploy-job actor to drive; `Rejected` is a typed up-front refusal
 /// (unsupported action, or a submission write rejection) and leaves no cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeploySubmissionOutcome {
-    Accepted(meta::AcceptedDeploy),
+    Accepted(meta::DeployHandle),
     Rejected(meta::RejectedDeploy),
 }
 
@@ -757,16 +757,16 @@ impl RuntimeConfiguration {
 
     fn shape_name(shape: &nexus::MaterializationShape) -> &'static str {
         match shape {
-            nexus::MaterializationShape::FullOs => "full-os",
-            nexus::MaterializationShape::OsOnly => "os-only",
-            nexus::MaterializationShape::Home(_) => "home",
+            nexus::MaterializationShape::CompleteHost => "complete-host",
+            nexus::MaterializationShape::BaseHost => "base-host",
+            nexus::MaterializationShape::UserEnvironment(_) => "user-environment",
         }
     }
 }
 
 /// The BootOnce transient unit name a deployment owns. Defined here (not on the
 /// foreign schema-emitted `DeploymentIdentifier`) and implemented on that type
-/// so the activation-side `SystemActivation::unit_name` and the resume-side
+/// so the activation-side `HostActivation::unit_name` and the resume-side
 /// `DeployJob::boot_once_unit` derive ONE deterministic string from ONE place —
 /// `lojix-boot-once-deploy-<deployment-identifier>` — instead of the old
 /// activation-only time+pid suffix that no resumed daemon could reconstruct
@@ -791,18 +791,22 @@ struct DeployPipeline {
     generation_identifier: ordinary::GenerationIdentifier,
     cluster_name: ordinary::ClusterName,
     node_name: ordinary::NodeName,
-    deployment_kind: ordinary::DeploymentKind,
-    activation_kind: ordinary::ActivationKind,
+    generation_artifact: ordinary::GenerationArtifact,
+    activation_effect: ordinary::ActivationEffect,
+    activation_slot: Option<ordinary::GenerationSlot>,
     source: ordinary::ProposalSource,
+    requested_flake: ordinary::FlakeReference,
     flake: ordinary::FlakeReference,
     /// A direct flake output attribute to build (a self-contained fixture /
     /// test closure), overriding the production `nixosConfigurations.target`
     /// path. `None` for a production deploy that needs the horizon override.
     build_attribute: Option<meta::FlakeAttribute>,
-    /// The deploy action (System action, or Home mode + user). Owns the
+    /// The deploy action (host action, or user-environment action + user). Owns the
     /// produces-closure / activates / target-attribute decisions so the
     /// pipeline asks the action rather than storing derived booleans.
     action: DeployAction,
+    source_revision_policy: meta::SourceRevisionPolicy,
+    source_revision: Option<ordinary::SourceRevisionRecord>,
     builder: Option<ordinary::NodeName>,
     substituters: Vec<nexus::ExtraSubstituter>,
     input_overrides: Vec<nexus::FlakeInputOverride>,
@@ -815,7 +819,7 @@ struct DeployPipeline {
 /// completed; after a phase-transition write commits, `advance_after_phase`
 /// reads it to emit the next effect (or the final activation-record write).
 /// The chain is: Submitted -> (FlakeAuth) -> Building/Eval -> Build -> Copy ->
-/// (Copying) -> Activate -> (Activated) -> RecordGenerationActivated -> Deployed.
+/// (Copying) -> Activate -> (Activated) -> RecordGenerationActivated -> DeployAccepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeployStage {
     /// Deploy accepted; the flake-auth + eval effects come next.
@@ -829,55 +833,60 @@ enum DeployStage {
     ActivatedRecorded,
 }
 
-/// The deploy action — a System action or a Home mode (with its user). Owns
-/// the produces-closure / activates / target-attribute decisions so the
-/// pipeline asks the action rather than storing derived booleans.
+/// The deploy action — a host action or a user-environment action (with its
+/// user). Owns the produces-closure / activates / target-attribute decisions
+/// so the pipeline asks the action rather than storing derived booleans.
 #[derive(Debug, Clone)]
 enum DeployAction {
-    System(ordinary::SystemAction),
-    Home {
-        mode: meta::HomeMode,
+    Host(ordinary::HostDeployAction),
+    UserEnvironment {
+        action: meta::UserEnvironmentAction,
         user: ordinary::UserName,
     },
 }
 
 impl DeployAction {
-    /// `false` only for a System `Eval` (derivation path only, no realised
-    /// closure). Home modes always build a closure.
+    /// `false` only for host `Evaluate` (derivation path only, no realised
+    /// closure). User-environment actions always build a closure.
     fn produces_closure(&self) -> bool {
         match self {
-            Self::System(action) => !matches!(action, ordinary::SystemAction::Eval),
-            Self::Home { .. } => true,
+            Self::Host(action) => !matches!(action, ordinary::HostDeployAction::Evaluate),
+            Self::UserEnvironment { .. } => true,
         }
     }
 
-    /// Whether the action copies + activates after the build: System
-    /// Boot/Switch/Test/BootOnce, or Home Profile/Activate. `Eval` and
-    /// `Build` (and Home `Build`) stop at the realised closure.
+    /// Whether the action copies + activates after the build: host
+    /// SetBootProfile/ActivateNow/TestActivation/ScheduleBootOnce, or
+    /// user-environment SetProfile/ActivateNow. Host Evaluate/Realize and
+    /// user-environment Realize stop at the realised closure.
     fn activates(&self) -> bool {
         match self {
-            Self::System(action) => matches!(
+            Self::Host(action) => matches!(
                 action,
-                ordinary::SystemAction::Boot
-                    | ordinary::SystemAction::Switch
-                    | ordinary::SystemAction::Test
-                    | ordinary::SystemAction::BootOnce
+                ordinary::HostDeployAction::SetBootProfile
+                    | ordinary::HostDeployAction::ActivateNow
+                    | ordinary::HostDeployAction::TestActivation
+                    | ordinary::HostDeployAction::ScheduleBootOnce
             ),
-            Self::Home { mode, .. } => {
-                matches!(mode, meta::HomeMode::Profile | meta::HomeMode::Activate)
+            Self::UserEnvironment { action, .. } => {
+                matches!(
+                    action,
+                    meta::UserEnvironmentAction::SetProfile
+                        | meta::UserEnvironmentAction::ActivateNow
+                )
             }
         }
     }
 
     /// The activation profile carried on the activate command — the shape that
-    /// decides which target-side activation runs (System switch-to-configuration
-    /// vs Home home-manager profile/activate).
+    /// decides which target-side activation runs (host switch-to-configuration
+    /// vs user-environment home-manager profile/activate).
     fn activation_profile(&self) -> nexus::ActivationProfile {
         match self {
-            Self::System(action) => nexus::ActivationProfile::System(*action),
-            Self::Home { mode, user } => {
-                nexus::ActivationProfile::Home(nexus::HomeActivationProfile {
-                    mode: *mode,
+            Self::Host(action) => nexus::ActivationProfile::Host(*action),
+            Self::UserEnvironment { action, user } => {
+                nexus::ActivationProfile::UserEnvironment(nexus::UserEnvironmentActivationProfile {
+                    action: *action,
                     user: user.clone(),
                 })
             }
@@ -885,18 +894,164 @@ impl DeployAction {
     }
 
     /// The production flake attribute for this action — used when no direct
-    /// `build_attribute` override is given. System builds the node toplevel
-    /// (node identity injected by the horizon override, the deferred M3
-    /// materialization work); Home builds the user's activation package.
+    /// `build_attribute` override is given. Host deploys build the node
+    /// toplevel (node identity injected by the horizon override);
+    /// user-environment deploys build the user's activation package.
     fn target_attribute(&self) -> String {
         match self {
-            Self::System(_) => {
-                "nixosConfigurations.target.config.system.build.toplevel".to_string()
-            }
-            Self::Home { user, .. } => {
+            Self::Host(_) => "nixosConfigurations.target.config.system.build.toplevel".to_string(),
+            Self::UserEnvironment { user, .. } => {
                 format!("homeConfigurations.{}.activationPackage", user.payload())
             }
         }
+    }
+}
+
+struct FlakeReferencePolicy<'a> {
+    reference: &'a str,
+}
+
+impl<'a> FlakeReferencePolicy<'a> {
+    fn new(reference: &'a str) -> Self {
+        Self { reference }
+    }
+
+    fn is_immutable(&self) -> bool {
+        FlakeReferenceText::new(self.reference)
+            .query()
+            .is_some_and(|query| query.has_immutable_identity())
+    }
+}
+
+struct FlakeReferenceText<'a> {
+    raw: &'a str,
+}
+
+impl<'a> FlakeReferenceText<'a> {
+    fn new(raw: &'a str) -> Self {
+        Self { raw }
+    }
+
+    fn query(&self) -> Option<FlakeReferenceQuery<'a>> {
+        let (_, query) = self.raw.split_once('?')?;
+        Some(FlakeReferenceQuery { raw: query })
+    }
+}
+
+struct FlakeReferenceQuery<'a> {
+    raw: &'a str,
+}
+
+impl FlakeReferenceQuery<'_> {
+    fn has_immutable_identity(&self) -> bool {
+        self.raw
+            .split('&')
+            .filter_map(FlakeQueryParameter::parse)
+            .any(|parameter| parameter.is_immutable_identity())
+    }
+}
+
+struct FlakeQueryParameter<'a> {
+    key: &'a str,
+    value: &'a str,
+}
+
+impl<'a> FlakeQueryParameter<'a> {
+    fn parse(raw: &'a str) -> Option<Self> {
+        let (key, value) = raw.split_once('=')?;
+        if key.is_empty() || value.is_empty() || value.contains('=') {
+            return None;
+        }
+        Some(Self { key, value })
+    }
+
+    fn is_immutable_identity(&self) -> bool {
+        match self.key {
+            "rev" => RevisionText::new(self.value).is_full_commit_hash(),
+            "narHash" => NarHashText::new(self.value).is_sri_hash(),
+            _ => false,
+        }
+    }
+}
+
+struct RevisionText<'a> {
+    raw: &'a str,
+}
+
+impl<'a> RevisionText<'a> {
+    fn new(raw: &'a str) -> Self {
+        Self { raw }
+    }
+
+    fn is_full_commit_hash(&self) -> bool {
+        self.raw.len() == 40
+            && self
+                .raw
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+    }
+}
+
+struct NarHashText<'a> {
+    raw: &'a str,
+}
+
+impl<'a> NarHashText<'a> {
+    fn new(raw: &'a str) -> Self {
+        Self { raw }
+    }
+
+    fn is_sri_hash(&self) -> bool {
+        self.raw
+            .strip_prefix("sha256-")
+            .is_some_and(|hash| !hash.is_empty())
+    }
+}
+
+struct NixFlakeMetadata {
+    value: serde_json::Value,
+}
+
+impl NixFlakeMetadata {
+    fn parse(text: &str) -> std::result::Result<Self, String> {
+        serde_json::from_str(text)
+            .map(|value| Self { value })
+            .map_err(|error| format!("nix flake metadata returned malformed json: {error}"))
+    }
+
+    fn source_revision(
+        &self,
+        policy: ordinary::SourceRevisionPolicy,
+        requested_ref: ordinary::FlakeReference,
+    ) -> ordinary::SourceRevisionRecord {
+        let resolved_ref = self
+            .string_at(&["url"])
+            .or_else(|| self.string_at(&["resolvedUrl"]))
+            .map(ordinary::FlakeReference::new)
+            .unwrap_or_else(|| requested_ref.clone());
+        ordinary::SourceRevisionRecord {
+            policy,
+            requested_ref,
+            resolved_ref,
+            resolved_revision: self.resolved_revision(),
+        }
+    }
+
+    fn resolved_revision(&self) -> String {
+        self.string_at(&["locked", "rev"])
+            .or_else(|| self.string_at(&["revision"]))
+            .or_else(|| self.string_at(&["rev"]))
+            .or_else(|| self.string_at(&["locked", "narHash"]))
+            .or_else(|| self.string_at(&["narHash"]))
+            .unwrap_or_default()
+    }
+
+    fn string_at(&self, path: &[&str]) -> Option<String> {
+        let mut value = &self.value;
+        for key in path {
+            value = value.get(*key)?;
+        }
+        value.as_str().map(ToOwned::to_owned)
     }
 }
 
@@ -908,17 +1063,21 @@ impl DeployPipeline {
         submission: sema::DeploySubmission,
     ) -> Self {
         match submission {
-            sema::DeploySubmission::System(deployment) => Self {
+            sema::DeploySubmission::Host(deployment) => Self {
                 deployment_identifier,
                 generation_identifier,
                 cluster_name: deployment.cluster_name,
                 node_name: deployment.node_name,
-                deployment_kind: deployment.deployment_kind,
-                activation_kind: Self::system_activation_kind(deployment.system_action),
+                generation_artifact: Self::host_generation_artifact(deployment.host_composition),
+                activation_effect: Self::host_activation_effect(deployment.host_deploy_action),
+                activation_slot: None,
                 source: deployment.source,
+                requested_flake: deployment.flake.clone(),
                 flake: deployment.flake,
                 build_attribute: deployment.build_attribute,
-                action: DeployAction::System(deployment.system_action),
+                action: DeployAction::Host(deployment.host_deploy_action),
+                source_revision_policy: deployment.source_revision_policy,
+                source_revision: None,
                 builder: deployment.builder.map(meta::Builder::into_payload),
                 substituters: Self::convert_substituters(deployment.substituters),
                 input_overrides: Vec::new(),
@@ -926,20 +1085,26 @@ impl DeployPipeline {
                 accepted_marker,
                 stage: DeployStage::Submitted,
             },
-            sema::DeploySubmission::Home(deployment) => Self {
+            sema::DeploySubmission::UserEnvironment(deployment) => Self {
                 deployment_identifier,
                 generation_identifier,
                 cluster_name: deployment.cluster_name,
                 node_name: deployment.node_name,
-                deployment_kind: ordinary::DeploymentKind::HomeOnly,
-                activation_kind: ordinary::ActivationKind::Switch,
+                generation_artifact: ordinary::GenerationArtifact::UserEnvironment,
+                activation_effect: Self::user_environment_activation_effect(
+                    deployment.user_environment_action,
+                ),
+                activation_slot: None,
                 source: deployment.source,
+                requested_flake: deployment.flake.clone(),
                 flake: deployment.flake,
                 build_attribute: None,
-                action: DeployAction::Home {
-                    mode: deployment.home_mode,
+                action: DeployAction::UserEnvironment {
+                    action: deployment.user_environment_action,
                     user: deployment.user_name,
                 },
+                source_revision_policy: deployment.source_revision_policy,
+                source_revision: None,
                 builder: deployment.builder.map(meta::Builder::into_payload),
                 substituters: Self::convert_substituters(deployment.substituters),
                 input_overrides: Vec::new(),
@@ -950,14 +1115,37 @@ impl DeployPipeline {
         }
     }
 
-    fn system_activation_kind(action: ordinary::SystemAction) -> ordinary::ActivationKind {
+    fn host_generation_artifact(
+        composition: ordinary::HostComposition,
+    ) -> ordinary::GenerationArtifact {
+        match composition {
+            ordinary::HostComposition::CompleteHost => ordinary::GenerationArtifact::CompleteHost,
+            ordinary::HostComposition::BaseHost => ordinary::GenerationArtifact::BaseHost,
+        }
+    }
+
+    fn host_activation_effect(action: ordinary::HostDeployAction) -> ordinary::ActivationEffect {
         match action {
-            ordinary::SystemAction::Boot => ordinary::ActivationKind::Boot,
-            ordinary::SystemAction::Test => ordinary::ActivationKind::Test,
-            ordinary::SystemAction::BootOnce => ordinary::ActivationKind::BootOnce,
-            ordinary::SystemAction::Eval
-            | ordinary::SystemAction::Build
-            | ordinary::SystemAction::Switch => ordinary::ActivationKind::Switch,
+            ordinary::HostDeployAction::SetBootProfile => ordinary::ActivationEffect::BootProfile,
+            ordinary::HostDeployAction::TestActivation => {
+                ordinary::ActivationEffect::TestActivation
+            }
+            ordinary::HostDeployAction::ScheduleBootOnce => {
+                ordinary::ActivationEffect::BootOnceProfile
+            }
+            ordinary::HostDeployAction::Evaluate
+            | ordinary::HostDeployAction::Realize
+            | ordinary::HostDeployAction::ActivateNow => ordinary::ActivationEffect::LiveActivation,
+        }
+    }
+
+    fn user_environment_activation_effect(
+        action: meta::UserEnvironmentAction,
+    ) -> ordinary::ActivationEffect {
+        match action {
+            meta::UserEnvironmentAction::Realize => ordinary::ActivationEffect::ProfileOnly,
+            meta::UserEnvironmentAction::SetProfile => ordinary::ActivationEffect::ProfileOnly,
+            meta::UserEnvironmentAction::ActivateNow => ordinary::ActivationEffect::LiveActivation,
         }
     }
 
@@ -990,6 +1178,7 @@ impl DeployPipeline {
         nexus::FlakeAuthRequest {
             source: self.source.clone(),
             flake: self.flake.clone(),
+            source_revision_policy: self.source_revision_policy,
         }
     }
 
@@ -1008,13 +1197,19 @@ impl DeployPipeline {
 
     fn materialization_shape(&self) -> nexus::MaterializationShape {
         match &self.action {
-            DeployAction::System(_) => match &self.deployment_kind {
-                ordinary::DeploymentKind::FullOs => nexus::MaterializationShape::FullOs,
-                ordinary::DeploymentKind::OsOnly => nexus::MaterializationShape::OsOnly,
-                ordinary::DeploymentKind::HomeOnly => nexus::MaterializationShape::OsOnly,
+            DeployAction::Host(_) => match &self.generation_artifact {
+                ordinary::GenerationArtifact::CompleteHost => {
+                    nexus::MaterializationShape::CompleteHost
+                }
+                ordinary::GenerationArtifact::BaseHost => nexus::MaterializationShape::BaseHost,
+                ordinary::GenerationArtifact::UserEnvironment => {
+                    nexus::MaterializationShape::BaseHost
+                }
             },
-            DeployAction::Home { user, .. } => {
-                nexus::MaterializationShape::Home(nexus::HomeMaterialization::new(user.clone()))
+            DeployAction::UserEnvironment { user, .. } => {
+                nexus::MaterializationShape::UserEnvironment(
+                    nexus::UserEnvironmentMaterialization::new(user.clone()),
+                )
             }
         }
     }
@@ -1023,8 +1218,9 @@ impl DeployPipeline {
         nexus::NixEvalCommand {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
-            deployment_kind: self.deployment_kind,
+            generation_artifact: self.generation_artifact,
             flake: self.flake.clone(),
+            source_revision: self.source_revision_record(),
             attribute: self.target_attribute(),
             overrides: self.input_overrides.clone(),
             // Build-on-target (Spirit ufjd / 0a9p / lc28, report 150): the eval
@@ -1086,23 +1282,37 @@ impl DeployPipeline {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             closure_path,
-            activation_kind: self.activation_kind,
+            activation_effect: self.activation_effect,
             profile: self.action.activation_profile(),
         }
     }
 
-    /// The activation-record write. The closure path is mandatory: by the time
-    /// the pipeline records activation it has been captured on the cursor (the
-    /// activate command already required it, risk R2), so `None` here is an
-    /// internal invariant failure surfaced through `activation_commit` returning
-    /// `None` rather than committing an empty closure into the live set.
+    fn source_revision_record(&self) -> ordinary::SourceRevisionRecord {
+        self.source_revision
+            .clone()
+            .unwrap_or_else(|| ordinary::SourceRevisionRecord {
+                policy: self.source_revision_policy,
+                requested_ref: self.requested_flake.clone(),
+                resolved_ref: self.flake.clone(),
+                resolved_revision: String::new(),
+            })
+    }
+
+    /// The activation-record write. The closure path, resolved source revision,
+    /// and computed activation slot are mandatory: by the time the pipeline
+    /// records activation they have been captured on the cursor (the activate
+    /// command already required the closure and returned the slot), so `None`
+    /// here is an internal invariant failure surfaced through
+    /// `activation_commit` returning `None` rather than committing incomplete
+    /// state into the live set.
     fn activation_commit(&self) -> Option<sema::ActivationCommit> {
         Some(sema::ActivationCommit {
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
-            generation_slot: ordinary::GenerationSlot::Current,
+            generation_slot: self.activation_slot?,
             closure_path: self.closure_path.clone()?,
+            source_revision_record: self.source_revision.clone()?,
         })
     }
 
@@ -1120,6 +1330,7 @@ impl DeployPipeline {
             deployment_phase: phase,
             event_log_position,
             detail,
+            source_revision: self.source_revision.clone(),
         }
     }
 
@@ -1141,7 +1352,7 @@ impl DeployPipeline {
     /// unit to poll; copy is idempotent and activation re-runs safely).
     fn boot_once_unit(&self) -> Option<String> {
         match &self.action {
-            DeployAction::System(ordinary::SystemAction::BootOnce) => {
+            DeployAction::Host(ordinary::HostDeployAction::ScheduleBootOnce) => {
                 Some(self.deployment_identifier.boot_once_unit_name())
             }
             _ => None,
@@ -1160,6 +1371,16 @@ impl DeployPipeline {
             node_name: self.node_name.clone(),
             phase,
             closure_path: self.closure_path.clone(),
+            source_revision_policy: self.source_revision_policy,
+            requested_ref: self.requested_flake.clone(),
+            resolved_ref: self
+                .source_revision
+                .as_ref()
+                .map(|source_revision| source_revision.resolved_ref.clone()),
+            resolved_revision: self
+                .source_revision
+                .as_ref()
+                .map(|source_revision| source_revision.resolved_revision.clone()),
             resolved_target: self.resolved_target(),
             boot_once_unit: self.boot_once_unit(),
         }
@@ -1330,7 +1551,7 @@ impl SchemaRuntime {
     /// Run ONLY the synchronous submit step of a `Deploy` (up9q surface a): the
     /// reject-guard, restart-safe identifier issuance, in-flight job-row
     /// persistence at `Submitted`, and cursor construction. Returns the typed
-    /// admission outcome immediately — the `AcceptedDeploy` handle the daemon
+    /// admission outcome immediately — the `DeployHandle` handle the daemon
     /// replies before the pipeline runs, or a typed rejection. On accept the
     /// in-flight cursor is left set on `self`, so the daemon hands this engine
     /// to the deploy-job actor, which drives the pipeline via
@@ -1339,10 +1560,15 @@ impl SchemaRuntime {
         if let Some(reason) = Self::unsupported_deploy_reason(&request) {
             return DeploySubmissionOutcome::Rejected(self.deploy_rejection(reason));
         }
+        if let Some(reason) = Self::source_revision_policy_rejection(&request) {
+            return DeploySubmissionOutcome::Rejected(self.deploy_rejection(reason));
+        }
         self.active_operation = Some(MetaOperation::Deploy);
         let submission = match request {
-            meta::DeployRequest::System(deployment) => sema::DeploySubmission::System(deployment),
-            meta::DeployRequest::Home(deployment) => sema::DeploySubmission::Home(deployment),
+            meta::DeployRequest::Host(deployment) => sema::DeploySubmission::Host(deployment),
+            meta::DeployRequest::UserEnvironment(deployment) => {
+                sema::DeploySubmission::UserEnvironment(deployment)
+            }
         };
         match self.record_deploy_submitted(submission) {
             sema::SemaWriteOutput::DeploySubmitted(accepted) => {
@@ -1375,12 +1601,12 @@ impl SchemaRuntime {
     /// the generated runner at the `DeploySubmitted` continuation, so it runs
     /// the SAME flake-auth -> eval -> build -> copy -> activate -> record chain
     /// the inline path ran, updating the durable job row at every phase. The
-    /// returned `meta::Output` is the terminal deploy outcome (Deployed or
-    /// DeployRejected) for logging and tests; the client already has its handle
-    /// and re-observes the outcome by deployment identifier.
+    /// returned `meta::Output` is daemon-internal executor evidence for logging
+    /// and tests; the client already has its admission handle and re-observes
+    /// the outcome by deployment identifier.
     pub async fn drive_submitted_deploy(&mut self) -> meta::Output {
         let accepted = match self.active_deploy.as_ref() {
-            Some(pipeline) => meta::AcceptedDeploy {
+            Some(pipeline) => meta::DeployHandle {
                 deployment_identifier: pipeline.deployment_identifier.clone(),
                 database_marker: pipeline.accepted_marker.clone(),
             },
@@ -1536,6 +1762,9 @@ impl SchemaRuntime {
                     ordinary::Selection::ByTestRun(lookup) => nexus::NexusAction::CommandSemaRead(
                         sema::SemaReadInput::QueryTestRuns(lookup),
                     ),
+                    ordinary::Selection::ByEventLog(range) => nexus::NexusAction::CommandSemaRead(
+                        sema::SemaReadInput::ReadEventLog(range),
+                    ),
                     selection => nexus::NexusAction::CommandSemaRead(
                         sema::SemaReadInput::QueryGenerations(selection),
                     ),
@@ -1583,13 +1812,18 @@ impl SchemaRuntime {
                         meta::DeployRejected::new(self.deploy_rejection(reason)),
                     ));
                 }
+                if let Some(reason) = Self::source_revision_policy_rejection(&request) {
+                    return Self::reply_meta(meta::Output::DeployRejected(
+                        meta::DeployRejected::new(self.deploy_rejection(reason)),
+                    ));
+                }
                 self.active_operation = Some(MetaOperation::Deploy);
                 let submission = match request {
-                    meta::DeployRequest::System(deployment) => {
-                        sema::DeploySubmission::System(deployment)
+                    meta::DeployRequest::Host(deployment) => {
+                        sema::DeploySubmission::Host(deployment)
                     }
-                    meta::DeployRequest::Home(deployment) => {
-                        sema::DeploySubmission::Home(deployment)
+                    meta::DeployRequest::UserEnvironment(deployment) => {
+                        sema::DeploySubmission::UserEnvironment(deployment)
                     }
                 };
                 nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordDeploySubmitted(
@@ -1702,9 +1936,10 @@ impl SchemaRuntime {
         }
     }
 
-    /// The deploy reject-guard. Production System/Home eval/build are
-    /// implemented through Horizon materialization, and the activating actions
-    /// (System Boot/Switch/Test/BootOnce, Home Profile/Activate) now construct
+    /// The deploy reject-guard. Production host and user-environment eval/build
+    /// are implemented through Horizon materialization, and the activating actions
+    /// (host SetBootProfile/ActivateNow/TestActivation/ScheduleBootOnce,
+    /// user-environment SetProfile/ActivateNow) now construct
     /// target-safe copy + activate commands (S4a), so every declared action is
     /// supported and enters the effect pipeline. `UnsupportedDeployAction`
     /// stays in the enum for honesty on any future not-yet-implemented shape;
@@ -1713,25 +1948,48 @@ impl SchemaRuntime {
         request: &meta::DeployRequest,
     ) -> Option<meta::DeployRejectionReason> {
         match request {
-            meta::DeployRequest::System(deployment) => {
+            meta::DeployRequest::Host(deployment) => {
                 let supported = matches!(
-                    deployment.system_action,
-                    ordinary::SystemAction::Eval
-                        | ordinary::SystemAction::Build
-                        | ordinary::SystemAction::Boot
-                        | ordinary::SystemAction::Switch
-                        | ordinary::SystemAction::Test
-                        | ordinary::SystemAction::BootOnce
+                    deployment.host_deploy_action,
+                    ordinary::HostDeployAction::Evaluate
+                        | ordinary::HostDeployAction::Realize
+                        | ordinary::HostDeployAction::SetBootProfile
+                        | ordinary::HostDeployAction::ActivateNow
+                        | ordinary::HostDeployAction::TestActivation
+                        | ordinary::HostDeployAction::ScheduleBootOnce
                 );
                 (!supported).then_some(meta::DeployRejectionReason::UnsupportedDeployAction)
             }
-            meta::DeployRequest::Home(deployment) => {
+            meta::DeployRequest::UserEnvironment(deployment) => {
                 let supported = matches!(
-                    deployment.home_mode,
-                    meta::HomeMode::Build | meta::HomeMode::Profile | meta::HomeMode::Activate
+                    deployment.user_environment_action,
+                    meta::UserEnvironmentAction::Realize
+                        | meta::UserEnvironmentAction::SetProfile
+                        | meta::UserEnvironmentAction::ActivateNow
                 );
                 (!supported).then_some(meta::DeployRejectionReason::UnsupportedDeployAction)
             }
+        }
+    }
+
+    fn source_revision_policy_rejection(
+        request: &meta::DeployRequest,
+    ) -> Option<meta::DeployRejectionReason> {
+        let (policy, flake) = match request {
+            meta::DeployRequest::Host(deployment) => (
+                deployment.source_revision_policy,
+                deployment.flake.payload(),
+            ),
+            meta::DeployRequest::UserEnvironment(deployment) => (
+                deployment.source_revision_policy,
+                deployment.flake.payload(),
+            ),
+        };
+        match policy {
+            meta::SourceRevisionPolicy::ResolveAndRecord => None,
+            meta::SourceRevisionPolicy::RequireImmutable => (!FlakeReferencePolicy::new(flake)
+                .is_immutable())
+            .then_some(meta::DeployRejectionReason::FlakeReferenceMalformed),
         }
     }
 
@@ -1748,11 +2006,13 @@ impl SchemaRuntime {
             sema::SemaReadOutput::TestRunsQueried(listing) => {
                 ordinary::Output::TestRunsQueried(ordinary::TestRunsQueried::new(listing))
             }
-            sema::SemaReadOutput::EventLogRead(_) => {
-                ordinary::Output::QueryRejected(ordinary::QueryRejected::new(
-                    self.query_rejection(ordinary::QueryRejectionReason::MalformedSelector),
-                ))
-            }
+            sema::SemaReadOutput::EventLogRead(page) => ordinary::Output::DeploymentEventsQueried(
+                ordinary::DeploymentEventsQueried::new(ordinary::EventLogPage {
+                    deployment_events: page.deployment_events,
+                    retention_events: page.retention_events,
+                    database_marker: Self::marker(page.state_marker.commit_sequence.into_payload()),
+                }),
+            ),
             sema::SemaReadOutput::ReadMissed(report) => ordinary::Output::QueryRejected(
                 ordinary::QueryRejected::new(ordinary::RejectedQuery {
                     query_rejection_reason: ordinary::QueryRejectionReason::GenerationUnknown,
@@ -1761,14 +2021,6 @@ impl SchemaRuntime {
             ),
         };
         nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
-    }
-
-    fn query_rejection(&self, reason: ordinary::QueryRejectionReason) -> ordinary::RejectedQuery {
-        let commit_sequence = self.store.commit_sequence().unwrap_or(0);
-        ordinary::RejectedQuery {
-            query_rejection_reason: reason,
-            database_marker: Self::marker(commit_sequence),
-        }
     }
 
     // ---- decide: sema write completion (opens / advances pipeline) ------
@@ -1952,10 +2204,14 @@ impl SchemaRuntime {
         }
     }
 
-    fn begin_deploy_pipeline(&mut self, accepted: meta::AcceptedDeploy) -> nexus::NexusAction {
+    fn begin_deploy_pipeline(&mut self, accepted: meta::DeployHandle) -> nexus::NexusAction {
         let pipeline = match self.active_deploy.as_ref() {
             Some(pipeline) => pipeline.clone(),
-            None => return Self::reply_meta(meta::Output::Deployed(meta::Deployed::new(accepted))),
+            None => {
+                return Self::reply_meta(meta::Output::DeployAccepted(meta::DeployAccepted::new(
+                    accepted,
+                )));
+            }
         };
         // First effect of the chain: resolve the flake against the proposal
         // source. Subsequent effects are emitted from `decide_effect_completion`.
@@ -2043,16 +2299,18 @@ impl SchemaRuntime {
             self.retire_job_row(&pipeline.clone());
         }
         let accepted = match self.active_deploy.take() {
-            Some(pipeline) => meta::AcceptedDeploy {
+            Some(pipeline) => meta::DeployHandle {
                 deployment_identifier: pipeline.deployment_identifier,
                 database_marker: pipeline.accepted_marker,
             },
-            None => meta::AcceptedDeploy {
+            None => meta::DeployHandle {
                 deployment_identifier: ordinary::DeploymentIdentifier::new(0),
                 database_marker: Self::marker(self.store.commit_sequence().unwrap_or(0)),
             },
         };
-        Self::reply_meta(meta::Output::Deployed(meta::Deployed::new(accepted)))
+        Self::reply_meta(meta::Output::DeployAccepted(meta::DeployAccepted::new(
+            accepted,
+        )))
     }
 
     fn reject_active_or_meta(&mut self, report: sema::RejectionReport) -> nexus::NexusAction {
@@ -2186,7 +2444,8 @@ impl SchemaRuntime {
             }
         };
         match result {
-            nexus::EffectResult::FlakeResolved(_) => {
+            nexus::EffectResult::FlakeResolved(resolved) => {
+                self.set_resolved_flake(resolved);
                 if pipeline.needs_horizon_materialization() {
                     nexus::NexusAction::CommandEffect(nexus::EffectCommand::MaterializeHorizon(
                         pipeline.horizon_materialization_command(),
@@ -2209,7 +2468,7 @@ impl SchemaRuntime {
                             .nix_build_command(evaluated.closure_path, self.configuration.as_ref()),
                     ))
                 } else {
-                    // System `Eval`: the derivation path is the result — finish
+                    // Host `Evaluate`: the derivation path is the result — finish
                     // the pipeline without building.
                     self.finish_deploy_pipeline()
                 }
@@ -2233,10 +2492,13 @@ impl SchemaRuntime {
                 // back through advance_after_phase, which fires ActivateGeneration.
                 self.record_phase(ordinary::DeploymentPhase::Copying, None)
             }
-            nexus::EffectResult::GenerationActivated(_) => {
+            nexus::EffectResult::GenerationActivated(activated) => {
                 // Record Activated (stage CopyingRecorded). The phase write hops
                 // back through advance_after_phase, which fires the
-                // RecordGenerationActivated write that commits the live set.
+                // RecordGenerationActivated write that commits the live set. The
+                // slot returned by the activation effect is persisted on that
+                // commit rather than re-defaulting to Current.
+                self.set_activation_slot(activated.generation_slot);
                 self.record_phase(ordinary::DeploymentPhase::Activated, None)
             }
             nexus::EffectResult::PathsCollected(_) => self.finish_deploy_pipeline(),
@@ -2255,6 +2517,12 @@ impl SchemaRuntime {
         }
     }
 
+    fn set_activation_slot(&mut self, generation_slot: ordinary::GenerationSlot) {
+        if let Some(pipeline) = self.active_deploy.as_mut() {
+            pipeline.activation_slot = Some(generation_slot);
+        }
+    }
+
     fn set_closure_path(&mut self, closure_path: ordinary::ClosurePath) {
         if let Some(pipeline) = self.active_deploy.as_mut() {
             pipeline.closure_path = Some(closure_path);
@@ -2264,6 +2532,19 @@ impl SchemaRuntime {
     fn set_input_overrides(&mut self, overrides: Vec<nexus::FlakeInputOverride>) {
         if let Some(pipeline) = self.active_deploy.as_mut() {
             pipeline.input_overrides = overrides;
+        }
+    }
+
+    fn set_resolved_flake(&mut self, resolved: nexus::ResolvedFlake) {
+        let source_revision = resolved.into_payload();
+        if let Some(pipeline) = self.active_deploy.as_mut() {
+            if matches!(
+                pipeline.source_revision_policy,
+                meta::SourceRevisionPolicy::ResolveAndRecord
+            ) {
+                pipeline.flake = source_revision.resolved_ref.clone();
+            }
+            pipeline.source_revision = Some(source_revision);
         }
     }
 
@@ -2412,7 +2693,7 @@ impl SchemaRuntime {
                 // daemon restart, independent of the connection that submitted
                 // it and of the job actor that will drive the pipeline.
                 self.persist_job_phase(sema::DeployJobPhase::Submitted);
-                sema::SemaWriteOutput::DeploySubmitted(meta::AcceptedDeploy {
+                sema::SemaWriteOutput::DeploySubmitted(meta::DeployHandle {
                     deployment_identifier: deployment_identifier.into(),
                     database_marker: accepted_marker,
                 })
@@ -2460,23 +2741,24 @@ impl SchemaRuntime {
             .as_ref()
             .map(|p| p.deployment_identifier.clone())
             .unwrap_or_else(|| ordinary::DeploymentIdentifier::new(0));
-        let deployment_kind = pipeline
+        let generation_artifact = pipeline
             .as_ref()
-            .map(|p| p.deployment_kind)
-            .unwrap_or(ordinary::DeploymentKind::FullOs);
-        let activation_kind = pipeline
+            .map(|p| p.generation_artifact)
+            .unwrap_or(ordinary::GenerationArtifact::CompleteHost);
+        let activation_effect = pipeline
             .as_ref()
-            .map(|p| p.activation_kind)
-            .unwrap_or(ordinary::ActivationKind::Switch);
+            .map(|p| p.activation_effect)
+            .unwrap_or(ordinary::ActivationEffect::LiveActivation);
         let generation = sema::LiveGeneration {
             deployment_identifier,
             generation_identifier: commit.generation_identifier.clone(),
             cluster_name: commit.cluster_name.clone(),
             node_name: commit.node_name.clone(),
-            deployment_kind,
-            activation_kind,
+            generation_artifact,
+            activation_effect,
             generation_slot: commit.generation_slot,
             closure_path: commit.closure_path.clone(),
+            source_revision_record: commit.source_revision_record.clone(),
         };
         let root = sema::GcRoot {
             generation_identifier: commit.generation_identifier.clone(),
@@ -2740,9 +3022,9 @@ impl SchemaRuntime {
                 selector.cluster_name == live.cluster_name
                     && selector.node_name == live.node_name
                     && selector
-                        .kind
+                        .artifact
                         .as_ref()
-                        .is_none_or(|kind| kind == &live.deployment_kind)
+                        .is_none_or(|artifact| artifact == &live.generation_artifact)
             }
             ordinary::Selection::ByGeneration(lookup) => {
                 *lookup.payload() == live.generation_identifier
@@ -2760,10 +3042,11 @@ impl SchemaRuntime {
             deployment_identifier: live.deployment_identifier.clone(),
             cluster_name: live.cluster_name.clone(),
             node_name: live.node_name.clone(),
-            deployment_kind: live.deployment_kind,
-            activation_kind: live.activation_kind,
+            generation_artifact: live.generation_artifact,
+            activation_effect: live.activation_effect,
             generation_slot: live.generation_slot,
             closure_path: live.closure_path.clone(),
+            source_revision: Some(live.source_revision_record.clone()),
         }
     }
 
@@ -2822,16 +3105,19 @@ impl SchemaRuntime {
         if let Some(barrier) = self.configuration.effect_barrier() {
             barrier.wait().await;
         }
-        // Resolve the flake metadata to a locked revision through the proposal
-        // source. `nix flake metadata --json <flake>` reports the resolved ref.
+        // Resolve the flake metadata to a locked revision through Nix. The
+        // typed SourceRevisionRecord produced here is carried through the
+        // eval/build path, event log, deploy-job row, and live-generation state.
         match NixCommand::flake_metadata(request.flake.payload())
             .run()
             .await
         {
-            Ok(output) => nexus::EffectResult::FlakeResolved(nexus::ResolvedFlake {
-                flake: request.flake,
-                revision: NixCommand::first_line(&output),
-            }),
+            Ok(output) => match NixFlakeMetadata::parse(&output) {
+                Ok(metadata) => nexus::EffectResult::FlakeResolved(nexus::ResolvedFlake::new(
+                    metadata.source_revision(request.source_revision_policy, request.flake),
+                )),
+                Err(detail) => Self::effect_failed(nexus::EffectStage::FlakeAuth, detail),
+            },
             Err(detail) => Self::effect_failed(nexus::EffectStage::FlakeAuth, detail),
         }
     }
@@ -2922,7 +3208,7 @@ impl SchemaRuntime {
         &self,
         command: nexus::ActivateGenerationCommand,
     ) -> nexus::EffectResult {
-        let slot = Self::activation_slot(&command.activation_kind);
+        let slot = Self::activation_slot(&command.activation_effect);
         let activation =
             match Activation::from_command(&command, Some(self.configuration.daemon_host())) {
                 Ok(activation) => activation,
@@ -2938,12 +3224,13 @@ impl SchemaRuntime {
         }
     }
 
-    fn activation_slot(activation_kind: &ordinary::ActivationKind) -> ordinary::GenerationSlot {
-        match activation_kind {
-            ordinary::ActivationKind::Switch => ordinary::GenerationSlot::Current,
-            ordinary::ActivationKind::Boot => ordinary::GenerationSlot::BootPending,
-            ordinary::ActivationKind::Test => ordinary::GenerationSlot::Recent,
-            ordinary::ActivationKind::BootOnce => ordinary::GenerationSlot::BootPending,
+    fn activation_slot(activation_effect: &ordinary::ActivationEffect) -> ordinary::GenerationSlot {
+        match activation_effect {
+            ordinary::ActivationEffect::LiveActivation => ordinary::GenerationSlot::Current,
+            ordinary::ActivationEffect::BootProfile => ordinary::GenerationSlot::BootPending,
+            ordinary::ActivationEffect::TestActivation => ordinary::GenerationSlot::Recent,
+            ordinary::ActivationEffect::BootOnceProfile => ordinary::GenerationSlot::BootPending,
+            ordinary::ActivationEffect::ProfileOnly => ordinary::GenerationSlot::Current,
         }
     }
 
@@ -3109,7 +3396,7 @@ impl HorizonViewpoint {
     }
 }
 
-/// Projection wrapper: today's production Horizon shape still has separate
+/// Projection model: today's production Horizon shape still has separate
 /// pan-Horizon and cluster proposals to match the old deploy stack.
 #[derive(Debug, Clone)]
 struct ProjectableProposal {
@@ -3348,15 +3635,15 @@ struct DeploymentInput {
 impl DeploymentInput {
     fn from_shape(shape: &nexus::MaterializationShape) -> Option<Self> {
         match shape {
-            nexus::MaterializationShape::FullOs => Some(Self {
+            nexus::MaterializationShape::CompleteHost => Some(Self {
                 include_home: true,
                 include_all_firmware: true,
             }),
-            nexus::MaterializationShape::OsOnly => Some(Self {
+            nexus::MaterializationShape::BaseHost => Some(Self {
                 include_home: false,
                 include_all_firmware: false,
             }),
-            nexus::MaterializationShape::Home(_) => None,
+            nexus::MaterializationShape::UserEnvironment(_) => None,
         }
     }
 
@@ -3515,7 +3802,7 @@ impl NarHash {
 
 /// SSH target — `<user>@<node>.<cluster>.criome` — the addressing used by
 /// `ssh`, `nix copy --to ssh-ng://…`, and `--from ssh-ng://…` (ported from
-/// `lojix-cli/src/host.rs`). Activate/copy address `root@<criome_domain>`,
+/// target addressing model. Activate/copy address `root@<criome_domain>`,
 /// NEVER a bare `NodeName`; the domain is derived from the cluster + node on
 /// the deploy cursor via `CriomeDomainName::for_node` (resolving open question
 /// Q1: the address is computed from cursor fields already present —
@@ -3581,7 +3868,7 @@ impl SshTarget {
 }
 
 /// A pre-quoted remote shell command body — the single string ssh runs on the
-/// target. Ported from `lojix-cli/src/process.rs::ShellCommand`.
+/// target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShellCommand(String);
 
@@ -3596,7 +3883,7 @@ impl ShellCommand {
 }
 
 /// A single argument rendered safe for a remote `/bin/sh -c` body. Ported from
-/// `lojix-cli/src/process.rs::ShellArgument`: bare when the text is wholly
+/// shell argument rendering: bare when the text is wholly
 /// shell-safe, single-quoted (with `'\''` escaping) otherwise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShellArgument {
@@ -3683,18 +3970,17 @@ impl ClosureCopy {
     }
 }
 
-/// One activation on the target node — System (switch-to-configuration +
-/// optional EFI reconcile / BootOnce transient unit) or Home (home-manager
-/// profile/activate). Decoded from the `ActivateGenerationCommand`; ported
-/// from `lojix-cli/src/activate.rs`.
+/// One activation on the target node — host (switch-to-configuration +
+/// optional EFI reconcile / BootOnce transient unit) or user environment
+/// (home-manager profile/activate). Decoded from the `ActivateGenerationCommand`.
 #[derive(Debug, Clone)]
 enum Activation {
-    System(SystemActivation),
-    Home(HomeActivation),
+    Host(HostActivation),
+    UserEnvironment(UserEnvironmentActivation),
 }
 
 impl Activation {
-    /// `daemon_host` is the node the dispatching daemon runs on, so a System
+    /// `daemon_host` is the node the dispatching daemon runs on, so a host
     /// activation can detect a self-targeting deploy and route around the
     /// self-Switch deadlock; `None` when no daemon host context is available.
     fn from_command(
@@ -3704,7 +3990,7 @@ impl Activation {
         let target = SshTarget::root_at_node(&command.cluster_name, &command.node_name)?;
         let store_path = command.closure_path.payload().clone();
         match &command.profile {
-            nexus::ActivationProfile::System(action) => Ok(Self::System(SystemActivation {
+            nexus::ActivationProfile::Host(action) => Ok(Self::Host(HostActivation {
                 deployment_identifier: command.deployment_identifier.clone(),
                 target,
                 node_name: command.node_name.clone(),
@@ -3712,15 +3998,15 @@ impl Activation {
                 store_path,
                 action: *action,
             })),
-            nexus::ActivationProfile::Home(profile) => {
+            nexus::ActivationProfile::UserEnvironment(profile) => {
                 let user = HorizonUserName::try_new(profile.user.payload().clone())
                     .map_err(|error| format!("invalid user name for home activation: {error}"))?;
-                Ok(Self::Home(HomeActivation {
+                Ok(Self::UserEnvironment(UserEnvironmentActivation {
                     node_name: command.node_name.clone(),
                     target,
                     user,
                     store_path,
-                    mode: profile.mode,
+                    mode: profile.action,
                 }))
             }
         }
@@ -3728,14 +4014,13 @@ impl Activation {
 
     async fn run(&self) -> std::result::Result<(), String> {
         match self {
-            Self::System(activation) => activation.run().await,
-            Self::Home(activation) => activation.run().await,
+            Self::Host(activation) => activation.run().await,
+            Self::UserEnvironment(activation) => activation.run().await,
         }
     }
 }
 
-/// System activation on the target (ported from
-/// `lojix-cli/src/activate.rs::SystemActivation`).
+/// Host activation on the target.
 ///
 /// `Boot`/`Switch`/`Test`: one ssh call running `switch-to-configuration
 /// <action>` directly (Boot/Switch first set the system profile). `BootOnce`:
@@ -3744,7 +4029,7 @@ impl Activation {
 /// not the dispatcher's ssh, so a network blip that kills the ssh leaves the
 /// unit running on the target to completion.
 #[derive(Debug, Clone)]
-struct SystemActivation {
+struct HostActivation {
     /// The deployment this activation belongs to. The BootOnce transient unit
     /// name derives deterministically from it so the unit the daemon starts on
     /// the target matches the `lojix-boot-once-deploy-<id>` the durable resume
@@ -3761,24 +4046,24 @@ struct SystemActivation {
     /// deadlocking the deploy. `None` outside a daemon context (some tests).
     daemon_host: Option<ordinary::NodeName>,
     store_path: String,
-    action: ordinary::SystemAction,
+    action: ordinary::HostDeployAction,
 }
 
-impl SystemActivation {
+impl HostActivation {
     /// Invocation for the simple Boot/Switch/Test path. `None` for the
     /// non-simple actions (BootOnce uses `systemd_run_invocation`; Eval/Build
     /// do not activate).
     fn ssh_invocation(&self) -> Option<NixCommand> {
         let action_word = match self.action {
-            ordinary::SystemAction::Boot => "boot",
-            ordinary::SystemAction::Switch => "switch",
-            ordinary::SystemAction::Test => "test",
-            ordinary::SystemAction::BootOnce
-            | ordinary::SystemAction::Eval
-            | ordinary::SystemAction::Build => return None,
+            ordinary::HostDeployAction::SetBootProfile => "boot",
+            ordinary::HostDeployAction::ActivateNow => "switch",
+            ordinary::HostDeployAction::TestActivation => "test",
+            ordinary::HostDeployAction::ScheduleBootOnce
+            | ordinary::HostDeployAction::Evaluate
+            | ordinary::HostDeployAction::Realize => return None,
         };
         let store = &self.store_path;
-        let remote_command = if matches!(self.action, ordinary::SystemAction::Test) {
+        let remote_command = if matches!(self.action, ordinary::HostDeployAction::TestActivation) {
             format!("{store}/bin/switch-to-configuration {action_word}")
         } else {
             format!(
@@ -3865,7 +4150,7 @@ impl SystemActivation {
     /// transient unit survives the restart (report 150 self-Switch). Always
     /// false when the daemon host is unknown or the target is a different node.
     fn runs_detached_self_switch(&self) -> bool {
-        matches!(self.action, ordinary::SystemAction::Switch)
+        matches!(self.action, ordinary::HostDeployAction::ActivateNow)
             && self
                 .daemon_host
                 .as_ref()
@@ -3916,7 +4201,7 @@ impl SystemActivation {
     fn requires_efi_reconcile(&self) -> bool {
         matches!(
             self.action,
-            ordinary::SystemAction::Boot | ordinary::SystemAction::Switch
+            ordinary::HostDeployAction::SetBootProfile | ordinary::HostDeployAction::ActivateNow
         )
     }
 
@@ -3950,7 +4235,7 @@ impl SystemActivation {
             return self.run_self_switch().await;
         }
         match self.action {
-            ordinary::SystemAction::BootOnce => self.run_boot_once().await,
+            ordinary::HostDeployAction::ScheduleBootOnce => self.run_boot_once().await,
             _ => self.run_simple().await,
         }
     }
@@ -3998,21 +4283,20 @@ impl SystemActivation {
     }
 }
 
-/// Home activation on the target (ported from
-/// `lojix-cli/src/activate.rs::HomeActivation`). `Profile`/`Activate` set the
-/// home-manager profile as the target user, then `Activate` additionally runs
+/// User-environment activation on the target. `SetProfile`/`ActivateNow` set
+/// the home-manager profile as the target user, then `ActivateNow` additionally runs
 /// the activation package. Includes the local fast-path: skip ssh entirely
 /// when the dispatcher already is the requested user on the target node.
 #[derive(Debug, Clone)]
-struct HomeActivation {
+struct UserEnvironmentActivation {
     node_name: ordinary::NodeName,
     target: SshTarget,
     user: HorizonUserName,
     store_path: String,
-    mode: meta::HomeMode,
+    mode: meta::UserEnvironmentAction,
 }
 
-impl HomeActivation {
+impl UserEnvironmentActivation {
     fn local_profile_invocation(&self, home: &Path) -> NixCommand {
         NixCommand::new(
             "nix-env",
@@ -4047,9 +4331,9 @@ impl HomeActivation {
 
     async fn run(&self) -> std::result::Result<(), String> {
         match self.mode {
-            meta::HomeMode::Build => Ok(()),
-            meta::HomeMode::Profile => self.run_profile().await,
-            meta::HomeMode::Activate => {
+            meta::UserEnvironmentAction::Realize => Ok(()),
+            meta::UserEnvironmentAction::SetProfile => self.run_profile().await,
+            meta::UserEnvironmentAction::ActivateNow => {
                 self.run_profile().await?;
                 self.run_activate().await
             }
@@ -4094,8 +4378,7 @@ impl HomeActivation {
 
     async fn current_node(&self) -> Option<String> {
         // The local-context node match compares the dispatcher's short hostname
-        // against the deploy cursor's node name (the same comparison lojix-cli
-        // makes with `hostname -s`).
+        // against the deploy cursor's node name.
         let output = NixCommand::new("hostname", vec!["-s".to_string()])
             .run()
             .await
@@ -4105,8 +4388,7 @@ impl HomeActivation {
 }
 
 /// The `system-N-link` symlink target of `/nix/var/nix/profiles/system`, parsed
-/// to its generation number (ported from
-/// `lojix-cli/src/activate.rs::SystemProfileLink`).
+/// to its generation number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SystemProfileLink {
     generation: SystemGeneration,
@@ -4152,7 +4434,7 @@ impl BootEntry {
 /// A typed `nix` / `nix-store` invocation. Holds the program name and its
 /// argument vector so the same value can be inspected before it runs; `run`
 /// spawns it via `tokio::process::Command` and returns captured stdout or a
-/// failure detail string. Constructors model the lojix-cli invocations.
+/// failure detail string. Constructors model the target-side Nix invocations.
 #[derive(Debug, Clone)]
 struct NixCommand {
     program: String,
@@ -4529,36 +4811,52 @@ impl sema::SemaEngine for SchemaRuntime {
 #[cfg(test)]
 mod tests {
     //! Unit/argv/snapshot tests for the S4a command port: closure-threading
-    //! onto the activate command, and the faithful `lojix-cli` command shapes
-    //! (`SshTarget` addressing, `ClosureCopy`, `SystemActivation`,
-    //! `HomeActivation`). The construction is unit-testable here; the on-node
+    //! onto the activate command, and the target-side command shapes
+    //! (`SshTarget` addressing, `ClosureCopy`, `HostActivation`,
+    //! `UserEnvironmentActivation`). The construction is unit-testable here; the on-node
     //! behavior is proven later at S5 on a live VM.
 
     use super::*;
 
     const STORE: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-toplevel";
 
-    fn system_submission(action: ordinary::SystemAction) -> sema::DeploySubmission {
-        sema::DeploySubmission::System(meta::SystemDeployment {
+    fn host_submission(action: ordinary::HostDeployAction) -> sema::DeploySubmission {
+        sema::DeploySubmission::Host(meta::HostDeployment {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
-            deployment_kind: ordinary::DeploymentKind::OsOnly,
+            host_composition: ordinary::HostComposition::BaseHost,
             source: ordinary::ProposalSource::new("/dev/null"),
             flake: ordinary::FlakeReference::new("github:owner/repo"),
-            system_action: action,
+            host_deploy_action: action,
+            source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
             builder: None,
             substituters: Vec::new(),
             build_attribute: None,
         })
     }
 
-    fn system_pipeline(action: ordinary::SystemAction) -> DeployPipeline {
+    fn host_pipeline(action: ordinary::HostDeployAction) -> DeployPipeline {
         DeployPipeline::from_submission(
             ordinary::DeploymentIdentifier::new(1),
             ordinary::GenerationIdentifier::new(1),
             SchemaRuntime::marker(0),
-            system_submission(action),
+            host_submission(action),
         )
+    }
+
+    fn source_revision(policy: ordinary::SourceRevisionPolicy) -> ordinary::SourceRevisionRecord {
+        ordinary::SourceRevisionRecord {
+            policy,
+            requested_ref: ordinary::FlakeReference::new("github:owner/repo/main"),
+            resolved_ref: ordinary::FlakeReference::new(
+                "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            resolved_revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        }
+    }
+
+    fn resolved_flake(policy: ordinary::SourceRevisionPolicy) -> nexus::ResolvedFlake {
+        nexus::ResolvedFlake::new(source_revision(policy))
     }
 
     fn cluster() -> ordinary::ClusterName {
@@ -4578,7 +4876,7 @@ mod tests {
         // it onto the fired ActivateGeneration command — same non-empty path,
         // never dropped between build and activate (risk R2).
         let mut engine = SchemaRuntime::new();
-        engine.active_deploy = Some(system_pipeline(ordinary::SystemAction::Switch));
+        engine.active_deploy = Some(host_pipeline(ordinary::HostDeployAction::ActivateNow));
         let built = ordinary::ClosurePath::new(STORE);
         engine.set_closure_path(built.clone());
         engine.set_stage(DeployStage::BuildingRecorded);
@@ -4600,7 +4898,7 @@ mod tests {
         // failure, not an empty activation: the pipeline fails, never fires an
         // ActivateGeneration with an empty path (risk R2).
         let mut engine = SchemaRuntime::new();
-        engine.active_deploy = Some(system_pipeline(ordinary::SystemAction::Switch));
+        engine.active_deploy = Some(host_pipeline(ordinary::HostDeployAction::ActivateNow));
         engine.set_stage(DeployStage::BuildingRecorded);
 
         match engine.advance_after_phase() {
@@ -4613,59 +4911,255 @@ mod tests {
 
     #[test]
     fn activation_commit_requires_closure_path() {
-        let mut pipeline = system_pipeline(ordinary::SystemAction::Switch);
+        let mut pipeline = host_pipeline(ordinary::HostDeployAction::ActivateNow);
+        pipeline.activation_slot = Some(ordinary::GenerationSlot::Current);
+        pipeline.source_revision = Some(source_revision(
+            ordinary::SourceRevisionPolicy::ResolveAndRecord,
+        ));
         assert!(pipeline.activation_commit().is_none());
         pipeline.closure_path = Some(ordinary::ClosurePath::new(STORE));
         let commit = pipeline.activation_commit().expect("commit with closure");
         assert_eq!(commit.closure_path.payload(), STORE);
     }
 
+    #[test]
+    fn activation_commit_persists_computed_boot_profile_slot() {
+        let mut pipeline = host_pipeline(ordinary::HostDeployAction::SetBootProfile);
+        pipeline.closure_path = Some(ordinary::ClosurePath::new(STORE));
+        pipeline.source_revision = Some(source_revision(
+            ordinary::SourceRevisionPolicy::ResolveAndRecord,
+        ));
+        pipeline.activation_slot = Some(ordinary::GenerationSlot::BootPending);
+        let commit = pipeline.activation_commit().expect("commit");
+        assert_eq!(
+            commit.generation_slot,
+            ordinary::GenerationSlot::BootPending
+        );
+    }
+
+    #[test]
+    fn activation_commit_persists_computed_boot_once_slot() {
+        let mut pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
+        pipeline.closure_path = Some(ordinary::ClosurePath::new(STORE));
+        pipeline.source_revision = Some(source_revision(
+            ordinary::SourceRevisionPolicy::ResolveAndRecord,
+        ));
+        pipeline.activation_slot = Some(ordinary::GenerationSlot::BootPending);
+        let commit = pipeline.activation_commit().expect("commit");
+        assert_eq!(
+            commit.generation_slot,
+            ordinary::GenerationSlot::BootPending
+        );
+    }
+
+    #[test]
+    fn activation_commit_persists_computed_test_activation_slot() {
+        let mut pipeline = host_pipeline(ordinary::HostDeployAction::TestActivation);
+        pipeline.closure_path = Some(ordinary::ClosurePath::new(STORE));
+        pipeline.source_revision = Some(source_revision(
+            ordinary::SourceRevisionPolicy::ResolveAndRecord,
+        ));
+        pipeline.activation_slot = Some(ordinary::GenerationSlot::Recent);
+        let commit = pipeline.activation_commit().expect("commit");
+        assert_eq!(commit.generation_slot, ordinary::GenerationSlot::Recent);
+    }
+
     // ---- Step 2: the reject-guard opens the activating actions ----
+
+    fn require_immutable_request(flake: &str) -> meta::DeployRequest {
+        meta::DeployRequest::Host(meta::HostDeployment {
+            cluster_name: cluster(),
+            node_name: node(),
+            host_composition: ordinary::HostComposition::BaseHost,
+            source: ordinary::ProposalSource::new("/dev/null"),
+            flake: ordinary::FlakeReference::new(flake),
+            host_deploy_action: ordinary::HostDeployAction::Evaluate,
+            source_revision_policy: meta::SourceRevisionPolicy::RequireImmutable,
+            builder: None,
+            substituters: Vec::new(),
+            build_attribute: None,
+        })
+    }
+
+    #[test]
+    fn require_immutable_rejects_mutable_flake_reference() {
+        let request = require_immutable_request("github:owner/repo/main");
+        assert_eq!(
+            SchemaRuntime::source_revision_policy_rejection(&request),
+            Some(meta::DeployRejectionReason::FlakeReferenceMalformed)
+        );
+    }
+
+    #[test]
+    fn require_immutable_rejects_malformed_refs_that_only_contain_rev_text() {
+        for flake in [
+            "github:owner/repo/rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "github:owner/repo?rev=not-a-full-commit",
+            "github:owner/repo?foo=rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            let request = require_immutable_request(flake);
+            assert_eq!(
+                SchemaRuntime::source_revision_policy_rejection(&request),
+                Some(meta::DeployRejectionReason::FlakeReferenceMalformed),
+                "{flake} must not pass the structured immutable-ref parser"
+            );
+        }
+    }
+
+    #[test]
+    fn require_immutable_rejects_malformed_refs_that_only_contain_nar_hash_text() {
+        for flake in [
+            "github:owner/repo/narHash=sha256-deadbeef",
+            "github:owner/repo?narHash=",
+            "github:owner/repo?narHash=not-sri",
+        ] {
+            let request = require_immutable_request(flake);
+            assert_eq!(
+                SchemaRuntime::source_revision_policy_rejection(&request),
+                Some(meta::DeployRejectionReason::FlakeReferenceMalformed),
+                "{flake} must not pass the structured immutable-ref parser"
+            );
+        }
+    }
+
+    #[test]
+    fn require_immutable_accepts_structured_revision_query() {
+        let request = require_immutable_request(
+            "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        assert!(SchemaRuntime::source_revision_policy_rejection(&request).is_none());
+    }
+
+    #[test]
+    fn resolve_and_record_records_pipeline_flake_and_eval_source_revision() {
+        let mut engine = SchemaRuntime::new();
+        engine.active_deploy = Some(host_pipeline(ordinary::HostDeployAction::Evaluate));
+        engine.set_resolved_flake(resolved_flake(
+            ordinary::SourceRevisionPolicy::ResolveAndRecord,
+        ));
+        let pipeline = engine.active_deploy.as_ref().expect("pipeline");
+        assert_eq!(
+            pipeline.flake,
+            source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord).resolved_ref
+        );
+        assert_eq!(
+            pipeline
+                .source_revision
+                .as_ref()
+                .expect("source revision")
+                .requested_ref,
+            ordinary::FlakeReference::new("github:owner/repo/main")
+        );
+        let command = pipeline.nix_eval_command(engine.configuration.as_ref());
+        assert_eq!(
+            command.source_revision.resolved_revision,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(command.flake, command.source_revision.resolved_ref);
+    }
+
+    #[test]
+    fn recorded_source_revision_survives_event_and_state_paths() {
+        let mut engine = SchemaRuntime::new();
+        let mut pipeline = host_pipeline(ordinary::HostDeployAction::ActivateNow);
+        let source_revision = source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord);
+        pipeline.source_revision = Some(source_revision.clone());
+        pipeline.activation_slot = Some(ordinary::GenerationSlot::Current);
+        pipeline.closure_path = Some(ordinary::ClosurePath::new(STORE));
+        engine.active_deploy = Some(pipeline.clone());
+
+        let event = pipeline.phase_event(
+            ordinary::DeploymentPhase::Building,
+            ordinary::EventLogPosition::new(0),
+            None,
+        );
+        assert_eq!(event.source_revision, Some(source_revision.clone()));
+        assert!(matches!(
+            engine.record_phase_transition(event),
+            sema::SemaWriteOutput::PhaseRecorded(_)
+        ));
+        match engine.read_event_log(ordinary::EventLogRange {
+            from: ordinary::EventLogPosition::new(0),
+            until: ordinary::EventLogPosition::new(1),
+        }) {
+            sema::SemaReadOutput::EventLogRead(page) => assert_eq!(
+                page.deployment_events
+                    .first()
+                    .expect("deployment event")
+                    .source_revision,
+                Some(source_revision.clone())
+            ),
+            other => panic!("expected EventLogRead, got {other:?}"),
+        }
+
+        let commit = pipeline.activation_commit().expect("activation commit");
+        assert!(matches!(
+            engine.record_generation_activated(commit),
+            sema::SemaWriteOutput::GenerationActivated(_)
+        ));
+        match engine.query_generations(ordinary::Selection::ByNode(ordinary::NodeSelector {
+            cluster_name: cluster(),
+            node_name: node(),
+            artifact: None,
+        })) {
+            sema::SemaReadOutput::GenerationsQueried(listing) => assert_eq!(
+                listing
+                    .generations
+                    .first()
+                    .expect("generation")
+                    .source_revision,
+                Some(source_revision)
+            ),
+            other => panic!("expected GenerationsQueried, got {other:?}"),
+        }
+    }
 
     #[test]
     fn guard_accepts_every_declared_action() {
         for action in [
-            ordinary::SystemAction::Eval,
-            ordinary::SystemAction::Build,
-            ordinary::SystemAction::Boot,
-            ordinary::SystemAction::Switch,
-            ordinary::SystemAction::Test,
-            ordinary::SystemAction::BootOnce,
+            ordinary::HostDeployAction::Evaluate,
+            ordinary::HostDeployAction::Realize,
+            ordinary::HostDeployAction::SetBootProfile,
+            ordinary::HostDeployAction::ActivateNow,
+            ordinary::HostDeployAction::TestActivation,
+            ordinary::HostDeployAction::ScheduleBootOnce,
         ] {
-            let request = meta::DeployRequest::System(meta::SystemDeployment {
+            let request = meta::DeployRequest::Host(meta::HostDeployment {
                 cluster_name: cluster(),
                 node_name: node(),
-                deployment_kind: ordinary::DeploymentKind::OsOnly,
+                host_composition: ordinary::HostComposition::BaseHost,
                 source: ordinary::ProposalSource::new("/dev/null"),
                 flake: ordinary::FlakeReference::new("github:owner/repo"),
-                system_action: action,
+                host_deploy_action: action,
+                source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
                 builder: None,
                 substituters: Vec::new(),
                 build_attribute: None,
             });
             assert!(
                 SchemaRuntime::unsupported_deploy_reason(&request).is_none(),
-                "System {action:?} should be supported"
+                "Host {action:?} should be supported"
             );
         }
         for mode in [
-            meta::HomeMode::Build,
-            meta::HomeMode::Profile,
-            meta::HomeMode::Activate,
+            meta::UserEnvironmentAction::Realize,
+            meta::UserEnvironmentAction::SetProfile,
+            meta::UserEnvironmentAction::ActivateNow,
         ] {
-            let request = meta::DeployRequest::Home(meta::HomeDeployment {
+            let request = meta::DeployRequest::UserEnvironment(meta::UserEnvironmentDeployment {
                 cluster_name: cluster(),
                 node_name: node(),
                 user_name: ordinary::UserName::new("li"),
                 source: ordinary::ProposalSource::new("/dev/null"),
                 flake: ordinary::FlakeReference::new("github:owner/repo"),
-                home_mode: mode,
+                user_environment_action: mode,
+                source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
                 builder: None,
                 substituters: Vec::new(),
             });
             assert!(
                 SchemaRuntime::unsupported_deploy_reason(&request).is_none(),
-                "Home {mode:?} should be supported"
+                "User environment {mode:?} should be supported"
             );
         }
     }
@@ -4809,7 +5303,7 @@ mod tests {
 
     fn activate_command(
         profile: nexus::ActivationProfile,
-        kind: ordinary::ActivationKind,
+        kind: ordinary::ActivationEffect,
     ) -> nexus::ActivateGenerationCommand {
         nexus::ActivateGenerationCommand {
             deployment_identifier: ordinary::DeploymentIdentifier::new(7),
@@ -4817,41 +5311,41 @@ mod tests {
             cluster_name: cluster(),
             node_name: node(),
             closure_path: ordinary::ClosurePath::new(STORE),
-            activation_kind: kind,
+            activation_effect: kind,
             profile,
         }
     }
 
-    fn system_activation(action: ordinary::SystemAction) -> SystemActivation {
-        system_activation_on_host(action, None)
+    fn host_activation(action: ordinary::HostDeployAction) -> HostActivation {
+        host_activation_on_host(action, None)
     }
 
-    /// A System activation built with an explicit daemon-host context so a test
+    /// A host activation built with an explicit daemon-host context so a test
     /// can target a self-Switch (`daemon_host == node-1`, the command's node) or
     /// a foreign-target Switch (`daemon_host == None` or a different node).
-    fn system_activation_on_host(
-        action: ordinary::SystemAction,
+    fn host_activation_on_host(
+        action: ordinary::HostDeployAction,
         daemon_host: Option<ordinary::NodeName>,
-    ) -> SystemActivation {
+    ) -> HostActivation {
         match Activation::from_command(
             &activate_command(
-                nexus::ActivationProfile::System(action),
-                ordinary::ActivationKind::Switch,
+                nexus::ActivationProfile::Host(action),
+                ordinary::ActivationEffect::LiveActivation,
             ),
             daemon_host.as_ref(),
         )
         .expect("activation")
         {
-            Activation::System(activation) => activation,
-            Activation::Home(_) => panic!("expected System activation"),
+            Activation::Host(activation) => activation,
+            Activation::UserEnvironment(_) => panic!("expected host activation"),
         }
     }
 
-    // ---- Step 3: per-action System activation argv, no $CLOSURE token ----
+    // ---- Step 3: per-action host activation argv, no $CLOSURE token ----
 
     #[test]
     fn switch_activation_has_store_path_and_switch_subcommand_no_closure_token() {
-        let activation = system_activation(ordinary::SystemAction::Switch);
+        let activation = host_activation(ordinary::HostDeployAction::ActivateNow);
         let invocation = activation.ssh_invocation().expect("switch invocation");
         assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
@@ -4870,7 +5364,7 @@ mod tests {
 
     #[test]
     fn boot_activation_runs_switch_to_configuration_boot_then_reconciles_efi() {
-        let activation = system_activation(ordinary::SystemAction::Boot);
+        let activation = host_activation(ordinary::HostDeployAction::SetBootProfile);
         let invocation = activation.ssh_invocation().expect("boot invocation");
         let argv = invocation.joined_arguments();
         assert!(
@@ -4907,7 +5401,7 @@ mod tests {
 
     #[test]
     fn test_activation_runs_switch_to_configuration_test_only_no_profile_set() {
-        let activation = system_activation(ordinary::SystemAction::Test);
+        let activation = host_activation(ordinary::HostDeployAction::TestActivation);
         let invocation = activation.ssh_invocation().expect("test invocation");
         let argv = invocation.joined_arguments();
         assert!(
@@ -4924,7 +5418,7 @@ mod tests {
     #[test]
     fn boot_once_uses_simple_invocation_none() {
         // BootOnce is not a simple invocation; it uses the systemd-run shape.
-        let activation = system_activation(ordinary::SystemAction::BootOnce);
+        let activation = host_activation(ordinary::HostDeployAction::ScheduleBootOnce);
         assert!(activation.ssh_invocation().is_none());
     }
 
@@ -4938,13 +5432,15 @@ mod tests {
         // daemon. `activate_command` targets node-1, so a daemon hosted on node-1
         // is a self-Switch.
         let activation =
-            system_activation_on_host(ordinary::SystemAction::Switch, Some(node()));
+            host_activation_on_host(ordinary::HostDeployAction::ActivateNow, Some(node()));
         assert!(
             activation.runs_detached_self_switch(),
             "self-host Switch must take the detached shape"
         );
-        let invocation =
-            activation.detached_invocation(&activation.self_switch_unit_name(), activation.self_switch_script());
+        let invocation = activation.detached_invocation(
+            &activation.self_switch_unit_name(),
+            activation.self_switch_script(),
+        );
         assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
         assert!(argv.contains("systemd-run"), "PID-1-owned unit: {argv}");
@@ -4971,12 +5467,12 @@ mod tests {
         // A Switch targeting a DIFFERENT node than the daemon host (or with no
         // daemon-host context) must NOT take the detached shape — the foreground
         // ssh is not at risk there.
-        let foreign = system_activation_on_host(
-            ordinary::SystemAction::Switch,
+        let foreign = host_activation_on_host(
+            ordinary::HostDeployAction::ActivateNow,
             Some(ordinary::NodeName::new("some-other-node")),
         );
         assert!(!foreign.runs_detached_self_switch());
-        let no_context = system_activation(ordinary::SystemAction::Switch);
+        let no_context = host_activation(ordinary::HostDeployAction::ActivateNow);
         assert!(!no_context.runs_detached_self_switch());
         // The foreground Switch invocation is still available and well-shaped.
         let invocation = no_context.ssh_invocation().expect("foreground switch");
@@ -4993,10 +5489,11 @@ mod tests {
         // Only Switch self-restarts the daemon; a self-host Boot/Test/BootOnce
         // keeps its normal path (Boot uses the foreground ssh; BootOnce its own
         // transient unit).
-        let boot = system_activation_on_host(ordinary::SystemAction::Boot, Some(node()));
+        let boot =
+            host_activation_on_host(ordinary::HostDeployAction::SetBootProfile, Some(node()));
         assert!(!boot.runs_detached_self_switch());
         let boot_once =
-            system_activation_on_host(ordinary::SystemAction::BootOnce, Some(node()));
+            host_activation_on_host(ordinary::HostDeployAction::ScheduleBootOnce, Some(node()));
         assert!(!boot_once.runs_detached_self_switch());
     }
 
@@ -5004,7 +5501,7 @@ mod tests {
 
     #[test]
     fn boot_once_systemd_run_argv_shape() {
-        let activation = system_activation(ordinary::SystemAction::BootOnce);
+        let activation = host_activation(ordinary::HostDeployAction::ScheduleBootOnce);
         let invocation = activation.systemd_run_invocation("lojix-boot-once-abc-def");
         assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
@@ -5024,7 +5521,7 @@ mod tests {
         // time+pid suffix — so a daemon that crashes inside the BootOnce window
         // recomputes the same name on restart. `activate_command` carries
         // deployment id 7.
-        let activation = system_activation(ordinary::SystemAction::BootOnce);
+        let activation = host_activation(ordinary::HostDeployAction::ScheduleBootOnce);
         assert_eq!(activation.unit_name(), "lojix-boot-once-deploy-7");
     }
 
@@ -5035,10 +5532,10 @@ mod tests {
         // deployment so the crash-resume `PollActivationUnit` polls the unit the
         // activation actually started (report 150). Both go through
         // `DeploymentIdentifier::boot_once_unit_name`.
-        let mut pipeline = system_pipeline(ordinary::SystemAction::BootOnce);
+        let mut pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
         pipeline.deployment_identifier = ordinary::DeploymentIdentifier::new(7);
         let cursor_unit = pipeline.boot_once_unit().expect("BootOnce records a unit");
-        let activation = system_activation(ordinary::SystemAction::BootOnce);
+        let activation = host_activation(ordinary::HostDeployAction::ScheduleBootOnce);
         assert_eq!(activation.unit_name(), cursor_unit);
     }
 
@@ -5046,7 +5543,7 @@ mod tests {
     fn non_boot_once_deploy_records_no_resume_unit() {
         // A non-BootOnce action has no transient unit to poll; copy is
         // idempotent and activation re-runs safely, so the cursor records None.
-        let pipeline = system_pipeline(ordinary::SystemAction::Switch);
+        let pipeline = host_pipeline(ordinary::HostDeployAction::ActivateNow);
         assert!(pipeline.boot_once_unit().is_none());
     }
 
@@ -5063,7 +5560,7 @@ mod tests {
         // The reason for the fix: deploying node-1 from a daemon hosted on
         // ouranos must NOT realize node-1's (model-bearing) closure on ouranos.
         // The build target is the target node's own store over ssh-ng.
-        let pipeline = system_pipeline(ordinary::SystemAction::BootOnce);
+        let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
         let configuration = configuration_on_host("ouranos");
         match pipeline.build_target(&configuration) {
             nexus::BuildTarget::TargetStore(store) => {
@@ -5077,9 +5574,9 @@ mod tests {
     fn build_on_the_daemon_host_stays_local() {
         // Deploying the daemon's own host (e.g. ouranos from the ouranos-hosted
         // daemon) must stay local — its store already holds any model closure,
-        // and an ssh-ng-to-self build would be wrong. `system_pipeline` targets
+        // and an ssh-ng-to-self build would be wrong. `host_pipeline` targets
         // node `node-1`, so a daemon hosted on `node-1` builds locally.
-        let pipeline = system_pipeline(ordinary::SystemAction::BootOnce);
+        let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
         let configuration = configuration_on_host("node-1");
         assert!(matches!(
             pipeline.build_target(&configuration),
@@ -5092,7 +5589,7 @@ mod tests {
         // An operator-named builder still dispatches to that Nix builder machine
         // regardless of daemon host — the build-on-target decision only governs
         // the default (no-builder) path.
-        let mut pipeline = system_pipeline(ordinary::SystemAction::BootOnce);
+        let mut pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
         pipeline.builder = Some(ordinary::NodeName::new("big-builder"));
         let configuration = configuration_on_host("ouranos");
         assert!(matches!(
@@ -5135,6 +5632,28 @@ mod tests {
         // A target-store build NEVER offloads to the daemon machine file — that
         // would copy the result back into the daemon host store (report 150).
         assert!(!argv.contains("--builders"), "{argv}");
+    }
+
+    #[test]
+    fn deployment_input_maps_complete_and_base_host_materialization() {
+        let complete = DeploymentInput::from_shape(&nexus::MaterializationShape::CompleteHost)
+            .expect("complete host deployment input");
+        assert_eq!(
+            complete.flake_text(),
+            "{ outputs = _: { deployment = { includeHome = true; includeAllFirmware = true; }; }; }\n"
+        );
+
+        let base = DeploymentInput::from_shape(&nexus::MaterializationShape::BaseHost)
+            .expect("base host deployment input");
+        assert_eq!(
+            base.flake_text(),
+            "{ outputs = _: { deployment = { includeHome = false; includeAllFirmware = false; }; }; }\n"
+        );
+
+        let user = nexus::MaterializationShape::UserEnvironment(
+            nexus::UserEnvironmentMaterialization::new(ordinary::UserName::new("li")),
+        );
+        assert!(DeploymentInput::from_shape(&user).is_none());
     }
 
     #[test]
@@ -5211,7 +5730,7 @@ mod tests {
 
     #[test]
     fn boot_once_script_snapshot() {
-        let activation = system_activation(ordinary::SystemAction::BootOnce);
+        let activation = host_activation(ordinary::HostDeployAction::ScheduleBootOnce);
         let expected = format!(
             "export PATH=/run/current-system/sw/bin:/run/wrappers/bin:$PATH\n\
              set -eu\n\
@@ -5244,27 +5763,28 @@ mod tests {
         assert!(SystemProfileLink::try_new("not-a-link").is_err());
     }
 
-    // ---- Step 3: Home activation argv ----
+    // ---- Step 3: user-environment activation argv ----
 
-    fn home_activation(mode: meta::HomeMode) -> HomeActivation {
-        let profile = nexus::ActivationProfile::Home(nexus::HomeActivationProfile {
-            mode,
-            user: ordinary::UserName::new("li"),
-        });
+    fn user_environment_activation(mode: meta::UserEnvironmentAction) -> UserEnvironmentActivation {
+        let profile =
+            nexus::ActivationProfile::UserEnvironment(nexus::UserEnvironmentActivationProfile {
+                action: mode,
+                user: ordinary::UserName::new("li"),
+            });
         match Activation::from_command(
-            &activate_command(profile, ordinary::ActivationKind::Switch),
+            &activate_command(profile, ordinary::ActivationEffect::LiveActivation),
             None,
         )
         .expect("activation")
         {
-            Activation::Home(activation) => activation,
-            Activation::System(_) => panic!("expected Home activation"),
+            Activation::UserEnvironment(activation) => activation,
+            Activation::Host(_) => panic!("expected user-environment activation"),
         }
     }
 
     #[test]
-    fn home_remote_profile_addresses_user_at_criome_domain() {
-        let activation = home_activation(meta::HomeMode::Profile);
+    fn user_environment_remote_profile_addresses_user_at_criome_domain() {
+        let activation = user_environment_activation(meta::UserEnvironmentAction::SetProfile);
         let invocation = activation.remote_profile_invocation();
         assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
@@ -5277,8 +5797,8 @@ mod tests {
     }
 
     #[test]
-    fn home_remote_activate_runs_activate_package() {
-        let activation = home_activation(meta::HomeMode::Activate);
+    fn user_environment_remote_activate_runs_activate_package() {
+        let activation = user_environment_activation(meta::UserEnvironmentAction::ActivateNow);
         let invocation = activation.remote_activate_invocation();
         let argv = invocation.joined_arguments();
         assert!(argv.contains("li@node-1.alpha.criome"), "{argv}");
@@ -5311,7 +5831,9 @@ mod tests {
         );
         // a single-token stem passes through unchanged
         assert_eq!(
-            secret_file("token.sops").attribute_name().expect("utf8 stem"),
+            secret_file("token.sops")
+                .attribute_name()
+                .expect("utf8 stem"),
             "token"
         );
     }
@@ -5344,26 +5866,31 @@ mod tests {
 
     #[test]
     fn generated_secrets_flake_maps_verbatim_stems_to_copied_files() {
-        let source_directory = std::env::temp_dir().join(format!(
-            "lojix-secrets-source-{}",
-            std::process::id()
-        ));
+        let source_directory =
+            std::env::temp_dir().join(format!("lojix-secrets-source-{}", std::process::id()));
         let secrets_directory = source_directory.join("secrets");
         fs::create_dir_all(&secrets_directory).expect("create source secrets dir");
         // opaque placeholder ciphertext — never read back by the daemon. Files
         // are named with their exact camelCase consumer name (coordinated
         // goldragon rename); the attribute is the stem verbatim.
-        fs::write(secrets_directory.join("routerWifiSaePasswords.sops"), b"opaque")
-            .expect("write sops file");
+        fs::write(
+            secrets_directory.join("routerWifiSaePasswords.sops"),
+            b"opaque",
+        )
+        .expect("write sops file");
         fs::write(secrets_directory.join("localLlmApiToken.sops"), b"opaque")
             .expect("write sops file");
         // a non-.sops file in the directory is ignored
         fs::write(secrets_directory.join("README.md"), b"ignore me").expect("write readme");
 
-        let generated = std::env::temp_dir().join(format!("lojix-secrets-gen-{}", std::process::id()));
+        let generated =
+            std::env::temp_dir().join(format!("lojix-secrets-gen-{}", std::process::id()));
         let _ = fs::remove_dir_all(&generated);
         let source = ordinary::ProposalSource::new(
-            source_directory.join("datom.nota").to_string_lossy().to_string(),
+            source_directory
+                .join("datom.nota")
+                .to_string_lossy()
+                .to_string(),
         );
         let cluster = ClusterSecretsDirectory::from_proposal_source(&source);
         GeneratedInputDirectory::new(generated.clone())
@@ -5380,7 +5907,10 @@ mod tests {
             flake.contains("routerWifiSaePasswords = ./routerWifiSaePasswords.sops;"),
             "{flake}"
         );
-        assert!(!flake.contains("README"), "non-sops files excluded: {flake}");
+        assert!(
+            !flake.contains("README"),
+            "non-sops files excluded: {flake}"
+        );
         assert!(
             generated.join("routerWifiSaePasswords.sops").is_file(),
             "ciphertext copied into the generated input"
@@ -5400,10 +5930,8 @@ mod tests {
         // cluster secrets leaves no stale ciphertext (which would drift the
         // narHash). First generate with two files, then with one, and confirm
         // the dropped file is gone from the generated input.
-        let source_directory = std::env::temp_dir().join(format!(
-            "lojix-secrets-stale-source-{}",
-            std::process::id()
-        ));
+        let source_directory =
+            std::env::temp_dir().join(format!("lojix-secrets-stale-source-{}", std::process::id()));
         let secrets_directory = source_directory.join("secrets");
         let _ = fs::remove_dir_all(&source_directory);
         fs::create_dir_all(&secrets_directory).expect("create source secrets dir");
@@ -5414,7 +5942,10 @@ mod tests {
             std::env::temp_dir().join(format!("lojix-secrets-stale-gen-{}", std::process::id()));
         let _ = fs::remove_dir_all(&generated);
         let source = ordinary::ProposalSource::new(
-            source_directory.join("datom.nota").to_string_lossy().to_string(),
+            source_directory
+                .join("datom.nota")
+                .to_string_lossy()
+                .to_string(),
         );
         let cluster = ClusterSecretsDirectory::from_proposal_source(&source);
         GeneratedInputDirectory::new(generated.clone())
@@ -5491,9 +6022,7 @@ mod tests {
         let generated =
             std::env::temp_dir().join(format!("lojix-secrets-empty-{}", std::process::id()));
         let _ = fs::remove_dir_all(&generated);
-        let source = ordinary::ProposalSource::new(
-            "/nonexistent/bootstrap/datom.nota".to_string(),
-        );
+        let source = ordinary::ProposalSource::new("/nonexistent/bootstrap/datom.nota".to_string());
         let cluster = ClusterSecretsDirectory::from_proposal_source(&source);
         GeneratedInputDirectory::new(generated.clone())
             .write_secrets(&cluster)
