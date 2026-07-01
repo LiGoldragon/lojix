@@ -36,7 +36,7 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 > substrate — Rust on Linux, `signal-core` over a Unix socket,
 > `sema-engine` for durable state, direct nix invocations. It is a
 > realization step toward the Sema-on-Sema future per
-> `~/primary/ESSENCE.md` §"Today and eventually".
+> `~/primary/ARCHITECTURE.md` §"Workspace vision and intent".
 
 ## 0.5 · Direction
 
@@ -271,7 +271,7 @@ Each daemon actor is a Kameo actor per
 
 ## 8 · Cross-cutting context
 
-- Workspace `~/primary/ESSENCE.md` is upstream of every rule.
+- Workspace `~/primary/ARCHITECTURE.md` §"Workspace vision and intent" is upstream of every rule.
 - `signal-lojix` at `github:LiGoldragon/signal-lojix` is the wire
   vocabulary; the daemon's external boundary is exactly that
   channel.
