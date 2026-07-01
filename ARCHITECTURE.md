@@ -65,6 +65,15 @@ streams subscription events.
   retention mutations. Owner socket modes granting any "other" access
   are refused at startup, and each owner connection must present
   kernel-vouched peer credentials matching the daemon process uid/gid.
+  The two-contract authority split places `Deploy`/`Pin`/`Unpin`/`Retire`
+  as owner-only policy in `meta-signal-lojix` — a deploy mutates the live
+  cluster and can break the router, the strongest owner-socket case —
+  while `Query`, the `WatchDeployments`/`WatchCacheRetention`
+  subscriptions, and `Unwatch` are peer-callable on the ordinary
+  `signal-lojix`. The policy contract is born `meta-signal-lojix`, never
+  `owner-signal-lojix` (Spirit `vudl`). Until cutover the meta contract is
+  carried as a local path-dependency package inside the `lojix` tree
+  (mirroring the cloud stopgap); the standalone repo is created at cutover.
 - **Live generation set** — `BTreeMap<(ClusterName, NodeName, Kind),
   Generation>` persisted via `sema-engine`. Source of truth for
   "what's running on every node right now."
@@ -154,6 +163,12 @@ Each daemon actor is a Kameo actor per
   `<state-directory>/generated-inputs/<cluster>/<node>/<shape>/`.
   `nix hash path --type sha256 --sri` supplies the narHash for each
   override.
+- **Substituter resolution (provisional):** for the cutover, resolving
+  a node name to its Yggdrasil cache URL and public key moves into the
+  daemon — the daemon gains horizon-read for substituters and the wire
+  reverts to carrying bare node names instead of pre-resolved
+  url/public-key pairs. This is a provisional for-now choice; the code
+  must be marked must-be-replaced-by-better-design (Spirit `lc28`).
 
 ## 5 · Constraints
 
@@ -169,6 +184,12 @@ Each daemon actor is a Kameo actor per
   there is no untyped escape hatch on the wire.
 - The daemon never initiates deploys on its own — every deploy
   starts from a received `DeploymentSubmission`.
+- The daemon serves connections concurrently, bounded by a permit
+  cap, and never blocks on in-progress nix builds. Deploy state is
+  per-request: each connection owns its own pipeline cursor. The
+  durable `sema-engine` Store is the only shared point and is locked
+  only briefly per sema op; long nix effects hold no global lock
+  (Spirit `2alg`).
 - The daemon's shared store is durable `sema-engine` backing; cross-table
   atomicity (an activation writes the live-set row then the gc-root row as
   two sequential keyed asserts) awaits a multi-table commit enhancement in
@@ -197,7 +218,50 @@ Each daemon actor is a Kameo actor per
   in response to typed requests; it does not invent its own
   schedule.
 
-## 7 · Cross-cutting context
+## 7 · Direction
+
+- **Testing and deployment are one function.** Both build an OS or
+  cluster closure and bring it up on a target; they differ only in
+  containment. The triad exposes both faces: ordinary non-meta signal
+  targets contained throwaway resources (hermetic VMs, sandboxes,
+  on-demand `VmHost` guests, ephemeral cloud droplets it provisions
+  and reaps) so a broken run kills only the contained target, while
+  meta signal is privileged production deploy to real nodes. The
+  ordinary-vs-meta split is the safety boundary, enforced by typed
+  contained-vs-production targets, not a runtime flag (Spirit `mq5s`).
+- **Safe typed interface is the default for nix work.** Practical
+  build, test, and deploy invocations describe the intended operation,
+  required capabilities, containment level, and builder policy in
+  Lojix language rather than hand-writing raw nix commands. Lojix
+  verifies an eligible remote worker exists, schedules jobs across
+  builder capabilities, and emits the corresponding nix invocation
+  only once the safety and placement constraints are satisfied
+  (Spirit `75pw`).
+- **Ergonomic test authoring is first-class.** The public
+  test-authoring interface carries schema shorthands and
+  well-developed option setting and querying so authoring a cluster
+  test — for example a criome, spirit, and router cluster test on the
+  ordinary contained-testing interface — is ergonomic rather than
+  verbose. Ease of use is a requirement of the interface, not an
+  afterthought (Spirit `vfgk`).
+- **Production credentials custodied through criome.** As part of
+  production cutover, the deploy daemon's operational credentials and
+  unattended machine identity are custodied and authenticated through
+  criome rather than borrowing the operator's logged-in session
+  (GPG/SSH agent). This builds on agents holding cryptographic
+  identity via criome (Spirit `h03z`).
+- **`lojix-daemon` owns GitHub-authenticated flake input resolution.**
+  The GitHub API rate-limit stale-activation failure is a deploy-path
+  problem owned by `lojix-daemon`, not a package problem: an
+  authenticated wrapper around the nix invocation fetches the GitHub
+  API key from the secret store and injects it into the nix call
+  (via `NIX_CONFIG` access-tokens). A small Rust library encapsulates
+  the secret-fetch and auth-injection so the rest of `lojix-daemon`
+  never handles the token directly. The credential value and its
+  store path stay out of source, logs, and the nix store (Spirit
+  `2qhw`).
+
+## 8 · Cross-cutting context
 
 - Workspace `~/primary/ESSENCE.md` is upstream of every rule.
 - `signal-lojix` at `github:LiGoldragon/signal-lojix` is the wire
