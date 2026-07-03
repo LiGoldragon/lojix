@@ -2608,7 +2608,7 @@ impl SchemaRuntime {
             nexus::EffectStage::Eval => meta::DeployRejectionReason::FlakeReferenceMalformed,
             nexus::EffectStage::Build => meta::DeployRejectionReason::FlakeReferenceMalformed,
             nexus::EffectStage::CopyClosure => meta::DeployRejectionReason::BuilderUnreachable,
-            nexus::EffectStage::Activate => meta::DeployRejectionReason::BuilderUnreachable,
+            nexus::EffectStage::Activate => meta::DeployRejectionReason::ActivationFailed,
             nexus::EffectStage::Gc => meta::DeployRejectionReason::DeploymentInFlight,
             // The test-only effect stages never reach the DEPLOY pipeline's
             // failure path (`fail_test_pipeline` owns them); an internal
