@@ -18,7 +18,7 @@ use lojix::schema::nexus::{self, NexusEngine};
 use lojix::schema::sema;
 use lojix::schema_runtime::SchemaRuntime;
 use meta_signal_lojix::schema::lib as meta;
-use nota_next::NotaEncode;
+use nota::NotaEncode;
 use signal_lojix::schema::lib as ordinary;
 
 fn run(engine: &mut SchemaRuntime, input: nexus::SignalInput) -> nexus::SignalOutput {

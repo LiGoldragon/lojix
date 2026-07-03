@@ -280,7 +280,7 @@ version = "0.1.0"
 source = "git+https://github.com/LiGoldragon/horizon-rs.git?branch=main#8d6cbc6660c1535fdb266f535e6413cbc4fbd33e"
 dependencies = [
  "ipnet",
- "nota-next",
+ "nota",
  "serde",
  "thiserror",
 ]
@@ -388,10 +388,10 @@ dependencies = [
  "horizon-lib",
  "kameo",
  "meta-signal-lojix",
- "nota-next",
+ "nota",
  "rkyv",
  "rustix",
- "schema-rust-next",
+ "schema-rust",
  "sema-engine",
  "serde_json",
  "signal-lojix",
@@ -412,9 +412,9 @@ name = "meta-signal-lojix"
 version = "0.2.0"
 source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?branch=main#4a8e79112d7195f5a95c22bb92a9607518db5256"
 dependencies = [
- "nota-next",
+ "nota",
  "rkyv",
- "schema-rust-next",
+ "schema-rust",
  "signal-frame",
  "signal-lojix",
 ]
@@ -451,9 +451,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "nota-next"
+name = "nota"
 version = "0.5.0"
-source = "git+https://github.com/LiGoldragon/nota-next.git?branch=main#c43d04a159e90314a0094b61ace66053371cc247"
+source = "git+https://github.com/LiGoldragon/nota.git?branch=main#c43d04a159e90314a0094b61ace66053371cc247"
 dependencies = [
  "nota-next-derive",
  "rkyv",
@@ -462,7 +462,7 @@ dependencies = [
 [[package]]
 name = "nota-next-derive"
 version = "0.3.0"
-source = "git+https://github.com/LiGoldragon/nota-next.git?branch=main#c43d04a159e90314a0094b61ace66053371cc247"
+source = "git+https://github.com/LiGoldragon/nota.git?branch=main#c43d04a159e90314a0094b61ace66053371cc247"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -620,9 +620,9 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 [[package]]
 name = "schema-cc"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/schema-next.git?branch=main#abae95f999c09491c706f39b6fdef48a3530b7f1"
+source = "git+https://github.com/LiGoldragon/schema.git?branch=main#abae95f999c09491c706f39b6fdef48a3530b7f1"
 dependencies = [
- "nota-next",
+ "nota",
  "prettyplease",
  "proc-macro2",
  "quote",
@@ -631,26 +631,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "schema-next"
+name = "schema"
 version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/schema-next.git?branch=main#abae95f999c09491c706f39b6fdef48a3530b7f1"
+source = "git+https://github.com/LiGoldragon/schema.git?branch=main#abae95f999c09491c706f39b6fdef48a3530b7f1"
 dependencies = [
  "blake3",
- "nota-next",
+ "nota",
  "rkyv",
  "schema-cc",
  "thiserror",
 ]
 
 [[package]]
-name = "schema-rust-next"
+name = "schema-rust"
 version = "0.5.3"
-source = "git+https://github.com/LiGoldragon/schema-rust-next.git?branch=main#e2e20b6607afb473204b2adbec0df81697fd38fc"
+source = "git+https://github.com/LiGoldragon/schema-rust.git?branch=main#e2e20b6607afb473204b2adbec0df81697fd38fc"
 dependencies = [
  "prettyplease",
  "proc-macro2",
  "quote",
- "schema-next",
+ "schema",
  "syn",
  "thiserror",
 ]
@@ -738,7 +738,7 @@ name = "signal-frame"
 version = "0.2.1"
 source = "git+https://github.com/LiGoldragon/signal-frame.git?branch=main#e2eae5c28dac47eea6c4c641b60c4fd27bb547d8"
 dependencies = [
- "nota-next",
+ "nota",
  "paste",
  "rkyv",
  "signal-frame-macros",
@@ -770,9 +770,9 @@ name = "signal-lojix"
 version = "0.2.0"
 source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=main#fbb28cf4775340d71886af866b4a403622ff6cef"
 dependencies = [
- "nota-next",
+ "nota",
  "rkyv",
- "schema-rust-next",
+ "schema-rust",
  "signal-frame",
 ]
 

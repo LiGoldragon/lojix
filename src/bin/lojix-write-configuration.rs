@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use lojix::{DaemonConfiguration, TestDefaults, TestMode};
-use nota_next::{NotaDecode, NotaDecodeError, NotaSource};
+use nota::{NotaDecode, NotaDecodeError, NotaSource};
 use thiserror::Error;
 use triad_runtime::{ArgumentError, ComponentArgument, ComponentCommand};
 
