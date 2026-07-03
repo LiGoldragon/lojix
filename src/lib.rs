@@ -192,10 +192,14 @@ pub struct DaemonConfiguration {
     /// flag, not a runtime `Configure`.
     pub daemon_host: String,
     /// The test-op defaults the daemon fills into a `(Check …)` shorthand at
-    /// lowering (report 54). Decoded from the same rkyv startup file as the
-    /// rest of the configuration — NOT a runtime `Configure` op, NOT a flag,
-    /// consistent with the daemons-take-binary-config-only override.
-    pub test_defaults: TestDefaults,
+    /// lowering (report 54). `None` when the daemon was started without a baked
+    /// fixture — the production posture: a bare `(Check …)`/`(Run …)` then
+    /// rejects with `NoTestDefaults` rather than resolving against a per-node
+    /// baked test cluster (the workspace deployment-independence discipline;
+    /// test fixtures live only in test code). Decoded from the same rkyv startup
+    /// file as the rest of the configuration — NOT a runtime `Configure` op, NOT
+    /// a flag, consistent with the daemons-take-binary-config-only override.
+    pub test_defaults: Option<TestDefaults>,
 }
 
 /// The config-default test-op selection a `(Check <node>)` shorthand expands

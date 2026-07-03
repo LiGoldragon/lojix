@@ -185,6 +185,13 @@ Each daemon actor is a Kameo actor per
   are rejected at daemon startup; launch tooling must encode
   configuration before exec. The owner/meta socket refuses any mode with
   "other" access and admits only same-uid/gid owner peers.
+- The startup configuration carries the test-op defaults as an OPTIONAL
+  fixture: `DaemonConfiguration.test_defaults` is `Option<TestDefaults>` and the
+  writer's field-7 `WriterTestDefaultsChoice` is `NoTestDefaults` (production)
+  or `(TestDefaults …)` (test/dev). A production node bakes `NoTestDefaults` →
+  `None`, so a bare `(Check …)`/`(Run …)` is rejected with `NoTestDefaults`
+  rather than resolving against a per-node baked test cluster. Test fixtures are
+  supplied only by test code (the workspace deployment-independence discipline).
 - The CLI sends one NOTA-encoded `signal-lojix` request per
   invocation and prints one NOTA-encoded reply (or streams events
   until the subscription closes).

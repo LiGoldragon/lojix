@@ -32,8 +32,21 @@ struct ConfigurationWriteRequest {
     owner_socket_mode: WriterMode,
     state_directory_path: WriterPath,
     daemon_host: WriterCluster,
-    test_defaults: WriterTestDefaults,
+    test_defaults: WriterTestDefaultsChoice,
     output_path: WriterPath,
+}
+
+/// Whether the daemon's binary startup bakes a test-op fixture at all. A
+/// production node carries the bare `NoTestDefaults`: with no baked fixture the
+/// daemon lowers to `None` and rejects a bare `(Check …)`/`(Run …)` with
+/// `NoTestDefaults` instead of silently building a baked test cluster. Test
+/// fixtures are supplied only by test code, never baked per-node into a
+/// production module (the workspace deployment-independence discipline). A
+/// test/dev daemon carries `(TestDefaults …)` with the explicit fixture.
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+enum WriterTestDefaultsChoice {
+    NoTestDefaults,
+    TestDefaults(WriterTestDefaults),
 }
 
 /// The test-op defaults authored as typed NOTA at deploy time and encoded into
@@ -120,18 +133,31 @@ impl ConfigurationWriteRequest {
             owner_socket_mode: self.owner_socket_mode.0,
             state_directory_path: self.state_directory_path.0,
             daemon_host: self.daemon_host.0,
-            test_defaults: TestDefaults {
-                cluster: self.test_defaults.cluster.0,
-                default_vm_host: self.test_defaults.default_vm_host.0,
-                default_mode: self.test_defaults.default_mode.into(),
-                test_flake: self.test_defaults.test_flake.0,
-                proposal_source: self.test_defaults.proposal_source.0,
-            },
+            test_defaults: self.test_defaults.into_config(),
         };
         configuration
             .write_rkyv_file(&output_path)
             .map_err(ConfigurationWriterError::WriteConfiguration)?;
         Ok(output_path)
+    }
+}
+
+impl WriterTestDefaultsChoice {
+    /// Lower the authored choice into the daemon's optional config default.
+    /// `NoTestDefaults` becomes `None` — the production posture — so a bare
+    /// `(Check …)`/`(Run …)` is rejected rather than resolved against a baked
+    /// fixture.
+    fn into_config(self) -> Option<TestDefaults> {
+        match self {
+            Self::NoTestDefaults => None,
+            Self::TestDefaults(defaults) => Some(TestDefaults {
+                cluster: defaults.cluster.0,
+                default_vm_host: defaults.default_vm_host.0,
+                default_mode: defaults.default_mode.into(),
+                test_flake: defaults.test_flake.0,
+                proposal_source: defaults.proposal_source.0,
+            }),
+        }
     }
 }
 

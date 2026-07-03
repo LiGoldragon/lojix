@@ -531,13 +531,13 @@ fn write_test_daemon_configuration(
         owner_socket_mode: 0o660,
         state_directory_path: directory.join("state").display().to_string(),
         daemon_host: "ouranos".to_string(),
-        test_defaults: lojix::TestDefaults {
+        test_defaults: Some(lojix::TestDefaults {
             cluster: "goldragon".to_string(),
             default_vm_host: "prometheus".to_string(),
             default_mode: lojix::TestMode::Hermetic,
             test_flake: "github:LiGoldragon/CriomOS-test-cluster/horizon-test-vm".to_string(),
             proposal_source: String::new(),
-        },
+        }),
     };
     let path = directory.join("daemon-configuration.rkyv");
     configuration
@@ -599,13 +599,13 @@ fn engine_with_projection() -> (tempfile::TempDir, SchemaRuntime) {
         owner_socket_mode: 0o660,
         state_directory_path: directory.path().join("state").display().to_string(),
         daemon_host: "ouranos".to_string(),
-        test_defaults: lojix::TestDefaults {
+        test_defaults: Some(lojix::TestDefaults {
             cluster: "goldragon".to_string(),
             default_vm_host: "atlas".to_string(),
             default_mode: lojix::TestMode::Hermetic,
             test_flake: "github:LiGoldragon/CriomOS-test-cluster/horizon-test-vm".to_string(),
             proposal_source: proposal_path.display().to_string(),
-        },
+        }),
     };
     let store = Arc::new(
         Store::open(directory.path().join("lojix.sema")).expect("open store over the projection"),
@@ -718,5 +718,44 @@ fn all_resolves_to_the_hosted_pod_nodes() {
     assert!(
         query_runs(&mut engine, "goldragon", "atlas").is_empty(),
         "All did not sweep the bare-metal atlas (no super_node)"
+    );
+}
+
+/// The production posture, end to end: a daemon started with NO baked test
+/// fixture (`test_defaults: None` — the `NoTestDefaults` writer form) REJECTS a
+/// bare `(Check …)` with `NoTestDefaults` rather than resolving it against a
+/// per-node baked cluster. This is the runtime half of the
+/// deployment-independence decision; test fixtures live only in test code and a
+/// production node bakes none.
+#[test]
+fn check_without_configured_defaults_is_rejected_no_test_defaults() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let configuration = lojix::DaemonConfiguration {
+        ordinary_socket_path: directory.path().join("ordinary.sock").display().to_string(),
+        ordinary_socket_mode: 0o660,
+        owner_socket_path: directory.path().join("owner.sock").display().to_string(),
+        owner_socket_mode: 0o660,
+        state_directory_path: directory.path().join("state").display().to_string(),
+        daemon_host: "ouranos".to_string(),
+        test_defaults: None,
+    };
+    let store = Arc::new(
+        Store::open(directory.path().join("lojix.sema")).expect("open store without defaults"),
+    );
+    let mut engine = SchemaRuntime::with_store_and_configuration(
+        store,
+        Arc::new(RuntimeConfiguration::from_daemon_configuration(
+            &configuration,
+        )),
+    );
+    let reason = rejection_reason(run(&mut engine, check_request("mercury")));
+    assert_eq!(
+        reason,
+        meta::TestRejectionReason::NoTestDefaults,
+        "a production daemon with no baked fixture rejects a bare (Check …)"
+    );
+    assert!(
+        query_runs(&mut engine, "goldragon", "mercury").is_empty(),
+        "a rejected check records no test-run row"
     );
 }

@@ -677,7 +677,7 @@ impl RuntimeConfiguration {
                 .join("generated-inputs"),
             daemon_host: ordinary::NodeName::new(configuration.daemon_host.clone()),
             effect_barrier: None,
-            test_defaults: Some(TestDefaults::from(&configuration.test_defaults)),
+            test_defaults: configuration.test_defaults.as_ref().map(TestDefaults::from),
         }
     }
 

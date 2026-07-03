@@ -34,13 +34,13 @@ fn write_daemon_configuration(
         owner_socket_mode,
         state_directory_path: directory.join("state").display().to_string(),
         daemon_host: "ouranos".to_string(),
-        test_defaults: lojix::TestDefaults {
+        test_defaults: Some(lojix::TestDefaults {
             cluster: "goldragon".to_string(),
             default_vm_host: "prometheus".to_string(),
             default_mode: lojix::TestMode::Hermetic,
             test_flake: "github:LiGoldragon/CriomOS-test-cluster".to_string(),
             proposal_source: String::new(),
-        },
+        }),
     };
     let path = directory.join("daemon-configuration.rkyv");
     configuration
