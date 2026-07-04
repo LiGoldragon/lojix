@@ -435,7 +435,7 @@ checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 [[package]]
 name = "meta-signal-lojix"
 version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?branch=drop-next#8375d9ff601aff3d70c453124046bb92ddd3eda6"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?branch=drop-next#f89dab1226df8ab93d9beac2b8632e73aa7c8adc"
 dependencies = [
  "nota",
  "rkyv",
@@ -670,7 +670,7 @@ dependencies = [
 [[package]]
 name = "schema-rust"
 version = "0.5.3"
-source = "git+https://github.com/LiGoldragon/schema-rust.git?branch=drop-next#af814e757cd84fb0b3b8cce9c0623f69b6d99b5c"
+source = "git+https://github.com/LiGoldragon/schema-rust.git?branch=drop-next#67b91f5a6a70eced5854f27c7af8b39ace7e2d88"
 dependencies = [
  "nota",
  "prettyplease",
@@ -816,7 +816,7 @@ dependencies = [
 [[package]]
 name = "signal-lojix"
 version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=drop-next#202d6187f5cc1377edef7d4e0228899887c6a43c"
+source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=drop-next#51941ca310298cb3330c752326e2727e819ee31e"
 dependencies = [
  "nota",
  "rkyv",
