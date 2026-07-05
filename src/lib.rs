@@ -30,6 +30,7 @@ use crate::schema::sema::{
 
 pub mod client;
 pub mod daemon;
+pub mod inspection;
 pub mod schema;
 pub mod schema_runtime;
 
