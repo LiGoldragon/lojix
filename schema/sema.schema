@@ -60,7 +60,7 @@
   SemaReadInput [(QueryGenerations Selection) (ReadEventLog EventLogRange) (CheckKeyMaterial KeyMaterialQuery) (QueryTestRuns TestRunLookup)]
 
   SemaReadOutput [(GenerationsQueried GenerationListing) (EventLogRead EventLogPage) (KeyMaterialChecked KeyMaterialReport) (TestRunsQueried TestRunListing) (ReadMissed RejectionReport)]
-  EventLogPage { deployment_events (Vec DeploymentPhaseEvent) retention_events (Vec CacheRetentionTransitionEvent) StateMarker * }
+  EventLogPage { deployment_events.(Vector DeploymentPhaseEvent) retention_events.(Vector CacheRetentionTransitionEvent) StateMarker }
 
   ;; RecordTestRun persists one already-lowered test-run row (the Unit-2a stub
   ;; writes it at phase Submitted / outcome Pending) and replies the accepted
@@ -68,34 +68,34 @@
   ;; rewrites the row at each phase transition as the real dispatch runs.
   SemaWriteInput [(RecordDeploySubmitted DeploySubmission) (RecordPhaseTransition DeploymentPhaseEvent) (RecordGenerationActivated ActivationCommit) (PinGeneration PinRequest) (UnpinGeneration UnpinRequest) (RetireGeneration RetireRequest) (RecordContainerTransition ContainerTransition) (RecordTestRun TestRunRecord)]
   DeploySubmission [(Host HostDeployment) (UserEnvironment UserEnvironmentDeployment)]
-  ActivationCommit { GenerationIdentifier * ClusterName * NodeName * GenerationSlot * ClosurePath * SourceRevisionRecord * }
-  ContainerTransition { ClusterName * NodeName * container ContainerName state ContainerState }
+  ActivationCommit { GenerationIdentifier ClusterName NodeName GenerationSlot ClosurePath SourceRevisionRecord }
+  ContainerTransition { ClusterName NodeName container.ContainerName state.ContainerState }
   ContainerName String
   ContainerState [Starting Started Stopping Stopped Failed]
 
   SemaWriteOutput [(DeploySubmitted DeployHandle) (PhaseRecorded PhaseReceipt) (GenerationActivated AppliedActivation) (GenerationPinned AppliedPin) (GenerationUnpinned AppliedUnpin) (GenerationRetired AppliedRetire) (ContainerRecorded ContainerReceipt) (TestRunRecorded AcceptedTest) (WriteRejected RejectionReport)]
-  PhaseReceipt { EventLogPosition * StateMarker * }
-  AppliedActivation { GenerationIdentifier * GenerationSlot * StateMarker * }
-  ContainerReceipt { EventLogPosition * StateMarker * }
+  PhaseReceipt { EventLogPosition StateMarker }
+  AppliedActivation { GenerationIdentifier GenerationSlot StateMarker }
+  ContainerReceipt { EventLogPosition StateMarker }
 
-  RejectionReport { reason RejectionReason marker StateMarker }
+  RejectionReport { reason.RejectionReason marker.StateMarker }
   RejectionReason [GenerationUnknown NodeUnknown ClusterUnknown PlanNotApproved PinLabelInUse PinLabelUnknown GenerationActive GenerationPinned EventLogPositionOutOfRange ProposalSourceUnreachable]
-  StateMarker { CommitSequence * StateDigest * }
+  StateMarker { CommitSequence StateDigest }
   CommitSequence Integer
   StateDigest Integer
 
-  LiveSetTable { entries (Vec LiveGeneration) }
-  LiveGeneration { DeploymentIdentifier * GenerationIdentifier * ClusterName * NodeName * GenerationArtifact * ActivationEffect * GenerationSlot * ClosurePath * SourceRevisionRecord * }
+  LiveSetTable { entries.(Vector LiveGeneration) }
+  LiveGeneration { DeploymentIdentifier GenerationIdentifier ClusterName NodeName GenerationArtifact ActivationEffect GenerationSlot ClosurePath SourceRevisionRecord }
 
-  GcRootsTable { roots (Vec GcRoot) }
-  GcRoot { GenerationIdentifier * ClusterName * NodeName * GenerationSlot * ClosurePath * label (Optional PinLabel) }
+  GcRootsTable { roots.(Vector GcRoot) }
+  GcRoot { GenerationIdentifier ClusterName NodeName GenerationSlot ClosurePath label.(Optional PinLabel) }
 
-  EventLogTable { entries (Vec EventLogEntry) }
-  EventLogEntry { EventLogPosition * record LoggedEvent }
+  EventLogTable { entries.(Vector EventLogEntry) }
+  EventLogEntry { EventLogPosition record.LoggedEvent }
   LoggedEvent [(Deployment DeploymentPhaseEvent) (CacheRetention CacheRetentionTransitionEvent) (Container ContainerLifecycleRecord)]
 
-  ContainerLifecycleTable { records (Vec ContainerLifecycleRecord) }
-  ContainerLifecycleRecord { ClusterName * NodeName * container ContainerName state ContainerState EventLogPosition * }
+  ContainerLifecycleTable { records.(Vector ContainerLifecycleRecord) }
+  ContainerLifecycleRecord { ClusterName NodeName container.ContainerName state.ContainerState EventLogPosition }
 
   ;; The durable in-flight deploy-job row (up9q). One row per submitted deploy,
   ;; keyed by DeploymentIdentifier. Written on submit and rewritten at every
@@ -105,8 +105,8 @@
   ;; at acceptance, resolved_ref / resolved_revision after flake metadata, and
   ;; resolved_target / boot_once_unit are populated so a resumed Activating job
   ;; can poll the transient unit instead of re-activating.
-  DeployJobTable { jobs (Vec DeployJob) }
-  DeployJob { DeploymentIdentifier * GenerationIdentifier * ClusterName * NodeName * phase DeployJobPhase closure_path (Optional ClosurePath) source_revision_policy SourceRevisionPolicy requested_ref FlakeReference resolved_ref (Optional FlakeReference) resolved_revision (Optional String) resolved_target (Optional String) boot_once_unit (Optional String) }
+  DeployJobTable { jobs.(Vector DeployJob) }
+  DeployJob { DeploymentIdentifier GenerationIdentifier ClusterName NodeName phase.DeployJobPhase closure_path.(Optional ClosurePath) SourceRevisionPolicy requested_ref.FlakeReference resolved_ref.(Optional FlakeReference) resolved_revision.(Optional String) resolved_target.(Optional String) boot_once_unit.(Optional String) }
   DeployJobPhase [Submitted Building Built Copying Activating Activated Failed]
 
   ;; The durable test-run table (report 54 §5.3), mirroring DeployJobTable. One
@@ -118,15 +118,15 @@
   ;; ordinary-contract TestRunRecord field-for-field — the same local/wire
   ;; split LiveGeneration/Generation already uses, because EngineRecord cannot
   ;; be implemented on an imported wire type (the orphan rule).
-  TestRunTable { runs (Vec StoredTestRun) }
+  TestRunTable { runs.(Vector StoredTestRun) }
   StoredTestRun {
-    TestRunIdentifier *
-    ClusterName *
-    NodeName *
-    host NodeName
-    mode TestMode
-    phase TestRunPhase
-    outcome TestOutcome
-    closure_path (Optional ClosurePath)
+    TestRunIdentifier
+    ClusterName
+    NodeName
+    host.NodeName
+    mode.TestMode
+    phase.TestRunPhase
+    outcome.TestOutcome
+    closure_path.(Optional ClosurePath)
   }
 }

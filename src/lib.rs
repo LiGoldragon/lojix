@@ -140,7 +140,7 @@ pub enum Error {
     Horizon(#[from] horizon_lib::Error),
 
     #[error("horizon nota decode error: {0}")]
-    HorizonNota(#[from] nota_next::NotaDecodeError),
+    HorizonNota(#[from] nota::NotaDecodeError),
 
     #[error("horizon json encode error: {0}")]
     HorizonJson(#[from] serde_json::Error),

@@ -21,7 +21,7 @@ use horizon_lib::name::{
 };
 use horizon_lib::{ClusterProposal, Horizon, Viewpoint};
 use meta_signal_lojix::schema::lib as meta;
-use nota_next::NotaSource;
+use nota::NotaSource;
 use signal_lojix::schema::lib as ordinary;
 use tokio::process::Command;
 

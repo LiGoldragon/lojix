@@ -1,6 +1,6 @@
 use std::{env, path::PathBuf};
 
-use schema_rust_next::build::{DependencySchema, GenerationDriver, GenerationPlan};
+use schema_rust::build::{DependencySchema, GenerationDriver, GenerationPlan};
 
 fn main() {
     SchemaBuild::from_environment().run();
