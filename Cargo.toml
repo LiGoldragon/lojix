@@ -32,21 +32,21 @@ default   = []
 nota-text = ["signal-lojix/nota-text", "meta-signal-lojix/nota-text"]
 
 [dependencies]
-horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", branch = "drop-next" }
+horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", branch = "main" }
 kameo             = "0.20"
 nota         = { git = "https://github.com/LiGoldragon/nota.git", branch = "main" }
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix.git", branch = "drop-next" }
-signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix.git", branch = "drop-next" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix.git", branch = "main" }
+signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix.git", branch = "main" }
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 rustix            = { version = "1", default-features = false, features = ["process"] }
 sema-engine       = { git = "https://github.com/LiGoldragon/sema-engine.git", branch = "main" }
 serde_json        = "1"
 thiserror         = "2"
 tokio             = { version = "1", features = ["process", "rt-multi-thread", "sync", "time"] }
-triad-runtime     = { git = "https://github.com/LiGoldragon/triad-runtime.git", branch = "drop-next" }
+triad-runtime     = { git = "https://github.com/LiGoldragon/triad-runtime.git", branch = "main" }
 
 [build-dependencies]
-schema-rust = { git = "https://github.com/LiGoldragon/schema-rust.git", branch = "drop-next" }
+schema-rust = { git = "https://github.com/LiGoldragon/schema-rust.git", branch = "main" }
 
 [dev-dependencies]
 tempfile = "3"
