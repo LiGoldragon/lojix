@@ -137,6 +137,16 @@ pub enum Error {
     #[error("sema database engine error: {0}")]
     Database(#[from] sema_engine::Error),
 
+    #[error(
+        "lojix store at {path:?} cannot be used by this daemon's startup schema/layout gate while {stage}; daemon startup stopped before serving requests; inspect the store with `lojix-inspect-store {path:?}`: {source}"
+    )]
+    StoreStartupCompatibility {
+        path: PathBuf,
+        stage: &'static str,
+        #[source]
+        source: Box<sema_engine::Error>,
+    },
+
     #[error("horizon projection error: {0}")]
     Horizon(#[from] horizon_lib::Error),
 
@@ -320,38 +330,79 @@ impl Store {
     /// resume — there is no separate load path (ur16).
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        let mut database = SemaDatabase::open(EngineOpen::new(path.clone(), LOJIX_SCHEMA_VERSION))?;
-        let live_set = database.register_table(TableDescriptor::new(
-            LIVE_SET_TABLE,
-            FamilyName::new(LIVE_SET_FAMILY),
-            SchemaHash::new(LIVE_SET_SCHEMA_HASH),
-        ))?;
-        let gc_roots = database.register_table(TableDescriptor::new(
-            GC_ROOTS_TABLE,
-            FamilyName::new(GC_ROOTS_FAMILY),
-            SchemaHash::new(GC_ROOTS_SCHEMA_HASH),
-        ))?;
-        let event_log = database.register_table(TableDescriptor::new(
-            EVENT_LOG_TABLE,
-            FamilyName::new(EVENT_LOG_FAMILY),
-            SchemaHash::new(EVENT_LOG_SCHEMA_HASH),
-        ))?;
-        let containers = database.register_table(TableDescriptor::new(
-            CONTAINER_LIFECYCLE_TABLE,
-            FamilyName::new(CONTAINER_LIFECYCLE_FAMILY),
-            SchemaHash::new(CONTAINER_LIFECYCLE_SCHEMA_HASH),
-        ))?;
-        let deploy_jobs = database.register_table(TableDescriptor::new(
-            DEPLOY_JOB_TABLE,
-            FamilyName::new(DEPLOY_JOB_FAMILY),
-            SchemaHash::new(DEPLOY_JOB_SCHEMA_HASH),
-        ))?;
-        let test_runs = database.register_table(TableDescriptor::new(
-            TEST_RUN_TABLE,
-            FamilyName::new(TEST_RUN_FAMILY),
-            SchemaHash::new(TEST_RUN_SCHEMA_HASH),
-        ))?;
-        Ok(Self {
+        let mut database = SemaDatabase::open(EngineOpen::new(path.clone(), LOJIX_SCHEMA_VERSION))
+            .map_err(|source| Error::StoreStartupCompatibility {
+                path: path.clone(),
+                stage: "opening sema-engine",
+                source: Box::new(source),
+            })?;
+        let live_set = database
+            .register_table(TableDescriptor::new(
+                LIVE_SET_TABLE,
+                FamilyName::new(LIVE_SET_FAMILY),
+                SchemaHash::new(LIVE_SET_SCHEMA_HASH),
+            ))
+            .map_err(|source| Error::StoreStartupCompatibility {
+                path: path.clone(),
+                stage: "registering live-set table",
+                source: Box::new(source),
+            })?;
+        let gc_roots = database
+            .register_table(TableDescriptor::new(
+                GC_ROOTS_TABLE,
+                FamilyName::new(GC_ROOTS_FAMILY),
+                SchemaHash::new(GC_ROOTS_SCHEMA_HASH),
+            ))
+            .map_err(|source| Error::StoreStartupCompatibility {
+                path: path.clone(),
+                stage: "registering gc-roots table",
+                source: Box::new(source),
+            })?;
+        let event_log = database
+            .register_table(TableDescriptor::new(
+                EVENT_LOG_TABLE,
+                FamilyName::new(EVENT_LOG_FAMILY),
+                SchemaHash::new(EVENT_LOG_SCHEMA_HASH),
+            ))
+            .map_err(|source| Error::StoreStartupCompatibility {
+                path: path.clone(),
+                stage: "registering event-log table",
+                source: Box::new(source),
+            })?;
+        let containers = database
+            .register_table(TableDescriptor::new(
+                CONTAINER_LIFECYCLE_TABLE,
+                FamilyName::new(CONTAINER_LIFECYCLE_FAMILY),
+                SchemaHash::new(CONTAINER_LIFECYCLE_SCHEMA_HASH),
+            ))
+            .map_err(|source| Error::StoreStartupCompatibility {
+                path: path.clone(),
+                stage: "registering container-lifecycle table",
+                source: Box::new(source),
+            })?;
+        let deploy_jobs = database
+            .register_table(TableDescriptor::new(
+                DEPLOY_JOB_TABLE,
+                FamilyName::new(DEPLOY_JOB_FAMILY),
+                SchemaHash::new(DEPLOY_JOB_SCHEMA_HASH),
+            ))
+            .map_err(|source| Error::StoreStartupCompatibility {
+                path: path.clone(),
+                stage: "registering deploy-job table",
+                source: Box::new(source),
+            })?;
+        let test_runs = database
+            .register_table(TableDescriptor::new(
+                TEST_RUN_TABLE,
+                FamilyName::new(TEST_RUN_FAMILY),
+                SchemaHash::new(TEST_RUN_SCHEMA_HASH),
+            ))
+            .map_err(|source| Error::StoreStartupCompatibility {
+                path: path.clone(),
+                stage: "registering test-run table",
+                source: Box::new(source),
+            })?;
+        let store = Self {
             database,
             live_set,
             gc_roots,
@@ -361,11 +412,52 @@ impl Store {
             test_runs,
             path,
             subscription_sequence: AtomicU64::new(0),
-        })
+        };
+        store.validate_startup_compatibility()?;
+        Ok(store)
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Read every durable table once during store construction. The daemon must
+    /// fail at the storage boundary when an older row layout no longer decodes;
+    /// otherwise startup succeeds and the first query reports a misleading
+    /// domain miss such as `GenerationUnknown`.
+    fn validate_startup_compatibility(&self) -> Result<()> {
+        self.live_generations().map(|_| ()).map_err(|source| {
+            self.startup_compatibility_error("validating live-set rows", source)
+        })?;
+        self.gc_root_records().map(|_| ()).map_err(|source| {
+            self.startup_compatibility_error("validating gc-roots rows", source)
+        })?;
+        self.event_log_entries().map(|_| ()).map_err(|source| {
+            self.startup_compatibility_error("validating event-log rows", source)
+        })?;
+        self.container_lifecycle_records()
+            .map(|_| ())
+            .map_err(|source| {
+                self.startup_compatibility_error("validating container-lifecycle rows", source)
+            })?;
+        self.deploy_jobs().map(|_| ()).map_err(|source| {
+            self.startup_compatibility_error("validating deploy-job rows", source)
+        })?;
+        self.test_runs().map(|_| ()).map_err(|source| {
+            self.startup_compatibility_error("validating test-run rows", source)
+        })?;
+        Ok(())
+    }
+
+    fn startup_compatibility_error(&self, stage: &'static str, error: Error) -> Error {
+        match error {
+            Error::Database(source) => Error::StoreStartupCompatibility {
+                path: self.path.clone(),
+                stage,
+                source: Box::new(source),
+            },
+            other => other,
+        }
     }
 
     /// The persisted commit sequence — sema-engine's durable write counter,
@@ -396,6 +488,14 @@ impl Store {
         Ok(self
             .database
             .match_records(QueryPlan::all(self.event_log))?
+            .records()
+            .to_vec())
+    }
+
+    fn container_lifecycle_records(&self) -> Result<Vec<ContainerLifecycleRecord>> {
+        Ok(self
+            .database
+            .match_records(QueryPlan::all(self.containers))?
             .records()
             .to_vec())
     }
