@@ -1,5 +1,3 @@
-You MUST read [~/primary/repos/lore/AGENTS.md](../../../lore/AGENTS.md) — the canonical agent contract.
-
 # lojix — agent carve-outs
 
 - **Status: implemented crate (2026-06-10).** The live
@@ -10,7 +8,7 @@ You MUST read [~/primary/repos/lore/AGENTS.md](../../../lore/AGENTS.md) — the 
   until a Nix check surface lands.
 
 - **Future infrastructure.** Per
-  `~/primary/protocols/active-repositories.md` §"Replacement Stack
+  the active-repositories protocol §"Replacement Stack
   (Future Infrastructure)", this daemon is the direct typed deploy implementation surface. Do not
   assume current cluster deploys flow through it.
 
@@ -21,8 +19,8 @@ You MUST read [~/primary/repos/lore/AGENTS.md](../../../lore/AGENTS.md) — the 
   `triad-runtime`'s actor-native multi-listener. Generated Nexus
   execution and effect hooks are async; do not reintroduce
   blocking-pool bridges around the engine. No zero-state holders per
-  `~/primary/skills/actor-systems.md`
+  the actor-system discipline
   §"Zero-sized actors are not actors".
 
-- **Push, not poll.** Per `~/primary/skills/push-not-pull.md`. The
+- **Push, not poll.** Per the push-not-pull discipline. The
   daemon emits observations; consumers subscribe.
