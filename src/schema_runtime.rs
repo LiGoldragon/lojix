@@ -4323,28 +4323,29 @@ impl UserEnvironmentActivation {
     }
 
     /// The deployment SSH identity is root (the same authority used for closure
-    /// realization and copying). Resolve the target account's home on the node
-    /// and drop privilege only for the profile and activation commands. This
-    /// keeps a user profile deploy possible when the target account has no SSH
-    /// login while preserving that profile's user-owned state.
+    /// realization and copying). Drop privilege to the target account for the
+    /// profile and activation commands, so a user profile deploy works even when
+    /// that account has no SSH login while preserving the profile's user-owned
+    /// state.
     ///
-    /// The root SSH session carries `XDG_RUNTIME_DIR=/run/user/0`, and `runuser`
-    /// preserves it into the target user's context. Home Manager's `activate`
-    /// then defaults its systemd reload to `${XDG_RUNTIME_DIR:-/run/user/$(id -u)}`
-    /// — root's `/run/user/0`, which the dropped-privilege user cannot use —
-    /// failing activation with a permission error. Unset it so the target's own
-    /// real runtime dir (`/run/user/<target-uid>`) is computed instead. `runuser`
-    /// already resets `USER`/`LOGNAME` to the target, so only `HOME` and the
-    /// leaked runtime dir need correcting here.
+    /// Drop through a login (`runuser --login`), not a bare privilege drop. The
+    /// root SSH session's environment — `XDG_RUNTIME_DIR` and
+    /// `DBUS_SESSION_BUS_ADDRESS` (`/run/user/0`), `NIX_PROFILES`,
+    /// `XDG_DATA_DIRS`, `XDG_CONFIG_DIRS`, … — otherwise survives into the target
+    /// context and points Home Manager's activation at root-owned runtime and
+    /// profile paths; its `mkdir`, `dconf`, and systemd-reload steps then fail
+    /// with permission errors. A login rebuilds the environment from the target
+    /// account: correct `HOME`, `USER`, `LOGNAME`, and the target's own profile
+    /// and runtime paths, so activation runs as a clean session of that user
+    /// (its systemd reload reaches the target's live `/run/user/<uid>` session).
+    /// The login also resolves the account's home natively, obviating a manual
+    /// `getent` lookup.
     fn root_mediated_invocation(&self, command: ShellCommand) -> NixCommand {
         let user = ShellArgument::new(self.user.as_str()).to_command_text();
         let command = ShellArgument::new(command.into_text()).to_command_text();
         self.target
             .remote_invocation(ShellCommand::from_raw(format!(
-                "USER_HOME=$(getent passwd {user} | cut -d: -f6) \\
-             && test -n \"$USER_HOME\" \\
-             && test -d \"$USER_HOME\" \\
-             && runuser --user {user} -- env -u XDG_RUNTIME_DIR HOME=\"$USER_HOME\" sh -c {command}",
+                "runuser --login --command {command} {user}",
             )))
     }
 
@@ -5805,10 +5806,8 @@ mod tests {
         let argv = invocation.joined_arguments();
         assert!(argv.contains("root@node-1.alpha.criome"), "{argv}");
         assert!(!argv.contains("li@node-1.alpha.criome"), "{argv}");
-        assert!(
-            argv.contains("runuser --user li -- env -u XDG_RUNTIME_DIR HOME=\"$USER_HOME\" sh -c"),
-            "{argv}"
-        );
+        assert!(argv.contains("runuser --login --command"), "{argv}");
+        assert!(argv.trim_end().ends_with("li"), "{argv}");
         assert!(
             argv.contains("nix-env -p \"$HOME/.local/state/nix/profiles/home-manager\" --set"),
             "{argv}"
@@ -5823,10 +5822,8 @@ mod tests {
         let argv = invocation.joined_arguments();
         assert!(argv.contains("root@node-1.alpha.criome"), "{argv}");
         assert!(!argv.contains("li@node-1.alpha.criome"), "{argv}");
-        assert!(
-            argv.contains("runuser --user li -- env -u XDG_RUNTIME_DIR HOME=\"$USER_HOME\" sh -c"),
-            "{argv}"
-        );
+        assert!(argv.contains("runuser --login --command"), "{argv}");
+        assert!(argv.trim_end().ends_with("li"), "{argv}");
         assert!(argv.contains(&format!("{STORE}/activate")), "{argv}");
     }
 
