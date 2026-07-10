@@ -55,8 +55,15 @@ permission, or stall a deploy that operates within it. `AGENTS.md` and
   `src/schema_runtime.rs`). The `root` reach is `li`'s admin keys in each node's
   `root` `authorized_keys` (CriomOS-home `ARCHITECTURE.md` "Cluster-host update
   authority": the maintainer has root SSH on all cluster hosts).
-- **Slow is normal.** Every deploy re-evaluates the flake tree with
-  `nix eval --refresh`, so deploys measured in minutes are expected, not a failure.
+- **A first build is slow; re-evaluating the same immutable pin is not.** A deploy's
+  real cost is the closure build. The eval itself only forces a full flake-tree
+  re-evaluation (`nix eval --refresh`) for a mutable reference. Since lojix `0.4.6`
+  (bead `primary-8sv6`), a `RequireImmutable` deploy against a reference carrying its
+  immutable identity (`?rev=`/`?narHash=`) omits `--refresh` and trusts Nix's
+  per-flake evaluation cache, so re-deploying an already-evaluated pin skips the
+  multi-minute re-eval and the eval returns in seconds. A first deploy of a new
+  closure still has to build it, so minutes there are expected, not a failure; a
+  mutable-ref deploy keeps `--refresh` so a moved ref re-resolves.
 - **User-environment activation is root-mediated.** For `SetProfile` / `ActivateNow`,
   lojix connects over the same `root@<node>` deployment identity and drops privilege
   through a login — `runuser --login --command <cmd> <user>` — to run the profile-set
@@ -67,9 +74,9 @@ permission, or stall a deploy that operates within it. `AGENTS.md` and
   user-environment deploy works for any account on the node, needing no per-user SSH
   login — it rides `li`'s root reach. A local fast path skips ssh when the dispatcher
   already is the target user on the target node. This root-mediation with a login-mode
-  privilege drop is current as of lojix `0.4.5`, which `CriomOS/flake.lock` pins; on a
-  daemon host still running an earlier lojix, redeploy the daemon host to the pinned
-  lojix to enable it.
+  privilege drop landed in lojix `0.4.5` and is carried by the `0.4.6` that
+  `CriomOS/flake.lock` now pins; on a daemon host still running an earlier lojix,
+  redeploy the daemon host to the pinned lojix to enable it.
 
 ## Deploying a different user on a different node (for example `bird` on `zeus`)
 
