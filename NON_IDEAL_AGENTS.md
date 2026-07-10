@@ -84,11 +84,29 @@ above):
 meta-lojix "(Deploy (UserEnvironment (goldragon zeus bird <proposal-source> <criomos-flake-ref> ActivateNow RequireImmutable None [])))"
 ```
 
+Known blocker (lojix `0.4.3`, bead `primary-9mh1`): the root-mediated activation
+resets only `HOME`, not `XDG_RUNTIME_DIR`. An `ssh root@<node>` session carries
+`XDG_RUNTIME_DIR=/run/user/0`, which `runuser` preserves into the target user's
+context, so home-manager's `activate` runs `mkdir /run/user/0` as that user and
+fails with `Permission denied` — a `SetProfile` or `ActivateNow` for any account
+other than the operator fails at the `Activate` effect (`ActivationFailed`).
+`Realize` (build-only) still succeeds. Until the fix lands (reset the target
+user's runtime env in `root_mediated_invocation` — e.g.
+`env -u XDG_RUNTIME_DIR HOME=… USER=<user> LOGNAME=<user>`), a non-operator
+`ActivateNow` such as `bird` on `zeus` cannot complete through this interface.
+Witnessed 2026-07-10: bird@zeus `ActivateNow` (rev `0db057d`) built and realized
+the closure on zeus but failed at `Activate`.
+
 - `ActivateNow` sets the profile and runs the activation package; `SetProfile` sets
   the profile only; `Realize` builds and realizes the closure on the target store
   and stops (no profile, no activate).
 - `<proposal-source>` is the local `datom.nota` path; `<criomos-flake-ref>` is the
-  pinned CriomOS reference (for example `github:LiGoldragon/CriomOS/<rev>`).
+  pinned CriomOS reference. Under `RequireImmutable` the reference must carry its
+  immutable identity in the query string —
+  `github:LiGoldragon/CriomOS?rev=<full-40-char-commit>` (or `?narHash=sha256-...`).
+  The path-suffix form `github:LiGoldragon/CriomOS/<rev>` is rejected as
+  `FlakeReferenceMalformed`: the immutability check parses only the
+  `?rev=`/`?narHash=` query parameters, not a revision in the path.
 - Admission — `meta-lojix` returning — is not deploy success. Verify the result:
 
 ```sh
