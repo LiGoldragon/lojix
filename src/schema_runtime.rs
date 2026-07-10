@@ -4327,6 +4327,15 @@ impl UserEnvironmentActivation {
     /// and drop privilege only for the profile and activation commands. This
     /// keeps a user profile deploy possible when the target account has no SSH
     /// login while preserving that profile's user-owned state.
+    ///
+    /// The root SSH session carries `XDG_RUNTIME_DIR=/run/user/0`, and `runuser`
+    /// preserves it into the target user's context. Home Manager's `activate`
+    /// then defaults its systemd reload to `${XDG_RUNTIME_DIR:-/run/user/$(id -u)}`
+    /// — root's `/run/user/0`, which the dropped-privilege user cannot use —
+    /// failing activation with a permission error. Unset it so the target's own
+    /// real runtime dir (`/run/user/<target-uid>`) is computed instead. `runuser`
+    /// already resets `USER`/`LOGNAME` to the target, so only `HOME` and the
+    /// leaked runtime dir need correcting here.
     fn root_mediated_invocation(&self, command: ShellCommand) -> NixCommand {
         let user = ShellArgument::new(self.user.as_str()).to_command_text();
         let command = ShellArgument::new(command.into_text()).to_command_text();
@@ -4335,7 +4344,7 @@ impl UserEnvironmentActivation {
                 "USER_HOME=$(getent passwd {user} | cut -d: -f6) \\
              && test -n \"$USER_HOME\" \\
              && test -d \"$USER_HOME\" \\
-             && runuser --user {user} -- env HOME=\"$USER_HOME\" sh -c {command}",
+             && runuser --user {user} -- env -u XDG_RUNTIME_DIR HOME=\"$USER_HOME\" sh -c {command}",
             )))
     }
 
@@ -5797,7 +5806,7 @@ mod tests {
         assert!(argv.contains("root@node-1.alpha.criome"), "{argv}");
         assert!(!argv.contains("li@node-1.alpha.criome"), "{argv}");
         assert!(
-            argv.contains("runuser --user li -- env HOME=\"$USER_HOME\" sh -c"),
+            argv.contains("runuser --user li -- env -u XDG_RUNTIME_DIR HOME=\"$USER_HOME\" sh -c"),
             "{argv}"
         );
         assert!(
@@ -5815,7 +5824,7 @@ mod tests {
         assert!(argv.contains("root@node-1.alpha.criome"), "{argv}");
         assert!(!argv.contains("li@node-1.alpha.criome"), "{argv}");
         assert!(
-            argv.contains("runuser --user li -- env HOME=\"$USER_HOME\" sh -c"),
+            argv.contains("runuser --user li -- env -u XDG_RUNTIME_DIR HOME=\"$USER_HOME\" sh -c"),
             "{argv}"
         );
         assert!(argv.contains(&format!("{STORE}/activate")), "{argv}");
