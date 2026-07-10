@@ -58,16 +58,18 @@ permission, or stall a deploy that operates within it. `AGENTS.md` and
 - **Slow is normal.** Every deploy re-evaluates the flake tree with
   `nix eval --refresh`, so deploys measured in minutes are expected, not a failure.
 - **User-environment activation is root-mediated.** For `SetProfile` / `ActivateNow`,
-  lojix connects over the same `root@<node>` deployment identity, resolves the target
-  account's home with `getent passwd <user>`, and drops privilege with
-  `runuser --user <user> -- env HOME=<home> sh -c …` to run the profile-set and
-  activate as that user (`root_mediated_invocation` in `src/schema_runtime.rs`). So a
+  lojix connects over the same `root@<node>` deployment identity and drops privilege
+  through a login — `runuser --login --command <cmd> <user>` — to run the profile-set
+  and activate as that user (`root_mediated_invocation` in `src/schema_runtime.rs`).
+  The login rebuilds the target account's environment (its `HOME`, `USER`, `LOGNAME`,
+  and its own profile and runtime paths), so activation runs as a clean session of
+  that user rather than inheriting root's polluted SSH environment. So a
   user-environment deploy works for any account on the node, needing no per-user SSH
   login — it rides `li`'s root reach. A local fast path skips ssh when the dispatcher
-  already is the target user on the target node. This root-mediation landed in lojix
-  `0.4.3`, which `CriomOS/flake.lock` pins; on a daemon host still running an earlier
-  lojix, activation instead connects as `<user>@<node>` and succeeds only for `li` —
-  redeploy the daemon host to the pinned lojix to enable it.
+  already is the target user on the target node. This root-mediation with a login-mode
+  privilege drop is current as of lojix `0.4.5`, which `CriomOS/flake.lock` pins; on a
+  daemon host still running an earlier lojix, redeploy the daemon host to the pinned
+  lojix to enable it.
 
 ## Deploying a different user on a different node (for example `bird` on `zeus`)
 
@@ -77,25 +79,26 @@ to the node. lojix connects as `root@zeus`, drops to `bird` via `runuser`, and s
 and activates `bird`'s Home Manager profile — exactly the "existing root path rather
 than direct Bird SSH" that CriomOS-home `ARCHITECTURE.md` "Cluster-host update
 authority" calls for. Submit it as `li` on the daemon host and let lojix do the rest
-(this needs the pinned lojix `0.4.3` on the daemon host — see the activation note
+(this needs the pinned lojix `0.4.5` on the daemon host — see the activation note
 above):
 
 ```sh
 meta-lojix "(Deploy (UserEnvironment (goldragon zeus bird <proposal-source> <criomos-flake-ref> ActivateNow RequireImmutable None [])))"
 ```
 
-Known blocker (lojix `0.4.3`, bead `primary-9mh1`): the root-mediated activation
-resets only `HOME`, not `XDG_RUNTIME_DIR`. An `ssh root@<node>` session carries
-`XDG_RUNTIME_DIR=/run/user/0`, which `runuser` preserves into the target user's
-context, so home-manager's `activate` runs `mkdir /run/user/0` as that user and
-fails with `Permission denied` — a `SetProfile` or `ActivateNow` for any account
-other than the operator fails at the `Activate` effect (`ActivationFailed`).
-`Realize` (build-only) still succeeds. Until the fix lands (reset the target
-user's runtime env in `root_mediated_invocation` — e.g.
-`env -u XDG_RUNTIME_DIR HOME=… USER=<user> LOGNAME=<user>`), a non-operator
-`ActivateNow` such as `bird` on `zeus` cannot complete through this interface.
-Witnessed 2026-07-10: bird@zeus `ActivateNow` (rev `0db057d`) built and realized
-the closure on zeus but failed at `Activate`.
+Resolved (lojix `0.4.5`, bead `primary-9mh1`): a non-operator `ActivateNow` such as
+`bird` on `zeus` completes end-to-end through this interface. The earlier blocker was
+root's SSH environment leaking into the dropped-privilege target context —
+`XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` (`/run/user/0`), `NIX_PROFILES`,
+`XDG_DATA_DIRS`, `XDG_CONFIG_DIRS` — which made home-manager's `activate` fail at its
+`mkdir`, `dconf`, and systemd-reload steps (`ActivationFailed`). Dropping privilege
+through a login (`runuser --login`) rebuilds the target account's own environment and
+fixes it. Witnessed 2026-07-10: bird@zeus `ActivateNow` (CriomOS rev `0c79e36`) built,
+realized, set the profile (generation 15), and activated; the ByNode query records a
+`Current` UserEnvironment generation at
+`/nix/store/1vp6vkinb2vqrq5avk1fv2zlx2hm8b2s-home-manager-generation`, and on zeus
+bird's home-manager profile pointer and `current-home` gcroot both point at that
+closure.
 
 - `ActivateNow` sets the profile and runs the activation package; `SetProfile` sets
   the profile only; `Realize` builds and realizes the closure on the target store
