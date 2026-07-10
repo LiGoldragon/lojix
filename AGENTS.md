@@ -15,6 +15,11 @@
 - **Spec.** `INTENT.md` first, then `ARCHITECTURE.md`. Cross-reference:
   `signal-lojix` and `meta-signal-lojix` for the two wire contracts.
 
+- **Non-ideal operations.** For driving today's deliberately hacky
+  SSH-based deployment — build-on-target, root-mediated user-environment
+  activation, and deploying a different user on a different node — see
+  `NON_IDEAL_AGENTS.md`.
+
 - **Actor discipline.** The daemon socket shell uses
   `triad-runtime`'s actor-native multi-listener. Generated Nexus
   execution and effect hooks are async; do not reintroduce
