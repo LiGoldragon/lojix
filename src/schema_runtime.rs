@@ -3838,13 +3838,6 @@ impl SshTarget {
         Ok(CriomeDomainName::for_node(&node, &cluster))
     }
 
-    fn with_user(&self, user: &HorizonUserName) -> Self {
-        Self {
-            user: user.as_str().to_string(),
-            domain: self.domain.clone(),
-        }
-    }
-
     fn ssh_uri(&self) -> String {
         format!("ssh-ng://{}@{}", self.user, self.domain.as_str())
     }
@@ -4283,10 +4276,11 @@ impl HostActivation {
     }
 }
 
-/// User-environment activation on the target. `SetProfile`/`ActivateNow` set
-/// the home-manager profile as the target user, then `ActivateNow` additionally runs
-/// the activation package. Includes the local fast-path: skip ssh entirely
-/// when the dispatcher already is the requested user on the target node.
+/// User-environment activation on the target. `SetProfile`/`ActivateNow` use
+/// the root deployment connection to run the profile operation as the requested
+/// user, then `ActivateNow` additionally runs the activation package. Includes
+/// the local fast-path: skip ssh entirely when the dispatcher already is the
+/// requested user on the target node.
 #[derive(Debug, Clone)]
 struct UserEnvironmentActivation {
     node_name: ordinary::NodeName,
@@ -4316,17 +4310,33 @@ impl UserEnvironmentActivation {
     }
 
     fn remote_profile_invocation(&self) -> NixCommand {
-        self.user_target()
-            .remote_invocation(ShellCommand::from_raw(format!(
-                "nix-env -p \"$HOME/.local/state/nix/profiles/home-manager\" --set {}",
-                ShellArgument::new(self.store_path.clone()).to_command_text(),
-            )))
+        self.root_mediated_invocation(ShellCommand::from_raw(format!(
+            "nix-env -p \"$HOME/.local/state/nix/profiles/home-manager\" --set {}",
+            ShellArgument::new(self.store_path.clone()).to_command_text(),
+        )))
     }
 
     fn remote_activate_invocation(&self) -> NixCommand {
-        self.user_target().remote_invocation(ShellCommand::from_raw(
+        self.root_mediated_invocation(ShellCommand::from_raw(
             ShellArgument::new(format!("{}/activate", self.store_path)).to_command_text(),
         ))
+    }
+
+    /// The deployment SSH identity is root (the same authority used for closure
+    /// realization and copying). Resolve the target account's home on the node
+    /// and drop privilege only for the profile and activation commands. This
+    /// keeps a user profile deploy possible when the target account has no SSH
+    /// login while preserving that profile's user-owned state.
+    fn root_mediated_invocation(&self, command: ShellCommand) -> NixCommand {
+        let user = ShellArgument::new(self.user.as_str()).to_command_text();
+        let command = ShellArgument::new(command.into_text()).to_command_text();
+        self.target
+            .remote_invocation(ShellCommand::from_raw(format!(
+                "USER_HOME=$(getent passwd {user} | cut -d: -f6) \\
+             && test -n \"$USER_HOME\" \\
+             && test -d \"$USER_HOME\" \\
+             && runuser --user {user} -- env HOME=\"$USER_HOME\" sh -c {command}",
+            )))
     }
 
     async fn run(&self) -> std::result::Result<(), String> {
@@ -4364,10 +4374,6 @@ impl UserEnvironmentActivation {
     async fn is_local_context(&self) -> bool {
         self.current_user().as_deref() == Some(self.user.as_str())
             && self.current_node().await.as_deref() == Some(self.node_name.payload().as_str())
-    }
-
-    fn user_target(&self) -> SshTarget {
-        self.target.with_user(&self.user)
     }
 
     fn current_user(&self) -> Option<String> {
@@ -5783,12 +5789,17 @@ mod tests {
     }
 
     #[test]
-    fn user_environment_remote_profile_addresses_user_at_criome_domain() {
+    fn user_environment_remote_profile_uses_root_mediation() {
         let activation = user_environment_activation(meta::UserEnvironmentAction::SetProfile);
         let invocation = activation.remote_profile_invocation();
         assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
-        assert!(argv.contains("li@node-1.alpha.criome"), "{argv}");
+        assert!(argv.contains("root@node-1.alpha.criome"), "{argv}");
+        assert!(!argv.contains("li@node-1.alpha.criome"), "{argv}");
+        assert!(
+            argv.contains("runuser --user li -- env HOME=\"$USER_HOME\" sh -c"),
+            "{argv}"
+        );
         assert!(
             argv.contains("nix-env -p \"$HOME/.local/state/nix/profiles/home-manager\" --set"),
             "{argv}"
@@ -5797,11 +5808,16 @@ mod tests {
     }
 
     #[test]
-    fn user_environment_remote_activate_runs_activate_package() {
+    fn user_environment_remote_activate_uses_root_mediation() {
         let activation = user_environment_activation(meta::UserEnvironmentAction::ActivateNow);
         let invocation = activation.remote_activate_invocation();
         let argv = invocation.joined_arguments();
-        assert!(argv.contains("li@node-1.alpha.criome"), "{argv}");
+        assert!(argv.contains("root@node-1.alpha.criome"), "{argv}");
+        assert!(!argv.contains("li@node-1.alpha.criome"), "{argv}");
+        assert!(
+            argv.contains("runuser --user li -- env HOME=\"$USER_HOME\" sh -c"),
+            "{argv}"
+        );
         assert!(argv.contains(&format!("{STORE}/activate")), "{argv}");
     }
 
