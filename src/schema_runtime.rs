@@ -737,7 +737,7 @@ impl RuntimeConfiguration {
     /// The node this daemon runs on — used to detect a self-targeting deploy so
     /// activation routes around the self-Switch deadlock (a foreground ssh that
     /// `switch-to-configuration switch` kills by restarting the daemon).
-    fn daemon_host(&self) -> &ordinary::NodeName {
+    pub fn daemon_host(&self) -> &ordinary::NodeName {
         &self.daemon_host
     }
 
@@ -920,6 +920,42 @@ impl<'a> FlakeReferencePolicy<'a> {
         FlakeReferenceText::new(self.reference)
             .query()
             .is_some_and(|query| query.has_immutable_identity())
+    }
+}
+
+/// Whether a `.drvPath` eval forces a full flake re-fetch (`--refresh`) or
+/// trusts Nix's per-flake evaluation cache (bead primary-8sv6). Under
+/// `RequireImmutable` against a reference that carries its immutable identity
+/// (`?rev=`/`?narHash=`) the flake is fully locked, so evaluation is
+/// deterministic and hermetic and the eval cache — keyed on the locked inputs —
+/// is authoritative; `--refresh` there only forces a redundant re-fetch and a
+/// full re-eval of the whole tree (witnessed at 10+ minutes over a slow link).
+/// Any other reference is potentially mutable, so it keeps `--refresh` and a
+/// moved ref re-resolves rather than serving a stale cached evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvalRefresh {
+    ForceRefresh,
+    TrustImmutablePin,
+}
+
+impl EvalRefresh {
+    /// The refresh decision for one eval, from the deploy's source-revision
+    /// policy and its resolved flake reference. Only a `RequireImmutable`
+    /// deploy whose reference actually carries an immutable identity may trust
+    /// the eval cache; every other case refreshes.
+    fn for_source(policy: ordinary::SourceRevisionPolicy, flake: &str) -> Self {
+        match policy {
+            ordinary::SourceRevisionPolicy::RequireImmutable
+                if FlakeReferencePolicy::new(flake).is_immutable() =>
+            {
+                Self::TrustImmutablePin
+            }
+            _ => Self::ForceRefresh,
+        }
+    }
+
+    fn adds_refresh_flag(self) -> bool {
+        matches!(self, Self::ForceRefresh)
     }
 }
 
@@ -1429,6 +1465,69 @@ impl sema::DeployJob {
                 DeployJobResumption::AlreadyTerminal
             }
         }
+    }
+
+    /// The live-set + gc-root rows a restarted daemon persists for a detached
+    /// self-switch it could not record before its own activation restarted it
+    /// (bead primary-7u8p). A host `ActivateNow` whose target IS the daemon host
+    /// runs `switch-to-configuration switch` inside a PID-1-owned unit that
+    /// restarts the daemon mid-pipeline, so the terminal activation write never
+    /// commits: the generation is lost, and because `next_deployment_identifier`
+    /// scans only the live set, its id is reused on the next deploy.
+    ///
+    /// `daemon_host_system_closure` is the store path the daemon host's live
+    /// system profile (`/nix/var/nix/profiles/system`) currently resolves to.
+    /// A COMPLETED host self-switch is the only activation that set that profile
+    /// to this job's closure (`nix-env -p /nix/var/nix/profiles/system --set
+    /// <closure>` runs before the switch restarts the daemon), so an exact match
+    /// is the tight witness that this interrupted `Activating` job really is a
+    /// finished host switch — genuinely `Current`. Every other row that could
+    /// reach `Activating` on the daemon host (a racy unrelated restart during a
+    /// self-host `SetBootProfile`/`TestActivation`, or a user-environment
+    /// activation, none of which touch the system profile) fails the match and
+    /// returns `None`, so it is left for S5 rather than mis-recorded as a
+    /// Current complete-host generation. Also `None` when the job never captured
+    /// a built closure path, so there is nothing to record.
+    pub fn self_switch_activation_record(
+        &self,
+        daemon_host_system_closure: Option<&str>,
+    ) -> Option<(sema::LiveGeneration, sema::GcRoot)> {
+        let closure_path = self.closure_path.clone()?;
+        if daemon_host_system_closure != Some(closure_path.payload().as_str()) {
+            return None;
+        }
+        let source_revision_record = ordinary::SourceRevisionRecord {
+            policy: self.source_revision_policy,
+            requested_ref: self.requested_ref.clone(),
+            resolved_ref: self
+                .resolved_ref
+                .clone()
+                .unwrap_or_else(|| self.requested_ref.clone()),
+            resolved_revision: self.resolved_revision.clone().unwrap_or_default(),
+        };
+        let generation = sema::LiveGeneration {
+            deployment_identifier: self.deployment_identifier.clone(),
+            generation_identifier: self.generation_identifier.clone(),
+            cluster_name: self.cluster_name.clone(),
+            node_name: self.node_name.clone(),
+            // The detached self-switch is only reached by a host `ActivateNow`,
+            // and a daemon host is a complete host, so the recorded artifact is
+            // CompleteHost and the effect a live activation.
+            generation_artifact: ordinary::GenerationArtifact::CompleteHost,
+            activation_effect: ordinary::ActivationEffect::LiveActivation,
+            generation_slot: ordinary::GenerationSlot::Current,
+            closure_path: closure_path.clone(),
+            source_revision_record,
+        };
+        let root = sema::GcRoot {
+            generation_identifier: self.generation_identifier.clone(),
+            cluster_name: self.cluster_name.clone(),
+            node_name: self.node_name.clone(),
+            generation_slot: ordinary::GenerationSlot::Current,
+            closure_path,
+            label: None,
+        };
+        Some((generation, root))
     }
 }
 
@@ -3136,7 +3235,9 @@ impl SchemaRuntime {
 
     async fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> nexus::EffectResult {
         let attribute = format!("{}#{}", command.flake.payload(), command.attribute);
-        match NixCommand::eval_drv_path(&attribute, &command.overrides, &command.target)
+        let refresh =
+            EvalRefresh::for_source(command.source_revision.policy, command.flake.payload());
+        match NixCommand::eval_drv_path(&attribute, &command.overrides, &command.target, refresh)
             .run()
             .await
         {
@@ -4501,12 +4602,16 @@ impl NixCommand {
         attribute: &str,
         overrides: &[nexus::FlakeInputOverride],
         target: &nexus::BuildTarget,
+        refresh: EvalRefresh,
     ) -> Self {
-        let mut arguments = vec![
-            "eval".to_string(),
-            "--refresh".to_string(),
-            "--raw".to_string(),
-        ];
+        // `--refresh` is conditional (bead primary-8sv6): an immutable pin
+        // evaluates deterministically, so the eval cache is authoritative and
+        // the flag only forces a redundant full re-eval; a mutable ref keeps it.
+        let mut arguments = vec!["eval".to_string()];
+        if refresh.adds_refresh_flag() {
+            arguments.push("--refresh".to_string());
+        }
+        arguments.push("--raw".to_string());
         match target {
             nexus::BuildTarget::TargetStore(store) => {
                 arguments.extend(Self::store_options(store.payload()));
@@ -5478,6 +5583,100 @@ mod tests {
         );
     }
 
+    fn interrupted_self_switch_job(closure: Option<&str>) -> sema::DeployJob {
+        sema::DeployJob {
+            deployment_identifier: ordinary::DeploymentIdentifier::new(72),
+            generation_identifier: ordinary::GenerationIdentifier::new(72),
+            cluster_name: ordinary::ClusterName::new("goldragon"),
+            node_name: ordinary::NodeName::new("ouranos"),
+            phase: sema::DeployJobPhase::Activating,
+            closure_path: closure.map(ordinary::ClosurePath::new),
+            source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
+            requested_ref: ordinary::FlakeReference::new(
+                "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567",
+            ),
+            resolved_ref: Some(ordinary::FlakeReference::new(
+                "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567",
+            )),
+            resolved_revision: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            resolved_target: None,
+            boot_once_unit: None,
+        }
+    }
+
+    #[test]
+    fn interrupted_self_switch_reconstructs_a_current_generation_record() {
+        // bead primary-7u8p: a self-switch interrupted at Activating (the daemon
+        // restarted itself mid-switch) rebuilds a Current live generation and its
+        // gc-root from the persisted job cursor, so the restarted daemon records
+        // the generation the pipeline could not — and the live-set-scanning id
+        // allocator advances past this id instead of reusing it. The resumption
+        // discriminator the daemon pairs with `target == daemon host` is a
+        // PollActivationUnit with NO boot-once unit.
+        let job = interrupted_self_switch_job(Some("/nix/store/aaaaaaaa-system"));
+        assert_eq!(
+            job.resumption(),
+            DeployJobResumption::PollActivationUnit { unit: None }
+        );
+        // The live system profile resolves to exactly this job's closure — the
+        // witness of a completed host switch.
+        let (generation, root) = job
+            .self_switch_activation_record(Some("/nix/store/aaaaaaaa-system"))
+            .expect("a completed self-switch whose system profile matches records");
+        assert_eq!(*generation.generation_identifier.payload(), 72);
+        assert_eq!(*generation.deployment_identifier.payload(), 72);
+        assert_eq!(
+            generation.generation_slot,
+            ordinary::GenerationSlot::Current
+        );
+        assert_eq!(
+            generation.activation_effect,
+            ordinary::ActivationEffect::LiveActivation
+        );
+        assert_eq!(
+            generation.generation_artifact,
+            ordinary::GenerationArtifact::CompleteHost
+        );
+        assert_eq!(
+            generation.closure_path.payload(),
+            "/nix/store/aaaaaaaa-system"
+        );
+        assert_eq!(
+            generation.source_revision_record.resolved_revision,
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        assert_eq!(root.generation_slot, ordinary::GenerationSlot::Current);
+        assert_eq!(root.closure_path.payload(), "/nix/store/aaaaaaaa-system");
+        assert_eq!(root.label, None);
+    }
+
+    #[test]
+    fn self_switch_without_a_built_closure_records_nothing() {
+        // No captured closure path means the switch never got past eval/build, so
+        // there is nothing to root or record — the daemon just drops the row.
+        let job = interrupted_self_switch_job(None);
+        assert!(
+            job.self_switch_activation_record(Some("/nix/store/aaaaaaaa-system"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn activating_row_whose_system_profile_differs_is_not_recorded() {
+        // The tight gate (audit fix): an Activating row on the daemon host whose
+        // closure is NOT the live system profile is a racy unrelated restart
+        // during a self-host SetBootProfile / TestActivation / user-environment
+        // activation — none of which set the system profile. It must NOT be
+        // recorded as a Current complete-host generation; it is left for S5.
+        let job = interrupted_self_switch_job(Some("/nix/store/aaaaaaaa-system"));
+        assert!(
+            job.self_switch_activation_record(Some("/nix/store/bbbbbbbb-other-system"))
+                .is_none()
+        );
+        // A daemon that cannot read its system profile also declines to record.
+        assert!(job.self_switch_activation_record(None).is_none());
+    }
+
     #[test]
     fn foreign_target_switch_keeps_the_foreground_path() {
         // A Switch targeting a DIFFERENT node than the daemon host (or with no
@@ -5687,7 +5886,8 @@ mod tests {
         let store = nexus::BuildTarget::TargetStore(nexus::TargetStore::new(
             "ssh-ng://root@node-1.alpha.criome",
         ));
-        let invocation = NixCommand::eval_drv_path(".#toplevel", &[], &store);
+        let invocation =
+            NixCommand::eval_drv_path(".#toplevel", &[], &store, EvalRefresh::ForceRefresh);
         assert_eq!(invocation.program(), "nix");
         let argv = invocation.joined_arguments();
         assert!(
@@ -5705,11 +5905,61 @@ mod tests {
     }
 
     #[test]
+    fn immutable_pin_eval_omits_refresh_but_keeps_raw_and_selector() {
+        // Under an immutable pin the eval trusts Nix's per-flake eval cache
+        // (bead primary-8sv6): no `--refresh`, so a re-deploy of the same rev
+        // serves the cached evaluation instead of re-evaluating the whole tree.
+        // The `--raw` flag and `.drvPath` selector are unaffected.
+        let store = nexus::BuildTarget::TargetStore(nexus::TargetStore::new(
+            "ssh-ng://root@node-1.alpha.criome",
+        ));
+        let invocation =
+            NixCommand::eval_drv_path(".#toplevel", &[], &store, EvalRefresh::TrustImmutablePin);
+        let argv = invocation.joined_arguments();
+        assert!(
+            !argv.contains("--refresh"),
+            "an immutable pin must not force a full re-eval: {argv}"
+        );
+        assert!(argv.contains("--raw"), "{argv}");
+        assert!(
+            argv.contains("--store ssh-ng://root@node-1.alpha.criome"),
+            "the target-store redirect is independent of refresh: {argv}"
+        );
+        assert!(argv.ends_with(".#toplevel.drvPath"), "{argv}");
+    }
+
+    #[test]
+    fn refresh_is_dropped_only_for_require_immutable_against_a_pinned_ref() {
+        // Only a RequireImmutable deploy against a reference carrying its
+        // immutable identity trusts the cache; a mutable ref (even under
+        // RequireImmutable) and every ResolveAndRecord deploy keep `--refresh`.
+        let pinned = "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567";
+        let mutable = "github:LiGoldragon/CriomOS";
+        assert_eq!(
+            EvalRefresh::for_source(ordinary::SourceRevisionPolicy::RequireImmutable, pinned),
+            EvalRefresh::TrustImmutablePin
+        );
+        assert_eq!(
+            EvalRefresh::for_source(ordinary::SourceRevisionPolicy::RequireImmutable, mutable),
+            EvalRefresh::ForceRefresh
+        );
+        assert_eq!(
+            EvalRefresh::for_source(ordinary::SourceRevisionPolicy::ResolveAndRecord, pinned),
+            EvalRefresh::ForceRefresh
+        );
+    }
+
+    #[test]
     fn local_eval_reads_the_daemon_host_store_with_no_redirect() {
         // A daemon-host target (`Local`) keeps the host-local eval — its store
         // already holds everything the config references, and a store redirect
         // would be wrong. No `--store` / `--eval-store` flags are added.
-        let invocation = NixCommand::eval_drv_path(".#toplevel", &[], &nexus::BuildTarget::Local);
+        let invocation = NixCommand::eval_drv_path(
+            ".#toplevel",
+            &[],
+            &nexus::BuildTarget::Local,
+            EvalRefresh::ForceRefresh,
+        );
         let argv = invocation.joined_arguments();
         assert!(
             !argv.contains("--store"),
@@ -5731,7 +5981,8 @@ mod tests {
         let target = nexus::BuildTarget::Remote(nexus::BuilderNode::new(ordinary::NodeName::new(
             "builder-1",
         )));
-        let invocation = NixCommand::eval_drv_path(".#toplevel", &[], &target);
+        let invocation =
+            NixCommand::eval_drv_path(".#toplevel", &[], &target, EvalRefresh::ForceRefresh);
         let argv = invocation.joined_arguments();
         assert!(
             !argv.contains("--store"),

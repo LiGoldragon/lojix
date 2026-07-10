@@ -599,9 +599,41 @@ impl DeployJobs {
         let Ok(jobs) = self.store.deploy_jobs() else {
             return;
         };
+        let daemon_host = self.configuration.daemon_host();
         for job in jobs {
             let deployment_identifier = *job.deployment_identifier.payload();
             match job.resumption() {
+                // A detached self-switch (bead primary-7u8p): a host `ActivateNow`
+                // targeting the daemon's OWN host restarts the daemon inside the
+                // switch, so the terminal activation write never committed. Only
+                // a COMPLETED host self-switch has set the live system profile to
+                // this job's closure, so that exact match — not merely "an
+                // Activating row on the daemon host" — is the witness that gates
+                // recording (see `self_switch_activation_record`); a racy
+                // unrelated restart during some other self-host activation fails
+                // the match and falls through to the S5 arm below. Recording the
+                // generation the interrupted pipeline could not also advances the
+                // live-set-scanned id allocator, ending the id reuse.
+                crate::schema_runtime::DeployJobResumption::PollActivationUnit { unit: None }
+                    if job.node_name == *daemon_host =>
+                {
+                    let system_closure = Self::daemon_host_system_closure();
+                    match job.self_switch_activation_record(system_closure.as_deref()) {
+                        Some((generation, root)) => {
+                            self.persist_reconciled_self_switch(
+                                deployment_identifier,
+                                generation,
+                                root,
+                            );
+                        }
+                        None => {
+                            // Not a completed host self-switch (the live system
+                            // profile does not resolve to this closure): leave the
+                            // row for the S5 unit-poll path rather than recording
+                            // it as a Current complete-host generation.
+                        }
+                    }
+                }
                 crate::schema_runtime::DeployJobResumption::PollActivationUnit { .. } => {
                     // S5: poll `journalctl -u <unit>` and adopt the unit's
                     // outcome rather than re-activating. Until then leave the
@@ -615,6 +647,50 @@ impl DeployJobs {
                     let _ = self.store.retract_deploy_job(deployment_identifier);
                 }
             }
+        }
+    }
+
+    /// The store path the daemon host's live system profile currently resolves
+    /// to (`/nix/var/nix/profiles/system` -> the running system closure), or
+    /// `None` when it cannot be read. A completed host self-switch set exactly
+    /// this to the deploy's closure (`nix-env --set`) before the switch
+    /// restarted the daemon, so a reconcile uses it as the tight witness that an
+    /// interrupted `Activating` job really finished as a host switch (bead
+    /// primary-7u8p).
+    fn daemon_host_system_closure() -> Option<String> {
+        std::fs::canonicalize("/nix/var/nix/profiles/system")
+            .ok()
+            .map(|path| path.display().to_string())
+    }
+
+    /// Persist a reconciled self-switch generation idempotently and fail-safe
+    /// (bead primary-7u8p audit). If a prior reconcile already recorded this
+    /// generation (its gc-root is present) but crashed before retracting the job
+    /// row, just drop the row. Otherwise record, and retract the resume cursor
+    /// ONLY on a successful write: a genuine store failure keeps the row so the
+    /// next restart retries, rather than silently dropping the generation and
+    /// reviving the lost-generation / id-reuse bug this fix closes.
+    fn persist_reconciled_self_switch(
+        &self,
+        deployment_identifier: u64,
+        generation: crate::schema::sema::LiveGeneration,
+        root: crate::schema::sema::GcRoot,
+    ) {
+        let already_recorded = self
+            .store
+            .gc_roots()
+            .map(|roots| {
+                roots.iter().any(|existing| {
+                    existing.generation_identifier == generation.generation_identifier
+                })
+            })
+            .unwrap_or(false);
+        if already_recorded {
+            let _ = self.store.retract_deploy_job(deployment_identifier);
+            return;
+        }
+        if self.store.record_activation(generation, root).is_ok() {
+            let _ = self.store.retract_deploy_job(deployment_identifier);
         }
     }
 }
