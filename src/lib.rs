@@ -282,6 +282,24 @@ impl DaemonConfiguration {
     }
 }
 
+/// The explicit bounded-history policy for deployment and container events.
+/// Current generations, GC roots, and active deploy jobs are independent keyed
+/// state and are never selected by this policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventLogRetention {
+    maximum_entries: u64,
+}
+
+impl EventLogRetention {
+    pub const fn new(maximum_entries: u64) -> Self {
+        Self { maximum_entries }
+    }
+
+    pub const fn maximum_entries(&self) -> u64 {
+        self.maximum_entries
+    }
+}
+
 /// The durable lojix daemon state plane: a `sema-engine` keyed table store
 /// written to a `*.sema` file, mirroring the spirit `Store` shape. SEMA means
 /// database work. `Store` maps the four schema-emitted record families onto
@@ -525,6 +543,40 @@ impl Store {
             .collect())
     }
 
+    /// Compact only the historical event and container-observation rows. The
+    /// caller supplies the query window explicitly; live deploy state and
+    /// restart-resume jobs stay outside this historical plane.
+    pub fn compact_event_history(&self, retention: EventLogRetention) -> Result<u64> {
+        let mut events = self.event_log_entries()?;
+        events.sort_by_key(|entry| *entry.event_log_position.payload());
+        let retired = events
+            .len()
+            .saturating_sub(retention.maximum_entries() as usize);
+        if retired == 0 {
+            return Ok(0);
+        }
+        let retired_positions: std::collections::BTreeSet<u64> = events
+            .into_iter()
+            .take(retired)
+            .map(|entry| *entry.event_log_position.payload())
+            .collect();
+        for container in self.container_lifecycle_records()? {
+            if retired_positions.contains(container.event_log_position.payload()) {
+                self.database.retract(Retraction::new(
+                    self.containers,
+                    RecordKey::new(container.event_log_position.payload().to_string()),
+                ))?;
+            }
+        }
+        for position in &retired_positions {
+            self.database.retract(Retraction::new(
+                self.event_log,
+                RecordKey::new(position.to_string()),
+            ))?;
+        }
+        Ok(retired as u64)
+    }
+
     /// The next generation identifier: one past the maximum persisted across
     /// the live set, or 1 when empty. Restart-safe — derived from durable rows,
     /// not a RAM counter (decision 5, the bug this fixes).
@@ -550,11 +602,11 @@ impl Store {
             .unwrap_or(1))
     }
 
-    /// The next event-log position: the count of persisted event-log records.
-    /// Restart-safe — derived from the durable rows, the analogue of the old
-    /// `event_log.len()` (decision 5).
+    /// The next event-log position derives from the engine's durable commit
+    /// high-water mark, not retained row count. It remains unique after event
+    /// compaction and across a daemon restart.
     pub fn next_event_log_position(&self) -> Result<u64> {
-        Ok(self.event_log_entries()?.len() as u64)
+        self.commit_sequence()
     }
 
     /// The next subscription token: an in-memory atomic fetch-add. Subscriptions

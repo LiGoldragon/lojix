@@ -95,9 +95,11 @@ streams subscription events.
   closures from cache eviction). Closure introspection via
   `nix path-info -r`; do not reimplement Nix's reachability graph.
   Two-phase deletion respecting narinfo TTL.
-- **Deploy event log** — append-only log of typed events
+- **Deploy event log** — typed historical events
   (`BuildRealized`, `CachePublished`, `ActivationSucceeded`,
-  `GenerationRetired`, `ContainerStarted`, `ContainerStopped`).
+  `GenerationRetired`, `ContainerStarted`, `ContainerStopped`). An explicit
+  `EventLogRetention` policy bounds retained event and matching container
+  rows without touching live generations, GC roots, or deploy-resume jobs.
   Subscribers consume via `signal-lojix` `DeploymentObservation` and
   `CacheRetentionObservation`, bridged through `sema-engine`'s
   `SubscriptionSink` trait.
