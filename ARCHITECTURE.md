@@ -38,7 +38,7 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 > realization step toward the Sema-on-Sema future per
 > `~/primary/ARCHITECTURE.md` §"Workspace vision and intent".
 
-## 0.5 · Direction
+## 0.6 · Direction
 
 `lojix` is the production deploy stack: a daemon-based orchestrator with direct typed ordinary and owner/meta contracts. The active goalpost is production cutover so the cluster runs on `lojix-daemon` and all consumers use the direct contracts without compatibility translation layers or aliases.
 
@@ -99,7 +99,10 @@ streams subscription events.
   (`BuildRealized`, `CachePublished`, `ActivationSucceeded`,
   `GenerationRetired`, `ContainerStarted`, `ContainerStopped`). An explicit
   `EventLogRetention` policy bounds retained event and matching container
-  rows without touching live generations, GC roots, or deploy-resume jobs.
+  rows without touching live generations, GC roots, or deploy-resume jobs. On
+  each retention pass, a verified local checkpoint compacts the corresponding
+  versioned log and mirror-outbox rows; the bounded query window is not merely
+  an in-memory or materialized-row projection.
   Subscribers consume via `signal-lojix` `DeploymentObservation` and
   `CacheRetentionObservation`, bridged through `sema-engine`'s
   `SubscriptionSink` trait.
@@ -157,14 +160,17 @@ Each daemon actor is a Kameo actor per
 ## 4 · Storage and wire
 
 - **Storage:** schema-derived SEMA tables over a durable `sema-engine`
-  store — a `*.sema` file under `<state-directory>/lojix.sema`. The four
-  record families (live set, gc-roots, event log, container lifecycle)
-  are keyed rows, one per element; `Engine::open` resumes the persisted
-  catalog, commit sequence, and records on restart, so daemon state
-  survives a process stop with no replay code. The identifier counters
-  (generation, deployment, event-log position) derive from the persisted
-  rows, so they no longer reset to zero on restart. Atomic
-  version-controlled backup is the named follow-on.
+  store — a `*.sema` file under `<state-directory>/lojix.sema`. The six
+  record families (live set, gc-roots, event log, container lifecycle,
+  deploy job, test run) are keyed rows, one per element; `Engine::open`
+  resumes the persisted catalog, commit sequence, and records on restart, so
+  daemon state survives a process stop with no replay code. The identifier
+  counters (generation, deployment, event-log position) derive from the
+  persisted rows, so they no longer reset to zero on restart. Storage schema 2
+  enables the engine's versioned log: the verified local checkpoint is the
+  recovery floor for retention because lojix has no external mirror consumer.
+  The schema bump deliberately hard-rejects schema-1 stores rather than
+  silently deleting or rewriting deployed state.
 - **Wire:** `signal-frame` records carrying `signal-lojix` on the
   ordinary socket and `meta-signal-lojix` on the owner/meta socket.
   Length-prefixed rkyv archives over Unix sockets.

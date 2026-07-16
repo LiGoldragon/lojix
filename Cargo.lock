@@ -408,7 +408,7 @@ checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
 name = "lojix"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "horizon-lib",
  "kameo 0.20.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -695,8 +695,8 @@ dependencies = [
 
 [[package]]
 name = "sema-engine"
-version = "0.6.2"
-source = "git+https://github.com/LiGoldragon/sema-engine.git?branch=main#73eea24b294a2bdcac470111afc387e7ce06608e"
+version = "0.8.0"
+source = "git+https://github.com/LiGoldragon/sema-engine.git?branch=main#83600fe59e4edc61f2b7e0a8a7976d1fe35c8862"
 dependencies = [
  "blake3",
  "rkyv",
@@ -764,7 +764,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "signal-frame"
 version = "0.3.0"
-source = "git+https://github.com/LiGoldragon/signal-frame.git?branch=main#bb86bef67e478ff52690a4dcceec8f22d2b005ad"
+source = "git+https://github.com/LiGoldragon/signal-frame.git?branch=main#fd7909d1497b7bb18751521387a1087cd9e7c91c"
 dependencies = [
  "nota",
  "paste",
@@ -776,7 +776,7 @@ dependencies = [
 [[package]]
 name = "signal-frame-macros"
 version = "0.1.1"
-source = "git+https://github.com/LiGoldragon/signal-frame.git?branch=main#bb86bef67e478ff52690a4dcceec8f22d2b005ad"
+source = "git+https://github.com/LiGoldragon/signal-frame.git?branch=main#fd7909d1497b7bb18751521387a1087cd9e7c91c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -807,7 +807,7 @@ dependencies = [
 [[package]]
 name = "signal-sema"
 version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/signal-sema.git?branch=main#c817ec2b5283975700881c2dec950a7e781b3bb6"
+source = "git+https://github.com/LiGoldragon/signal-sema.git?branch=main#bdd7fe369952cb51e4476f201a3419ae5b35d444"
 dependencies = [
  "rkyv",
  "thiserror",

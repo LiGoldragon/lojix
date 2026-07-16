@@ -22,6 +22,8 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, Engine as SemaDatabase, EngineOpen, EngineRecord, FamilyName, Mutation, QueryPlan,
     RecordKey, Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
+    VersionedHistoryAcknowledgement, VersionedHistoryRetention, VersionedStoreName,
+    VersioningPolicy,
 };
 
 use crate::schema::sema::{
@@ -34,11 +36,12 @@ pub mod inspection;
 pub mod schema;
 pub mod schema_runtime;
 
-/// The lojix durable-store schema version. The store is a typed, versioned
-/// database from the very first write: every future bump is a deliberate HARD
-/// migration (the workspace no-backward-compat override), not a soft upgrade —
-/// the kernel hard-fails to open a store stamped at a different version.
-const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(1);
+/// The lojix durable-store schema version. Schema 2 enables the engine's
+/// versioned log so event retention compacts both materialized rows and their
+/// raw history. Every future bump is a deliberate HARD migration (the workspace
+/// no-backward-compat override), not a soft upgrade — the kernel hard-fails to
+/// open a store stamped at a different version.
+const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(2);
 
 /// The five durable table names. One row per element (a keyed record family),
 /// not one blob per table — the sema-engine model. `deploy-job` is the
@@ -55,7 +58,7 @@ const TEST_RUN_TABLE: TableName = TableName::new("test-run");
 /// The stable per-family schema identities. Each table is its own record
 /// family with a distinct, reopen-stable `FamilyName` + `SchemaHash`. The hash
 /// only has to be stable across reopens and distinct per family; the leading
-/// byte distinguishes the four families. A schema change is a deliberate hard
+/// byte distinguishes the six families. A schema change is a deliberate hard
 /// migration, so a fixed value is correct until a version bump.
 const LIVE_SET_FAMILY: &str = "LiveSetFamily";
 const GC_ROOTS_FAMILY: &str = "GcRootsFamily";
@@ -302,7 +305,7 @@ impl EventLogRetention {
 
 /// The durable lojix daemon state plane: a `sema-engine` keyed table store
 /// written to a `*.sema` file, mirroring the spirit `Store` shape. SEMA means
-/// database work. `Store` maps the four schema-emitted record families onto
+/// database work. `Store` maps the six schema-emitted record families onto
 /// sema-engine operations — one row per element, not one blob per table — and
 /// sema-engine owns the database handle, the durable commit sequence, and typed
 /// rkyv table access. There is no `Mutex`: the engine's redb write transaction
@@ -344,12 +347,15 @@ impl Store {
     /// Open or create the durable SEMA database at `path`. A fresh file is
     /// created with empty engine counters; an existing file resumes its
     /// persisted commit sequence and records straight back through sema-engine.
-    /// The four `register_table` calls are idempotent, so opening doubles as the
+    /// The six `register_table` calls are idempotent, so opening doubles as the
     /// resume — there is no separate load path (ur16).
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        let mut database = SemaDatabase::open(EngineOpen::new(path.clone(), LOJIX_SCHEMA_VERSION))
-            .map_err(|source| Error::StoreStartupCompatibility {
+        let mut database = SemaDatabase::open(
+            EngineOpen::new(path.clone(), LOJIX_SCHEMA_VERSION)
+                .with_versioning(VersioningPolicy::new(VersionedStoreName::new("lojix"))),
+        )
+        .map_err(|source| Error::StoreStartupCompatibility {
                 path: path.clone(),
                 stage: "opening sema-engine",
                 source: Box::new(source),
@@ -574,6 +580,14 @@ impl Store {
                 RecordKey::new(position.to_string()),
             ))?;
         }
+        // Lojix has no external mirror consumer. The verified local checkpoint
+        // is therefore the complete recovery artifact once the historical rows
+        // are retracted, and compaction reclaims the corresponding raw log and
+        // outbox rows rather than leaving a second unbounded on-disk history.
+        self.database.compact_versioned_history(
+            VersionedHistoryRetention::new(0),
+            VersionedHistoryAcknowledgement::LocalCheckpoint,
+        )?;
         Ok(retired as u64)
     }
 
