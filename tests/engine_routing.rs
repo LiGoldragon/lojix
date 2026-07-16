@@ -4,6 +4,7 @@
 //! so it is exercised only in a live environment, not here.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use horizon_lib::address::{YggAddress, YggSubnet};
 use horizon_lib::domain::DomainConfiguration;
@@ -14,9 +15,10 @@ use horizon_lib::name::NodeName;
 use horizon_lib::proposal::{ClusterProposal, ClusterTrust, NodeProposal, NodePubKeys};
 use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
 use horizon_lib::species::{Arch, Bootloader, Keyboard, MachineSpecies, NodeSpecies};
+use lojix::Store;
 use lojix::schema::nexus::{self, NexusEngine};
 use lojix::schema::sema;
-use lojix::schema_runtime::SchemaRuntime;
+use lojix::schema_runtime::{RuntimeConfiguration, SchemaRuntime};
 use meta_signal_lojix::schema::lib as meta;
 use nota::NotaEncode;
 use signal_lojix::schema::lib as ordinary;
@@ -289,7 +291,27 @@ fn production_eval_materializes_horizon_inputs_and_returns_deploy_accepted() {
     let flake_directory = directory.path().join("flake");
     FixtureFlake::new(flake_directory).write();
 
-    let mut engine = SchemaRuntime::new();
+    // The fixture node is the daemon host for this non-production smoke test,
+    // so evaluation stays in the local store. A synthetic fixture must not
+    // require public DNS for `node-1.alpha.criome` merely to prove Horizon
+    // materialization and the generated override inputs.
+    let configuration = lojix::DaemonConfiguration {
+        ordinary_socket_path: directory.path().join("ordinary.sock").display().to_string(),
+        ordinary_socket_mode: 0o660,
+        owner_socket_path: directory.path().join("owner.sock").display().to_string(),
+        owner_socket_mode: 0o660,
+        state_directory_path: directory.path().join("state").display().to_string(),
+        daemon_host: "node-1".to_string(),
+        test_defaults: None,
+    };
+    let store =
+        Arc::new(Store::open(directory.path().join("lojix.sema")).expect("open fixture store"));
+    let mut engine = SchemaRuntime::with_store_and_configuration(
+        store,
+        Arc::new(RuntimeConfiguration::from_daemon_configuration(
+            &configuration,
+        )),
+    );
     let mut deployment = host_deployment(None, ordinary::HostDeployAction::Evaluate);
     deployment.proposal_source = ordinary::ProposalSource::new(cluster_path.display().to_string());
     deployment.flake_reference =
@@ -303,7 +325,8 @@ fn production_eval_materializes_horizon_inputs_and_returns_deploy_accepted() {
             assert_eq!(*accepted.payload().deployment_identifier.payload(), 1);
             assert_eq!(
                 *accepted.payload().database_marker.commit_sequence.payload(),
-                1
+                0,
+                "the first durable commit uses the zero-based commit identity",
             );
         }
         other => panic!("expected DeployAccepted, got {other:?}"),
@@ -345,6 +368,17 @@ impl FixtureFlake {
 "#,
         )
         .expect("fixture flake");
+
+        // Resolve the synthetic fixture before lojix records its immutable
+        // path identity. Otherwise `nix flake metadata` creates flake.lock
+        // after hashing the path and the subsequent eval correctly rejects
+        // the now-mutated source with a NAR hash mismatch.
+        let status = std::process::Command::new("nix")
+            .args(["flake", "lock"])
+            .arg(format!("path:{}", self.directory.display()))
+            .status()
+            .expect("run nix flake lock for fixture");
+        assert!(status.success(), "lock the synthetic fixture flake");
     }
 
     fn write_stub_input(&self, name: &str, output: &str) {

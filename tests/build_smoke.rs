@@ -33,7 +33,10 @@ fn write_daemon_configuration(
         owner_socket_path: owner_socket.display().to_string(),
         owner_socket_mode,
         state_directory_path: directory.join("state").display().to_string(),
-        daemon_host: "ouranos".to_string(),
+        // `dune` is this synthetic fixture's local daemon host. Keeping the
+        // contained smoke local avoids requiring public DNS or SSH authority
+        // for a non-production test node.
+        daemon_host: "dune".to_string(),
         test_defaults: Some(lojix::TestDefaults {
             cluster: "goldragon".to_string(),
             default_vm_host: "prometheus".to_string(),
@@ -72,7 +75,25 @@ fn dune_host_deploy(action: ordinary::HostDeployAction) -> meta::Input {
 
 /// Drive one meta `Input` through a fresh engine and return the meta reply.
 fn drive(input: meta::Input) -> meta::Output {
-    let mut engine = SchemaRuntime::new();
+    let directory = tempfile::tempdir().expect("tempdir");
+    let configuration = lojix::DaemonConfiguration {
+        ordinary_socket_path: directory.path().join("ordinary.sock").display().to_string(),
+        ordinary_socket_mode: 0o660,
+        owner_socket_path: directory.path().join("owner.sock").display().to_string(),
+        owner_socket_mode: 0o660,
+        state_directory_path: directory.path().join("state").display().to_string(),
+        daemon_host: "dune".to_string(),
+        test_defaults: None,
+    };
+    let store = std::sync::Arc::new(
+        lojix::Store::open(directory.path().join("lojix.sema")).expect("open fixture store"),
+    );
+    let mut engine = SchemaRuntime::with_store_and_configuration(
+        store,
+        std::sync::Arc::new(
+            lojix::schema_runtime::RuntimeConfiguration::from_daemon_configuration(&configuration),
+        ),
+    );
     let work = nexus::NexusWork::SignalArrived(nexus::RoutedMail::Meta(input))
         .with_origin_route(nexus::OriginRoute::new(0));
     let runtime = tokio::runtime::Builder::new_current_thread()
