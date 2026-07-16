@@ -694,6 +694,14 @@ impl Store {
         Ok(self.database.versioned_commit_log()?.len())
     }
 
+    /// The durable mirror-outbox suffix. Lojix persists the explicit
+    /// `LocalCheckpoint` topology, so ordinary daemon writes must always leave
+    /// this at zero; a future mirror is a separately versioned topology change,
+    /// not an implicit retry queue.
+    pub fn unshipped_mirror_entries(&self) -> Result<usize> {
+        Ok(self.database.unshipped_outbox()?.len())
+    }
+
     /// The next subscription token: an in-memory atomic fetch-add. Subscriptions
     /// do not survive restart, so an ephemeral counter is correct (decision 5).
     pub fn next_subscription_token(&self) -> u64 {

@@ -63,6 +63,11 @@ fn normal_writes_bound_raw_and_materialized_history_across_reopen() {
             4_096
         );
         assert!(store.retained_raw_history_entries().expect("raw history") <= 4_096);
+        assert_eq!(
+            store.unshipped_mirror_entries().expect("local outbox"),
+            0,
+            "LocalCheckpoint Lojix never creates a mirror retry suffix"
+        );
     }
     let store = Store::open(&path).expect("reopen bounded store");
     assert_eq!(
@@ -77,5 +82,12 @@ fn normal_writes_bound_raw_and_materialized_history_across_reopen() {
             .retained_raw_history_entries()
             .expect("raw history after reopen")
             <= 4_096
+    );
+    assert_eq!(
+        store
+            .unshipped_mirror_entries()
+            .expect("local outbox after reopen"),
+        0,
+        "reopen retains the local-checkpoint topology without a mirror suffix"
     );
 }

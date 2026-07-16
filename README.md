@@ -40,6 +40,27 @@ omitted and reported as `MissingDeploySubmission` rather than inventing a Host
 or UserEnvironment request. Reopen the destination with `lojix-daemon` only
 after the final inspection succeeds.
 
+## Non-production test-VM acceptance
+
+Run only in a disposable test environment, never against daemon production
+state. Start a daemon with a temporary state directory and a test-only rkyv
+configuration, then execute the existing ignored witnesses:
+
+```sh
+LOJIX_UPDATE_SCHEMA_ARTIFACTS=1 cargo test --test test_op \
+  daemon_socket_roundtrip_hermetic_check_mercury_passes --features nota-text -- --ignored --nocapture
+LOJIX_UPDATE_SCHEMA_ARTIFACTS=1 cargo test --test build_smoke \
+  daemon_binary_socket_roundtrip_eval --features nota-text -- --ignored --nocapture
+```
+
+Expected observations: one accepted test-run record for `mercury`, exactly one
+terminal `Passed` record with a `/nix/store/` closure path, no additional live
+generations or GC roots from the hermetic check, and no retained mirror-outbox
+entries. Record `du -sh <temporary-state-directory>` before and after the run
+and `free -h` / `df -h <temporary-state-directory>` at completion; these are
+observations, not fixed production thresholds. Remove the temporary directory
+only after inspection confirms the expected cardinalities.
+
 ## Related
 
 - `signal-lojix` — ordinary peer-callable wire contract.
