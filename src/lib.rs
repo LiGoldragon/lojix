@@ -20,9 +20,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, Engine as SemaDatabase, EngineOpen, EngineRecord, FamilyName, Mutation, QueryPlan,
-    RecordKey, Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
-    VersionedHistoryAcknowledgement, VersionedHistoryRetention, VersionedStoreName,
+    Assertion, Engine as SemaDatabase, EngineOpen, EngineRecord, FamilyDirectory, FamilyName,
+    Mutation, QueryPlan, RecordKey, Retraction, RowMaterializer, SchemaHash, SchemaVersion,
+    TableDescriptor, TableName, TableReference, VersionedHistoryRetention, VersionedStoreName,
     VersioningPolicy,
 };
 
@@ -334,6 +334,31 @@ pub struct Store {
     subscription_sequence: AtomicU64,
 }
 
+struct LojixDirectory {
+    live_set: TableReference<LiveGeneration>,
+    gc_roots: TableReference<GcRoot>,
+    event_log: TableReference<EventLogEntry>,
+    containers: TableReference<ContainerLifecycleRecord>,
+    deploy_jobs: TableReference<DeployJob>,
+    test_runs: TableReference<StoredTestRun>,
+}
+
+impl FamilyDirectory for LojixDirectory {
+    fn materialize(&self, row: RowMaterializer<'_>) -> sema_engine::Result<()> {
+        match row.family().table_name() {
+            "live-set" => row.apply(self.live_set),
+            "gc-roots" => row.apply(self.gc_roots),
+            "event-log" => row.apply(self.event_log),
+            "container-lifecycle" => row.apply(self.containers),
+            "deploy-job" => row.apply(self.deploy_jobs),
+            "test-run" => row.apply(self.test_runs),
+            table => Err(sema_engine::Error::TableNotRegistered {
+                table: table.to_owned(),
+            }),
+        }
+    }
+}
+
 impl std::fmt::Debug for Store {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -358,10 +383,10 @@ impl Store {
             ),
         )
         .map_err(|source| Error::StoreStartupCompatibility {
-                path: path.clone(),
-                stage: "opening sema-engine",
-                source: Box::new(source),
-            })?;
+            path: path.clone(),
+            stage: "opening sema-engine",
+            source: Box::new(source),
+        })?;
         let live_set = database
             .register_table(TableDescriptor::new(
                 LIVE_SET_TABLE,
@@ -439,6 +464,7 @@ impl Store {
             path,
             subscription_sequence: AtomicU64::new(0),
         };
+        store.resume_compaction()?;
         store.validate_startup_compatibility()?;
         Ok(store)
     }
@@ -554,6 +580,18 @@ impl Store {
     /// Compact only the historical event and container-observation rows. The
     /// caller supplies the query window explicitly; live deploy state and
     /// restart-resume jobs stay outside this historical plane.
+    fn resume_compaction(&self) -> Result<()> {
+        self.database.resume_compaction(&LojixDirectory {
+            live_set: self.live_set,
+            gc_roots: self.gc_roots,
+            event_log: self.event_log,
+            containers: self.containers,
+            deploy_jobs: self.deploy_jobs,
+            test_runs: self.test_runs,
+        })?;
+        Ok(())
+    }
+
     pub fn compact_event_history(&self, retention: EventLogRetention) -> Result<u64> {
         let mut events = self.event_log_entries()?;
         events.sort_by_key(|entry| *entry.event_log_position.payload());
@@ -568,6 +606,7 @@ impl Store {
             .take(retired)
             .map(|entry| *entry.event_log_position.payload())
             .collect();
+        self.database.begin_compaction()?;
         for container in self.container_lifecycle_records()? {
             if retired_positions.contains(container.event_log_position.payload()) {
                 self.database.retract(Retraction::new(
@@ -582,14 +621,9 @@ impl Store {
                 RecordKey::new(position.to_string()),
             ))?;
         }
-        // Lojix has no external mirror consumer. The verified local checkpoint
-        // is therefore the complete recovery artifact once the historical rows
-        // are retracted, and compaction reclaims the corresponding raw log and
-        // outbox rows rather than leaving a second unbounded on-disk history.
-        self.database.compact_versioned_history(
-            VersionedHistoryRetention::new(0),
-            VersionedHistoryAcknowledgement::LocalCheckpoint,
-        )?;
+        if self.database.park_compaction()? {
+            self.resume_compaction()?;
+        }
         Ok(retired as u64)
     }
 
