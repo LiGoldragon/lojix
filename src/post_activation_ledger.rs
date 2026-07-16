@@ -99,7 +99,9 @@ impl PostActivationLedger {
             .arg("--")
             .arg(&self.arguments.user)
             .args(&self.arguments.managed_units)
-            .stdin(Stdio::piped());
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let mut child = command.spawn()?;
         use std::io::Write;
         child
