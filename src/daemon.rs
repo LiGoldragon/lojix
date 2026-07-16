@@ -378,20 +378,20 @@ impl RequestWorker {
     async fn submit_deploy(&self, request: meta::DeployRequest) -> meta::Output {
         match self.deploy_jobs.ask(AdmitDeploy { request }).await {
             Ok(DeployAdmission::Accepted(accepted)) => {
-                meta::Output::DeployAccepted(meta::DeployAccepted::new(accepted))
+                meta::Output::DeployAccepted(meta::DeployAcceptedPayload::new(accepted))
             }
             Ok(DeployAdmission::Rejected(rejected)) => {
-                meta::Output::DeployRejected(meta::DeployRejected::new(rejected))
+                meta::Output::DeployRejected(meta::DeployRejectedPayload::new(rejected))
             }
             // The deploy-job actor is daemon-lifetime; a send error means the
             // runtime is tearing down. Reply a typed internal rejection rather
             // than dropping the connection without a frame.
-            Err(_) => {
-                meta::Output::DeployRejected(meta::DeployRejected::new(meta::RejectedDeploy {
+            Err(_) => meta::Output::DeployRejected(meta::DeployRejectedPayload::new(
+                meta::RejectedDeploy {
                     deploy_rejection_reason: meta::DeployRejectionReason::InternalError,
                     database_marker: Self::zero_marker(),
-                }))
-            }
+                },
+            )),
         }
     }
 
@@ -406,15 +406,17 @@ impl RequestWorker {
     async fn submit_test(&self, request: meta::TestRequest) -> meta::Output {
         match self.test_jobs.ask(AdmitTest { request }).await {
             Ok(TestAdmission::Accepted(accepted)) => {
-                meta::Output::Tested(meta::Tested::new(accepted))
+                meta::Output::Tested(meta::TestedPayload::new(accepted))
             }
             Ok(TestAdmission::Rejected(rejected)) => {
-                meta::Output::TestRejected(meta::TestRejected::new(rejected))
+                meta::Output::TestRejected(meta::TestRejectedPayload::new(rejected))
             }
-            Err(_) => meta::Output::TestRejected(meta::TestRejected::new(meta::RejectedTest {
-                test_rejection_reason: meta::TestRejectionReason::InternalError,
-                database_marker: Self::zero_marker(),
-            })),
+            Err(_) => {
+                meta::Output::TestRejected(meta::TestRejectedPayload::new(meta::RejectedTest {
+                    test_rejection_reason: meta::TestRejectionReason::InternalError,
+                    database_marker: Self::zero_marker(),
+                }))
+            }
         }
     }
 
@@ -477,7 +479,7 @@ impl RequestWorker {
         match listener {
             ListenerRole::Owner => {
                 nexus::RoutedReply::Meta(meta_signal_lojix::schema::lib::Output::DeployRejected(
-                    meta_signal_lojix::schema::lib::DeployRejected::new(
+                    meta_signal_lojix::schema::lib::DeployRejectedPayload::new(
                         meta_signal_lojix::schema::lib::RejectedDeploy {
                             deploy_rejection_reason:
                                 meta_signal_lojix::schema::lib::DeployRejectionReason::InternalError,
@@ -491,7 +493,7 @@ impl RequestWorker {
             }
             ListenerRole::Ordinary => {
                 nexus::RoutedReply::Ordinary(signal_lojix::schema::lib::Output::QueryRejected(
-                    signal_lojix::schema::lib::QueryRejected::new(
+                    signal_lojix::schema::lib::QueryRejectedPayload::new(
                         signal_lojix::schema::lib::RejectedQuery {
                             query_rejection_reason:
                                 signal_lojix::schema::lib::QueryRejectionReason::MalformedSelector,

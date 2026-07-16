@@ -62,7 +62,7 @@ fn engine() -> SchemaRuntime {
 }
 
 fn check_request(node: &str) -> nexus::RoutedMail {
-    nexus::RoutedMail::Meta(meta::Input::Test(meta::Test::new(
+    nexus::RoutedMail::Meta(meta::Input::Test(meta::TestPayload::new(
         meta::TestRequest::Check(meta::QuickCheck::new(vec![ordinary::NodeName::new(node)])),
     )))
 }
@@ -73,14 +73,14 @@ fn run_request(
     host: ordinary::HostSelection,
     mode: ordinary::TestMode,
 ) -> nexus::RoutedMail {
-    nexus::RoutedMail::Meta(meta::Input::Test(meta::Test::new(meta::TestRequest::Run(
-        meta::TestRun {
+    nexus::RoutedMail::Meta(meta::Input::Test(meta::TestPayload::new(
+        meta::TestRequest::Run(meta::TestRun {
             cluster_name: ordinary::ClusterName::new(cluster),
             node_selection: meta::NodeSelection::Nodes(vec![ordinary::NodeName::new(node)]),
             host_selection: host,
             test_mode: mode,
-        },
-    ))))
+        }),
+    )))
 }
 
 fn accepted_identifier(output: nexus::RoutedReply) -> u64 {
@@ -95,7 +95,7 @@ fn query_runs(
     cluster: &str,
     node: &str,
 ) -> Vec<ordinary::TestRunRecord> {
-    let input = nexus::RoutedMail::Ordinary(ordinary::Input::Query(ordinary::Query::new(
+    let input = nexus::RoutedMail::Ordinary(ordinary::Input::Query(ordinary::QueryPayload::new(
         ordinary::Selection::ByTestRun(ordinary::TestRunLookup {
             cluster_name: ordinary::ClusterName::new(cluster),
             node_name: ordinary::NodeName::new(node),
@@ -238,7 +238,7 @@ fn query_by_run_identifier_filters_to_one() {
     let mut engine = engine();
     accepted_identifier(run(&mut engine, check_request("mercury")));
     let second = accepted_identifier(run(&mut engine, check_request("mercury")));
-    let input = nexus::RoutedMail::Ordinary(ordinary::Input::Query(ordinary::Query::new(
+    let input = nexus::RoutedMail::Ordinary(ordinary::Input::Query(ordinary::QueryPayload::new(
         ordinary::Selection::ByTestRun(ordinary::TestRunLookup {
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new("mercury"),
@@ -440,7 +440,7 @@ fn daemon_socket_roundtrip_hermetic_check_mercury_passes() {
     // 1. (Test (Check [mercury])) over the REAL owner socket → AcceptedTest.
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut owner = connect(&owner_socket, deadline, &mut daemon);
-    let test_input = meta::Input::Test(meta::Test::new(check_test_request("mercury")));
+    let test_input = meta::Input::Test(meta::TestPayload::new(check_test_request("mercury")));
     let frame = FrameBody::new(test_input.encode_signal_frame().expect("encode test"));
     codec.write_body(&mut owner, &frame).expect("write test");
     let reply = codec.read_body(&mut owner).expect("read test reply");
@@ -457,13 +457,13 @@ fn daemon_socket_roundtrip_hermetic_check_mercury_passes() {
     // 2. Poll (Query (ByTestRun (goldragon mercury None))) over the REAL
     //    ordinary socket until the decoupled dispatch reaches a terminal
     //    outcome — the real `nix build vm-mercury` runs on the daemon.
-    let query = ordinary::Input::Query(ordinary::Query::new(ordinary::Selection::ByTestRun(
-        ordinary::TestRunLookup {
+    let query = ordinary::Input::Query(ordinary::QueryPayload::new(
+        ordinary::Selection::ByTestRun(ordinary::TestRunLookup {
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new("mercury"),
             run: None,
-        },
-    )));
+        }),
+    ));
     let query_frame = query.encode_signal_frame().expect("encode query");
     let build_deadline = Instant::now() + Duration::from_secs(540);
     let terminal = loop {
@@ -622,7 +622,7 @@ fn engine_with_projection() -> (tempfile::TempDir, SchemaRuntime) {
 fn submit_verdict(engine: &mut SchemaRuntime, request: meta::TestRequest) -> nexus::RoutedReply {
     run(
         engine,
-        nexus::RoutedMail::Meta(meta::Input::Test(meta::Test::new(request))),
+        nexus::RoutedMail::Meta(meta::Input::Test(meta::TestPayload::new(request))),
     )
 }
 

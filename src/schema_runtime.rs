@@ -302,12 +302,12 @@ impl ResolvedTestRun {
         ordinary::TestRunRecord {
             test_run_identifier: identifier,
             cluster_name: self.cluster.clone(),
-            node_name: self.node.clone(),
+            node: self.node.clone(),
             host: self.host.clone(),
-            mode: self.mode,
-            phase: ordinary::TestRunPhase::Submitted,
-            outcome: ordinary::TestOutcome::Pending,
-            closure_path: None,
+            test_mode: self.mode,
+            test_run_phase: ordinary::TestRunPhase::Submitted,
+            test_outcome: ordinary::TestOutcome::Pending,
+            optional_closure_path: None,
         }
     }
 
@@ -406,12 +406,12 @@ impl TestPipeline {
         ordinary::TestRunRecord {
             test_run_identifier: self.identifier.clone(),
             cluster_name: self.run.cluster.clone(),
-            node_name: self.run.node.clone(),
+            node: self.run.node.clone(),
             host: self.run.host.clone(),
-            mode: self.run.mode,
-            phase,
-            outcome,
-            closure_path,
+            test_mode: self.run.mode,
+            test_run_phase: phase,
+            test_outcome: outcome,
+            optional_closure_path: closure_path,
         }
     }
 
@@ -542,7 +542,7 @@ impl HermeticCheck {
     fn installable(&self) -> String {
         format!(
             "{}#checks.{}.vm-{}",
-            self.command.flake.payload(),
+            self.command.flake_reference.payload(),
             self.command.system,
             self.command.node_name.payload()
         )
@@ -1066,10 +1066,10 @@ impl NixFlakeMetadata {
             .map(ordinary::FlakeReference::new)
             .unwrap_or_else(|| requested_ref.clone());
         ordinary::SourceRevisionRecord {
-            policy,
+            source_revision_policy: policy,
             requested_ref,
             resolved_ref,
-            resolved_revision: self.resolved_revision(),
+            string: self.resolved_revision(),
         }
     }
 
@@ -1107,15 +1107,15 @@ impl DeployPipeline {
                 generation_artifact: Self::host_generation_artifact(deployment.host_composition),
                 activation_effect: Self::host_activation_effect(deployment.host_deploy_action),
                 activation_slot: None,
-                source: deployment.source,
-                requested_flake: deployment.flake.clone(),
-                flake: deployment.flake,
-                build_attribute: deployment.build_attribute,
+                source: deployment.proposal_source,
+                requested_flake: deployment.flake_reference.clone(),
+                flake: deployment.flake_reference,
+                build_attribute: deployment.optional_flake_attribute,
                 action: DeployAction::Host(deployment.host_deploy_action),
                 source_revision_policy: deployment.source_revision_policy,
                 source_revision: None,
-                builder: deployment.builder.map(meta::Builder::into_payload),
-                substituters: Self::convert_substituters(deployment.substituters),
+                builder: deployment.optional_builder.map(meta::Builder::into_payload),
+                substituters: Self::convert_substituters(deployment.extra_substituter_vector),
                 input_overrides: Vec::new(),
                 closure_path: None,
                 accepted_marker,
@@ -1131,9 +1131,9 @@ impl DeployPipeline {
                     deployment.user_environment_action,
                 ),
                 activation_slot: None,
-                source: deployment.source,
-                requested_flake: deployment.flake.clone(),
-                flake: deployment.flake,
+                source: deployment.proposal_source,
+                requested_flake: deployment.flake_reference.clone(),
+                flake: deployment.flake_reference,
                 build_attribute: None,
                 action: DeployAction::UserEnvironment {
                     action: deployment.user_environment_action,
@@ -1141,8 +1141,8 @@ impl DeployPipeline {
                 },
                 source_revision_policy: deployment.source_revision_policy,
                 source_revision: None,
-                builder: deployment.builder.map(meta::Builder::into_payload),
-                substituters: Self::convert_substituters(deployment.substituters),
+                builder: deployment.optional_builder.map(meta::Builder::into_payload),
+                substituters: Self::convert_substituters(deployment.extra_substituter_vector),
                 input_overrides: Vec::new(),
                 closure_path: None,
                 accepted_marker,
@@ -1327,10 +1327,10 @@ impl DeployPipeline {
         self.source_revision
             .clone()
             .unwrap_or_else(|| ordinary::SourceRevisionRecord {
-                policy: self.source_revision_policy,
+                source_revision_policy: self.source_revision_policy,
                 requested_ref: self.requested_flake.clone(),
                 resolved_ref: self.flake.clone(),
-                resolved_revision: String::new(),
+                string: String::new(),
             })
     }
 
@@ -1365,8 +1365,8 @@ impl DeployPipeline {
             node_name: self.node_name.clone(),
             deployment_phase: phase,
             event_log_position,
-            detail,
-            source_revision: self.source_revision.clone(),
+            optional_phase_detail: detail,
+            optional_source_revision_record: self.source_revision.clone(),
         }
     }
 
@@ -1412,12 +1412,12 @@ impl DeployPipeline {
                         ordinary::HostComposition::BaseHost
                     }
                 },
-                source: self.source.clone(),
-                flake: self.requested_flake.clone(),
+                proposal_source: self.source.clone(),
+                flake_reference: self.requested_flake.clone(),
                 host_deploy_action: *action,
                 source_revision_policy: self.source_revision_policy,
-                builder: self.builder.clone().map(meta::Builder::new),
-                substituters: self
+                optional_builder: self.builder.clone().map(meta::Builder::new),
+                extra_substituter_vector: self
                     .substituters
                     .iter()
                     .cloned()
@@ -1426,19 +1426,19 @@ impl DeployPipeline {
                         public_key: substituter.public_key,
                     })
                     .collect(),
-                build_attribute: self.build_attribute.clone(),
+                optional_flake_attribute: self.build_attribute.clone(),
             }),
             DeployAction::UserEnvironment { action, user } => {
                 sema::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
                     cluster_name: self.cluster_name.clone(),
                     node_name: self.node_name.clone(),
                     user_name: user.clone(),
-                    source: self.source.clone(),
-                    flake: self.requested_flake.clone(),
+                    proposal_source: self.source.clone(),
+                    flake_reference: self.requested_flake.clone(),
                     user_environment_action: *action,
                     source_revision_policy: self.source_revision_policy,
-                    builder: self.builder.clone().map(meta::Builder::new),
-                    substituters: self
+                    optional_builder: self.builder.clone().map(meta::Builder::new),
+                    extra_substituter_vector: self
                         .substituters
                         .iter()
                         .cloned()
@@ -1474,7 +1474,7 @@ impl DeployPipeline {
             resolved_revision: self
                 .source_revision
                 .as_ref()
-                .map(|source_revision| source_revision.resolved_revision.clone()),
+                .map(|source_revision| source_revision.string.clone()),
             resolved_target: self.resolved_target(),
             boot_once_unit: self.boot_once_unit(),
         }
@@ -1555,13 +1555,13 @@ impl sema::DeployJob {
             return None;
         }
         let source_revision_record = ordinary::SourceRevisionRecord {
-            policy: self.source_revision_policy,
-            flake_reference: self.requested_ref.clone(),
-            optional_flake_reference: self
+            source_revision_policy: self.source_revision_policy,
+            requested_ref: self.requested_ref.clone(),
+            resolved_ref: self
                 .resolved_ref
                 .clone()
                 .unwrap_or_else(|| self.requested_ref.clone()),
-            resolved_revision: self.resolved_revision.clone().unwrap_or_default(),
+            string: self.resolved_revision.clone().unwrap_or_default(),
         };
         let generation = sema::LiveGeneration {
             deployment_identifier: self.deployment_identifier.clone(),
@@ -1597,12 +1597,12 @@ impl From<ordinary::TestRunRecord> for sema::StoredTestRun {
         Self {
             test_run_identifier: record.test_run_identifier,
             cluster_name: record.cluster_name,
-            node: record.node_name,
+            node: record.node,
             host: record.host,
-            test_mode: record.mode,
-            test_run_phase: record.phase,
-            test_outcome: record.outcome,
-            optional_closure_path: record.closure_path,
+            test_mode: record.test_mode,
+            test_run_phase: record.test_run_phase,
+            test_outcome: record.test_outcome,
+            optional_closure_path: record.optional_closure_path,
         }
     }
 }
@@ -1614,12 +1614,12 @@ impl From<sema::StoredTestRun> for ordinary::TestRunRecord {
         Self {
             test_run_identifier: run.test_run_identifier,
             cluster_name: run.cluster_name,
-            node_name: run.node_name,
+            node: run.node,
             host: run.host,
-            mode: run.mode,
-            phase: run.phase,
-            outcome: run.outcome,
-            closure_path: run.closure_path,
+            test_mode: run.test_mode,
+            test_run_phase: run.test_run_phase,
+            test_outcome: run.test_outcome,
+            optional_closure_path: run.optional_closure_path,
         }
     }
 }
@@ -1762,8 +1762,10 @@ impl SchemaRuntime {
                 self.active_operation = None;
                 self.active_deploy = None;
                 DeploySubmissionOutcome::Rejected(meta::RejectedDeploy {
-                    deploy_rejection_reason: Self::deploy_reason(report.reason),
-                    database_marker: Self::marker(report.marker.commit_sequence.into_payload()),
+                    deploy_rejection_reason: Self::deploy_reason(report.rejection_reason),
+                    database_marker: Self::marker(
+                        report.state_marker.commit_sequence.into_payload(),
+                    ),
                 })
             }
             // `record_deploy_submitted` only ever returns the two arms above;
@@ -1795,7 +1797,7 @@ impl SchemaRuntime {
                 database_marker: pipeline.accepted_marker.clone(),
             },
             None => {
-                return meta::Output::DeployRejected(meta::DeployRejected::new(
+                return meta::Output::DeployRejected(meta::DeployRejectedPayload::new(
                     self.deploy_rejection(meta::DeployRejectionReason::InternalError),
                 ));
             }
@@ -1805,7 +1807,7 @@ impl SchemaRuntime {
                 .with_origin_route(nexus::OriginRoute::new(0));
         match self.execute(work).await.into_root() {
             nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Meta(output)) => output,
-            _ => meta::Output::DeployRejected(meta::DeployRejected::new(
+            _ => meta::Output::DeployRejected(meta::DeployRejectedPayload::new(
                 self.deploy_rejection(meta::DeployRejectionReason::InternalError),
             )),
         }
@@ -1820,7 +1822,7 @@ impl SchemaRuntime {
     /// hermetic build / live cycle does NOT run here.
     pub async fn submit_test(&mut self, request: meta::TestRequest) -> TestSubmissionOutcome {
         let work = nexus::NexusWork::SignalArrived(nexus::RoutedMail::Meta(meta::Input::Test(
-            meta::Test::new(request),
+            meta::TestPayload::new(request),
         )))
         .with_origin_route(nexus::OriginRoute::new(0));
         match self.execute(work).await.into_root() {
@@ -1857,7 +1859,7 @@ impl SchemaRuntime {
     /// re-observes the outcome via `(Query (ByTestRun …))`.
     pub async fn drive_submitted_test(&mut self) -> meta::Output {
         let Some(pipeline) = self.active_test.clone() else {
-            return meta::Output::TestRejected(meta::TestRejected::new(
+            return meta::Output::TestRejected(meta::TestRejectedPayload::new(
                 self.test_rejection(meta::TestRejectionReason::InternalError),
             ));
         };
@@ -1905,7 +1907,7 @@ impl SchemaRuntime {
                     action = self.decide_test_effect_completion(result);
                 }
                 _ => {
-                    return meta::Output::TestRejected(meta::TestRejected::new(
+                    return meta::Output::TestRejected(meta::TestRejectedPayload::new(
                         self.test_rejection(meta::TestRejectionReason::InternalError),
                     ));
                 }
@@ -1967,13 +1969,13 @@ impl SchemaRuntime {
     fn open_subscription(&mut self) -> nexus::NexusAction {
         let subscription_token = self.store.next_subscription_token();
         let reply = match self.store.commit_sequence() {
-            Ok(commit_sequence) => {
-                ordinary::Output::Watching(ordinary::Watching::new(ordinary::SubscriptionOpened {
+            Ok(commit_sequence) => ordinary::Output::Watching(ordinary::WatchingPayload::new(
+                ordinary::SubscriptionOpened {
                     subscription_token: ordinary::SubscriptionToken::new(subscription_token),
                     commit_sequence: ordinary::CommitSequence::new(commit_sequence),
-                }))
-            }
-            Err(_) => ordinary::Output::WatchRejected(ordinary::WatchRejected::new(
+                },
+            )),
+            Err(_) => ordinary::Output::WatchRejected(ordinary::WatchRejectedPayload::new(
                 ordinary::RejectedWatch::new(ordinary::WatchRejectionReason::StreamUnavailable),
             )),
         };
@@ -1981,7 +1983,7 @@ impl SchemaRuntime {
     }
 
     fn close_subscription(&mut self, close: ordinary::SubscriptionClose) -> nexus::NexusAction {
-        let reply = ordinary::Output::Unwatched(ordinary::Unwatched::new(
+        let reply = ordinary::Output::Unwatched(ordinary::UnwatchedPayload::new(
             ordinary::SubscriptionClosed::new(close.into_payload()),
         ));
         nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Ordinary(reply))
@@ -1993,12 +1995,12 @@ impl SchemaRuntime {
                 let request = request.into_payload();
                 if let Some(reason) = Self::unsupported_deploy_reason(&request) {
                     return Self::reply_meta(meta::Output::DeployRejected(
-                        meta::DeployRejected::new(self.deploy_rejection(reason)),
+                        meta::DeployRejectedPayload::new(self.deploy_rejection(reason)),
                     ));
                 }
                 if let Some(reason) = Self::source_revision_policy_rejection(&request) {
                     return Self::reply_meta(meta::Output::DeployRejected(
-                        meta::DeployRejected::new(self.deploy_rejection(reason)),
+                        meta::DeployRejectedPayload::new(self.deploy_rejection(reason)),
                     ));
                 }
                 self.active_operation = Some(MetaOperation::Deploy);
@@ -2061,9 +2063,9 @@ impl SchemaRuntime {
                     run.pending_record(identifier),
                 ))
             }
-            Err(reason) => Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
-                self.test_rejection(reason),
-            ))),
+            Err(reason) => Self::reply_meta(meta::Output::TestRejected(
+                meta::TestRejectedPayload::new(self.test_rejection(reason)),
+            )),
         }
     }
 
@@ -2162,11 +2164,11 @@ impl SchemaRuntime {
         let (policy, flake) = match request {
             meta::DeployRequest::Host(deployment) => (
                 deployment.source_revision_policy,
-                deployment.flake.payload(),
+                deployment.flake_reference.payload(),
             ),
             meta::DeployRequest::UserEnvironment(deployment) => (
                 deployment.source_revision_policy,
-                deployment.flake.payload(),
+                deployment.flake_reference.payload(),
             ),
         };
         match policy {
@@ -2182,25 +2184,30 @@ impl SchemaRuntime {
     fn decide_read_completion(&mut self, output: sema::SemaReadOutput) -> nexus::NexusAction {
         let reply = match output {
             sema::SemaReadOutput::GenerationsQueried(listing) => {
-                ordinary::Output::Queried(ordinary::Queried::new(listing))
+                ordinary::Output::Queried(ordinary::QueriedPayload::new(listing))
             }
             sema::SemaReadOutput::KeyMaterialChecked(report) => {
-                ordinary::Output::KeyMaterialChecked(ordinary::KeyMaterialChecked::new(report))
+                ordinary::Output::KeyMaterialChecked(ordinary::KeyMaterialCheckedPayload::new(
+                    report,
+                ))
             }
             sema::SemaReadOutput::TestRunsQueried(listing) => {
-                ordinary::Output::TestRunsQueried(ordinary::TestRunsQueried::new(listing))
+                ordinary::Output::TestRunsQueried(ordinary::TestRunsQueriedPayload::new(listing))
             }
             sema::SemaReadOutput::EventLogRead(page) => ordinary::Output::DeploymentEventsQueried(
-                ordinary::DeploymentEventsQueried::new(ordinary::EventLogPage {
-                    deployment_events: page.deployment_events,
-                    retention_events: page.retention_events,
+                ordinary::DeploymentEventsQueriedPayload::new(ordinary::EventLogPage {
+                    deployment_phase_event_vector: page.deployment_phase_event_vector,
+                    cache_retention_transition_event_vector: page
+                        .cache_retention_transition_event_vector,
                     database_marker: Self::marker(page.state_marker.commit_sequence.into_payload()),
                 }),
             ),
             sema::SemaReadOutput::ReadMissed(report) => ordinary::Output::QueryRejected(
-                ordinary::QueryRejected::new(ordinary::RejectedQuery {
+                ordinary::QueryRejectedPayload::new(ordinary::RejectedQuery {
                     query_rejection_reason: ordinary::QueryRejectionReason::GenerationUnknown,
-                    database_marker: Self::marker(report.marker.commit_sequence.into_payload()),
+                    database_marker: Self::marker(
+                        report.state_marker.commit_sequence.into_payload(),
+                    ),
                 }),
             ),
         };
@@ -2218,15 +2225,15 @@ impl SchemaRuntime {
             sema::SemaWriteOutput::GenerationActivated(_) => self.finish_deploy_pipeline(),
             sema::SemaWriteOutput::GenerationPinned(applied) => {
                 self.active_operation = None;
-                Self::reply_meta(meta::Output::Pinned(meta::Pinned::new(applied)))
+                Self::reply_meta(meta::Output::Pinned(meta::PinnedPayload::new(applied)))
             }
             sema::SemaWriteOutput::GenerationUnpinned(applied) => {
                 self.active_operation = None;
-                Self::reply_meta(meta::Output::Unpinned(meta::Unpinned::new(applied)))
+                Self::reply_meta(meta::Output::Unpinned(meta::UnpinnedPayload::new(applied)))
             }
             sema::SemaWriteOutput::GenerationRetired(applied) => {
                 self.active_operation = None;
-                Self::reply_meta(meta::Output::Retired(meta::Retired::new(applied)))
+                Self::reply_meta(meta::Output::Retired(meta::RetiredPayload::new(applied)))
             }
             sema::SemaWriteOutput::ContainerRecorded(_) => self.advance_after_phase(),
             sema::SemaWriteOutput::TestRunRecorded(accepted) => {
@@ -2235,7 +2242,7 @@ impl SchemaRuntime {
                 // decoupled executor (`drive_submitted_test`) re-enters to run
                 // the real dispatch and rewrite the row to a terminal outcome.
                 self.active_operation = None;
-                Self::reply_meta(meta::Output::Tested(meta::Tested::new(accepted)))
+                Self::reply_meta(meta::Output::Tested(meta::TestedPayload::new(accepted)))
             }
             sema::SemaWriteOutput::WriteRejected(report) => self.reject_active_or_meta(report),
         }
@@ -2255,7 +2262,7 @@ impl SchemaRuntime {
     /// honest live terminal is the belt to that submit-time gate.
     fn decide_test_effect_completion(&mut self, result: nexus::EffectResult) -> nexus::NexusAction {
         let Some(pipeline) = self.active_test.clone() else {
-            return Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
+            return Self::reply_meta(meta::Output::TestRejected(meta::TestRejectedPayload::new(
                 self.test_rejection(meta::TestRejectionReason::InternalError),
             )));
         };
@@ -2326,9 +2333,9 @@ impl SchemaRuntime {
         self.active_test = None;
         match output {
             sema::SemaWriteOutput::TestRunRecorded(accepted) => {
-                Self::reply_meta(meta::Output::Tested(meta::Tested::new(accepted)))
+                Self::reply_meta(meta::Output::Tested(meta::TestedPayload::new(accepted)))
             }
-            _ => Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
+            _ => Self::reply_meta(meta::Output::TestRejected(meta::TestRejectedPayload::new(
                 self.test_rejection(meta::TestRejectionReason::InternalError),
             ))),
         }
@@ -2361,9 +2368,11 @@ impl SchemaRuntime {
         let pipeline = match self.active_test.clone() {
             Some(pipeline) => pipeline,
             None => {
-                return Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
-                    self.test_rejection(meta::TestRejectionReason::InternalError),
-                )));
+                return Self::reply_meta(meta::Output::TestRejected(
+                    meta::TestRejectedPayload::new(
+                        self.test_rejection(meta::TestRejectionReason::InternalError),
+                    ),
+                ));
             }
         };
         self.record_test_terminal(
@@ -2392,9 +2401,9 @@ impl SchemaRuntime {
         let pipeline = match self.active_deploy.as_ref() {
             Some(pipeline) => pipeline.clone(),
             None => {
-                return Self::reply_meta(meta::Output::DeployAccepted(meta::DeployAccepted::new(
-                    accepted,
-                )));
+                return Self::reply_meta(meta::Output::DeployAccepted(
+                    meta::DeployAcceptedPayload::new(accepted),
+                ));
             }
         };
         // First effect of the chain: resolve the flake against the proposal
@@ -2411,9 +2420,11 @@ impl SchemaRuntime {
         let pipeline = match self.active_deploy.clone() {
             Some(pipeline) => pipeline,
             None => {
-                return Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
-                    self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-                )));
+                return Self::reply_meta(meta::Output::DeployRejected(
+                    meta::DeployRejectedPayload::new(
+                        self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
+                    ),
+                ));
             }
         };
         match pipeline.stage {
@@ -2492,9 +2503,9 @@ impl SchemaRuntime {
                 database_marker: Self::marker(self.store.commit_sequence().unwrap_or(0)),
             },
         };
-        Self::reply_meta(meta::Output::DeployAccepted(meta::DeployAccepted::new(
-            accepted,
-        )))
+        Self::reply_meta(meta::Output::DeployAccepted(
+            meta::DeployAcceptedPayload::new(accepted),
+        ))
     }
 
     fn reject_active_or_meta(&mut self, report: sema::RejectionReport) -> nexus::NexusAction {
@@ -2506,35 +2517,35 @@ impl SchemaRuntime {
             .active_operation
             .take()
             .unwrap_or(MetaOperation::Deploy);
-        let marker = Self::marker(report.marker.commit_sequence.into_payload());
+        let marker = Self::marker(report.state_marker.commit_sequence.into_payload());
         let output = match operation {
-            MetaOperation::Deploy => {
-                meta::Output::DeployRejected(meta::DeployRejected::new(meta::RejectedDeploy {
-                    deploy_rejection_reason: Self::deploy_reason(report.reason),
+            MetaOperation::Deploy => meta::Output::DeployRejected(
+                meta::DeployRejectedPayload::new(meta::RejectedDeploy {
+                    deploy_rejection_reason: Self::deploy_reason(report.rejection_reason),
                     database_marker: marker,
-                }))
-            }
+                }),
+            ),
             MetaOperation::Pin => {
-                meta::Output::PinRejected(meta::PinRejected::new(meta::RejectedPin {
-                    pin_rejection_reason: Self::pin_reason(report.reason),
+                meta::Output::PinRejected(meta::PinRejectedPayload::new(meta::RejectedPin {
+                    pin_rejection_reason: Self::pin_reason(report.rejection_reason),
                     database_marker: marker,
                 }))
             }
             MetaOperation::Unpin => {
-                meta::Output::UnpinRejected(meta::UnpinRejected::new(meta::RejectedUnpin {
-                    unpin_rejection_reason: Self::unpin_reason(report.reason),
+                meta::Output::UnpinRejected(meta::UnpinRejectedPayload::new(meta::RejectedUnpin {
+                    unpin_rejection_reason: Self::unpin_reason(report.rejection_reason),
                     database_marker: marker,
                 }))
             }
-            MetaOperation::Retire => {
-                meta::Output::RetireRejected(meta::RetireRejected::new(meta::RejectedRetire {
-                    retire_rejection_reason: Self::retire_reason(report.reason),
+            MetaOperation::Retire => meta::Output::RetireRejected(
+                meta::RetireRejectedPayload::new(meta::RejectedRetire {
+                    retire_rejection_reason: Self::retire_reason(report.rejection_reason),
                     database_marker: marker,
-                }))
-            }
+                }),
+            ),
             MetaOperation::Test => {
-                meta::Output::TestRejected(meta::TestRejected::new(meta::RejectedTest {
-                    test_rejection_reason: Self::test_reason(report.reason),
+                meta::Output::TestRejected(meta::TestRejectedPayload::new(meta::RejectedTest {
+                    test_rejection_reason: Self::test_reason(report.rejection_reason),
                     database_marker: marker,
                 }))
             }
@@ -2621,9 +2632,11 @@ impl SchemaRuntime {
                 // an unexpected effect completion replies a rejection.
                 return match result {
                     nexus::EffectResult::EffectFailed(failure) => self.fail_pipeline(failure),
-                    _ => Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
-                        self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-                    ))),
+                    _ => Self::reply_meta(meta::Output::DeployRejected(
+                        meta::DeployRejectedPayload::new(
+                            self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
+                        ),
+                    )),
                 };
             }
         };
@@ -2743,9 +2756,11 @@ impl SchemaRuntime {
                 pipeline.phase_event(phase, ordinary::EventLogPosition::new(position), detail)
             }
             None => {
-                return Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
-                    self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-                )));
+                return Self::reply_meta(meta::Output::DeployRejected(
+                    meta::DeployRejectedPayload::new(
+                        self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
+                    ),
+                ));
             }
         };
         nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordPhaseTransition(event))
@@ -2801,9 +2816,9 @@ impl SchemaRuntime {
             | nexus::EffectStage::BringUpTestVm
             | nexus::EffectStage::TearDownTestVm => meta::DeployRejectionReason::InternalError,
         };
-        Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
-            self.deploy_rejection(reason),
-        )))
+        Self::reply_meta(meta::Output::DeployRejected(
+            meta::DeployRejectedPayload::new(self.deploy_rejection(reason)),
+        ))
     }
 
     // ---- sema apply / observe (the four tables) -------------------------
@@ -3164,7 +3179,7 @@ impl SchemaRuntime {
                 .cmp(left.test_run_identifier.payload())
         });
         sema::SemaReadOutput::TestRunsQueried(ordinary::TestRunListing {
-            runs: matching
+            test_run_record_vector: matching
                 .into_iter()
                 .map(ordinary::TestRunRecord::from)
                 .collect(),
@@ -3174,7 +3189,7 @@ impl SchemaRuntime {
 
     fn test_run_matches(lookup: &ordinary::TestRunLookup, run: &sema::StoredTestRun) -> bool {
         lookup.cluster_name == run.cluster_name
-            && lookup.node_name == run.node_name
+            && lookup.node_name == run.node
             && lookup
                 .run
                 .as_ref()
@@ -3230,7 +3245,7 @@ impl SchemaRuntime {
             activation_effect: live.activation_effect,
             generation_slot: live.generation_slot,
             closure_path: live.closure_path.clone(),
-            source_revision: Some(live.source_revision_record.clone()),
+            optional_source_revision_record: Some(live.source_revision_record.clone()),
         }
     }
 
@@ -3248,7 +3263,7 @@ impl SchemaRuntime {
         let mut deployment_events = Vec::new();
         let mut retention_events = Vec::new();
         for entry in &entries {
-            match &entry.record {
+            match &entry.logged_event {
                 sema::LoggedEvent::Deployment(event) => deployment_events.push(event.clone()),
                 sema::LoggedEvent::CacheRetention(event) => retention_events.push(event.clone()),
                 sema::LoggedEvent::Container(_) => {}
@@ -3265,7 +3280,7 @@ impl SchemaRuntime {
         let commit_sequence = self.store.commit_sequence().unwrap_or(0);
         sema::SemaReadOutput::KeyMaterialChecked(ordinary::KeyMaterialReport {
             node_name: query.node_name,
-            mismatches: Vec::new(),
+            key_material_mismatch_vector: Vec::new(),
             database_marker: Self::marker(commit_sequence),
         })
     }
@@ -4974,9 +4989,11 @@ impl nexus::NexusEngine for SchemaRuntime {
         &self,
         _exhausted: triad_runtime::ContinuationExhausted,
     ) -> nexus::RoutedReply {
-        nexus::RoutedReply::Meta(meta::Output::DeployRejected(meta::DeployRejected::new(
-            self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-        )))
+        nexus::RoutedReply::Meta(meta::Output::DeployRejected(
+            meta::DeployRejectedPayload::new(
+                self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
+            ),
+        ))
     }
 
     fn decide(
@@ -5031,13 +5048,13 @@ mod tests {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
             host_composition: ordinary::HostComposition::BaseHost,
-            source: ordinary::ProposalSource::new("/dev/null"),
-            flake: ordinary::FlakeReference::new("github:owner/repo"),
+            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
             host_deploy_action: action,
             source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-            builder: None,
-            substituters: Vec::new(),
-            build_attribute: None,
+            optional_builder: None,
+            extra_substituter_vector: Vec::new(),
+            optional_flake_attribute: None,
         })
     }
 
@@ -5057,7 +5074,7 @@ mod tests {
             resolved_ref: ordinary::FlakeReference::new(
                 "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
-            resolved_revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            string: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         }
     }
 
@@ -5258,7 +5275,7 @@ mod tests {
         );
         let command = pipeline.nix_eval_command(engine.configuration.as_ref());
         assert_eq!(
-            command.source_revision.resolved_revision,
+            command.source_revision.string,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         assert_eq!(command.flake, command.source_revision.resolved_ref);
@@ -5289,7 +5306,7 @@ mod tests {
             until: ordinary::EventLogPosition::new(1),
         }) {
             sema::SemaReadOutput::EventLogRead(page) => assert_eq!(
-                page.deployment_events
+                page.deployment_phase_event_vector
                     .first()
                     .expect("deployment event")
                     .source_revision,
@@ -5306,7 +5323,7 @@ mod tests {
         match engine.query_generations(ordinary::Selection::ByNode(ordinary::NodeSelector {
             cluster_name: cluster(),
             node_name: node(),
-            artifact: None,
+            optional_generation_artifact: None,
         })) {
             sema::SemaReadOutput::GenerationsQueried(listing) => assert_eq!(
                 listing
@@ -5334,13 +5351,13 @@ mod tests {
                 cluster_name: cluster(),
                 node_name: node(),
                 host_composition: ordinary::HostComposition::BaseHost,
-                source: ordinary::ProposalSource::new("/dev/null"),
-                flake: ordinary::FlakeReference::new("github:owner/repo"),
+                proposal_source: ordinary::ProposalSource::new("/dev/null"),
+                flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
                 host_deploy_action: action,
                 source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-                builder: None,
-                substituters: Vec::new(),
-                build_attribute: None,
+                optional_builder: None,
+                extra_substituter_vector: Vec::new(),
+                optional_flake_attribute: None,
             });
             assert!(
                 SchemaRuntime::unsupported_deploy_reason(&request).is_none(),
@@ -5356,12 +5373,12 @@ mod tests {
                 cluster_name: cluster(),
                 node_name: node(),
                 user_name: ordinary::UserName::new("li"),
-                source: ordinary::ProposalSource::new("/dev/null"),
-                flake: ordinary::FlakeReference::new("github:owner/repo"),
+                proposal_source: ordinary::ProposalSource::new("/dev/null"),
+                flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
                 user_environment_action: mode,
                 source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-                builder: None,
-                substituters: Vec::new(),
+                optional_builder: None,
+                extra_substituter_vector: Vec::new(),
             });
             assert!(
                 SchemaRuntime::unsupported_deploy_reason(&request).is_none(),
@@ -5678,13 +5695,13 @@ mod tests {
                 cluster_name: ordinary::ClusterName::new("goldragon"),
                 node_name: ordinary::NodeName::new("ouranos"),
                 host_composition: ordinary::HostComposition::CompleteHost,
-                source: ordinary::ProposalSource::new("/dev/null"),
-                flake: ordinary::FlakeReference::new("path:/none"),
+                proposal_source: ordinary::ProposalSource::new("/dev/null"),
+                flake_reference: ordinary::FlakeReference::new("path:/none"),
                 host_deploy_action: ordinary::HostDeployAction::ActivateNow,
                 source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-                builder: None,
-                substituters: Vec::new(),
-                build_attribute: None,
+                optional_builder: None,
+                extra_substituter_vector: Vec::new(),
+                optional_flake_attribute: None,
             }),
             deploy_job_phase: sema::DeployJobPhase::Activating,
             optional_closure_path: closure.map(ordinary::ClosurePath::new),

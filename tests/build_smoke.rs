@@ -54,7 +54,7 @@ fn write_daemon_configuration(
 /// horizon materialization). The proposal source is unused on this path
 /// (no projection), so it is a placeholder.
 fn dune_host_deploy(action: ordinary::HostDeployAction) -> meta::Input {
-    meta::Input::Deploy(meta::Deploy::new(meta::DeployRequest::Host(
+    meta::Input::Deploy(meta::DeployPayload::new(meta::DeployRequest::Host(
         meta::HostDeployment {
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new("dune"),
@@ -376,7 +376,7 @@ fn concurrent_requests_are_served_in_parallel() {
     let query_started = Instant::now();
     let mut query_stream = connect(&ordinary_socket, deadline);
     let codec = LengthPrefixedCodec::default();
-    let query = ordinary::Input::Query(ordinary::Query::new(ordinary::Selection::ByNode(
+    let query = ordinary::Input::Query(ordinary::QueryPayload::new(ordinary::Selection::ByNode(
         ordinary::NodeSelector {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),

@@ -15,17 +15,17 @@ use signal_lojix::schema::lib as ordinary;
 use triad_runtime::{ComponentArgument, ComponentCommand};
 
 fn ordinary_query() -> ordinary::Input {
-    ordinary::Input::Query(ordinary::Query::new(ordinary::Selection::ByNode(
+    ordinary::Input::Query(ordinary::QueryPayload::new(ordinary::Selection::ByNode(
         ordinary::NodeSelector {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
-            artifact: None,
+            optional_generation_artifact: None,
         },
     )))
 }
 
 fn owner_pin() -> meta::Input {
-    meta::Input::Pin(meta::Pin::new(meta::PinRequest {
+    meta::Input::Pin(meta::PinPayload::new(meta::PinRequest {
         cluster_name: ordinary::ClusterName::new("alpha"),
         node_name: ordinary::NodeName::new("node-1"),
         generation_identifier: ordinary::GenerationIdentifier::new(42),
@@ -98,7 +98,7 @@ fn meta_client_decodes_inline_pin() {
 /// lowers the cluster/host/mode from TestDefaults (report 54).
 #[cfg(feature = "nota-text")]
 fn owner_test_check() -> meta::Input {
-    meta::Input::Test(meta::Test::new(meta::TestRequest::Check(
+    meta::Input::Test(meta::TestPayload::new(meta::TestRequest::Check(
         meta::QuickCheck::new(vec![ordinary::NodeName::new("mercury")]),
     )))
 }
@@ -106,22 +106,24 @@ fn owner_test_check() -> meta::Input {
 /// The full test form: explicit node selection, host, and mode.
 #[cfg(feature = "nota-text")]
 fn owner_test_run() -> meta::Input {
-    meta::Input::Test(meta::Test::new(meta::TestRequest::Run(meta::TestRun {
-        cluster_name: ordinary::ClusterName::new("goldragon"),
-        node_selection: meta::NodeSelection::Nodes(vec![ordinary::NodeName::new("mercury")]),
-        host_selection: ordinary::HostSelection::OnHost(ordinary::NodeName::new("prometheus")),
-        test_mode: ordinary::TestMode::Hermetic,
-    })))
+    meta::Input::Test(meta::TestPayload::new(meta::TestRequest::Run(
+        meta::TestRun {
+            cluster_name: ordinary::ClusterName::new("goldragon"),
+            node_selection: meta::NodeSelection::Nodes(vec![ordinary::NodeName::new("mercury")]),
+            host_selection: ordinary::HostSelection::OnHost(ordinary::NodeName::new("prometheus")),
+            test_mode: ordinary::TestMode::Hermetic,
+        },
+    )))
 }
 
 /// The test-run read: `lojix '(Query (ByTestRun (goldragon mercury None)))'`.
 #[cfg(feature = "nota-text")]
 fn ordinary_query_test_run() -> ordinary::Input {
-    ordinary::Input::Query(ordinary::Query::new(ordinary::Selection::ByTestRun(
+    ordinary::Input::Query(ordinary::QueryPayload::new(ordinary::Selection::ByTestRun(
         ordinary::TestRunLookup {
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new("mercury"),
-            run: None,
+            optional_test_run_identifier: None,
         },
     )))
 }
@@ -214,13 +216,14 @@ fn meta_client_decodes_signal_frame() {
 #[test]
 #[cfg(feature = "nota-text")]
 fn ordinary_output_renders_nota() {
-    let output = ordinary::Output::Queried(ordinary::Queried::new(ordinary::GenerationListing {
-        generations: Vec::new(),
-        database_marker: ordinary::DatabaseMarker {
-            commit_sequence: ordinary::CommitSequence::new(7),
-            state_digest: ordinary::StateDigest::new(7),
-        },
-    }));
+    let output =
+        ordinary::Output::Queried(ordinary::QueriedPayload::new(ordinary::GenerationListing {
+            generation_vector: Vec::new(),
+            database_marker: ordinary::DatabaseMarker {
+                commit_sequence: ordinary::CommitSequence::new(7),
+                state_digest: ordinary::StateDigest::new(7),
+            },
+        }));
 
     assert!(output.to_string().starts_with("(Queried"));
 }
