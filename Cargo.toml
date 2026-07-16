@@ -31,6 +31,10 @@ path = "src/bin/lojix-write-configuration.rs"
 name = "lojix-inspect-store"
 path = "src/bin/lojix-inspect-store.rs"
 
+[[bin]]
+name = "lojix-reconstruct-schema-one"
+path = "src/bin/lojix-reconstruct-schema-one.rs"
+
 [features]
 default   = []
 nota-text = ["signal-lojix/nota-text", "meta-signal-lojix/nota-text"]

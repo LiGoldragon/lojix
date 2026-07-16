@@ -33,6 +33,7 @@ use crate::schema::sema::{
 pub mod client;
 pub mod daemon;
 pub mod inspection;
+pub mod reconstruction;
 pub mod schema;
 pub mod schema_runtime;
 
@@ -96,6 +97,9 @@ pub enum Error {
     #[error("expected exactly one argument")]
     ExpectedSingleArgument,
 
+    #[error("expected source and destination paths")]
+    ExpectedSourceAndDestination,
+
     #[error("flag-style arguments are not part of component binaries: {0}")]
     FlagArgument(String),
 
@@ -142,6 +146,9 @@ pub enum Error {
 
     #[error("durable recovery failed before daemon admission: {0}")]
     RecoveryAdmission(String),
+
+    #[error("schema-one reconstruction rejected: {0}")]
+    Reconstruction(String),
 
     #[error(
         "lojix store at {path:?} cannot be used by this daemon's startup schema/layout gate while {stage}; daemon startup stopped before serving requests; inspect the store with `lojix-inspect-store {path:?}`: {source}"
@@ -701,6 +708,38 @@ impl Store {
                 .assert(self.event_log, entry),
         )?;
         self.maintain_event_history()?;
+        Ok(())
+    }
+
+    /// Seed a verified schema-one reconstruction as one atomic destination
+    /// commit. This is intentionally crate-visible: reconstruction validates
+    /// every source row before opening a new final-schema store, then invokes
+    /// this exactly once.
+    pub(crate) fn seed_reconstruction(
+        &self,
+        generations: Vec<LiveGeneration>,
+        roots: Vec<GcRoot>,
+        events: Vec<EventLogEntry>,
+        containers: Vec<ContainerLifecycleRecord>,
+        test_runs: Vec<StoredTestRun>,
+    ) -> Result<()> {
+        let mut seed = self.database.begin_atomic_commit();
+        for generation in generations {
+            seed = seed.assert(self.live_set, generation);
+        }
+        for root in roots {
+            seed = seed.assert(self.gc_roots, root);
+        }
+        for event in events {
+            seed = seed.assert(self.event_log, event);
+        }
+        for container in containers {
+            seed = seed.assert(self.containers, container);
+        }
+        for run in test_runs {
+            seed = seed.assert(self.test_runs, run);
+        }
+        self.database.commit_atomic(seed)?;
         Ok(())
     }
 

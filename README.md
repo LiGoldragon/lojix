@@ -18,6 +18,28 @@ Storage lives in `sema-engine`; wire framing uses `signal-frame`. The
 ordinary contract repo is `signal-lojix`; the owner/meta contract repo is
 `meta-signal-lojix`.
 
+## Schema-one store reconstruction
+
+A schema-one `*.sema` store is never opened by the schema-two daemon. Preserve
+it first, inspect it read-only, then reconstruct into a **new, nonexistent**
+destination path:
+
+```sh
+cp --reflink=auto /path/lojix.sema /safe-backup/lojix-schema-one.sema
+lojix-inspect-store /safe-backup/lojix-schema-one.sema
+lojix-reconstruct-schema-one /safe-backup/lojix-schema-one.sema /path/lojix-schema-two.sema
+lojix-inspect-store /path/lojix-schema-two.sema
+```
+
+The reconstructor opens the source read-only, validates every decodable record
+and every generation/GC-root and container/event pair, then performs one atomic
+seed of the new schema-two store. It rejects a mismatched/corrupt source or an
+already-existing destination without writing either path. Schema one never
+persisted `DeploySubmission`; legacy in-flight deploy jobs are deliberately
+omitted and reported as `MissingDeploySubmission` rather than inventing a Host
+or UserEnvironment request. Reopen the destination with `lojix-daemon` only
+after the final inspection succeeds.
+
 ## Related
 
 - `signal-lojix` — ordinary peer-callable wire contract.
