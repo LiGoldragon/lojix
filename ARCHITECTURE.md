@@ -99,10 +99,14 @@ streams subscription events.
   (`BuildRealized`, `CachePublished`, `ActivationSucceeded`,
   `GenerationRetired`, `ContainerStarted`, `ContainerStopped`). An explicit
   `EventLogRetention` policy bounds retained event and matching container
-  rows without touching live generations, GC roots, or deploy-resume jobs. On
-  each retention pass, a verified local checkpoint compacts the corresponding
-  versioned log and mirror-outbox rows; the bounded query window is not merely
-  an in-memory or materialized-row projection.
+  rows without touching live generations, GC roots, or deploy-resume jobs. The
+  versioned store also persists a finite 4,096-entry raw-history policy and
+  invokes checkpoint-backed maintenance after each event append, so ordinary
+  operation is neither disabled nor unbounded. On each retention pass, a
+  verified local checkpoint compacts the corresponding versioned log; lojix
+  has no configured mirror, so it creates no mirror-outbox replay rows. The
+  bounded query window is not merely an in-memory or materialized-row
+  projection.
   Subscribers consume via `signal-lojix` `DeploymentObservation` and
   `CacheRetentionObservation`, bridged through `sema-engine`'s
   `SubscriptionSink` trait.

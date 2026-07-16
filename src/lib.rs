@@ -352,8 +352,10 @@ impl Store {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let mut database = SemaDatabase::open(
-            EngineOpen::new(path.clone(), LOJIX_SCHEMA_VERSION)
-                .with_versioning(VersioningPolicy::new(VersionedStoreName::new("lojix"))),
+            EngineOpen::new(path.clone(), LOJIX_SCHEMA_VERSION).with_versioning(
+                VersioningPolicy::new(VersionedStoreName::new("lojix"))
+                    .with_retention(VersionedHistoryRetention::new(4_096)),
+            ),
         )
         .map_err(|source| Error::StoreStartupCompatibility {
                 path: path.clone(),
@@ -633,6 +635,11 @@ impl Store {
     pub fn append_event_log_entry(&self, entry: EventLogEntry) -> Result<()> {
         self.database
             .assert(Assertion::new(self.event_log, entry))?;
+        // Event appends are the high-volume historical write path. The
+        // persisted finite versioned-store policy performs checkpoint-backed
+        // maintenance here without selecting live generations, GC roots, or
+        // deploy jobs for deletion.
+        self.database.compact_configured_versioned_history()?;
         Ok(())
     }
 
