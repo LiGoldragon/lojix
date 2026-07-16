@@ -54,12 +54,14 @@ fn query_empty_live_set_returns_empty_listing() {
         ordinary::Selection::ByNode(ordinary::NodeSelector {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
-            artifact: None,
+            optional_generation_artifact: None,
         }),
     )));
     let output = ordinary_reply(run(&mut engine, input));
     match output {
-        ordinary::Output::Queried(listing) => assert!(listing.payload().generations.is_empty()),
+        ordinary::Output::Queried(listing) => {
+            assert!(listing.payload().generation_vector.is_empty())
+        }
         other => panic!("expected Queried, got {other:?}"),
     }
 }
@@ -71,15 +73,15 @@ fn query_by_event_log_returns_typed_deployment_events() {
         .store()
         .append_event_log_entry(sema::EventLogEntry {
             event_log_position: ordinary::EventLogPosition::new(0),
-            record: sema::LoggedEvent::Deployment(ordinary::DeploymentPhaseEvent {
+            logged_event: sema::LoggedEvent::Deployment(ordinary::DeploymentPhaseEvent {
                 deployment_identifier: ordinary::DeploymentIdentifier::new(7),
                 generation_identifier: ordinary::GenerationIdentifier::new(9),
                 cluster_name: ordinary::ClusterName::new("alpha"),
                 node_name: ordinary::NodeName::new("node-1"),
                 deployment_phase: ordinary::DeploymentPhase::Submitted,
                 event_log_position: ordinary::EventLogPosition::new(0),
-                detail: None,
-                source_revision: None,
+                optional_phase_detail: None,
+                optional_source_revision_record: None,
             }),
         })
         .expect("append event");
@@ -94,8 +96,8 @@ fn query_by_event_log_returns_typed_deployment_events() {
     match output {
         ordinary::Output::DeploymentEventsQueried(page) => {
             let page = page.payload();
-            assert_eq!(page.deployment_events.len(), 1);
-            assert!(page.retention_events.is_empty());
+            assert_eq!(page.deployment_phase_event_vector.len(), 1);
+            assert!(page.cache_retention_transition_event_vector.is_empty());
         }
         other => panic!("expected DeploymentEventsQueried, got {other:?}"),
     }
@@ -106,9 +108,9 @@ fn watch_deployments_mints_subscription_token() {
     let mut engine = SchemaRuntime::new();
     let input = nexus::RoutedMail::Ordinary(ordinary::Input::WatchDeployments(
         ordinary::WatchDeploymentsPayload::new(ordinary::DeploymentWatch {
-            deployment: None,
-            cluster: None,
-            node: None,
+            optional_deployment_identifier: None,
+            optional_cluster_name: None,
+            optional_node_name: None,
         }),
     ));
     let output = ordinary_reply(run(&mut engine, input));
@@ -127,14 +129,14 @@ fn check_host_key_material_reports_no_mismatches() {
         ordinary::CheckHostKeyMaterialPayload::new(ordinary::KeyMaterialQuery {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
-            source: ordinary::ProposalSource::new("github:owner/repo"),
+            proposal_proposal_source: ordinary::ProposalSource::new("github:owner/repo"),
         }),
     ));
     let output = ordinary_reply(run(&mut engine, input));
     match output {
         ordinary::Output::KeyMaterialChecked(report) => {
             assert_eq!(report.payload().node_name.payload(), "node-1");
-            assert!(report.payload().mismatches.is_empty());
+            assert!(report.payload().key_material_mismatch_vector.is_empty());
         }
         other => panic!("expected KeyMaterialChecked, got {other:?}"),
     }
@@ -176,20 +178,20 @@ fn retire_unknown_generation_is_rejected() {
 
 /// A host deploy submission with the given `build_attribute` and action.
 fn host_deployment(
-    build_attribute: Option<&str>,
+    optional_flake_attribute: Option<&str>,
     action: ordinary::HostDeployAction,
 ) -> meta::HostDeployment {
     meta::HostDeployment {
         cluster_name: ordinary::ClusterName::new("alpha"),
         node_name: ordinary::NodeName::new("node-1"),
         host_composition: ordinary::HostComposition::BaseHost,
-        source: ordinary::ProposalSource::new("/dev/null"),
-        flake: ordinary::FlakeReference::new("github:owner/repo"),
+        proposal_proposal_source: ordinary::ProposalSource::new("/dev/null"),
+        flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
         host_deploy_action: action,
         source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-        builder: None,
-        substituters: Vec::new(),
-        build_attribute: build_attribute.map(meta::FlakeAttribute::new),
+        optional_builder: None,
+        extra_substituter_vector: Vec::new(),
+        optional_flake_attribute: build_attribute.map(meta::FlakeAttribute::new),
     }
 }
 
@@ -230,12 +232,12 @@ fn user_environment_activate_enters_effect_pipeline() {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
             user_name: ordinary::UserName::new("li"),
-            source: ordinary::ProposalSource::new("/dev/null"),
-            flake: ordinary::FlakeReference::new("github:owner/repo"),
+            proposal_proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
             user_environment_action: meta::UserEnvironmentAction::ActivateNow,
             source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-            builder: None,
-            substituters: Vec::new(),
+            optional_builder: None,
+            extra_substituter_vector: Vec::new(),
         }),
     )));
     assert_eq!(
@@ -264,12 +266,12 @@ fn user_environment_realize_enters_effect_pipeline() {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
             user_name: ordinary::UserName::new("li"),
-            source: ordinary::ProposalSource::new("/dev/null"),
-            flake: ordinary::FlakeReference::new("github:owner/repo"),
+            proposal_proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
             user_environment_action: meta::UserEnvironmentAction::Realize,
             source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-            builder: None,
-            substituters: Vec::new(),
+            optional_builder: None,
+            extra_substituter_vector: Vec::new(),
         }),
     )));
     assert_eq!(
@@ -289,8 +291,8 @@ fn production_eval_materializes_horizon_inputs_and_returns_deploy_accepted() {
 
     let mut engine = SchemaRuntime::new();
     let mut deployment = host_deployment(None, ordinary::HostDeployAction::Evaluate);
-    deployment.source = ordinary::ProposalSource::new(cluster_path.display().to_string());
-    deployment.flake =
+    deployment.proposal_source = ordinary::ProposalSource::new(cluster_path.display().to_string());
+    deployment.flake_reference =
         ordinary::FlakeReference::new(format!("path:{}", directory.path().join("flake").display()));
     let input = nexus::RoutedMail::Meta(meta::Input::Deploy(meta::DeployPayload::new(
         meta::DeployRequest::Host(deployment),
@@ -370,7 +372,7 @@ fn fixture_cluster_proposal() -> ClusterProposal {
                 cores: 4,
                 model: None,
                 mother_board: None,
-                super_node: None,
+                super_optional_node_name: None,
                 super_user: None,
                 chip_gen: None,
                 ram_gb: None,
@@ -421,4 +423,25 @@ fn fixture_cluster_proposal() -> ClusterProposal {
         },
         domain_configuration: DomainConfiguration::default(),
     }
+}
+
+#[test]
+fn routed_contact_preserves_origin_through_reply_mapping() {
+    let origin = nexus::OriginRoute::new(41);
+    let routed_mail =
+        nexus::RoutedMail::Ordinary(ordinary::Input::Unwatch(ordinary::UnwatchPayload::new(
+            ordinary::SubscriptionClose::new(ordinary::SubscriptionToken::new(9)),
+        )));
+    let routed_reply = routed_mail.with_origin_route(origin).map_root(|_| {
+        nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Ordinary(
+            ordinary::Output::Unwatched(ordinary::UnwatchedPayload::new(
+                ordinary::SubscriptionClosed::new(ordinary::SubscriptionToken::new(9)),
+            )),
+        ))
+    });
+    assert_eq!(routed_reply.origin_route().payload(), 41);
+    assert!(matches!(
+        routed_reply.into_root(),
+        nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Ordinary(_))
+    ));
 }
