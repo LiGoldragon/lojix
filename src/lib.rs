@@ -140,6 +140,9 @@ pub enum Error {
     #[error("sema database engine error: {0}")]
     Database(#[from] sema_engine::Error),
 
+    #[error("durable recovery failed before daemon admission: {0}")]
+    RecoveryAdmission(String),
+
     #[error(
         "lojix store at {path:?} cannot be used by this daemon's startup schema/layout gate while {stage}; daemon startup stopped before serving requests; inspect the store with `lojix-inspect-store {path:?}`: {source}"
     )]
@@ -616,7 +619,10 @@ impl Store {
         let mut group = self.database.begin_atomic_commit();
         for container in self.container_lifecycle_records()? {
             if retired_positions.contains(container.event_log_position.payload()) {
-                group = group.retract(self.containers, RecordKey::new(container.event_log_position.payload().to_string()));
+                group = group.retract(
+                    self.containers,
+                    RecordKey::new(container.event_log_position.payload().to_string()),
+                );
             }
         }
         for position in &retired_positions {
@@ -675,6 +681,12 @@ impl Store {
         self.commit_sequence()
     }
 
+    /// The retained raw versioned-history count. This read-only diagnostic is
+    /// exposed for bounded-retention acceptance tests and never controls policy.
+    pub fn retained_raw_history_entries(&self) -> Result<usize> {
+        Ok(self.database.versioned_commit_log()?.len())
+    }
+
     /// The next subscription token: an in-memory atomic fetch-add. Subscriptions
     /// do not survive restart, so an ephemeral counter is correct (decision 5).
     pub fn next_subscription_token(&self) -> u64 {
@@ -684,7 +696,9 @@ impl Store {
     /// Append one event-log entry, keyed by its position (decision 4).
     pub fn append_event_log_entry(&self, entry: EventLogEntry) -> Result<()> {
         self.database.commit_atomic(
-            self.database.begin_atomic_commit().assert(self.event_log, entry),
+            self.database
+                .begin_atomic_commit()
+                .assert(self.event_log, entry),
         )?;
         self.maintain_event_history()?;
         Ok(())
@@ -701,7 +715,8 @@ impl Store {
     /// Record the live generation and its GC root as one durable commit.
     pub fn record_activation(&self, generation: LiveGeneration, root: GcRoot) -> Result<()> {
         self.database.commit_atomic(
-            self.database.begin_atomic_commit()
+            self.database
+                .begin_atomic_commit()
                 .assert(self.live_set, generation)
                 .assert(self.gc_roots, root),
         )?;
@@ -743,7 +758,8 @@ impl Store {
         entry: EventLogEntry,
     ) -> Result<()> {
         self.database.commit_atomic(
-            self.database.begin_atomic_commit()
+            self.database
+                .begin_atomic_commit()
                 .assert(self.containers, record)
                 .assert(self.event_log, entry),
         )?;

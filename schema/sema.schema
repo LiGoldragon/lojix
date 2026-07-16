@@ -106,7 +106,7 @@
   ;; resolved_target / boot_once_unit are populated so a resumed Activating job
   ;; can poll the transient unit instead of re-activating.
   DeployJobTable { jobs.(Vector DeployJob) }
-  DeployJob { DeploymentIdentifier GenerationIdentifier ClusterName NodeName phase.DeployJobPhase closure_path.(Optional ClosurePath) SourceRevisionPolicy requested_ref.FlakeReference resolved_ref.(Optional FlakeReference) resolved_revision.(Optional String) resolved_target.(Optional String) boot_once_unit.(Optional String) }
+  DeployJob { DeploymentIdentifier GenerationIdentifier ClusterName NodeName submission.DeploySubmission phase.DeployJobPhase closure_path.(Optional ClosurePath) SourceRevisionPolicy requested_ref.FlakeReference resolved_ref.(Optional FlakeReference) resolved_revision.(Optional String) resolved_target.(Optional String) boot_once_unit.(Optional String) }
   DeployJobPhase [Submitted Building Built Copying Activating Activated Failed]
 
   ;; The durable test-run table (report 54 §5.3), mirroring DeployJobTable. One

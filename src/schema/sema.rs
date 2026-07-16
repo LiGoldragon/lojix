@@ -457,6 +457,7 @@ pub struct DeployJob {
     pub generation_identifier: GenerationIdentifier,
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
+    pub submission: DeploySubmission,
     pub phase: DeployJobPhase,
     pub closure_path: Option<ClosurePath>,
     pub source_revision_policy: SourceRevisionPolicy,

@@ -1395,6 +1395,63 @@ impl DeployPipeline {
         }
     }
 
+    /// The complete accepted submission is retained with every cursor so a
+    /// recovery can restart pre-activation work without guessing an action,
+    /// builder, or source authority.
+    fn submission(&self) -> sema::DeploySubmission {
+        match &self.action {
+            DeployAction::Host(action) => sema::DeploySubmission::Host(meta::HostDeployment {
+                cluster_name: self.cluster_name.clone(),
+                node_name: self.node_name.clone(),
+                host_composition: match self.generation_artifact {
+                    ordinary::GenerationArtifact::CompleteHost => {
+                        ordinary::HostComposition::CompleteHost
+                    }
+                    ordinary::GenerationArtifact::BaseHost => ordinary::HostComposition::BaseHost,
+                    ordinary::GenerationArtifact::UserEnvironment => {
+                        ordinary::HostComposition::BaseHost
+                    }
+                },
+                source: self.source.clone(),
+                flake: self.requested_flake.clone(),
+                host_deploy_action: *action,
+                source_revision_policy: self.source_revision_policy,
+                builder: self.builder.clone().map(meta::Builder::new),
+                substituters: self
+                    .substituters
+                    .iter()
+                    .cloned()
+                    .map(|substituter| meta::ExtraSubstituter {
+                        url: substituter.url,
+                        public_key: substituter.public_key,
+                    })
+                    .collect(),
+                build_attribute: self.build_attribute.clone(),
+            }),
+            DeployAction::UserEnvironment { action, user } => {
+                sema::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
+                    cluster_name: self.cluster_name.clone(),
+                    node_name: self.node_name.clone(),
+                    user_name: user.clone(),
+                    source: self.source.clone(),
+                    flake: self.requested_flake.clone(),
+                    user_environment_action: *action,
+                    source_revision_policy: self.source_revision_policy,
+                    builder: self.builder.clone().map(meta::Builder::new),
+                    substituters: self
+                        .substituters
+                        .iter()
+                        .cloned()
+                        .map(|substituter| meta::ExtraSubstituter {
+                            url: substituter.url,
+                            public_key: substituter.public_key,
+                        })
+                        .collect(),
+                })
+            }
+        }
+    }
+
     /// The durable in-flight job row at the given phase. Written on submit and
     /// rewritten at every phase transition (up9q): the persisted phase cursor,
     /// closure path (once built), resolved target, and BootOnce unit name let a
@@ -1405,6 +1462,7 @@ impl DeployPipeline {
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
+            submission: self.submission(),
             phase,
             closure_path: self.closure_path.clone(),
             source_revision_policy: self.source_revision_policy,
@@ -1629,6 +1687,33 @@ impl SchemaRuntime {
             store,
             configuration,
             active_deploy: None,
+            active_test: None,
+            active_operation: None,
+        }
+    }
+
+    /// Rebuild a daemon-owned pipeline from the complete durable submission.
+    /// This is only used before socket admission while reconciling a
+    /// pre-activation job; it preserves its assigned deployment/generation ids.
+    pub fn from_recovered_deploy_job(
+        store: Arc<Store>,
+        configuration: Arc<RuntimeConfiguration>,
+        job: sema::DeployJob,
+    ) -> Self {
+        let marker = ordinary::DatabaseMarker {
+            commit_sequence: ordinary::CommitSequence::new(0),
+            state_digest: ordinary::StateDigest::new(0),
+        };
+        let pipeline = DeployPipeline::from_submission(
+            job.deployment_identifier,
+            job.generation_identifier,
+            marker,
+            job.submission,
+        );
+        Self {
+            store,
+            configuration,
+            active_deploy: Some(pipeline),
             active_test: None,
             active_operation: None,
         }
@@ -5589,6 +5674,18 @@ mod tests {
             generation_identifier: ordinary::GenerationIdentifier::new(72),
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new("ouranos"),
+            submission: sema::DeploySubmission::Host(meta::HostDeployment {
+                cluster_name: ordinary::ClusterName::new("goldragon"),
+                node_name: ordinary::NodeName::new("ouranos"),
+                host_composition: ordinary::HostComposition::CompleteHost,
+                source: ordinary::ProposalSource::new("/dev/null"),
+                flake: ordinary::FlakeReference::new("path:/none"),
+                host_deploy_action: ordinary::HostDeployAction::ActivateNow,
+                source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
+                builder: None,
+                substituters: Vec::new(),
+                build_attribute: None,
+            }),
             phase: sema::DeployJobPhase::Activating,
             closure_path: closure.map(ordinary::ClosurePath::new),
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,

@@ -257,6 +257,10 @@ fn deploy_job_resumption_decides_per_phase() {
         generation_identifier: ordinary::GenerationIdentifier::new(1),
         cluster_name: ordinary::ClusterName::new("alpha"),
         node_name: ordinary::NodeName::new("node-1"),
+        submission: match deploy_request() {
+            meta::DeployRequest::Host(submission) => sema::DeploySubmission::Host(submission),
+            meta::DeployRequest::UserEnvironment(_) => unreachable!(),
+        },
         phase,
         closure_path: None,
         source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
@@ -302,7 +306,7 @@ fn deploy_job_resumption_decides_per_phase() {
 // reconciled away so it does not wedge the cap ----
 
 #[tokio::test]
-async fn reconcile_on_start_clears_a_stale_pre_activation_job_row() {
+async fn reconcile_on_start_relaunches_a_pre_activation_job() {
     let (_directory, store) = store();
     // Simulate a daemon that crashed mid-build: a Building job row persisted.
     store
@@ -311,6 +315,10 @@ async fn reconcile_on_start_clears_a_stale_pre_activation_job_row() {
             generation_identifier: ordinary::GenerationIdentifier::new(7),
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
+            submission: match deploy_request() {
+                meta::DeployRequest::Host(submission) => sema::DeploySubmission::Host(submission),
+                meta::DeployRequest::UserEnvironment(_) => unreachable!(),
+            },
             phase: DeployJobPhase::Building,
             closure_path: None,
             source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
@@ -333,7 +341,9 @@ async fn reconcile_on_start_clears_a_stale_pre_activation_job_row() {
     jobs.ask(ReconcilePersistedJobs).await.expect("reconcile");
 
     assert!(
-        job_row(&store, 7).is_none(),
-        "the read-on-start reconcile clears the stale pre-activation row"
+        await_until(&store, |store| job_row(store, 7)
+            .is_none_or(|job| matches!(job.phase, DeployJobPhase::Failed)))
+        .await,
+        "the read-on-start reconcile must run the persisted submission to an explicit terminal resolution"
     );
 }

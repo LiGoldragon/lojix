@@ -193,7 +193,13 @@ impl LojixRuntime {
         // unit, re-drive the pipeline, or drop a stale terminal row. A startup
         // reconcile failure is non-fatal: the durable rows remain for the next
         // start, and the daemon still serves new requests.
-        let _ = deploy_jobs.ask(ReconcilePersistedJobs).await;
+        match deploy_jobs.ask(ReconcilePersistedJobs).await {
+            Ok(RecoveryAdmission::Recovered) => {}
+            Ok(RecoveryAdmission::Rejected(message)) => {
+                return Err(Error::RecoveryAdmission(message));
+            }
+            Err(error) => return Err(Error::RecoveryAdmission(error.to_string())),
+        }
         let test_jobs = TestJobs::start(
             store.clone(),
             configuration.clone(),
@@ -595,59 +601,63 @@ impl DeployJobs {
     /// so this start path computes and (for terminal rows) clears, leaving live
     /// resumption to S5. Pre-activation rows are dropped here so they do not
     /// wedge the cap; they are re-submittable by the operator.
-    fn reconcile_persisted_jobs(&self) {
-        let Ok(jobs) = self.store.deploy_jobs() else {
-            return;
+    fn reconcile_persisted_jobs(&mut self, jobs: ActorRef<DeployJobs>) -> RecoveryAdmission {
+        let persisted = match self.store.deploy_jobs() {
+            Ok(jobs) => jobs,
+            Err(error) => return RecoveryAdmission::Rejected(error.to_string()),
         };
         let daemon_host = self.configuration.daemon_host();
-        for job in jobs {
+        for job in persisted {
             let deployment_identifier = *job.deployment_identifier.payload();
             match job.resumption() {
-                // A detached self-switch (bead primary-7u8p): a host `ActivateNow`
-                // targeting the daemon's OWN host restarts the daemon inside the
-                // switch, so the terminal activation write never committed. Only
-                // a COMPLETED host self-switch has set the live system profile to
-                // this job's closure, so that exact match — not merely "an
-                // Activating row on the daemon host" — is the witness that gates
-                // recording (see `self_switch_activation_record`); a racy
-                // unrelated restart during some other self-host activation fails
-                // the match and falls through to the S5 arm below. Recording the
-                // generation the interrupted pipeline could not also advances the
-                // live-set-scanned id allocator, ending the id reuse.
                 crate::schema_runtime::DeployJobResumption::PollActivationUnit { unit: None }
                     if job.node_name == *daemon_host =>
                 {
                     let system_closure = Self::daemon_host_system_closure();
-                    match job.self_switch_activation_record(system_closure.as_deref()) {
-                        Some((generation, root)) => {
-                            self.persist_reconciled_self_switch(
-                                deployment_identifier,
-                                generation,
-                                root,
-                            );
+                    if let Some((generation, root)) =
+                        job.self_switch_activation_record(system_closure.as_deref())
+                    {
+                        if let Err(error) = self.persist_reconciled_self_switch(
+                            deployment_identifier,
+                            generation,
+                            root,
+                        ) {
+                            return RecoveryAdmission::Rejected(error.to_string());
                         }
-                        None => {
-                            // Not a completed host self-switch (the live system
-                            // profile does not resolve to this closure): leave the
-                            // row for the S5 unit-poll path rather than recording
-                            // it as a Current complete-host generation.
-                        }
+                    } else if let Err(error) = self.resolve_unrestartable_job(job) {
+                        return RecoveryAdmission::Rejected(error.to_string());
                     }
                 }
+                crate::schema_runtime::DeployJobResumption::RestartPipeline => {
+                    if self.at_capacity() {
+                        return RecoveryAdmission::Rejected(
+                            "persisted deploy jobs exceed recovery capacity".to_string(),
+                        );
+                    }
+                    let engine = SchemaRuntime::from_recovered_deploy_job(
+                        self.store.clone(),
+                        self.configuration.clone(),
+                        job,
+                    );
+                    self.active_count += 1;
+                    self.launch_pipeline(engine, jobs.clone());
+                }
                 crate::schema_runtime::DeployJobResumption::PollActivationUnit { .. } => {
-                    // S5: poll `journalctl -u <unit>` and adopt the unit's
-                    // outcome rather than re-activating. Until then leave the
-                    // row so the operator sees the in-flight activation.
+                    if let Err(error) = self.resolve_unrestartable_job(job) {
+                        return RecoveryAdmission::Rejected(error.to_string());
+                    }
                 }
-                crate::schema_runtime::DeployJobResumption::RestartPipeline
-                | crate::schema_runtime::DeployJobResumption::AlreadyTerminal => {
-                    // Pre-activation work mutated no durable target state (or the
-                    // deploy already finished); drop the stale row so it does not
-                    // occupy a cap slot. Live re-drive is an S5 follow-on.
-                    let _ = self.store.retract_deploy_job(deployment_identifier);
-                }
+                crate::schema_runtime::DeployJobResumption::AlreadyTerminal => {}
             }
         }
+        RecoveryAdmission::Recovered
+    }
+
+    /// An activation whose durable cursor cannot prove a safe continuation is
+    /// retained as an explicit Failed resolution, never reactivated or dropped.
+    fn resolve_unrestartable_job(&self, mut job: crate::schema::sema::DeployJob) -> Result<()> {
+        job.phase = crate::schema::sema::DeployJobPhase::Failed;
+        self.store.upsert_deploy_job(job)
     }
 
     /// The store path the daemon host's live system profile currently resolves
@@ -675,7 +685,7 @@ impl DeployJobs {
         deployment_identifier: u64,
         generation: crate::schema::sema::LiveGeneration,
         root: crate::schema::sema::GcRoot,
-    ) {
+    ) -> Result<()> {
         let already_recorded = self
             .store
             .gc_roots()
@@ -686,12 +696,12 @@ impl DeployJobs {
             })
             .unwrap_or(false);
         if already_recorded {
-            let _ = self.store.retract_deploy_job(deployment_identifier);
-            return;
+            self.store.retract_deploy_job(deployment_identifier)?;
+            return Ok(());
         }
-        if self.store.record_activation(generation, root).is_ok() {
-            let _ = self.store.retract_deploy_job(deployment_identifier);
-        }
+        self.store.record_activation(generation, root)?;
+        self.store.retract_deploy_job(deployment_identifier)?;
+        Ok(())
     }
 }
 
@@ -763,18 +773,25 @@ impl Message<DeployCompleted> for DeployJobs {
     }
 }
 
+/// Startup recovery verdict. A rejected recovery prevents listener construction.
+#[derive(Debug, Clone, PartialEq, Eq, kameo::Reply)]
+pub enum RecoveryAdmission {
+    Recovered,
+    Rejected(String),
+}
+
 /// Read and reconcile persisted in-flight deploy-job rows on daemon start.
 pub struct ReconcilePersistedJobs;
 
 impl Message<ReconcilePersistedJobs> for DeployJobs {
-    type Reply = ();
+    type Reply = RecoveryAdmission;
 
     async fn handle(
         &mut self,
         _message: ReconcilePersistedJobs,
-        _context: &mut Context<Self, Self::Reply>,
+        context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.reconcile_persisted_jobs();
+        self.reconcile_persisted_jobs(context.actor_ref().clone())
     }
 }
 
