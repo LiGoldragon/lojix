@@ -22,12 +22,12 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path: closure.clone(),
             source_revision_record: ordinary::SourceRevisionRecord {
-                policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
+                source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
                 requested_ref: ordinary::FlakeReference::new("github:owner/repo/main"),
                 resolved_ref: ordinary::FlakeReference::new(
                     "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 ),
-                resolved_revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                string: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             },
         },
         GcRoot {
@@ -36,7 +36,7 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
             node_name: node,
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path: closure,
-            label: None,
+            optional_pin_label: None,
         },
     )
 }

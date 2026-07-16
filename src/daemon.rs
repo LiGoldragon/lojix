@@ -187,12 +187,12 @@ impl LojixRuntime {
         )
         .await;
         // Read any persisted in-flight deploy-job rows and reconcile them on
-        // start (up9q durable resume scaffolding). A clean shutdown leaves no
-        // rows; rows present mean a deploy was in flight when the daemon
-        // stopped, so the actor decides per row whether to poll the activation
-        // unit, re-drive the pipeline, or drop a stale terminal row. A startup
-        // reconcile failure is non-fatal: the durable rows remain for the next
-        // start, and the daemon still serves new requests.
+        // start. A clean shutdown leaves no rows; rows present mean a deploy
+        // was in flight when the daemon stopped, so the actor decides per row
+        // whether to resolve an activation safely, re-drive its complete
+        // durable submission, or retain a terminal row. Recovery admission is
+        // fail-closed: no listener actor starts until every persisted row is
+        // reconciled or an explicit recovery error is returned.
         match deploy_jobs.ask(ReconcilePersistedJobs).await {
             Ok(RecoveryAdmission::Recovered) => {}
             Ok(RecoveryAdmission::Rejected(message)) => {
@@ -597,9 +597,10 @@ impl DeployJobs {
     /// `DeployJobResumption` verdict (poll the activation unit, re-drive the
     /// pipeline, or drop a stale terminal row) is computed per row here; the
     /// LIVE continuation behind each verdict is proven on a real target at S5,
-    /// so this start path computes and (for terminal rows) clears, leaving live
-    /// resumption to S5. Pre-activation rows are dropped here so they do not
-    /// wedge the cap; they are re-submittable by the operator.
+    /// so this start path replays only pre-activation submissions, resolves
+    /// safely provable self-switches, and preserves failures explicitly.
+    /// Pre-activation rows retain their assigned identifiers and are launched
+    /// before daemon admission, so recovery cannot silently discard a deploy.
     fn reconcile_persisted_jobs(&mut self, jobs: ActorRef<DeployJobs>) -> RecoveryAdmission {
         let persisted = match self.store.deploy_jobs() {
             Ok(jobs) => jobs,

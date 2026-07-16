@@ -32,13 +32,13 @@ fn deploy_request() -> meta::DeployRequest {
         cluster_name: ordinary::ClusterName::new("alpha"),
         node_name: ordinary::NodeName::new("node-1"),
         host_composition: ordinary::HostComposition::BaseHost,
-        source: ordinary::ProposalSource::new("/dev/null"),
-        flake: ordinary::FlakeReference::new("path:/does/not/exist"),
+        proposal_source: ordinary::ProposalSource::new("/dev/null"),
+        flake_reference: ordinary::FlakeReference::new("path:/does/not/exist"),
         host_deploy_action: ordinary::HostDeployAction::ActivateNow,
         source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-        builder: None,
-        substituters: Vec::new(),
-        build_attribute: None,
+        optional_builder: None,
+        extra_substituter_vector: Vec::new(),
+        optional_flake_attribute: None,
     })
 }
 
@@ -94,7 +94,7 @@ async fn submit_deploy_accepts_and_persists_submitted_row_before_pipeline() {
     // The durable job row is written at Submitted — synchronously, before any
     // effect ran (the pipeline driver was never invoked here).
     let job = job_row(&store, 1).expect("submitted job row");
-    assert_eq!(job.phase, DeployJobPhase::Submitted);
+    assert_eq!(job.deploy_job_phase, DeployJobPhase::Submitted);
     assert_eq!(
         job.resolved_target.as_deref(),
         Some("root@node-1.alpha.criome")
@@ -144,7 +144,7 @@ async fn deploy_replies_accepted_before_pipeline_completes_and_survives_caller_d
     // is Submitted, no phase advanced — reply-before-completion.
     let parked = job_row(&store, 1).expect("submitted row");
     assert_eq!(
-        parked.phase,
+        parked.deploy_job_phase,
         DeployJobPhase::Submitted,
         "pipeline must still be parked when the accepted handle is already replied"
     );
@@ -158,7 +158,7 @@ async fn deploy_replies_accepted_before_pipeline_completes_and_survives_caller_d
     // flake-auth -> Failed) on the daemon-owned executor — proving the deploy
     // outlived the request task that submitted it.
     let reached_terminal = await_until(&store, |store| {
-        job_row(store, 1).is_none_or(|job| matches!(job.phase, DeployJobPhase::Failed))
+        job_row(store, 1).is_none_or(|job| matches!(job.deploy_job_phase, DeployJobPhase::Failed))
     })
     .await;
     assert!(
@@ -212,7 +212,7 @@ async fn deploy_job_cap_rejects_when_full_and_frees_on_completion() {
     // Release the first deploy; its pipeline completes and frees the slot.
     barrier.open();
     let freed = await_until(&store, |store| {
-        job_row(store, 1).is_none_or(|job| matches!(job.phase, DeployJobPhase::Failed))
+        job_row(store, 1).is_none_or(|job| matches!(job.deploy_job_phase, DeployJobPhase::Failed))
     })
     .await;
     assert!(
@@ -257,15 +257,15 @@ fn deploy_job_resumption_decides_per_phase() {
         generation_identifier: ordinary::GenerationIdentifier::new(1),
         cluster_name: ordinary::ClusterName::new("alpha"),
         node_name: ordinary::NodeName::new("node-1"),
-        submission: match deploy_request() {
+        deploy_submission: match deploy_request() {
             meta::DeployRequest::Host(submission) => sema::DeploySubmission::Host(submission),
             meta::DeployRequest::UserEnvironment(_) => unreachable!(),
         },
-        phase,
-        closure_path: None,
+        deploy_job_phase: phase,
+        optional_closure_path: None,
         source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
-        requested_ref: ordinary::FlakeReference::new("github:owner/repo/main"),
-        resolved_ref: Some(ordinary::FlakeReference::new(
+        flake_reference: ordinary::FlakeReference::new("github:owner/repo/main"),
+        optional_flake_reference: Some(ordinary::FlakeReference::new(
             "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )),
         resolved_revision: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
@@ -315,15 +315,15 @@ async fn reconcile_on_start_relaunches_a_pre_activation_job() {
             generation_identifier: ordinary::GenerationIdentifier::new(7),
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
-            submission: match deploy_request() {
+            deploy_submission: match deploy_request() {
                 meta::DeployRequest::Host(submission) => sema::DeploySubmission::Host(submission),
                 meta::DeployRequest::UserEnvironment(_) => unreachable!(),
             },
-            phase: DeployJobPhase::Building,
-            closure_path: None,
+            deploy_job_phase: DeployJobPhase::Building,
+            optional_closure_path: None,
             source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
-            requested_ref: ordinary::FlakeReference::new("github:owner/repo/main"),
-            resolved_ref: Some(ordinary::FlakeReference::new(
+            flake_reference: ordinary::FlakeReference::new("github:owner/repo/main"),
+            optional_flake_reference: Some(ordinary::FlakeReference::new(
                 "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )),
             resolved_revision: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
@@ -341,8 +341,9 @@ async fn reconcile_on_start_relaunches_a_pre_activation_job() {
     jobs.ask(ReconcilePersistedJobs).await.expect("reconcile");
 
     assert!(
-        await_until(&store, |store| job_row(store, 7)
-            .is_none_or(|job| matches!(job.phase, DeployJobPhase::Failed)))
+        await_until(&store, |store| job_row(store, 7).is_none_or(
+            |job| matches!(job.deploy_job_phase, DeployJobPhase::Failed)
+        ))
         .await,
         "the read-on-start reconcile must run the persisted submission to an explicit terminal resolution"
     );

@@ -5,15 +5,15 @@ use signal_lojix::schema::lib as ordinary;
 fn event(position: u64) -> EventLogEntry {
     EventLogEntry {
         event_log_position: ordinary::EventLogPosition::new(position),
-        record: LoggedEvent::Deployment(ordinary::DeploymentPhaseEvent {
+        logged_event: LoggedEvent::Deployment(ordinary::DeploymentPhaseEvent {
             deployment_identifier: ordinary::DeploymentIdentifier::new(position + 1),
             generation_identifier: ordinary::GenerationIdentifier::new(position + 1),
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node"),
             deployment_phase: ordinary::DeploymentPhase::Submitted,
             event_log_position: ordinary::EventLogPosition::new(position),
-            detail: None,
-            source_revision: None,
+            optional_phase_detail: None,
+            optional_source_revision_record: None,
         }),
     }
 }

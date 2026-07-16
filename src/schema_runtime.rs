@@ -1493,8 +1493,9 @@ pub enum DeployJobResumption {
     /// daemon stopped. Re-activating could double-switch, so poll the BootOnce
     /// transient unit (PID-1-owned, survives the daemon) via
     /// `journalctl -u <unit>` and adopt its outcome. Carries the unit name when
-    /// the job recorded one (BootOnce); a non-BootOnce activating job has no
-    /// unit and falls back to re-running the idempotent activation at S5.
+    /// the job recorded one (BootOnce). A non-BootOnce activation has no
+    /// durable proof of safe continuation and is retained as an explicit
+    /// failure rather than being activated twice.
     PollActivationUnit { unit: Option<String> },
     /// Phase is pre-activation (`Submitted`/`Building`/`Built`/`Copying`): no
     /// target state was mutated yet, or only the idempotent copy ran. Re-drive
@@ -5089,7 +5090,7 @@ mod tests {
 
     fn source_revision(policy: ordinary::SourceRevisionPolicy) -> ordinary::SourceRevisionRecord {
         ordinary::SourceRevisionRecord {
-            policy,
+            source_revision_policy: policy,
             requested_ref: ordinary::FlakeReference::new("github:owner/repo/main"),
             resolved_ref: ordinary::FlakeReference::new(
                 "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -5214,13 +5215,13 @@ mod tests {
             cluster_name: cluster(),
             node_name: node(),
             host_composition: ordinary::HostComposition::BaseHost,
-            source: ordinary::ProposalSource::new("/dev/null"),
-            flake: ordinary::FlakeReference::new(flake),
+            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            flake_reference: ordinary::FlakeReference::new(flake),
             host_deploy_action: ordinary::HostDeployAction::Evaluate,
             source_revision_policy: meta::SourceRevisionPolicy::RequireImmutable,
-            builder: None,
-            substituters: Vec::new(),
-            build_attribute: None,
+            optional_builder: None,
+            extra_substituter_vector: Vec::new(),
+            optional_flake_attribute: None,
         })
     }
 
@@ -5319,7 +5320,10 @@ mod tests {
             ordinary::EventLogPosition::new(0),
             None,
         );
-        assert_eq!(event.source_revision, Some(source_revision.clone()));
+        assert_eq!(
+            event.optional_source_revision_record,
+            Some(source_revision.clone())
+        );
         assert!(matches!(
             engine.record_phase_transition(event),
             sema::SemaWriteOutput::PhaseRecorded(_)
@@ -5332,7 +5336,7 @@ mod tests {
                 page.deployment_phase_event_vector
                     .first()
                     .expect("deployment event")
-                    .source_revision,
+                    .optional_source_revision_record,
                 Some(source_revision.clone())
             ),
             other => panic!("expected EventLogRead, got {other:?}"),
@@ -5350,10 +5354,10 @@ mod tests {
         })) {
             sema::SemaReadOutput::GenerationsQueried(listing) => assert_eq!(
                 listing
-                    .generations
+                    .generation_vector
                     .first()
                     .expect("generation")
-                    .source_revision,
+                    .optional_source_revision_record,
                 Some(source_revision)
             ),
             other => panic!("expected GenerationsQueried, got {other:?}"),
@@ -5476,7 +5480,7 @@ mod tests {
             cluster_name: cluster(),
             node_name: node(),
             closure_path: ordinary::ClosurePath::new(STORE),
-            source,
+            build_target: source,
         }
     }
 
@@ -5557,7 +5561,7 @@ mod tests {
             node_name: node(),
             closure_path: ordinary::ClosurePath::new(STORE),
             activation_effect: kind,
-            profile,
+            activation_profile: profile,
         }
     }
 
@@ -5778,7 +5782,7 @@ mod tests {
             "/nix/store/aaaaaaaa-system"
         );
         assert_eq!(
-            generation.source_revision_record.resolved_revision,
+            generation.source_revision_record.string,
             "0123456789abcdef0123456789abcdef01234567"
         );
         assert_eq!(root.generation_slot, ordinary::GenerationSlot::Current);
