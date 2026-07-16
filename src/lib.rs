@@ -22,8 +22,8 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, Engine as SemaDatabase, EngineOpen, EngineRecord, FamilyDirectory, FamilyName,
     Mutation, QueryPlan, RecordKey, Retraction, RowMaterializer, SchemaHash, SchemaVersion,
-    TableDescriptor, TableName, TableReference, VersionedHistoryRetention, VersionedStoreName,
-    VersioningPolicy,
+    TableDescriptor, TableName, TableReference, VersionedHistoryAcknowledgement,
+    VersionedHistoryRetention, VersionedStoreName, VersioningPolicy,
 };
 
 use crate::schema::sema::{
@@ -294,6 +294,12 @@ pub struct EventLogRetention {
 }
 
 impl EventLogRetention {
+    pub const DEFAULT_MAXIMUM_ENTRIES: u64 = 4_096;
+
+    pub const fn default_policy() -> Self {
+        Self::new(Self::DEFAULT_MAXIMUM_ENTRIES)
+    }
+
     pub const fn new(maximum_entries: u64) -> Self {
         Self { maximum_entries }
     }
@@ -607,24 +613,34 @@ impl Store {
             .map(|entry| *entry.event_log_position.payload())
             .collect();
         self.database.begin_compaction()?;
+        let mut group = self.database.begin_atomic_commit();
         for container in self.container_lifecycle_records()? {
             if retired_positions.contains(container.event_log_position.payload()) {
-                self.database.retract(Retraction::new(
-                    self.containers,
-                    RecordKey::new(container.event_log_position.payload().to_string()),
-                ))?;
+                group = group.retract(self.containers, RecordKey::new(container.event_log_position.payload().to_string()));
             }
         }
         for position in &retired_positions {
-            self.database.retract(Retraction::new(
-                self.event_log,
-                RecordKey::new(position.to_string()),
-            ))?;
+            group = group.retract(self.event_log, RecordKey::new(position.to_string()));
         }
+        self.database.commit_atomic(group)?;
         if self.database.park_compaction()? {
             self.resume_compaction()?;
         }
+        // Lojix has no external mirror consumer. The verified local checkpoint
+        // is therefore the complete recovery artifact once the historical rows
+        // are retracted, and compaction reclaims the corresponding raw log and
+        // outbox rows rather than leaving a second unbounded on-disk history.
+        self.database.compact_versioned_history(
+            VersionedHistoryRetention::new(0),
+            VersionedHistoryAcknowledgement::LocalCheckpoint,
+        )?;
         Ok(retired as u64)
+    }
+
+    fn maintain_event_history(&self) -> Result<()> {
+        self.compact_event_history(EventLogRetention::default_policy())?;
+        self.database.compact_configured_versioned_history()?;
+        Ok(())
     }
 
     /// The next generation identifier: one past the maximum persisted across
@@ -667,13 +683,10 @@ impl Store {
 
     /// Append one event-log entry, keyed by its position (decision 4).
     pub fn append_event_log_entry(&self, entry: EventLogEntry) -> Result<()> {
-        self.database
-            .assert(Assertion::new(self.event_log, entry))?;
-        // Event appends are the high-volume historical write path. The
-        // persisted finite versioned-store policy performs checkpoint-backed
-        // maintenance here without selecting live generations, GC roots, or
-        // deploy jobs for deletion.
-        self.database.compact_configured_versioned_history()?;
+        self.database.commit_atomic(
+            self.database.begin_atomic_commit().assert(self.event_log, entry),
+        )?;
+        self.maintain_event_history()?;
         Ok(())
     }
 
@@ -685,18 +698,13 @@ impl Store {
         Ok(())
     }
 
-    /// Record an activation: write the live generation then the GC-root as TWO
-    /// sequential keyed asserts. `CommitRequest` is single-table, so true
-    /// cross-table atomicity is NOT available; the sequential write is the
-    /// accepted baseline. Each row is keyed by its generation identifier, so the
-    /// asserts are fail-safe — a duplicate key errors rather than silently
-    /// clobbering — but a crash between the two leaves a torn write (a live row
-    /// without its gc-root) that is NOT auto-reconciled on reopen. True
-    /// cross-table atomicity needs a sema-engine multi-table commit, tracked as
-    /// the follow-on.
+    /// Record the live generation and its GC root as one durable commit.
     pub fn record_activation(&self, generation: LiveGeneration, root: GcRoot) -> Result<()> {
-        self.append_live_generation(generation)?;
-        self.append_gc_root(root)?;
+        self.database.commit_atomic(
+            self.database.begin_atomic_commit()
+                .assert(self.live_set, generation)
+                .assert(self.gc_roots, root),
+        )?;
         Ok(())
     }
 
@@ -728,18 +736,18 @@ impl Store {
         self.gc_root_records()
     }
 
-    /// Append one container-lifecycle record, keyed by its event-log position,
-    /// and a matching event-log entry. Two sequential keyed asserts across two
-    /// tables; cross-table atomicity needs the same sema-engine enhancement
-    /// noted on [`Self::record_activation`].
+    /// Record a container observation and its matching event in one durable commit.
     pub fn record_container_transition(
         &self,
         record: ContainerLifecycleRecord,
         entry: EventLogEntry,
     ) -> Result<()> {
-        self.database
-            .assert(Assertion::new(self.containers, record))?;
-        self.append_event_log_entry(entry)?;
+        self.database.commit_atomic(
+            self.database.begin_atomic_commit()
+                .assert(self.containers, record)
+                .assert(self.event_log, entry),
+        )?;
+        self.maintain_event_history()?;
         Ok(())
     }
 

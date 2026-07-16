@@ -408,7 +408,7 @@ checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
 name = "lojix"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "horizon-lib",
  "kameo 0.20.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -696,7 +696,7 @@ dependencies = [
 [[package]]
 name = "sema-engine"
 version = "0.10.0"
-source = "git+https://github.com/LiGoldragon/sema-engine.git?branch=main#3e2e2a1e24e2b2c147c79f6b8bb3dddc235a8219"
+source = "git+https://github.com/LiGoldragon/sema-engine.git?branch=main#71508caf4d61e52a2e340b3cb080ba4ee7d0f30f"
 dependencies = [
  "blake3",
  "rkyv",
