@@ -655,7 +655,7 @@ impl DeployJobs {
     /// An activation whose durable cursor cannot prove a safe continuation is
     /// retained as an explicit Failed resolution, never reactivated or dropped.
     fn resolve_unrestartable_job(&self, mut job: crate::schema::sema::DeployJob) -> Result<()> {
-        job.phase = crate::schema::sema::DeployJobPhase::Failed;
+        job.deploy_job_phase = crate::schema::sema::DeployJobPhase::Failed;
         self.store.upsert_deploy_job(job)
     }
 

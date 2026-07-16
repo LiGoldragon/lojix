@@ -99,11 +99,11 @@ fn query_runs(
         ordinary::Selection::ByTestRun(ordinary::TestRunLookup {
             cluster_name: ordinary::ClusterName::new(cluster),
             node_name: ordinary::NodeName::new(node),
-            run: None,
+            optional_test_run_identifier: None,
         }),
     )));
     match ordinary_reply(run(engine, input)) {
-        ordinary::Output::TestRunsQueried(listing) => listing.into_payload().runs,
+        ordinary::Output::TestRunsQueried(listing) => listing.into_payload().test_run_record_vector,
         other => panic!("expected TestRunsQueried, got {other:?}"),
     }
 }
@@ -129,18 +129,14 @@ fn check_shorthand_lowers_to_full_run_via_test_defaults() {
         "goldragon",
         "cluster from defaults"
     );
-    assert_eq!(
-        record.node_name.payload(),
-        "mercury",
-        "node from the request"
-    );
+    assert_eq!(record.node.payload(), "mercury", "node from the request");
     assert_eq!(
         record.host.payload(),
         "prometheus",
         "host from DefaultHost -> default_vm_host"
     );
     assert_eq!(
-        record.mode,
+        record.test_mode,
         ordinary::TestMode::Hermetic,
         "mode from default_mode"
     );
@@ -159,17 +155,17 @@ fn accepted_test_lands_a_queryable_pending_record() {
         "queryable by the accepted id"
     );
     assert_eq!(
-        record.phase,
+        record.test_run_phase,
         ordinary::TestRunPhase::Submitted,
         "stub records Submitted phase"
     );
     assert_eq!(
-        record.outcome,
+        record.test_outcome,
         ordinary::TestOutcome::Pending,
         "stub records Pending — never a faked pass"
     );
     assert!(
-        record.closure_path.is_none(),
+        record.optional_closure_path.is_none(),
         "no closure under test yet (Unit 2b)"
     );
 }
@@ -198,7 +194,7 @@ fn run_full_form_carries_explicit_selection() {
         "explicit OnHost override"
     );
     assert_eq!(
-        record.mode,
+        record.test_mode,
         ordinary::TestMode::Hermetic,
         "explicit Hermetic mode"
     );
@@ -242,11 +238,11 @@ fn query_by_run_identifier_filters_to_one() {
         ordinary::Selection::ByTestRun(ordinary::TestRunLookup {
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new("mercury"),
-            run: Some(ordinary::TestRunIdentifier::new(second)),
+            optional_test_run_identifier: Some(ordinary::TestRunIdentifier::new(second)),
         }),
     )));
     let runs = match ordinary_reply(run(&mut engine, input)) {
-        ordinary::Output::TestRunsQueried(listing) => listing.into_payload().runs,
+        ordinary::Output::TestRunsQueried(listing) => listing.into_payload().test_run_record_vector,
         other => panic!("expected TestRunsQueried, got {other:?}"),
     };
     assert_eq!(runs.len(), 1, "filtered to the named run");
@@ -298,13 +294,13 @@ fn hermetic_check_mercury_actually_builds_and_records_passed() {
     assert_eq!(runs.len(), 1, "exactly one run recorded");
     let record = &runs[0];
     assert_eq!(
-        record.outcome,
+        record.test_outcome,
         ordinary::TestOutcome::Passed,
         "the real nix-build of vm-mercury Passed"
     );
-    assert_eq!(record.phase, ordinary::TestRunPhase::Completed);
+    assert_eq!(record.test_run_phase, ordinary::TestRunPhase::Completed);
     let closure = record
-        .closure_path
+        .optional_closure_path
         .as_ref()
         .expect("Passed carries the realised check out-path");
     assert!(
@@ -331,13 +327,13 @@ fn hermetic_check_missing_node_records_failed_not_faked() {
     assert_eq!(runs.len(), 1);
     let record = &runs[0];
     assert_eq!(
-        record.outcome,
+        record.test_outcome,
         ordinary::TestOutcome::Failed(ordinary::FailureStage::HermeticCheck),
         "a failed nix-build is recorded Failed(HermeticCheck), never a faked pass"
     );
-    assert_eq!(record.phase, ordinary::TestRunPhase::Failed);
+    assert_eq!(record.test_run_phase, ordinary::TestRunPhase::Failed);
     assert!(
-        record.closure_path.is_none(),
+        record.optional_closure_path.is_none(),
         "a failed check has no closure"
     );
 }
@@ -461,7 +457,7 @@ fn daemon_socket_roundtrip_hermetic_check_mercury_passes() {
         ordinary::Selection::ByTestRun(ordinary::TestRunLookup {
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new("mercury"),
-            run: None,
+            optional_test_run_identifier: None,
         }),
     ));
     let query_frame = query.encode_signal_frame().expect("encode query");
@@ -475,14 +471,16 @@ fn daemon_socket_roundtrip_hermetic_check_mercury_passes() {
         let (_, output) =
             ordinary::Output::decode_signal_frame(reply.bytes()).expect("decode query reply");
         let runs = match output {
-            ordinary::Output::TestRunsQueried(listing) => listing.into_payload().runs,
+            ordinary::Output::TestRunsQueried(listing) => {
+                listing.into_payload().test_run_record_vector
+            }
             other => {
                 daemon.kill().ok();
                 panic!("expected TestRunsQueried, got {other:?}");
             }
         };
         if let Some(record) = runs.into_iter().next()
-            && !matches!(record.outcome, ordinary::TestOutcome::Pending)
+            && !matches!(record.test_outcome, ordinary::TestOutcome::Pending)
         {
             break record;
         }
@@ -497,12 +495,12 @@ fn daemon_socket_roundtrip_hermetic_check_mercury_passes() {
     daemon.wait().ok();
 
     assert_eq!(
-        terminal.outcome,
+        terminal.test_outcome,
         ordinary::TestOutcome::Passed,
         "the real daemon nix-built vm-mercury and recorded Passed"
     );
     let closure = terminal
-        .closure_path
+        .optional_closure_path
         .as_ref()
         .expect("Passed carries the realised out-path");
     assert!(
@@ -569,7 +567,7 @@ fn test_run_table_survives_store_reopen() {
     let runs = query_runs(&mut engine, "goldragon", "mercury");
     assert_eq!(runs.len(), 1, "the run persisted across reopen");
     assert_eq!(*runs[0].test_run_identifier.payload(), identifier);
-    assert_eq!(runs[0].outcome, ordinary::TestOutcome::Pending);
+    assert_eq!(runs[0].test_outcome, ordinary::TestOutcome::Pending);
 }
 
 // ---- Unit 2b fix 2: the host/node selection guarantee, proven ----

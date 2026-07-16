@@ -59,13 +59,13 @@ fn dune_host_deploy(action: ordinary::HostDeployAction) -> meta::Input {
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new("dune"),
             host_composition: ordinary::HostComposition::BaseHost,
-            source: ordinary::ProposalSource::new("/dev/null"),
-            flake: ordinary::FlakeReference::new(FIXTURE_FLAKE),
+            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            flake_reference: ordinary::FlakeReference::new(FIXTURE_FLAKE),
             host_deploy_action: action,
             source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-            builder: None,
-            substituters: Vec::new(),
-            build_attribute: Some(meta::FlakeAttribute::new(FIXTURE_ATTRIBUTE)),
+            optional_builder: None,
+            extra_substituter_vector: Vec::new(),
+            optional_flake_attribute: Some(meta::FlakeAttribute::new(FIXTURE_ATTRIBUTE)),
         },
     )))
 }
@@ -380,7 +380,7 @@ fn concurrent_requests_are_served_in_parallel() {
         ordinary::NodeSelector {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
-            artifact: None,
+            optional_generation_artifact: None,
         },
     )));
     let frame = FrameBody::new(query.encode_signal_frame().expect("encode query"));

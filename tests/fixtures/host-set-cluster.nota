@@ -6,10 +6,10 @@
 ;; member OnHost is accepted, a non-member OnHost is VmHostNotDeclaredForNode,
 ;; an unknown node is NodeUnknown, and `All` resolves to the hosted-Pod nodes
 ;; ([beacon], not the bare-metal atlas). Canonical form emitted by
-;; ClusterProposal::to_nota (5-root, horizon-rs 8d6cbc66) — every Optional
+;; ClusterProposal::to_nota (5-root, horizon-rs a6300bc) — every Optional
 ;; position carries a token; bare atoms stay bare. The 5th root is the
 ;; positional-tail domain_configuration; the default `(criome [])` is the
 ;; `criome` internal suffix with no public cluster domains. Regenerate via the
 ;; same encoder if the proposal schema shape changes.
 
-({atlas (EdgeTesting Large Max (Metal (Some X86_64) 4 None None None None None None None None []) (Qwerty Uefi {} [] None) (AAA= (Some AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA) (Some (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 200::1 300:ca41:6b12:fba))) [] None None False False [] False False None None []) beacon (EdgeTesting Large Max (Pod (Some X86_64) 4 None None (Some atlas) (Some operator) None None None None []) (Qwerty Uefi {} [] None) (AAA= (Some AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA) (Some (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 200::1 300:ca41:6b12:fba))) [] None None False False [] False False None None [])} {} {} (Max {} {} {}) (criome []))
+({atlas. (EdgeTesting Large Max (Metal (Some X86_64) 4 None None None None None None None None []) (Qwerty Uefi {} []) (AAA= (Some AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA) (Some (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 200::1 300:ca41:6b12:fba))) [] None None False False [] False False None None []) beacon. (EdgeTesting Large Max (Pod (Some X86_64) 4 None None (Some atlas) (Some operator) None None None None []) (Qwerty Uefi {} []) (AAA= (Some AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA) (Some (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 200::1 300:ca41:6b12:fba))) [] None None False False [] False False None None [])} {} {} (Max {} {} {}) (criome []))

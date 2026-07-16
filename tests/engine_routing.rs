@@ -129,7 +129,7 @@ fn check_host_key_material_reports_no_mismatches() {
         ordinary::CheckHostKeyMaterialPayload::new(ordinary::KeyMaterialQuery {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
-            proposal_proposal_source: ordinary::ProposalSource::new("github:owner/repo"),
+            proposal_source: ordinary::ProposalSource::new("github:owner/repo"),
         }),
     ));
     let output = ordinary_reply(run(&mut engine, input));
@@ -185,13 +185,13 @@ fn host_deployment(
         cluster_name: ordinary::ClusterName::new("alpha"),
         node_name: ordinary::NodeName::new("node-1"),
         host_composition: ordinary::HostComposition::BaseHost,
-        proposal_proposal_source: ordinary::ProposalSource::new("/dev/null"),
+        proposal_source: ordinary::ProposalSource::new("/dev/null"),
         flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
         host_deploy_action: action,
         source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
         optional_builder: None,
         extra_substituter_vector: Vec::new(),
-        optional_flake_attribute: build_attribute.map(meta::FlakeAttribute::new),
+        optional_flake_attribute: optional_flake_attribute.map(meta::FlakeAttribute::new),
     }
 }
 
@@ -232,7 +232,7 @@ fn user_environment_activate_enters_effect_pipeline() {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
             user_name: ordinary::UserName::new("li"),
-            proposal_proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            proposal_source: ordinary::ProposalSource::new("/dev/null"),
             flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
             user_environment_action: meta::UserEnvironmentAction::ActivateNow,
             source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
@@ -266,7 +266,7 @@ fn user_environment_realize_enters_effect_pipeline() {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
             user_name: ordinary::UserName::new("li"),
-            proposal_proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            proposal_source: ordinary::ProposalSource::new("/dev/null"),
             flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
             user_environment_action: meta::UserEnvironmentAction::Realize,
             source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
@@ -372,7 +372,7 @@ fn fixture_cluster_proposal() -> ClusterProposal {
                 cores: 4,
                 model: None,
                 mother_board: None,
-                super_optional_node_name: None,
+                super_node: None,
                 super_user: None,
                 chip_gen: None,
                 ram_gb: None,
@@ -432,13 +432,15 @@ fn routed_contact_preserves_origin_through_reply_mapping() {
         nexus::RoutedMail::Ordinary(ordinary::Input::Unwatch(ordinary::UnwatchPayload::new(
             ordinary::SubscriptionClose::new(ordinary::SubscriptionToken::new(9)),
         )));
-    let routed_reply = routed_mail.with_origin_route(origin).map_root(|_| {
-        nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Ordinary(
-            ordinary::Output::Unwatched(ordinary::UnwatchedPayload::new(
-                ordinary::SubscriptionClosed::new(ordinary::SubscriptionToken::new(9)),
-            )),
-        ))
-    });
+    let routed_reply = nexus::NexusWork::SignalArrived(routed_mail)
+        .with_origin_route(origin)
+        .map_root(|_| {
+            nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Ordinary(
+                ordinary::Output::Unwatched(ordinary::UnwatchedPayload::new(
+                    ordinary::SubscriptionClosed::new(ordinary::SubscriptionToken::new(9)),
+                )),
+            ))
+        });
     assert_eq!(routed_reply.origin_route().payload(), 41);
     assert!(matches!(
         routed_reply.into_root(),

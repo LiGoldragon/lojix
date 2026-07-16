@@ -320,8 +320,8 @@ impl ResolvedTestRun {
         nexus::HermeticCheckCommand {
             cluster_name: self.cluster.clone(),
             node_name: self.node.clone(),
-            flake: self.flake.clone(),
-            system: HermeticCheck::SYSTEM.to_string(),
+            flake_reference: self.flake.clone(),
+            string: HermeticCheck::SYSTEM.to_string(),
         }
     }
 
@@ -332,10 +332,10 @@ impl ResolvedTestRun {
     fn bring_up_command(&self, runner: ordinary::ClosurePath) -> nexus::BringUpTestVmCommand {
         nexus::BringUpTestVmCommand {
             cluster_name: self.cluster.clone(),
-            node_name: self.node.clone(),
+            node: self.node.clone(),
             host: self.host.clone(),
-            runner,
-            guest_ip: String::new(),
+            closure_path: runner,
+            string: String::new(),
         }
     }
 
@@ -344,7 +344,7 @@ impl ResolvedTestRun {
     fn tear_down_command(&self) -> nexus::TearDownTestVmCommand {
         nexus::TearDownTestVmCommand {
             cluster_name: self.cluster.clone(),
-            node_name: self.node.clone(),
+            node: self.node.clone(),
             host: self.host.clone(),
         }
     }
@@ -424,7 +424,7 @@ impl TestPipeline {
             cluster_name: self.run.cluster.clone(),
             node_name: self.run.node.clone(),
             container_name: sema::ContainerName::new(format!("vm-{}", self.run.node.payload())),
-            state,
+            container_state: state,
         }
     }
 }
@@ -543,7 +543,7 @@ impl HermeticCheck {
         format!(
             "{}#checks.{}.vm-{}",
             self.command.flake_reference.payload(),
-            self.command.system,
+            self.command.string,
             self.command.node_name.payload()
         )
     }
@@ -581,16 +581,16 @@ impl LiveTestVm {
     fn from_bring_up(command: &nexus::BringUpTestVmCommand) -> Self {
         Self {
             target: Self::host_target(&command.cluster_name, &command.host),
-            node: command.node_name.clone(),
-            runner: command.runner.payload().clone(),
-            guest_ip: command.guest_ip.clone(),
+            node: command.node.clone(),
+            runner: command.closure_path.payload().clone(),
+            guest_ip: command.string.clone(),
         }
     }
 
     fn from_tear_down(command: &nexus::TearDownTestVmCommand) -> Self {
         Self {
             target: Self::host_target(&command.cluster_name, &command.host),
-            node: command.node_name.clone(),
+            node: command.node.clone(),
             runner: String::new(),
             guest_ip: String::new(),
         }
@@ -720,7 +720,7 @@ impl RuntimeConfiguration {
             return nexus::BuildTarget::Local;
         }
         match SshTarget::root_at_node(cluster_name, node_name) {
-            Ok(target) => nexus::BuildTarget::target_store(target.ssh_uri()),
+            Ok(target) => nexus::BuildTarget::target(target.ssh_uri()),
             // A target whose names fail horizon validation can't be addressed
             // for a remote store; fall back to a local build rather than emit a
             // malformed `--store` URI. A submitted deploy never has invalid
@@ -752,7 +752,7 @@ impl RuntimeConfiguration {
         self.generated_inputs_directory
             .join(cluster)
             .join(node)
-            .join(Self::shape_name(&command.shape))
+            .join(Self::shape_name(&command.materialization_shape))
     }
 
     fn shape_name(shape: &nexus::MaterializationShape) -> &'static str {
@@ -886,8 +886,8 @@ impl DeployAction {
             Self::Host(action) => nexus::ActivationProfile::Host(*action),
             Self::UserEnvironment { action, user } => {
                 nexus::ActivationProfile::UserEnvironment(nexus::UserEnvironmentActivationProfile {
-                    action: *action,
-                    user: user.clone(),
+                    user_environment_action: *action,
+                    user_name: user.clone(),
                 })
             }
         }
@@ -1463,7 +1463,7 @@ impl DeployPipeline {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             deploy_submission: self.submission(),
-            phase,
+            deploy_job_phase: phase,
             optional_closure_path: self.closure_path.clone(),
             source_revision_policy: self.source_revision_policy,
             flake_reference: self.requested_flake.clone(),
@@ -1511,7 +1511,7 @@ impl sema::DeployJob {
     /// pure projection of the persisted phase cursor — the daemon calls it once
     /// per resumed row and acts on the typed verdict (up9q resume scaffolding).
     pub fn resumption(&self) -> DeployJobResumption {
-        match self.phase {
+        match self.deploy_job_phase {
             sema::DeployJobPhase::Activating => DeployJobResumption::PollActivationUnit {
                 unit: self.boot_once_unit.clone(),
             },
@@ -1550,17 +1550,17 @@ impl sema::DeployJob {
         &self,
         daemon_host_system_closure: Option<&str>,
     ) -> Option<(sema::LiveGeneration, sema::GcRoot)> {
-        let closure_path = self.closure_path.clone()?;
+        let closure_path = self.optional_closure_path.clone()?;
         if daemon_host_system_closure != Some(closure_path.payload().as_str()) {
             return None;
         }
         let source_revision_record = ordinary::SourceRevisionRecord {
             source_revision_policy: self.source_revision_policy,
-            requested_ref: self.requested_ref.clone(),
+            requested_ref: self.flake_reference.clone(),
             resolved_ref: self
-                .resolved_ref
+                .optional_flake_reference
                 .clone()
-                .unwrap_or_else(|| self.requested_ref.clone()),
+                .unwrap_or_else(|| self.flake_reference.clone()),
             string: self.resolved_revision.clone().unwrap_or_default(),
         };
         let generation = sema::LiveGeneration {
@@ -1574,7 +1574,7 @@ impl sema::DeployJob {
             generation_artifact: ordinary::GenerationArtifact::CompleteHost,
             activation_effect: ordinary::ActivationEffect::LiveActivation,
             generation_slot: ordinary::GenerationSlot::Current,
-            optional_closure_path: closure_path.clone(),
+            closure_path: closure_path.clone(),
             source_revision_record,
         };
         let root = sema::GcRoot {
@@ -1583,7 +1583,7 @@ impl sema::DeployJob {
             node_name: self.node_name.clone(),
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path,
-            label: None,
+            optional_pin_label: None,
         };
         Some((generation, root))
     }
@@ -1708,7 +1708,7 @@ impl SchemaRuntime {
             job.deployment_identifier,
             job.generation_identifier,
             marker,
-            job.submission,
+            job.deploy_submission,
         );
         Self {
             store,
@@ -2309,8 +2309,8 @@ impl SchemaRuntime {
             // No other effect result belongs to a test dispatch; treat it as an
             // internal invariant failure rather than a misleading pass.
             _ => self.fail_test_pipeline(nexus::EffectFailure {
-                stage: nexus::EffectStage::HermeticCheck,
-                detail: "unexpected effect result on the test pipeline".to_string(),
+                effect_stage: nexus::EffectStage::HermeticCheck,
+                string: "unexpected effect result on the test pipeline".to_string(),
             }),
         }
     }
@@ -2362,9 +2362,9 @@ impl SchemaRuntime {
     fn fail_test_pipeline(&mut self, failure: nexus::EffectFailure) -> nexus::NexusAction {
         eprintln!(
             "lojix test pipeline effect failed at {:?}: {}",
-            failure.stage, failure.detail
+            failure.effect_stage, failure.string
         );
-        let stage = Self::test_failure_stage(failure.stage);
+        let stage = Self::test_failure_stage(failure.effect_stage);
         let pipeline = match self.active_test.clone() {
             Some(pipeline) => pipeline,
             None => {
@@ -2443,8 +2443,8 @@ impl SchemaRuntime {
                     Some(closure_path) => closure_path,
                     None => {
                         return self.fail_pipeline(nexus::EffectFailure {
-                            stage: nexus::EffectStage::Activate,
-                            detail: "activation reached without a built closure path".to_string(),
+                            effect_stage: nexus::EffectStage::Activate,
+                            string: "activation reached without a built closure path".to_string(),
                         });
                     }
                 };
@@ -2464,8 +2464,8 @@ impl SchemaRuntime {
                     Some(commit) => commit,
                     None => {
                         return self.fail_pipeline(nexus::EffectFailure {
-                            stage: nexus::EffectStage::Activate,
-                            detail: "activation record reached without a built closure path"
+                            effect_stage: nexus::EffectStage::Activate,
+                            string: "activation record reached without a built closure path"
                                 .to_string(),
                         });
                     }
@@ -2707,8 +2707,8 @@ impl SchemaRuntime {
             nexus::EffectResult::HermeticCheckBuilt(_)
             | nexus::EffectResult::VmBroughtUp(_)
             | nexus::EffectResult::VmTornDown(_) => self.fail_pipeline(nexus::EffectFailure {
-                stage: nexus::EffectStage::Build,
-                detail: "test effect result on the deploy pipeline".to_string(),
+                effect_stage: nexus::EffectStage::Build,
+                string: "test effect result on the deploy pipeline".to_string(),
             }),
             nexus::EffectResult::EffectFailed(failure) => self.fail_pipeline(failure),
         }
@@ -2789,7 +2789,7 @@ impl SchemaRuntime {
     fn fail_pipeline(&mut self, failure: nexus::EffectFailure) -> nexus::NexusAction {
         eprintln!(
             "lojix deploy pipeline effect failed at {:?}: {}",
-            failure.stage, failure.detail
+            failure.effect_stage, failure.string
         );
         // Mark the durable job row Failed before clearing the cursor (up9q): a
         // restarted daemon reads Failed and does not re-attempt — the deploy is
@@ -2799,7 +2799,7 @@ impl SchemaRuntime {
         // R5) — a mid-pipeline effect failure must not leak `active_operation`.
         self.active_deploy = None;
         self.active_operation = None;
-        let reason = match failure.stage {
+        let reason = match failure.effect_stage {
             nexus::EffectStage::FlakeAuth => meta::DeployRejectionReason::ProposalSourceUnreachable,
             nexus::EffectStage::MaterializeHorizon => {
                 meta::DeployRejectionReason::ProposalSourceUnreachable
@@ -2910,7 +2910,7 @@ impl SchemaRuntime {
             self.store
                 .append_event_log_entry(sema::EventLogEntry {
                     event_log_position: ordinary::EventLogPosition::new(position),
-                    record: sema::LoggedEvent::Deployment(event),
+                    logged_event: sema::LoggedEvent::Deployment(event),
                 })
                 .and_then(|()| self.store.commit_sequence())
                 .map(|commit_sequence| (position, commit_sequence))
@@ -2965,7 +2965,7 @@ impl SchemaRuntime {
             node_name: commit.node_name.clone(),
             generation_slot: commit.generation_slot,
             closure_path: commit.closure_path.clone(),
-            label: None,
+            optional_pin_label: None,
         };
         // The live-set row and the gc-root row are written as TWO sequential
         // keyed asserts (inside `Store::record_activation`). A `CommitRequest`
@@ -2998,7 +2998,7 @@ impl SchemaRuntime {
         let current_sequence = self.store.commit_sequence().unwrap_or(0);
         let already_used = roots
             .iter()
-            .any(|root| root.label.as_ref() == Some(&request.pin_label));
+            .any(|root| root.optional_pin_label.as_ref() == Some(&request.pin_label));
         if already_used {
             return Self::write_rejected(current_sequence, sema::RejectionReason::PinLabelInUse);
         }
@@ -3014,7 +3014,7 @@ impl SchemaRuntime {
         };
         let from_slot = root.generation_slot;
         root.generation_slot = ordinary::GenerationSlot::Pinned;
-        root.label = Some(request.pin_label.clone());
+        root.optional_pin_label = Some(request.pin_label.clone());
         let committed = self
             .store
             .mutate_gc_root(root)
@@ -3040,7 +3040,7 @@ impl SchemaRuntime {
         };
         let current_sequence = self.store.commit_sequence().unwrap_or(0);
         let Some(mut root) = roots.into_iter().find(|root| {
-            root.label.as_ref() == Some(&request.pin_label)
+            root.optional_pin_label.as_ref() == Some(&request.pin_label)
                 && root.cluster_name == request.cluster_name
                 && root.node_name == request.node_name
         }) else {
@@ -3049,7 +3049,7 @@ impl SchemaRuntime {
         let generation_identifier = root.generation_identifier.clone();
         let from_slot = root.generation_slot;
         root.generation_slot = ordinary::GenerationSlot::Recent;
-        root.label = None;
+        root.optional_pin_label = None;
         let committed = self
             .store
             .mutate_gc_root(root)
@@ -3094,7 +3094,7 @@ impl SchemaRuntime {
         match committed {
             Ok(commit_sequence) => sema::SemaWriteOutput::GenerationRetired(meta::AppliedRetire {
                 generation_identifier: request.generation_identifier,
-                from_slot: root.generation_slot,
+                generation_slot: root.generation_slot,
                 database_marker: Self::marker(commit_sequence),
             }),
             Err(_) => {
@@ -3111,13 +3111,13 @@ impl SchemaRuntime {
             let record = sema::ContainerLifecycleRecord {
                 cluster_name: transition.cluster_name,
                 node_name: transition.node_name,
-                container: transition.container,
-                state: transition.state,
+                container_name: transition.container_name,
+                container_state: transition.container_state,
                 event_log_position: ordinary::EventLogPosition::new(position),
             };
             let entry = sema::EventLogEntry {
                 event_log_position: ordinary::EventLogPosition::new(position),
-                record: sema::LoggedEvent::Container(record.clone()),
+                logged_event: sema::LoggedEvent::Container(record.clone()),
             };
             self.store
                 .record_container_transition(record, entry)
@@ -3143,8 +3143,8 @@ impl SchemaRuntime {
         reason: sema::RejectionReason,
     ) -> sema::SemaWriteOutput {
         sema::SemaWriteOutput::WriteRejected(sema::RejectionReport {
-            reason,
-            marker: Self::sema_marker(commit_sequence),
+            rejection_reason: reason,
+            state_marker: Self::sema_marker(commit_sequence),
         })
     }
 
@@ -3191,7 +3191,7 @@ impl SchemaRuntime {
         lookup.cluster_name == run.cluster_name
             && lookup.node_name == run.node
             && lookup
-                .run
+                .optional_test_run_identifier
                 .as_ref()
                 .is_none_or(|identifier| identifier == &run.test_run_identifier)
     }
@@ -3210,7 +3210,7 @@ impl SchemaRuntime {
             .map(Self::project_generation)
             .collect();
         sema::SemaReadOutput::GenerationsQueried(ordinary::GenerationListing {
-            generations,
+            generation_vector: generations,
             database_marker: Self::marker(commit_sequence),
         })
     }
@@ -3221,7 +3221,7 @@ impl SchemaRuntime {
                 selector.cluster_name == live.cluster_name
                     && selector.node_name == live.node_name
                     && selector
-                        .artifact
+                        .optional_generation_artifact
                         .as_ref()
                         .is_none_or(|artifact| artifact == &live.generation_artifact)
             }
@@ -3270,8 +3270,8 @@ impl SchemaRuntime {
             }
         }
         sema::SemaReadOutput::EventLogRead(sema::EventLogPage {
-            deployment_events,
-            retention_events,
+            deployment_phase_event_vector: deployment_events,
+            cache_retention_transition_event_vector: retention_events,
             state_marker: Self::sema_marker(commit_sequence),
         })
     }
@@ -3289,8 +3289,8 @@ impl SchemaRuntime {
     /// this never re-locks; the caller supplies the sequence.
     fn read_missed(commit_sequence: u64, reason: sema::RejectionReason) -> sema::SemaReadOutput {
         sema::SemaReadOutput::ReadMissed(sema::RejectionReport {
-            reason,
-            marker: Self::sema_marker(commit_sequence),
+            rejection_reason: reason,
+            state_marker: Self::sema_marker(commit_sequence),
         })
     }
 
@@ -3307,13 +3307,14 @@ impl SchemaRuntime {
         // Resolve the flake metadata to a locked revision through Nix. The
         // typed SourceRevisionRecord produced here is carried through the
         // eval/build path, event log, deploy-job row, and live-generation state.
-        match NixCommand::flake_metadata(request.flake.payload())
+        match NixCommand::flake_metadata(request.flake_reference.payload())
             .run()
             .await
         {
             Ok(output) => match NixFlakeMetadata::parse(&output) {
                 Ok(metadata) => nexus::EffectResult::FlakeResolved(nexus::ResolvedFlake::new(
-                    metadata.source_revision(request.source_revision_policy, request.flake),
+                    metadata
+                        .source_revision(request.source_revision_policy, request.flake_reference),
                 )),
                 Err(detail) => Self::effect_failed(nexus::EffectStage::FlakeAuth, detail),
             },
@@ -3334,12 +3335,19 @@ impl SchemaRuntime {
     }
 
     async fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> nexus::EffectResult {
-        let attribute = format!("{}#{}", command.flake.payload(), command.attribute);
-        let refresh =
-            EvalRefresh::for_source(command.source_revision.policy, command.flake.payload());
-        match NixCommand::eval_drv_path(&attribute, &command.overrides, &command.target, refresh)
-            .run()
-            .await
+        let attribute = format!("{}#{}", command.flake_reference.payload(), command.string);
+        let refresh = EvalRefresh::for_source(
+            command.source_revision_record.source_revision_policy,
+            command.flake_reference.payload(),
+        );
+        match NixCommand::eval_drv_path(
+            &attribute,
+            &command.flake_input_override_vector,
+            &command.build_target,
+            refresh,
+        )
+        .run()
+        .await
         {
             Ok(output) => nexus::EffectResult::ClosureEvaluated(nexus::EvaluatedClosure {
                 generation_identifier: ordinary::GenerationIdentifier::new(0),
@@ -3359,18 +3367,19 @@ impl SchemaRuntime {
         // `Remote` adds the daemon machine file and `TargetStore` adds the
         // `--store <uri>` redirect ALONE (NO `--eval-store auto`) so eval and
         // build both operate on the target store.
-        let invocation = match &command.target {
-            nexus::BuildTarget::Local => {
-                NixCommand::build_closure(command.closure_path.payload(), &command.substituters)
-            }
+        let invocation = match &command.build_target {
+            nexus::BuildTarget::Local => NixCommand::build_closure(
+                command.closure_path.payload(),
+                &command.extra_substituter_vector,
+            ),
             nexus::BuildTarget::Remote(_) => NixCommand::build_closure_remote(
                 command.closure_path.payload(),
-                &command.substituters,
+                &command.extra_substituter_vector,
             ),
-            nexus::BuildTarget::TargetStore(store) => NixCommand::build_closure_in_store(
+            nexus::BuildTarget::Target(store) => NixCommand::build_closure_in_store(
                 command.closure_path.payload(),
                 store.payload(),
-                &command.substituters,
+                &command.extra_substituter_vector,
             ),
         };
         match invocation.run().await {
@@ -3443,7 +3452,7 @@ impl SchemaRuntime {
             Ok(output) => nexus::EffectResult::PathsCollected(nexus::GarbageCollected {
                 cluster_name: command.cluster_name,
                 node_name: command.node_name,
-                reclaimed_paths: NixCommand::count_lines(&output),
+                integer: NixCommand::count_lines(&output),
             }),
             Err(detail) => Self::effect_failed(nexus::EffectStage::Gc, detail),
         }
@@ -3491,7 +3500,7 @@ impl SchemaRuntime {
         let _invocation = bring_up.bring_up_invocation();
         nexus::EffectResult::VmBroughtUp(nexus::TestVmBroughtUp {
             cluster_name: command.cluster_name,
-            node_name: command.node_name,
+            node: command.node,
             host: command.host,
         })
     }
@@ -3508,13 +3517,16 @@ impl SchemaRuntime {
         let _invocation = tear_down.tear_down_invocation();
         nexus::EffectResult::VmTornDown(nexus::TestVmTornDown {
             cluster_name: command.cluster_name,
-            node_name: command.node_name,
+            node: command.node,
             host: command.host,
         })
     }
 
     fn effect_failed(stage: nexus::EffectStage, detail: String) -> nexus::EffectResult {
-        nexus::EffectResult::EffectFailed(nexus::EffectFailure { stage, detail })
+        nexus::EffectResult::EffectFailed(nexus::EffectFailure {
+            effect_stage: stage,
+            string: detail,
+        })
     }
 }
 
@@ -3543,15 +3555,22 @@ impl HorizonMaterialization {
     }
 
     async fn run_inner(&self) -> Result<nexus::MaterializedInputs> {
-        let proposal = ProjectableProposal::from(ProposalFile::new(&self.command.source).load()?);
+        let proposal =
+            ProjectableProposal::from(ProposalFile::new(&self.command.proposal_source).load()?);
         let viewpoint = HorizonViewpoint::from_command(&self.command)?;
         let horizon = proposal.project(&viewpoint)?;
         let root = MaterializationRoot::new(self.configuration.materialization_root(&self.command));
         root.prepare()?;
-        let secrets_source = ClusterSecretsDirectory::from_proposal_source(&self.command.source);
-        MaterializedInputSet::new(root, horizon, self.command.shape.clone(), secrets_source)
-            .write()
-            .await
+        let secrets_source =
+            ClusterSecretsDirectory::from_proposal_source(&self.command.proposal_source);
+        MaterializedInputSet::new(
+            root,
+            horizon,
+            self.command.materialization_shape.clone(),
+            secrets_source,
+        )
+        .write()
+        .await
     }
 }
 
@@ -4136,7 +4155,7 @@ impl ClosureCopy {
     fn from_command(
         command: &nexus::CopyClosureCommand,
     ) -> std::result::Result<Option<Self>, String> {
-        if matches!(command.source, nexus::BuildTarget::TargetStore(_)) {
+        if matches!(command.build_target, nexus::BuildTarget::Target(_)) {
             return Ok(None);
         }
         let target = SshTarget::root_at_node(&command.cluster_name, &command.node_name)?;
@@ -4183,7 +4202,7 @@ impl Activation {
     ) -> std::result::Result<Self, String> {
         let target = SshTarget::root_at_node(&command.cluster_name, &command.node_name)?;
         let store_path = command.closure_path.payload().clone();
-        match &command.profile {
+        match &command.activation_profile {
             nexus::ActivationProfile::Host(action) => Ok(Self::Host(HostActivation {
                 deployment_identifier: command.deployment_identifier.clone(),
                 target,
@@ -4193,14 +4212,14 @@ impl Activation {
                 action: *action,
             })),
             nexus::ActivationProfile::UserEnvironment(profile) => {
-                let user = HorizonUserName::try_new(profile.user.payload().clone())
+                let user = HorizonUserName::try_new(profile.user_name.payload().clone())
                     .map_err(|error| format!("invalid user name for home activation: {error}"))?;
                 Ok(Self::UserEnvironment(UserEnvironmentActivation {
                     node_name: command.node_name.clone(),
                     target,
                     user,
                     store_path,
-                    mode: profile.action,
+                    mode: profile.user_environment_action,
                 }))
             }
         }
@@ -4713,7 +4732,7 @@ impl NixCommand {
         }
         arguments.push("--raw".to_string());
         match target {
-            nexus::BuildTarget::TargetStore(store) => {
+            nexus::BuildTarget::Target(store) => {
                 arguments.extend(Self::store_options(store.payload()));
             }
             nexus::BuildTarget::Local | nexus::BuildTarget::Remote(_) => {}
@@ -4872,10 +4891,11 @@ impl NixCommand {
         let mut arguments = Vec::new();
         for override_input in overrides {
             arguments.push("--override-input".to_string());
-            arguments.push(override_input.name.clone());
+            arguments.push(override_input.string.clone());
             arguments.push(format!(
                 "{}?narHash={}",
-                override_input.reference.url, override_input.reference.nix_archive_hash
+                override_input.flake_input_reference.url,
+                override_input.flake_input_reference.nix_archive_hash
             ));
         }
         arguments
@@ -5275,10 +5295,13 @@ mod tests {
         );
         let command = pipeline.nix_eval_command(engine.configuration.as_ref());
         assert_eq!(
-            command.source_revision.string,
+            command.source_revision_record.string,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
-        assert_eq!(command.flake, command.source_revision.resolved_ref);
+        assert_eq!(
+            command.flake_reference,
+            command.source_revision_record.resolved_ref
+        );
     }
 
     #[test]
@@ -5515,8 +5538,7 @@ mod tests {
         // A build-on-target build already realized the closure in the target
         // node's own store (Spirit lc28 / report 150), so there is nothing to
         // push: `from_command` returns `None` and no `ssh-ng` transfer runs.
-        let source =
-            nexus::BuildTarget::target_store("ssh-ng://root@node-1.alpha.criome".to_string());
+        let source = nexus::BuildTarget::target("ssh-ng://root@node-1.alpha.criome".to_string());
         let copy = ClosureCopy::from_command(&copy_command(source)).expect("copy");
         assert!(
             copy.is_none(),
@@ -5761,7 +5783,7 @@ mod tests {
         );
         assert_eq!(root.generation_slot, ordinary::GenerationSlot::Current);
         assert_eq!(root.closure_path.payload(), "/nix/store/aaaaaaaa-system");
-        assert_eq!(root.label, None);
+        assert_eq!(root.optional_pin_label, None);
     }
 
     #[test]
@@ -5892,7 +5914,7 @@ mod tests {
         let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
         let configuration = configuration_on_host("ouranos");
         match pipeline.build_target(&configuration) {
-            nexus::BuildTarget::TargetStore(store) => {
+            nexus::BuildTarget::Target(store) => {
                 assert_eq!(store.payload(), "ssh-ng://root@node-1.alpha.criome");
             }
             other => panic!("expected a target-store build for a remote node, got {other:?}"),
@@ -5997,7 +6019,7 @@ mod tests {
         // (`build_closure_in_store`) now uses the SAME `--store <uri>` alone, so
         // eval and build operate consistently on the target store. The
         // `--override-input` flags and `.drvPath` selector are preserved.
-        let store = nexus::BuildTarget::TargetStore(nexus::TargetStore::new(
+        let store = nexus::BuildTarget::Target(nexus::TargetStore::new(
             "ssh-ng://root@node-1.alpha.criome",
         ));
         let invocation =
@@ -6024,7 +6046,7 @@ mod tests {
         // (bead primary-8sv6): no `--refresh`, so a re-deploy of the same rev
         // serves the cached evaluation instead of re-evaluating the whole tree.
         // The `--raw` flag and `.drvPath` selector are unaffected.
-        let store = nexus::BuildTarget::TargetStore(nexus::TargetStore::new(
+        let store = nexus::BuildTarget::Target(nexus::TargetStore::new(
             "ssh-ng://root@node-1.alpha.criome",
         ));
         let invocation =
