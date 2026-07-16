@@ -14,88 +14,88 @@
 ;; at startup.
 
 {
-  Selection signal-lojix:lib:Selection
-  GenerationListing signal-lojix:lib:GenerationListing
-  Generation signal-lojix:lib:Generation
-  KeyMaterialQuery signal-lojix:lib:KeyMaterialQuery
-  KeyMaterialReport signal-lojix:lib:KeyMaterialReport
-  EventLogRange signal-lojix:lib:EventLogRange
-  EventLogPosition signal-lojix:lib:EventLogPosition
-  DeploymentPhaseEvent signal-lojix:lib:DeploymentPhaseEvent
-  CacheRetentionTransitionEvent signal-lojix:lib:CacheRetentionTransitionEvent
-  ClusterName signal-lojix:lib:ClusterName
-  NodeName signal-lojix:lib:NodeName
-  PinLabel signal-lojix:lib:PinLabel
-  ClosurePath signal-lojix:lib:ClosurePath
-  FlakeReference signal-lojix:lib:FlakeReference
-  SourceRevisionPolicy signal-lojix:lib:SourceRevisionPolicy
-  SourceRevisionRecord signal-lojix:lib:SourceRevisionRecord
-  DeploymentIdentifier signal-lojix:lib:DeploymentIdentifier
-  GenerationIdentifier signal-lojix:lib:GenerationIdentifier
-  TestRunIdentifier signal-lojix:lib:TestRunIdentifier
-  GenerationArtifact signal-lojix:lib:GenerationArtifact
-  ActivationEffect signal-lojix:lib:ActivationEffect
-  GenerationSlot signal-lojix:lib:GenerationSlot
-  TestMode signal-lojix:lib:TestMode
-  TestRunRecord signal-lojix:lib:TestRunRecord
-  TestRunListing signal-lojix:lib:TestRunListing
-  TestRunLookup signal-lojix:lib:TestRunLookup
-  TestRunPhase signal-lojix:lib:TestRunPhase
-  TestOutcome signal-lojix:lib:TestOutcome
-  FailureStage signal-lojix:lib:FailureStage
-  HostDeployment meta-signal-lojix:lib:HostDeployment
-  UserEnvironmentDeployment meta-signal-lojix:lib:UserEnvironmentDeployment
-  PinRequest meta-signal-lojix:lib:PinRequest
-  UnpinRequest meta-signal-lojix:lib:UnpinRequest
-  RetireRequest meta-signal-lojix:lib:RetireRequest
-  DeployHandle meta-signal-lojix:lib:DeployHandle
-  AcceptedTest meta-signal-lojix:lib:AcceptedTest
-  AppliedPin meta-signal-lojix:lib:AppliedPin
-  AppliedUnpin meta-signal-lojix:lib:AppliedUnpin
-  AppliedRetire meta-signal-lojix:lib:AppliedRetire
+  signal-lojix.lib.Selection
+  signal-lojix.lib.GenerationListing
+  signal-lojix.lib.Generation
+  signal-lojix.lib.KeyMaterialQuery
+  signal-lojix.lib.KeyMaterialReport
+  signal-lojix.lib.EventLogRange
+  signal-lojix.lib.EventLogPosition
+  signal-lojix.lib.DeploymentPhaseEvent
+  signal-lojix.lib.CacheRetentionTransitionEvent
+  signal-lojix.lib.ClusterName
+  signal-lojix.lib.NodeName
+  signal-lojix.lib.PinLabel
+  signal-lojix.lib.ClosurePath
+  signal-lojix.lib.FlakeReference
+  signal-lojix.lib.SourceRevisionPolicy
+  signal-lojix.lib.SourceRevisionRecord
+  signal-lojix.lib.DeploymentIdentifier
+  signal-lojix.lib.GenerationIdentifier
+  signal-lojix.lib.TestRunIdentifier
+  signal-lojix.lib.GenerationArtifact
+  signal-lojix.lib.ActivationEffect
+  signal-lojix.lib.GenerationSlot
+  signal-lojix.lib.TestMode
+  signal-lojix.lib.TestRunRecord
+  signal-lojix.lib.TestRunListing
+  signal-lojix.lib.TestRunLookup
+  signal-lojix.lib.TestRunPhase
+  signal-lojix.lib.TestOutcome
+  signal-lojix.lib.FailureStage
+  meta-signal-lojix.lib.HostDeployment
+  meta-signal-lojix.lib.UserEnvironmentDeployment
+  meta-signal-lojix.lib.PinRequest
+  meta-signal-lojix.lib.UnpinRequest
+  meta-signal-lojix.lib.RetireRequest
+  meta-signal-lojix.lib.DeployHandle
+  meta-signal-lojix.lib.AcceptedTest
+  meta-signal-lojix.lib.AppliedPin
+  meta-signal-lojix.lib.AppliedUnpin
+  meta-signal-lojix.lib.AppliedRetire
 }
-[SemaReadInput SemaWriteInput]
-[SemaReadOutput SemaWriteOutput]
+[(Read SemaReadInput) (Write SemaWriteInput)]
+[(Read SemaReadOutput) (Write SemaWriteOutput)]
 {
-  SemaReadInput [(QueryGenerations Selection) (ReadEventLog EventLogRange) (CheckKeyMaterial KeyMaterialQuery) (QueryTestRuns TestRunLookup)]
+  SemaReadInput.[(QueryGenerations Selection) (ReadEventLog EventLogRange) (CheckKeyMaterial KeyMaterialQuery) (QueryTestRuns TestRunLookup)]
 
-  SemaReadOutput [(GenerationsQueried GenerationListing) (EventLogRead EventLogPage) (KeyMaterialChecked KeyMaterialReport) (TestRunsQueried TestRunListing) (ReadMissed RejectionReport)]
-  EventLogPage { deployment_events.(Vector DeploymentPhaseEvent) retention_events.(Vector CacheRetentionTransitionEvent) StateMarker }
+  SemaReadOutput.[(GenerationsQueried GenerationListing) (EventLogRead EventLogPage) (KeyMaterialChecked KeyMaterialReport) (TestRunsQueried TestRunListing) (ReadMissed RejectionReport)]
+  EventLogPage.{ Vector.DeploymentPhaseEvent Vector.CacheRetentionTransitionEvent StateMarker }
 
   ;; RecordTestRun persists one already-lowered test-run row (the Unit-2a stub
   ;; writes it at phase Submitted / outcome Pending) and replies the accepted
   ;; handle, mirroring RecordDeploySubmitted -> DeploySubmitted. Unit 2b
   ;; rewrites the row at each phase transition as the real dispatch runs.
-  SemaWriteInput [(RecordDeploySubmitted DeploySubmission) (RecordPhaseTransition DeploymentPhaseEvent) (RecordGenerationActivated ActivationCommit) (PinGeneration PinRequest) (UnpinGeneration UnpinRequest) (RetireGeneration RetireRequest) (RecordContainerTransition ContainerTransition) (RecordTestRun TestRunRecord)]
-  DeploySubmission [(Host HostDeployment) (UserEnvironment UserEnvironmentDeployment)]
-  ActivationCommit { GenerationIdentifier ClusterName NodeName GenerationSlot ClosurePath SourceRevisionRecord }
-  ContainerTransition { ClusterName NodeName container.ContainerName state.ContainerState }
-  ContainerName String
-  ContainerState [Starting Started Stopping Stopped Failed]
+  SemaWriteInput.[(RecordDeploySubmitted DeploySubmission) (RecordPhaseTransition DeploymentPhaseEvent) (RecordGenerationActivated ActivationCommit) (PinGeneration PinRequest) (UnpinGeneration UnpinRequest) (RetireGeneration RetireRequest) (RecordContainerTransition ContainerTransition) (RecordTestRun TestRunRecord)]
+  DeploySubmission.[(Host HostDeployment) (UserEnvironment UserEnvironmentDeployment)]
+  ActivationCommit.{ GenerationIdentifier ClusterName NodeName GenerationSlot ClosurePath SourceRevisionRecord }
+  ContainerTransition.{ ClusterName NodeName ContainerName ContainerState }
+  ContainerName.String
+  ContainerState.[Starting Started Stopping Stopped Failed]
 
-  SemaWriteOutput [(DeploySubmitted DeployHandle) (PhaseRecorded PhaseReceipt) (GenerationActivated AppliedActivation) (GenerationPinned AppliedPin) (GenerationUnpinned AppliedUnpin) (GenerationRetired AppliedRetire) (ContainerRecorded ContainerReceipt) (TestRunRecorded AcceptedTest) (WriteRejected RejectionReport)]
-  PhaseReceipt { EventLogPosition StateMarker }
-  AppliedActivation { GenerationIdentifier GenerationSlot StateMarker }
-  ContainerReceipt { EventLogPosition StateMarker }
+  SemaWriteOutput.[(DeploySubmitted DeployHandle) (PhaseRecorded PhaseReceipt) (GenerationActivated AppliedActivation) (GenerationPinned AppliedPin) (GenerationUnpinned AppliedUnpin) (GenerationRetired AppliedRetire) (ContainerRecorded ContainerReceipt) (TestRunRecorded AcceptedTest) (WriteRejected RejectionReport)]
+  PhaseReceipt.{ EventLogPosition StateMarker }
+  AppliedActivation.{ GenerationIdentifier GenerationSlot StateMarker }
+  ContainerReceipt.{ EventLogPosition StateMarker }
 
-  RejectionReport { reason.RejectionReason marker.StateMarker }
-  RejectionReason [GenerationUnknown NodeUnknown ClusterUnknown PlanNotApproved PinLabelInUse PinLabelUnknown GenerationActive GenerationPinned EventLogPositionOutOfRange ProposalSourceUnreachable]
-  StateMarker { CommitSequence StateDigest }
-  CommitSequence Integer
-  StateDigest Integer
+  RejectionReport.{ RejectionReason StateMarker }
+  RejectionReason.[GenerationUnknown NodeUnknown ClusterUnknown PlanNotApproved PinLabelInUse PinLabelUnknown GenerationActive GenerationPinned EventLogPositionOutOfRange ProposalSourceUnreachable]
+  StateMarker.{ CommitSequence StateDigest }
+  CommitSequence.Integer
+  StateDigest.Integer
 
-  LiveSetTable { entries.(Vector LiveGeneration) }
-  LiveGeneration { DeploymentIdentifier GenerationIdentifier ClusterName NodeName GenerationArtifact ActivationEffect GenerationSlot ClosurePath SourceRevisionRecord }
+  LiveSetTable.{ Vector.LiveGeneration }
+  LiveGeneration.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName GenerationArtifact ActivationEffect GenerationSlot ClosurePath SourceRevisionRecord }
 
-  GcRootsTable { roots.(Vector GcRoot) }
-  GcRoot { GenerationIdentifier ClusterName NodeName GenerationSlot ClosurePath label.(Optional PinLabel) }
+  GcRootsTable.{ Vector.GcRoot }
+  GcRoot.{ GenerationIdentifier ClusterName NodeName GenerationSlot ClosurePath Optional.PinLabel }
 
-  EventLogTable { entries.(Vector EventLogEntry) }
-  EventLogEntry { EventLogPosition record.LoggedEvent }
-  LoggedEvent [(Deployment DeploymentPhaseEvent) (CacheRetention CacheRetentionTransitionEvent) (Container ContainerLifecycleRecord)]
+  EventLogTable.{ Vector.EventLogEntry }
+  EventLogEntry.{ EventLogPosition LoggedEvent }
+  LoggedEvent.[(Deployment DeploymentPhaseEvent) (CacheRetention CacheRetentionTransitionEvent) (Container ContainerLifecycleRecord)]
 
-  ContainerLifecycleTable { records.(Vector ContainerLifecycleRecord) }
-  ContainerLifecycleRecord { ClusterName NodeName container.ContainerName state.ContainerState EventLogPosition }
+  ContainerLifecycleTable.{ Vector.ContainerLifecycleRecord }
+  ContainerLifecycleRecord.{ ClusterName NodeName ContainerName ContainerState EventLogPosition }
 
   ;; The durable in-flight deploy-job row (up9q). One row per submitted deploy,
   ;; keyed by DeploymentIdentifier. Written on submit and rewritten at every
@@ -105,9 +105,9 @@
   ;; at acceptance, resolved_ref / resolved_revision after flake metadata, and
   ;; resolved_target / boot_once_unit are populated so a resumed Activating job
   ;; can poll the transient unit instead of re-activating.
-  DeployJobTable { jobs.(Vector DeployJob) }
-  DeployJob { DeploymentIdentifier GenerationIdentifier ClusterName NodeName submission.DeploySubmission phase.DeployJobPhase closure_path.(Optional ClosurePath) SourceRevisionPolicy requested_ref.FlakeReference resolved_ref.(Optional FlakeReference) resolved_revision.(Optional String) resolved_target.(Optional String) boot_once_unit.(Optional String) }
-  DeployJobPhase [Submitted Building Built Copying Activating Activated Failed]
+  DeployJobTable.{ Vector.DeployJob }
+  DeployJob.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName DeploySubmission DeployJobPhase Optional.ClosurePath SourceRevisionPolicy FlakeReference Optional.FlakeReference resolved_revision.Optional.String resolved_target.Optional.String boot_once_unit.Optional.String }
+  DeployJobPhase.[Submitted Building Built Copying Activating Activated Failed]
 
   ;; The durable test-run table (report 54 §5.3), mirroring DeployJobTable. One
   ;; row per submitted test, keyed by TestRunIdentifier, written on accept at
@@ -118,15 +118,17 @@
   ;; ordinary-contract TestRunRecord field-for-field — the same local/wire
   ;; split LiveGeneration/Generation already uses, because EngineRecord cannot
   ;; be implemented on an imported wire type (the orphan rule).
-  TestRunTable { runs.(Vector StoredTestRun) }
-  StoredTestRun {
+  TestRunTable.{ Vector.StoredTestRun }
+  StoredTestRun.{
     TestRunIdentifier
     ClusterName
-    NodeName
+    node.NodeName
     host.NodeName
-    mode.TestMode
-    phase.TestRunPhase
-    outcome.TestOutcome
-    closure_path.(Optional ClosurePath)
+    TestMode
+    TestRunPhase
+    TestOutcome
+    Optional.ClosurePath
   }
 }
+{}
+{}

@@ -277,7 +277,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "horizon-lib"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/horizon-rs.git?branch=main#33014c71ebec7f3c8decf5022e32e8cd612e585c"
+source = "git+https://github.com/LiGoldragon/horizon-rs.git?rev=a6300bccc4b6#a6300bccc4b668614a0a164fedd9fa1fc734147c"
 dependencies = [
  "ipnet",
  "nota",
@@ -360,6 +360,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kameo"
+version = "0.20.0"
+source = "git+https://github.com/LiGoldragon/kameo.git?rev=f491b45d#f491b45d7dcb55e5837eddde3d5d7ca8ceaa9f01"
+dependencies = [
+ "downcast-rs",
+ "dyn-clone",
+ "futures",
+ "kameo_macros 0.20.0 (git+https://github.com/LiGoldragon/kameo.git?rev=f491b45d)",
+ "serde",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "kameo_macros"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -375,6 +389,17 @@ dependencies = [
 name = "kameo_macros"
 version = "0.20.0"
 source = "git+https://github.com/LiGoldragon/kameo.git?branch=main#f491b45d7dcb55e5837eddde3d5d7ca8ceaa9f01"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "kameo_macros"
+version = "0.20.0"
+source = "git+https://github.com/LiGoldragon/kameo.git?rev=f491b45d#f491b45d7dcb55e5837eddde3d5d7ca8ceaa9f01"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -424,7 +449,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "triad-runtime",
+ "triad-runtime 0.6.1",
 ]
 
 [[package]]
@@ -435,13 +460,13 @@ checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 
 [[package]]
 name = "meta-signal-lojix"
-version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?branch=main#024bf0648ac5b63bfd14147ae748e1fbf6a81933"
+version = "0.4.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?rev=35510c008418#35510c00841892eeffd8042ec0bedf3e0b28cd32"
 dependencies = [
  "nota",
  "rkyv",
  "schema-rust",
- "signal-frame",
+ "signal-frame 0.3.0 (git+https://github.com/LiGoldragon/signal-frame.git?rev=b61ec7d9e98e)",
  "signal-lojix",
 ]
 
@@ -478,8 +503,8 @@ dependencies = [
 
 [[package]]
 name = "nota"
-version = "0.5.1"
-source = "git+https://github.com/LiGoldragon/nota.git?branch=main#ce7c564de0a0518eaa1938d55dccc460a67cadb4"
+version = "0.7.0"
+source = "git+https://github.com/LiGoldragon/nota.git?rev=f8de7a516b769fc544c7f8c0030e258833c1cf9b#f8de7a516b769fc544c7f8c0030e258833c1cf9b"
 dependencies = [
  "nota-derive",
  "rkyv",
@@ -488,7 +513,7 @@ dependencies = [
 [[package]]
 name = "nota-derive"
 version = "0.3.0"
-source = "git+https://github.com/LiGoldragon/nota.git?branch=main#ce7c564de0a0518eaa1938d55dccc460a67cadb4"
+source = "git+https://github.com/LiGoldragon/nota.git?rev=f8de7a516b769fc544c7f8c0030e258833c1cf9b#f8de7a516b769fc544c7f8c0030e258833c1cf9b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -644,43 +669,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
-name = "schema"
-version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/schema.git?branch=main#f351f90d3b8898205cf3057f3c253a5e451180a9"
+name = "schema-language"
+version = "0.3.0"
+source = "git+https://github.com/LiGoldragon/schema-language.git?rev=7fac6ac810bc#7fac6ac810bc736a68fa95f866b7ee1ddad19a33"
 dependencies = [
  "blake3",
  "nota",
  "rkyv",
- "schema-cc",
- "thiserror",
-]
-
-[[package]]
-name = "schema-cc"
-version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/schema.git?branch=main#f351f90d3b8898205cf3057f3c253a5e451180a9"
-dependencies = [
- "nota",
- "prettyplease",
- "proc-macro2",
- "quote",
- "syn",
  "thiserror",
 ]
 
 [[package]]
 name = "schema-rust"
-version = "0.5.3"
-source = "git+https://github.com/LiGoldragon/schema-rust.git?branch=main#0f306826f64622b375ad232f0a59d32904487b9d"
+version = "0.9.0"
+source = "git+https://github.com/LiGoldragon/schema-rust.git?rev=51a65c4b241f#51a65c4b241f269644918e62e69a8f64ed84b71c"
 dependencies = [
  "nota",
  "prettyplease",
  "proc-macro2",
  "quote",
- "schema",
+ "schema-language",
  "syn",
  "thiserror",
- "triad-runtime",
+ "triad-runtime 0.7.0",
 ]
 
 [[package]]
@@ -695,13 +706,13 @@ dependencies = [
 
 [[package]]
 name = "sema-engine"
-version = "0.10.0"
-source = "git+https://github.com/LiGoldragon/sema-engine.git?branch=main#71508caf4d61e52a2e340b3cb080ba4ee7d0f30f"
+version = "0.10.1"
+source = "git+https://github.com/LiGoldragon/sema-engine.git?rev=c56c905d2cec24b9b41a62ed7b8bc847b33be533#c56c905d2cec24b9b41a62ed7b8bc847b33be533"
 dependencies = [
  "blake3",
  "rkyv",
  "sema",
- "signal-frame",
+ "signal-frame 0.3.0 (git+https://github.com/LiGoldragon/signal-frame.git?branch=main)",
  "signal-sema",
  "thiserror",
 ]
@@ -766,10 +777,21 @@ name = "signal-frame"
 version = "0.3.0"
 source = "git+https://github.com/LiGoldragon/signal-frame.git?branch=main#fd7909d1497b7bb18751521387a1087cd9e7c91c"
 dependencies = [
+ "paste",
+ "rkyv",
+ "signal-frame-macros 0.1.1 (git+https://github.com/LiGoldragon/signal-frame.git?branch=main)",
+ "thiserror",
+]
+
+[[package]]
+name = "signal-frame"
+version = "0.3.0"
+source = "git+https://github.com/LiGoldragon/signal-frame.git?rev=b61ec7d9e98e#b61ec7d9e98e8d80381ad9497efcd4379adb5ede"
+dependencies = [
  "nota",
  "paste",
  "rkyv",
- "signal-frame-macros",
+ "signal-frame-macros 0.1.1 (git+https://github.com/LiGoldragon/signal-frame.git?rev=b61ec7d9e98e)",
  "thiserror",
 ]
 
@@ -777,6 +799,16 @@ dependencies = [
 name = "signal-frame-macros"
 version = "0.1.1"
 source = "git+https://github.com/LiGoldragon/signal-frame.git?branch=main#fd7909d1497b7bb18751521387a1087cd9e7c91c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "signal-frame-macros"
+version = "0.1.1"
+source = "git+https://github.com/LiGoldragon/signal-frame.git?rev=b61ec7d9e98e#b61ec7d9e98e8d80381ad9497efcd4379adb5ede"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -795,13 +827,13 @@ dependencies = [
 
 [[package]]
 name = "signal-lojix"
-version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix.git?branch=main#5d5a9a1112d0909f922905329d1854ee552a3c4d"
+version = "0.4.0"
+source = "git+https://github.com/LiGoldragon/signal-lojix.git?rev=3c96c5c06563#3c96c5c0656377dc67c054f5f82db8d6ad7aa56b"
 dependencies = [
  "nota",
  "rkyv",
  "schema-rust",
- "signal-frame",
+ "signal-frame 0.3.0 (git+https://github.com/LiGoldragon/signal-frame.git?rev=b61ec7d9e98e)",
 ]
 
 [[package]]
@@ -961,7 +993,20 @@ dependencies = [
  "kameo 0.20.0 (git+https://github.com/LiGoldragon/kameo.git?branch=main)",
  "rkyv",
  "rustix",
- "signal-frame",
+ "signal-frame 0.3.0 (git+https://github.com/LiGoldragon/signal-frame.git?branch=main)",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "triad-runtime"
+version = "0.7.0"
+source = "git+https://github.com/LiGoldragon/triad-runtime.git?rev=d93ad0d08e46#d93ad0d08e46ecfff08b8f67fcebc4a0d936d0ae"
+dependencies = [
+ "kameo 0.20.0 (git+https://github.com/LiGoldragon/kameo.git?rev=f491b45d)",
+ "rkyv",
+ "rustix",
+ "signal-frame 0.3.0 (git+https://github.com/LiGoldragon/signal-frame.git?rev=b61ec7d9e98e)",
  "thiserror",
  "tokio",
 ]

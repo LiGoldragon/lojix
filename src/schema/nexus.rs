@@ -10,22 +10,6 @@ pub type Boolean = bool;
 pub type Path = std::string::String;
 
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::Input as OrdinaryInput;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::Output as OrdinaryOutput;
-#[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::Input as MetaInput;
-#[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::Output as MetaOutput;
-#[rustfmt::skip]
-pub use crate::schema::sema::SemaReadInput as SemaReadInput;
-#[rustfmt::skip]
-pub use crate::schema::sema::SemaReadOutput as SemaReadOutput;
-#[rustfmt::skip]
-pub use crate::schema::sema::SemaWriteInput as SemaWriteInput;
-#[rustfmt::skip]
-pub use crate::schema::sema::SemaWriteOutput as SemaWriteOutput;
-#[rustfmt::skip]
 pub use signal_lojix::schema::lib::ClusterName as ClusterName;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::NodeName as NodeName;
@@ -68,9 +52,9 @@ pub use nota::{NotaDecodeError, NotaEncode, NotaSource};
     derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum SignalInput {
-    OrdinaryInput(OrdinaryInput),
-    MetaInput(MetaInput),
+pub enum RoutedMail {
+    Ordinary(signal_lojix::Input),
+    Meta(meta_signal_lojix::Input),
 }
 
 #[rustfmt::skip]
@@ -79,9 +63,9 @@ pub enum SignalInput {
     derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum SignalOutput {
-    OrdinaryOutput(OrdinaryOutput),
-    MetaOutput(MetaOutput),
+pub enum RoutedReply {
+    Ordinary(signal_lojix::Output),
+    Meta(meta_signal_lojix::Output),
 }
 
 #[rustfmt::skip]
@@ -109,7 +93,7 @@ pub struct TargetStore(String);
 pub enum BuildTarget {
     Local,
     Remote(BuilderNode),
-    TargetStore(TargetStore),
+    Target(TargetStore),
 }
 
 #[rustfmt::skip]
@@ -130,8 +114,8 @@ pub struct ExtraSubstituter {
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct FlakeAuthRequest {
-    pub source: ProposalSource,
-    pub flake: FlakeReference,
+    pub proposal_source: ProposalSource,
+    pub flake_reference: FlakeReference,
     pub source_revision_policy: SourceRevisionPolicy,
 }
 
@@ -172,8 +156,8 @@ pub enum MaterializationShape {
 pub struct HorizonMaterializationCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub source: ProposalSource,
-    pub shape: MaterializationShape,
+    pub proposal_source: ProposalSource,
+    pub materialization_shape: MaterializationShape,
 }
 
 #[rustfmt::skip]
@@ -194,8 +178,8 @@ pub struct FlakeInputReference {
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct FlakeInputOverride {
-    pub name: String,
-    pub reference: FlakeInputReference,
+    pub string: String,
+    pub flake_input_reference: FlakeInputReference,
 }
 
 #[rustfmt::skip]
@@ -216,11 +200,11 @@ pub struct NixEvalCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub generation_artifact: GenerationArtifact,
-    pub flake: FlakeReference,
-    pub source_revision: SourceRevisionRecord,
-    pub attribute: String,
-    pub overrides: Vec<FlakeInputOverride>,
-    pub target: BuildTarget,
+    pub flake_reference: FlakeReference,
+    pub source_revision_record: SourceRevisionRecord,
+    pub string: String,
+    pub flake_input_override_vector: Vec<FlakeInputOverride>,
+    pub build_target: BuildTarget,
 }
 
 #[rustfmt::skip]
@@ -232,8 +216,8 @@ pub struct NixEvalCommand {
 pub struct NixBuildCommand {
     pub generation_identifier: GenerationIdentifier,
     pub closure_path: ClosurePath,
-    pub target: BuildTarget,
-    pub substituters: Vec<ExtraSubstituter>,
+    pub build_target: BuildTarget,
+    pub extra_substituter_vector: Vec<ExtraSubstituter>,
 }
 
 #[rustfmt::skip]
@@ -247,7 +231,7 @@ pub struct CopyClosureCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub closure_path: ClosurePath,
-    pub source: BuildTarget,
+    pub build_target: BuildTarget,
 }
 
 #[rustfmt::skip]
@@ -257,8 +241,8 @@ pub struct CopyClosureCommand {
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UserEnvironmentActivationProfile {
-    pub action: UserEnvironmentAction,
-    pub user: UserName,
+    pub user_environment_action: UserEnvironmentAction,
+    pub user_name: UserName,
 }
 
 #[rustfmt::skip]
@@ -285,7 +269,7 @@ pub struct ActivateGenerationCommand {
     pub node_name: NodeName,
     pub closure_path: ClosurePath,
     pub activation_effect: ActivationEffect,
-    pub profile: ActivationProfile,
+    pub activation_profile: ActivationProfile,
 }
 
 #[rustfmt::skip]
@@ -308,8 +292,8 @@ pub struct PathInfoGcCommand {
 pub struct HermeticCheckCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub flake: FlakeReference,
-    pub system: String,
+    pub flake_reference: FlakeReference,
+    pub string: String,
 }
 
 #[rustfmt::skip]
@@ -332,10 +316,10 @@ pub struct CheckBuilt {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct BringUpTestVmCommand {
     pub cluster_name: ClusterName,
-    pub node_name: NodeName,
+    pub node: NodeName,
     pub host: NodeName,
-    pub runner: ClosurePath,
-    pub guest_ip: String,
+    pub closure_path: ClosurePath,
+    pub string: String,
 }
 
 #[rustfmt::skip]
@@ -346,7 +330,7 @@ pub struct BringUpTestVmCommand {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TearDownTestVmCommand {
     pub cluster_name: ClusterName,
-    pub node_name: NodeName,
+    pub node: NodeName,
     pub host: NodeName,
 }
 
@@ -358,7 +342,7 @@ pub struct TearDownTestVmCommand {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TestVmBroughtUp {
     pub cluster_name: ClusterName,
-    pub node_name: NodeName,
+    pub node: NodeName,
     pub host: NodeName,
 }
 
@@ -370,7 +354,7 @@ pub struct TestVmBroughtUp {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TestVmTornDown {
     pub cluster_name: ClusterName,
-    pub node_name: NodeName,
+    pub node: NodeName,
     pub host: NodeName,
 }
 
@@ -448,7 +432,7 @@ pub struct ActivatedGeneration {
 pub struct GarbageCollected {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub reclaimed_paths: Integer,
+    pub integer: Integer,
 }
 
 #[rustfmt::skip]
@@ -458,8 +442,8 @@ pub struct GarbageCollected {
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct EffectFailure {
-    pub stage: EffectStage,
-    pub detail: String,
+    pub effect_stage: EffectStage,
+    pub string: String,
 }
 
 #[rustfmt::skip]
@@ -505,8 +489,8 @@ pub enum EffectResult {
     GenerationActivated(ActivatedGeneration),
     PathsCollected(GarbageCollected),
     HermeticCheckBuilt(CheckBuilt),
-    TestVmBroughtUp(TestVmBroughtUp),
-    TestVmTornDown(TestVmTornDown),
+    VmBroughtUp(TestVmBroughtUp),
+    VmTornDown(TestVmTornDown),
     EffectFailed(EffectFailure),
 }
 
@@ -517,7 +501,7 @@ pub enum EffectResult {
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum NexusWork {
-    SignalArrived(SignalInput),
+    SignalArrived(RoutedMail),
     SemaReadCompleted(SemaReadOutput),
     SemaWriteCompleted(SemaWriteOutput),
     EffectCompleted(EffectResult),
@@ -533,7 +517,7 @@ pub enum NexusAction {
     CommandSemaRead(SemaReadInput),
     CommandSemaWrite(SemaWriteInput),
     CommandEffect(EffectCommand),
-    ReplyToSignal(SignalOutput),
+    ReplyToSignal(RoutedReply),
     Continue(NexusWork),
 }
 
@@ -544,7 +528,7 @@ pub enum NexusAction {
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Input {
-    NexusWork(NexusWork),
+    Work(NexusWork),
 }
 
 #[rustfmt::skip]
@@ -554,7 +538,7 @@ pub enum Input {
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Output {
-    NexusAction(NexusAction),
+    Action(NexusAction),
 }
 
 #[rustfmt::skip]
@@ -653,22 +637,22 @@ impl From<Vec<FlakeInputOverride>> for MaterializedInputs {
 }
 
 #[rustfmt::skip]
-impl SignalInput {
-    pub fn ordinary_input(payload: OrdinaryInput) -> Self {
-        Self::OrdinaryInput(payload)
+impl RoutedMail {
+    pub fn ordinary(payload: signal_lojix::Input) -> Self {
+        Self::Ordinary(payload)
     }
-    pub fn meta_input(payload: MetaInput) -> Self {
-        Self::MetaInput(payload)
+    pub fn meta(payload: meta_signal_lojix::Input) -> Self {
+        Self::Meta(payload)
     }
 }
 
 #[rustfmt::skip]
-impl SignalOutput {
-    pub fn ordinary_output(payload: OrdinaryOutput) -> Self {
-        Self::OrdinaryOutput(payload)
+impl RoutedReply {
+    pub fn ordinary(payload: signal_lojix::Output) -> Self {
+        Self::Ordinary(payload)
     }
-    pub fn meta_output(payload: MetaOutput) -> Self {
-        Self::MetaOutput(payload)
+    pub fn meta(payload: meta_signal_lojix::Output) -> Self {
+        Self::Meta(payload)
     }
 }
 
@@ -677,8 +661,8 @@ impl BuildTarget {
     pub fn remote(payload: NodeName) -> Self {
         Self::Remote(BuilderNode::new(payload))
     }
-    pub fn target_store(payload: String) -> Self {
-        Self::TargetStore(TargetStore::new(payload))
+    pub fn target(payload: String) -> Self {
+        Self::Target(TargetStore::new(payload))
     }
 }
 
@@ -759,11 +743,11 @@ impl EffectResult {
     pub fn hermetic_check_built(payload: CheckBuilt) -> Self {
         Self::HermeticCheckBuilt(payload)
     }
-    pub fn test_vm_brought_up(payload: TestVmBroughtUp) -> Self {
-        Self::TestVmBroughtUp(payload)
+    pub fn vm_brought_up(payload: TestVmBroughtUp) -> Self {
+        Self::VmBroughtUp(payload)
     }
-    pub fn test_vm_torn_down(payload: TestVmTornDown) -> Self {
-        Self::TestVmTornDown(payload)
+    pub fn vm_torn_down(payload: TestVmTornDown) -> Self {
+        Self::VmTornDown(payload)
     }
     pub fn effect_failed(payload: EffectFailure) -> Self {
         Self::EffectFailed(payload)
@@ -772,7 +756,7 @@ impl EffectResult {
 
 #[rustfmt::skip]
 impl NexusWork {
-    pub fn signal_arrived(payload: SignalInput) -> Self {
+    pub fn signal_arrived(payload: RoutedMail) -> Self {
         Self::SignalArrived(payload)
     }
     pub fn sema_read_completed(payload: SemaReadOutput) -> Self {
@@ -797,7 +781,7 @@ impl NexusAction {
     pub fn command_effect(payload: EffectCommand) -> Self {
         Self::CommandEffect(payload)
     }
-    pub fn reply_to_signal(payload: SignalOutput) -> Self {
+    pub fn reply_to_signal(payload: RoutedReply) -> Self {
         Self::ReplyToSignal(payload)
     }
     pub fn r#continue(payload: NexusWork) -> Self {
@@ -807,43 +791,15 @@ impl NexusAction {
 
 #[rustfmt::skip]
 impl Input {
-    pub fn nexus_work(payload: NexusWork) -> Self {
-        Self::NexusWork(payload)
+    pub fn work(payload: NexusWork) -> Self {
+        Self::Work(payload)
     }
 }
 
 #[rustfmt::skip]
 impl Output {
-    pub fn nexus_action(payload: NexusAction) -> Self {
-        Self::NexusAction(payload)
-    }
-}
-
-#[rustfmt::skip]
-impl From<OrdinaryInput> for SignalInput {
-    fn from(payload: OrdinaryInput) -> Self {
-        Self::OrdinaryInput(payload)
-    }
-}
-
-#[rustfmt::skip]
-impl From<MetaInput> for SignalInput {
-    fn from(payload: MetaInput) -> Self {
-        Self::MetaInput(payload)
-    }
-}
-
-#[rustfmt::skip]
-impl From<OrdinaryOutput> for SignalOutput {
-    fn from(payload: OrdinaryOutput) -> Self {
-        Self::OrdinaryOutput(payload)
-    }
-}
-
-#[rustfmt::skip]
-impl From<MetaOutput> for SignalOutput {
-    fn from(payload: MetaOutput) -> Self {
-        Self::MetaOutput(payload)
+    pub fn action(payload: NexusAction) -> Self {
+        Self::Action(payload)
     }
 }
 
@@ -857,7 +813,7 @@ impl From<BuilderNode> for BuildTarget {
 #[rustfmt::skip]
 impl From<TargetStore> for BuildTarget {
     fn from(payload: TargetStore) -> Self {
-        Self::TargetStore(payload)
+        Self::Target(payload)
     }
 }
 
@@ -1011,14 +967,14 @@ impl From<CheckBuilt> for EffectResult {
 #[rustfmt::skip]
 impl From<TestVmBroughtUp> for EffectResult {
     fn from(payload: TestVmBroughtUp) -> Self {
-        Self::TestVmBroughtUp(payload)
+        Self::VmBroughtUp(payload)
     }
 }
 
 #[rustfmt::skip]
 impl From<TestVmTornDown> for EffectResult {
     fn from(payload: TestVmTornDown) -> Self {
-        Self::TestVmTornDown(payload)
+        Self::VmTornDown(payload)
     }
 }
 
@@ -1030,8 +986,8 @@ impl From<EffectFailure> for EffectResult {
 }
 
 #[rustfmt::skip]
-impl From<SignalInput> for NexusWork {
-    fn from(payload: SignalInput) -> Self {
+impl From<RoutedMail> for NexusWork {
+    fn from(payload: RoutedMail) -> Self {
         Self::SignalArrived(payload)
     }
 }
@@ -1079,8 +1035,8 @@ impl From<EffectCommand> for NexusAction {
 }
 
 #[rustfmt::skip]
-impl From<SignalOutput> for NexusAction {
-    fn from(payload: SignalOutput) -> Self {
+impl From<RoutedReply> for NexusAction {
+    fn from(payload: RoutedReply) -> Self {
         Self::ReplyToSignal(payload)
     }
 }
@@ -1095,14 +1051,14 @@ impl From<NexusWork> for NexusAction {
 #[rustfmt::skip]
 impl From<NexusWork> for Input {
     fn from(payload: NexusWork) -> Self {
-        Self::NexusWork(payload)
+        Self::Work(payload)
     }
 }
 
 #[rustfmt::skip]
 impl From<NexusAction> for Output {
     fn from(payload: NexusAction) -> Self {
-        Self::NexusAction(payload)
+        Self::Action(payload)
     }
 }
 
@@ -1445,7 +1401,7 @@ impl std::error::Error for EngineStopFailure {}
 
 #[rustfmt::skip]
 pub type NexusRunnerNextStep = triad_runtime::NextStep<
-    SignalOutput,
+    RoutedReply,
     SemaWriteInput,
     SemaReadInput,
     EffectCommand,
@@ -1453,7 +1409,7 @@ pub type NexusRunnerNextStep = triad_runtime::NextStep<
 >;
 #[rustfmt::skip]
 impl triad_runtime::NexusAction for NexusAction {
-    type Reply = SignalOutput;
+    type Reply = RoutedReply;
     type SemaWrite = SemaWriteInput;
     type SemaRead = SemaReadInput;
     type Effect = EffectCommand;
@@ -1504,7 +1460,7 @@ pub trait NexusEngine: Send {
     fn budget_exhausted_reply(
         &self,
         exhausted: triad_runtime::ContinuationExhausted,
-    ) -> SignalOutput;
+    ) -> RoutedReply;
     fn decide(
         &mut self,
         input: nexus::Nexus<nexus::Work>,
@@ -1548,7 +1504,7 @@ for NexusRunnerAdapter<'engine, Engine>
 where
     Engine: NexusEngine,
 {
-    type Reply = SignalOutput;
+    type Reply = RoutedReply;
     type SemaWrite = SemaWriteInput;
     type SemaRead = SemaReadInput;
     type Effect = EffectCommand;

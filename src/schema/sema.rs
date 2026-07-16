@@ -126,8 +126,8 @@ pub enum SemaReadOutput {
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct EventLogPage {
-    pub deployment_events: Vec<DeploymentPhaseEvent>,
-    pub retention_events: Vec<CacheRetentionTransitionEvent>,
+    pub deployment_phase_event_vector: Vec<DeploymentPhaseEvent>,
+    pub cache_retention_transition_event_vector: Vec<CacheRetentionTransitionEvent>,
     pub state_marker: StateMarker,
 }
 
@@ -183,8 +183,8 @@ pub struct ActivationCommit {
 pub struct ContainerTransition {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub container: ContainerName,
-    pub state: ContainerState,
+    pub container_name: ContainerName,
+    pub container_state: ContainerState,
 }
 
 #[rustfmt::skip]
@@ -277,8 +277,8 @@ pub struct ContainerReceipt {
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RejectionReport {
-    pub reason: RejectionReason,
-    pub marker: StateMarker,
+    pub rejection_reason: RejectionReason,
+    pub state_marker: StateMarker,
 }
 
 #[rustfmt::skip]
@@ -382,7 +382,7 @@ pub struct GcRoot {
     pub node_name: NodeName,
     pub generation_slot: GenerationSlot,
     pub closure_path: ClosurePath,
-    pub label: Option<PinLabel>,
+    pub optional_pin_label: Option<PinLabel>,
 }
 
 #[rustfmt::skip]
@@ -401,7 +401,7 @@ pub struct EventLogTable(Vec<EventLogEntry>);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct EventLogEntry {
     pub event_log_position: EventLogPosition,
-    pub record: LoggedEvent,
+    pub logged_event: LoggedEvent,
 }
 
 #[rustfmt::skip]
@@ -433,8 +433,8 @@ pub struct ContainerLifecycleTable(Vec<ContainerLifecycleRecord>);
 pub struct ContainerLifecycleRecord {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub container: ContainerName,
-    pub state: ContainerState,
+    pub container_name: ContainerName,
+    pub container_state: ContainerState,
     pub event_log_position: EventLogPosition,
 }
 
@@ -457,12 +457,12 @@ pub struct DeployJob {
     pub generation_identifier: GenerationIdentifier,
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub submission: DeploySubmission,
-    pub phase: DeployJobPhase,
-    pub closure_path: Option<ClosurePath>,
+    pub deploy_submission: DeploySubmission,
+    pub deploy_job_phase: DeployJobPhase,
+    pub optional_closure_path: Option<ClosurePath>,
     pub source_revision_policy: SourceRevisionPolicy,
-    pub requested_ref: FlakeReference,
-    pub resolved_ref: Option<FlakeReference>,
+    pub flake_reference: FlakeReference,
+    pub optional_flake_reference: Option<FlakeReference>,
     pub resolved_revision: Option<String>,
     pub resolved_target: Option<String>,
     pub boot_once_unit: Option<String>,
@@ -510,12 +510,12 @@ pub struct TestRunTable(Vec<StoredTestRun>);
 pub struct StoredTestRun {
     pub test_run_identifier: TestRunIdentifier,
     pub cluster_name: ClusterName,
-    pub node_name: NodeName,
+    pub node: NodeName,
     pub host: NodeName,
-    pub mode: TestMode,
-    pub phase: TestRunPhase,
-    pub outcome: TestOutcome,
-    pub closure_path: Option<ClosurePath>,
+    pub test_mode: TestMode,
+    pub test_run_phase: TestRunPhase,
+    pub test_outcome: TestOutcome,
+    pub optional_closure_path: Option<ClosurePath>,
 }
 
 #[rustfmt::skip]
@@ -525,8 +525,8 @@ pub struct StoredTestRun {
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Input {
-    SemaReadInput(SemaReadInput),
-    SemaWriteInput(SemaWriteInput),
+    Read(SemaReadInput),
+    Write(SemaWriteInput),
 }
 
 #[rustfmt::skip]
@@ -536,8 +536,8 @@ pub enum Input {
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Output {
-    SemaReadOutput(SemaReadOutput),
-    SemaWriteOutput(SemaWriteOutput),
+    Read(SemaReadOutput),
+    Write(SemaWriteOutput),
 }
 
 #[rustfmt::skip]
@@ -830,21 +830,21 @@ impl LoggedEvent {
 
 #[rustfmt::skip]
 impl Input {
-    pub fn sema_read_input(payload: SemaReadInput) -> Self {
-        Self::SemaReadInput(payload)
+    pub fn read(payload: SemaReadInput) -> Self {
+        Self::Read(payload)
     }
-    pub fn sema_write_input(payload: SemaWriteInput) -> Self {
-        Self::SemaWriteInput(payload)
+    pub fn write(payload: SemaWriteInput) -> Self {
+        Self::Write(payload)
     }
 }
 
 #[rustfmt::skip]
 impl Output {
-    pub fn sema_read_output(payload: SemaReadOutput) -> Self {
-        Self::SemaReadOutput(payload)
+    pub fn read(payload: SemaReadOutput) -> Self {
+        Self::Read(payload)
     }
-    pub fn sema_write_output(payload: SemaWriteOutput) -> Self {
-        Self::SemaWriteOutput(payload)
+    pub fn write(payload: SemaWriteOutput) -> Self {
+        Self::Write(payload)
     }
 }
 
@@ -1068,28 +1068,28 @@ impl From<ContainerLifecycleRecord> for LoggedEvent {
 #[rustfmt::skip]
 impl From<SemaReadInput> for Input {
     fn from(payload: SemaReadInput) -> Self {
-        Self::SemaReadInput(payload)
+        Self::Read(payload)
     }
 }
 
 #[rustfmt::skip]
 impl From<SemaWriteInput> for Input {
     fn from(payload: SemaWriteInput) -> Self {
-        Self::SemaWriteInput(payload)
+        Self::Write(payload)
     }
 }
 
 #[rustfmt::skip]
 impl From<SemaReadOutput> for Output {
     fn from(payload: SemaReadOutput) -> Self {
-        Self::SemaReadOutput(payload)
+        Self::Read(payload)
     }
 }
 
 #[rustfmt::skip]
 impl From<SemaWriteOutput> for Output {
     fn from(payload: SemaWriteOutput) -> Self {
-        Self::SemaWriteOutput(payload)
+        Self::Write(payload)
     }
 }
 
