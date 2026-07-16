@@ -73,14 +73,14 @@ fn dune_host_deploy(action: ordinary::HostDeployAction) -> meta::Input {
 /// Drive one meta `Input` through a fresh engine and return the meta reply.
 fn drive(input: meta::Input) -> meta::Output {
     let mut engine = SchemaRuntime::new();
-    let work = nexus::NexusWork::SignalArrived(nexus::SignalInput::MetaInput(input))
+    let work = nexus::NexusWork::SignalArrived(nexus::RoutedMail::Meta(input))
         .with_origin_route(nexus::OriginRoute::new(0));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
     match runtime.block_on(async { engine.execute(work).await.into_root() }) {
-        nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => output,
+        nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Meta(output)) => output,
         other => panic!("expected a meta reply from the engine, got {other:?}"),
     }
 }

@@ -10,6 +10,14 @@ pub type Boolean = bool;
 pub type Path = std::string::String;
 
 #[rustfmt::skip]
+pub use crate::schema::sema::SemaReadInput as SemaReadInput;
+#[rustfmt::skip]
+pub use crate::schema::sema::SemaReadOutput as SemaReadOutput;
+#[rustfmt::skip]
+pub use crate::schema::sema::SemaWriteInput as SemaWriteInput;
+#[rustfmt::skip]
+pub use crate::schema::sema::SemaWriteOutput as SemaWriteOutput;
+#[rustfmt::skip]
 pub use signal_lojix::schema::lib::ClusterName as ClusterName;
 #[rustfmt::skip]
 pub use signal_lojix::schema::lib::NodeName as NodeName;

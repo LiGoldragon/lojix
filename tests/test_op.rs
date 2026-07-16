@@ -29,7 +29,7 @@ use lojix::schema_runtime::{RuntimeConfiguration, SchemaRuntime};
 use meta_signal_lojix::schema::lib as meta;
 use signal_lojix::schema::lib as ordinary;
 
-fn run(engine: &mut SchemaRuntime, input: nexus::SignalInput) -> nexus::SignalOutput {
+fn run(engine: &mut SchemaRuntime, input: nexus::RoutedMail) -> nexus::RoutedReply {
     let work = nexus::NexusWork::SignalArrived(input).with_origin_route(nexus::OriginRoute::new(0));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -41,17 +41,17 @@ fn run(engine: &mut SchemaRuntime, input: nexus::SignalInput) -> nexus::SignalOu
     }
 }
 
-fn meta_reply(output: nexus::SignalOutput) -> meta::Output {
+fn meta_reply(output: nexus::RoutedReply) -> meta::Output {
     match output {
-        nexus::SignalOutput::MetaOutput(output) => output,
-        nexus::SignalOutput::OrdinaryOutput(output) => panic!("expected meta, got {output:?}"),
+        nexus::RoutedReply::Meta(output) => output,
+        nexus::RoutedReply::Ordinary(output) => panic!("expected meta, got {output:?}"),
     }
 }
 
-fn ordinary_reply(output: nexus::SignalOutput) -> ordinary::Output {
+fn ordinary_reply(output: nexus::RoutedReply) -> ordinary::Output {
     match output {
-        nexus::SignalOutput::OrdinaryOutput(output) => output,
-        nexus::SignalOutput::MetaOutput(output) => panic!("expected ordinary, got {output:?}"),
+        nexus::RoutedReply::Ordinary(output) => output,
+        nexus::RoutedReply::Meta(output) => panic!("expected ordinary, got {output:?}"),
     }
 }
 
@@ -61,8 +61,8 @@ fn engine() -> SchemaRuntime {
     SchemaRuntime::new()
 }
 
-fn check_request(node: &str) -> nexus::SignalInput {
-    nexus::SignalInput::MetaInput(meta::Input::Test(meta::Test::new(
+fn check_request(node: &str) -> nexus::RoutedMail {
+    nexus::RoutedMail::Meta(meta::Input::Test(meta::Test::new(
         meta::TestRequest::Check(meta::QuickCheck::new(vec![ordinary::NodeName::new(node)])),
     )))
 }
@@ -72,8 +72,8 @@ fn run_request(
     node: &str,
     host: ordinary::HostSelection,
     mode: ordinary::TestMode,
-) -> nexus::SignalInput {
-    nexus::SignalInput::MetaInput(meta::Input::Test(meta::Test::new(meta::TestRequest::Run(
+) -> nexus::RoutedMail {
+    nexus::RoutedMail::Meta(meta::Input::Test(meta::Test::new(meta::TestRequest::Run(
         meta::TestRun {
             cluster_name: ordinary::ClusterName::new(cluster),
             node_selection: meta::NodeSelection::Nodes(vec![ordinary::NodeName::new(node)]),
@@ -83,7 +83,7 @@ fn run_request(
     ))))
 }
 
-fn accepted_identifier(output: nexus::SignalOutput) -> u64 {
+fn accepted_identifier(output: nexus::RoutedReply) -> u64 {
     match meta_reply(output) {
         meta::Output::Tested(accepted) => *accepted.payload().test_run_identifier.payload(),
         other => panic!("expected Tested(AcceptedTest), got {other:?}"),
@@ -95,7 +95,7 @@ fn query_runs(
     cluster: &str,
     node: &str,
 ) -> Vec<ordinary::TestRunRecord> {
-    let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::Query(ordinary::Query::new(
+    let input = nexus::RoutedMail::Ordinary(ordinary::Input::Query(ordinary::Query::new(
         ordinary::Selection::ByTestRun(ordinary::TestRunLookup {
             cluster_name: ordinary::ClusterName::new(cluster),
             node_name: ordinary::NodeName::new(node),
@@ -238,7 +238,7 @@ fn query_by_run_identifier_filters_to_one() {
     let mut engine = engine();
     accepted_identifier(run(&mut engine, check_request("mercury")));
     let second = accepted_identifier(run(&mut engine, check_request("mercury")));
-    let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::Query(ordinary::Query::new(
+    let input = nexus::RoutedMail::Ordinary(ordinary::Input::Query(ordinary::Query::new(
         ordinary::Selection::ByTestRun(ordinary::TestRunLookup {
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new("mercury"),
@@ -619,14 +619,14 @@ fn engine_with_projection() -> (tempfile::TempDir, SchemaRuntime) {
     (directory, engine)
 }
 
-fn submit_verdict(engine: &mut SchemaRuntime, request: meta::TestRequest) -> nexus::SignalOutput {
+fn submit_verdict(engine: &mut SchemaRuntime, request: meta::TestRequest) -> nexus::RoutedReply {
     run(
         engine,
-        nexus::SignalInput::MetaInput(meta::Input::Test(meta::Test::new(request))),
+        nexus::RoutedMail::Meta(meta::Input::Test(meta::Test::new(request))),
     )
 }
 
-fn rejection_reason(output: nexus::SignalOutput) -> meta::TestRejectionReason {
+fn rejection_reason(output: nexus::RoutedReply) -> meta::TestRejectionReason {
     match meta_reply(output) {
         meta::Output::TestRejected(rejected) => rejected.into_payload().test_rejection_reason,
         other => panic!("expected TestRejected, got {other:?}"),

@@ -4,7 +4,7 @@
 //! Resolves the port-plan §4.4 blocker by binding two `AsyncListenerSocket`s on
 //! one `AsyncMultiListenerDaemon` (the runtime's two-socket primitive), each
 //! tagged by its authority role. `handle_stream` decodes the length-prefixed wire frame
-//! for the arriving role into a `SignalInput`, drives it through
+//! for the arriving role into a `RoutedMail`, drives it through
 //! awaits `NexusEngine::execute` (which runs the `Runner` continuation loop —
 //! the deploy pipeline included), and encodes the reply back. The schema engine
 //! is the single source of routing truth; there is no inline request `Store`.
@@ -324,10 +324,7 @@ impl RequestWorker {
         let body = self.read_body(connection).await?;
         let (_, input) = signal_lojix::schema::lib::Input::decode_signal_frame(body.bytes())?;
         let output = self
-            .execute_request(
-                ListenerRole::Ordinary,
-                nexus::SignalInput::OrdinaryInput(input),
-            )
+            .execute_request(ListenerRole::Ordinary, nexus::RoutedMail::Ordinary(input))
             .await;
         let reply = Self::ordinary_reply(output)?;
         self.codec
@@ -356,7 +353,7 @@ impl RequestWorker {
             meta::Input::Test(request) => self.submit_test(request.into_payload()).await,
             other => {
                 let output = self
-                    .execute_request(ListenerRole::Owner, nexus::SignalInput::MetaInput(other))
+                    .execute_request(ListenerRole::Owner, nexus::RoutedMail::Meta(other))
                     .await;
                 Self::meta_reply(output)?
             }
@@ -441,8 +438,8 @@ impl RequestWorker {
     async fn execute_request(
         &self,
         listener: ListenerRole,
-        signal_input: nexus::SignalInput,
-    ) -> nexus::SignalOutput {
+        signal_input: nexus::RoutedMail,
+    ) -> nexus::RoutedReply {
         Self::execute_with_store(
             self.store.clone(),
             self.configuration.clone(),
@@ -461,8 +458,8 @@ impl RequestWorker {
         store: Arc<Store>,
         configuration: Arc<RuntimeConfiguration>,
         listener: ListenerRole,
-        signal_input: nexus::SignalInput,
-    ) -> nexus::SignalOutput {
+        signal_input: nexus::RoutedMail,
+    ) -> nexus::RoutedReply {
         let mut engine = SchemaRuntime::with_store_and_configuration(store, configuration);
         let work = nexus::NexusWork::SignalArrived(signal_input)
             .with_origin_route(nexus::OriginRoute::new(0));
@@ -476,10 +473,10 @@ impl RequestWorker {
         }
     }
 
-    fn invariant_rejection(listener: ListenerRole) -> nexus::SignalOutput {
+    fn invariant_rejection(listener: ListenerRole) -> nexus::RoutedReply {
         match listener {
-            ListenerRole::Owner => nexus::SignalOutput::MetaOutput(
-                meta_signal_lojix::schema::lib::Output::DeployRejected(
+            ListenerRole::Owner => {
+                nexus::RoutedReply::Meta(meta_signal_lojix::schema::lib::Output::DeployRejected(
                     meta_signal_lojix::schema::lib::DeployRejected::new(
                         meta_signal_lojix::schema::lib::RejectedDeploy {
                             deploy_rejection_reason:
@@ -490,10 +487,10 @@ impl RequestWorker {
                             },
                         },
                     ),
-                ),
-            ),
-            ListenerRole::Ordinary => nexus::SignalOutput::OrdinaryOutput(
-                signal_lojix::schema::lib::Output::QueryRejected(
+                ))
+            }
+            ListenerRole::Ordinary => {
+                nexus::RoutedReply::Ordinary(signal_lojix::schema::lib::Output::QueryRejected(
                     signal_lojix::schema::lib::QueryRejected::new(
                         signal_lojix::schema::lib::RejectedQuery {
                             query_rejection_reason:
@@ -504,22 +501,22 @@ impl RequestWorker {
                             },
                         },
                     ),
-                ),
-            ),
+                ))
+            }
         }
     }
 
-    fn ordinary_reply(output: nexus::SignalOutput) -> Result<signal_lojix::schema::lib::Output> {
+    fn ordinary_reply(output: nexus::RoutedReply) -> Result<signal_lojix::schema::lib::Output> {
         match output {
-            nexus::SignalOutput::OrdinaryOutput(output) => Ok(output),
-            nexus::SignalOutput::MetaOutput(_) => Err(Error::UnexpectedFrame),
+            nexus::RoutedReply::Ordinary(output) => Ok(output),
+            nexus::RoutedReply::Meta(_) => Err(Error::UnexpectedFrame),
         }
     }
 
-    fn meta_reply(output: nexus::SignalOutput) -> Result<meta_signal_lojix::schema::lib::Output> {
+    fn meta_reply(output: nexus::RoutedReply) -> Result<meta_signal_lojix::schema::lib::Output> {
         match output {
-            nexus::SignalOutput::MetaOutput(output) => Ok(output),
-            nexus::SignalOutput::OrdinaryOutput(_) => Err(Error::UnexpectedFrame),
+            nexus::RoutedReply::Meta(output) => Ok(output),
+            nexus::RoutedReply::Ordinary(_) => Err(Error::UnexpectedFrame),
         }
     }
 }

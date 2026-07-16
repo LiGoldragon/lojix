@@ -423,7 +423,7 @@ impl TestPipeline {
         sema::ContainerTransition {
             cluster_name: self.run.cluster.clone(),
             node_name: self.run.node.clone(),
-            container: sema::ContainerName::new(format!("vm-{}", self.run.node.payload())),
+            container_name: sema::ContainerName::new(format!("vm-{}", self.run.node.payload())),
             state,
         }
     }
@@ -1212,8 +1212,8 @@ impl DeployPipeline {
 
     fn flake_auth_request(&self) -> nexus::FlakeAuthRequest {
         nexus::FlakeAuthRequest {
-            source: self.source.clone(),
-            flake: self.flake.clone(),
+            proposal_source: self.source.clone(),
+            flake_reference: self.flake.clone(),
             source_revision_policy: self.source_revision_policy,
         }
     }
@@ -1226,8 +1226,8 @@ impl DeployPipeline {
         nexus::HorizonMaterializationCommand {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
-            source: self.source.clone(),
-            shape: self.materialization_shape(),
+            proposal_source: self.source.clone(),
+            materialization_shape: self.materialization_shape(),
         }
     }
 
@@ -1255,17 +1255,17 @@ impl DeployPipeline {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             generation_artifact: self.generation_artifact,
-            flake: self.flake.clone(),
-            source_revision: self.source_revision_record(),
-            attribute: self.target_attribute(),
-            overrides: self.input_overrides.clone(),
+            flake_reference: self.flake.clone(),
+            source_revision_record: self.source_revision_record(),
+            string: self.target_attribute(),
+            flake_input_override_vector: self.input_overrides.clone(),
             // Build-on-target (Spirit ufjd / 0a9p / lc28, report 150): the eval
             // step must resolve `.drvPath` against the SAME store the build will
             // realize into. A target node that is not the daemon host references
             // model `.drv`s that exist only in its own store, so a daemon-host
             // local eval cannot find them. Mirroring `nix_build_command`'s target
             // points the eval at the target store where those paths already live.
-            target: self.build_target(configuration),
+            build_target: self.build_target(configuration),
         }
     }
 
@@ -1289,8 +1289,8 @@ impl DeployPipeline {
         nexus::NixBuildCommand {
             generation_identifier: self.generation_identifier.clone(),
             closure_path,
-            target: self.build_target(configuration),
-            substituters: self.substituters.clone(),
+            build_target: self.build_target(configuration),
+            extra_substituter_vector: self.substituters.clone(),
         }
     }
 
@@ -1304,7 +1304,7 @@ impl DeployPipeline {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             closure_path,
-            source: self.build_target(configuration),
+            build_target: self.build_target(configuration),
         }
     }
 
@@ -1319,7 +1319,7 @@ impl DeployPipeline {
             node_name: self.node_name.clone(),
             closure_path,
             activation_effect: self.activation_effect,
-            profile: self.action.activation_profile(),
+            activation_profile: self.action.activation_profile(),
         }
     }
 
@@ -1462,12 +1462,12 @@ impl DeployPipeline {
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
-            submission: self.submission(),
+            deploy_submission: self.submission(),
             phase,
-            closure_path: self.closure_path.clone(),
+            optional_closure_path: self.closure_path.clone(),
             source_revision_policy: self.source_revision_policy,
-            requested_ref: self.requested_flake.clone(),
-            resolved_ref: self
+            flake_reference: self.requested_flake.clone(),
+            optional_flake_reference: self
                 .source_revision
                 .as_ref()
                 .map(|source_revision| source_revision.resolved_ref.clone()),
@@ -1556,8 +1556,8 @@ impl sema::DeployJob {
         }
         let source_revision_record = ordinary::SourceRevisionRecord {
             policy: self.source_revision_policy,
-            requested_ref: self.requested_ref.clone(),
-            resolved_ref: self
+            flake_reference: self.requested_ref.clone(),
+            optional_flake_reference: self
                 .resolved_ref
                 .clone()
                 .unwrap_or_else(|| self.requested_ref.clone()),
@@ -1574,7 +1574,7 @@ impl sema::DeployJob {
             generation_artifact: ordinary::GenerationArtifact::CompleteHost,
             activation_effect: ordinary::ActivationEffect::LiveActivation,
             generation_slot: ordinary::GenerationSlot::Current,
-            closure_path: closure_path.clone(),
+            optional_closure_path: closure_path.clone(),
             source_revision_record,
         };
         let root = sema::GcRoot {
@@ -1597,12 +1597,12 @@ impl From<ordinary::TestRunRecord> for sema::StoredTestRun {
         Self {
             test_run_identifier: record.test_run_identifier,
             cluster_name: record.cluster_name,
-            node_name: record.node_name,
+            node: record.node_name,
             host: record.host,
-            mode: record.mode,
-            phase: record.phase,
-            outcome: record.outcome,
-            closure_path: record.closure_path,
+            test_mode: record.mode,
+            test_run_phase: record.phase,
+            test_outcome: record.outcome,
+            optional_closure_path: record.closure_path,
         }
     }
 }
@@ -1804,7 +1804,7 @@ impl SchemaRuntime {
             nexus::NexusWork::SemaWriteCompleted(sema::SemaWriteOutput::DeploySubmitted(accepted))
                 .with_origin_route(nexus::OriginRoute::new(0));
         match self.execute(work).await.into_root() {
-            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => output,
+            nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Meta(output)) => output,
             _ => meta::Output::DeployRejected(meta::DeployRejected::new(
                 self.deploy_rejection(meta::DeployRejectionReason::InternalError),
             )),
@@ -1819,14 +1819,14 @@ impl SchemaRuntime {
     /// which drives the dispatch via [`Self::drive_submitted_test`]. The
     /// hermetic build / live cycle does NOT run here.
     pub async fn submit_test(&mut self, request: meta::TestRequest) -> TestSubmissionOutcome {
-        let work = nexus::NexusWork::SignalArrived(nexus::SignalInput::MetaInput(
-            meta::Input::Test(meta::Test::new(request)),
-        ))
+        let work = nexus::NexusWork::SignalArrived(nexus::RoutedMail::Meta(meta::Input::Test(
+            meta::Test::new(request),
+        )))
         .with_origin_route(nexus::OriginRoute::new(0));
         match self.execute(work).await.into_root() {
-            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
-                meta::Output::Tested(accepted),
-            )) => {
+            nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Meta(meta::Output::Tested(
+                accepted,
+            ))) => {
                 // Stamp the accepted marker onto the cursor so the terminal
                 // outcome reply carries the acceptance marker (like deploy).
                 let accepted = accepted.into_payload();
@@ -1835,7 +1835,7 @@ impl SchemaRuntime {
                 }
                 TestSubmissionOutcome::Accepted(accepted)
             }
-            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
+            nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Meta(
                 meta::Output::TestRejected(rejected),
             )) => TestSubmissionOutcome::Rejected(rejected.into_payload()),
             _ => TestSubmissionOutcome::Rejected(
@@ -1893,7 +1893,7 @@ impl SchemaRuntime {
     async fn drive_to_terminal(&mut self, mut action: nexus::NexusAction) -> meta::Output {
         loop {
             match action {
-                nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => {
+                nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Meta(output)) => {
                     return output;
                 }
                 nexus::NexusAction::CommandSemaWrite(input) => {
@@ -1929,10 +1929,10 @@ impl SchemaRuntime {
 
     // ---- decide: signal arrival routing (port plan §4.2) ----------------
 
-    fn decide_signal_arrival(&mut self, input: nexus::SignalInput) -> nexus::NexusAction {
+    fn decide_signal_arrival(&mut self, input: nexus::RoutedMail) -> nexus::NexusAction {
         match input {
-            nexus::SignalInput::OrdinaryInput(input) => self.decide_ordinary_input(input),
-            nexus::SignalInput::MetaInput(input) => self.decide_meta_input(input),
+            nexus::RoutedMail::Ordinary(input) => self.decide_ordinary_input(input),
+            nexus::RoutedMail::Meta(input) => self.decide_meta_input(input),
         }
     }
 
@@ -1977,14 +1977,14 @@ impl SchemaRuntime {
                 ordinary::RejectedWatch::new(ordinary::WatchRejectionReason::StreamUnavailable),
             )),
         };
-        nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
+        nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Ordinary(reply))
     }
 
     fn close_subscription(&mut self, close: ordinary::SubscriptionClose) -> nexus::NexusAction {
         let reply = ordinary::Output::Unwatched(ordinary::Unwatched::new(
             ordinary::SubscriptionClosed::new(close.into_payload()),
         ));
-        nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
+        nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Ordinary(reply))
     }
 
     fn decide_meta_input(&mut self, input: meta::Input) -> nexus::NexusAction {
@@ -2204,7 +2204,7 @@ impl SchemaRuntime {
                 }),
             ),
         };
-        nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
+        nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Ordinary(reply))
     }
 
     // ---- decide: sema write completion (opens / advances pipeline) ------
@@ -2270,7 +2270,7 @@ impl SchemaRuntime {
                     Some(built.closure_path),
                 )
             }
-            nexus::EffectResult::TestVmBroughtUp(_) => {
+            nexus::EffectResult::VmBroughtUp(_) => {
                 self.record_container(&pipeline, sema::ContainerState::Started);
                 self.set_test_stage(TestStage::BroughtUp);
                 // The deploy-into-VM + assert chain runs here in a live run
@@ -2281,7 +2281,7 @@ impl SchemaRuntime {
                     pipeline.run.tear_down_command(),
                 ))
             }
-            nexus::EffectResult::TestVmTornDown(_) => {
+            nexus::EffectResult::VmTornDown(_) => {
                 self.record_container(&pipeline, sema::ContainerState::Stopped);
                 // Honest LIVE terminal (report 54 Unit 2b fix 1): the bring-up →
                 // teardown bracket ran, but the deploy-into-VM + assert chain
@@ -2608,7 +2608,7 @@ impl SchemaRuntime {
     }
 
     fn reply_meta(output: meta::Output) -> nexus::NexusAction {
-        nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output))
+        nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Meta(output))
     }
 
     // ---- decide: effect completion (drives the deploy chain) ------------
@@ -2692,8 +2692,8 @@ impl SchemaRuntime {
             // invariant failure, surfaced as a deploy failure rather than a
             // misleading success.
             nexus::EffectResult::HermeticCheckBuilt(_)
-            | nexus::EffectResult::TestVmBroughtUp(_)
-            | nexus::EffectResult::TestVmTornDown(_) => self.fail_pipeline(nexus::EffectFailure {
+            | nexus::EffectResult::VmBroughtUp(_)
+            | nexus::EffectResult::VmTornDown(_) => self.fail_pipeline(nexus::EffectFailure {
                 stage: nexus::EffectStage::Build,
                 detail: "test effect result on the deploy pipeline".to_string(),
             }),
@@ -3474,7 +3474,7 @@ impl SchemaRuntime {
         // proves the command shape; `invocation()` is the on-host effect a live
         // run would `.run().await`.
         let _invocation = bring_up.bring_up_invocation();
-        nexus::EffectResult::TestVmBroughtUp(nexus::TestVmBroughtUp {
+        nexus::EffectResult::VmBroughtUp(nexus::TestVmBroughtUp {
             cluster_name: command.cluster_name,
             node_name: command.node_name,
             host: command.host,
@@ -3491,7 +3491,7 @@ impl SchemaRuntime {
     ) -> nexus::EffectResult {
         let tear_down = LiveTestVm::from_tear_down(&command);
         let _invocation = tear_down.tear_down_invocation();
-        nexus::EffectResult::TestVmTornDown(nexus::TestVmTornDown {
+        nexus::EffectResult::VmTornDown(nexus::TestVmTornDown {
             cluster_name: command.cluster_name,
             node_name: command.node_name,
             host: command.host,
@@ -3783,8 +3783,8 @@ impl GeneratedInputDirectory {
     async fn to_override(&self, name: GeneratedInputName) -> Result<nexus::FlakeInputOverride> {
         let hash = NarHash::from_path(&self.path).await?;
         Ok(nexus::FlakeInputOverride {
-            name: name.as_str().to_string(),
-            reference: nexus::FlakeInputReference {
+            string: name.as_str().to_string(),
+            flake_input_reference: nexus::FlakeInputReference {
                 url: format!("path:{}", self.path.display()),
                 nix_archive_hash: hash.as_url_query_value(),
             },
@@ -4973,8 +4973,8 @@ impl nexus::NexusEngine for SchemaRuntime {
     fn budget_exhausted_reply(
         &self,
         _exhausted: triad_runtime::ContinuationExhausted,
-    ) -> nexus::SignalOutput {
-        nexus::SignalOutput::MetaOutput(meta::Output::DeployRejected(meta::DeployRejected::new(
+    ) -> nexus::RoutedReply {
+        nexus::RoutedReply::Meta(meta::Output::DeployRejected(meta::DeployRejected::new(
             self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
         )))
     }
@@ -5108,7 +5108,7 @@ mod tests {
         engine.set_stage(DeployStage::BuildingRecorded);
 
         match engine.advance_after_phase() {
-            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
+            nexus::NexusAction::ReplyToSignal(nexus::RoutedReply::Meta(
                 meta::Output::DeployRejected(_),
             )) => {}
             other => panic!("expected DeployRejected, got {other:?}"),
@@ -5674,7 +5674,7 @@ mod tests {
             generation_identifier: ordinary::GenerationIdentifier::new(72),
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new("ouranos"),
-            submission: sema::DeploySubmission::Host(meta::HostDeployment {
+            deploy_submission: sema::DeploySubmission::Host(meta::HostDeployment {
                 cluster_name: ordinary::ClusterName::new("goldragon"),
                 node_name: ordinary::NodeName::new("ouranos"),
                 host_composition: ordinary::HostComposition::CompleteHost,
@@ -5686,13 +5686,13 @@ mod tests {
                 substituters: Vec::new(),
                 build_attribute: None,
             }),
-            phase: sema::DeployJobPhase::Activating,
-            closure_path: closure.map(ordinary::ClosurePath::new),
+            deploy_job_phase: sema::DeployJobPhase::Activating,
+            optional_closure_path: closure.map(ordinary::ClosurePath::new),
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-            requested_ref: ordinary::FlakeReference::new(
+            flake_reference: ordinary::FlakeReference::new(
                 "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567",
             ),
-            resolved_ref: Some(ordinary::FlakeReference::new(
+            optional_flake_reference: Some(ordinary::FlakeReference::new(
                 "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567",
             )),
             resolved_revision: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
@@ -6132,8 +6132,8 @@ mod tests {
     fn user_environment_activation(mode: meta::UserEnvironmentAction) -> UserEnvironmentActivation {
         let profile =
             nexus::ActivationProfile::UserEnvironment(nexus::UserEnvironmentActivationProfile {
-                action: mode,
-                user: ordinary::UserName::new("li"),
+                user_environment_action: mode,
+                user_name: ordinary::UserName::new("li"),
             });
         match Activation::from_command(
             &activate_command(profile, ordinary::ActivationEffect::LiveActivation),

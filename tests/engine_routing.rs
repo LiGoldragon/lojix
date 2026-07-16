@@ -21,7 +21,7 @@ use meta_signal_lojix::schema::lib as meta;
 use nota::NotaEncode;
 use signal_lojix::schema::lib as ordinary;
 
-fn run(engine: &mut SchemaRuntime, input: nexus::SignalInput) -> nexus::SignalOutput {
+fn run(engine: &mut SchemaRuntime, input: nexus::RoutedMail) -> nexus::RoutedReply {
     let work = nexus::NexusWork::SignalArrived(input).with_origin_route(nexus::OriginRoute::new(0));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -33,24 +33,24 @@ fn run(engine: &mut SchemaRuntime, input: nexus::SignalInput) -> nexus::SignalOu
     }
 }
 
-fn ordinary_reply(output: nexus::SignalOutput) -> ordinary::Output {
+fn ordinary_reply(output: nexus::RoutedReply) -> ordinary::Output {
     match output {
-        nexus::SignalOutput::OrdinaryOutput(output) => output,
-        nexus::SignalOutput::MetaOutput(output) => panic!("expected ordinary, got {output:?}"),
+        nexus::RoutedReply::Ordinary(output) => output,
+        nexus::RoutedReply::Meta(output) => panic!("expected ordinary, got {output:?}"),
     }
 }
 
-fn meta_reply(output: nexus::SignalOutput) -> meta::Output {
+fn meta_reply(output: nexus::RoutedReply) -> meta::Output {
     match output {
-        nexus::SignalOutput::MetaOutput(output) => output,
-        nexus::SignalOutput::OrdinaryOutput(output) => panic!("expected meta, got {output:?}"),
+        nexus::RoutedReply::Meta(output) => output,
+        nexus::RoutedReply::Ordinary(output) => panic!("expected meta, got {output:?}"),
     }
 }
 
 #[test]
 fn query_empty_live_set_returns_empty_listing() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::Query(ordinary::Query::new(
+    let input = nexus::RoutedMail::Ordinary(ordinary::Input::Query(ordinary::Query::new(
         ordinary::Selection::ByNode(ordinary::NodeSelector {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
@@ -84,7 +84,7 @@ fn query_by_event_log_returns_typed_deployment_events() {
         })
         .expect("append event");
 
-    let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::Query(ordinary::Query::new(
+    let input = nexus::RoutedMail::Ordinary(ordinary::Input::Query(ordinary::Query::new(
         ordinary::Selection::ByEventLog(ordinary::EventLogRange {
             from: ordinary::EventLogPosition::new(0),
             until: ordinary::EventLogPosition::new(1),
@@ -104,7 +104,7 @@ fn query_by_event_log_returns_typed_deployment_events() {
 #[test]
 fn watch_deployments_mints_subscription_token() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::WatchDeployments(
+    let input = nexus::RoutedMail::Ordinary(ordinary::Input::WatchDeployments(
         ordinary::WatchDeployments::new(ordinary::DeploymentWatch {
             deployment: None,
             cluster: None,
@@ -123,7 +123,7 @@ fn watch_deployments_mints_subscription_token() {
 #[test]
 fn check_host_key_material_reports_no_mismatches() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::CheckHostKeyMaterial(
+    let input = nexus::RoutedMail::Ordinary(ordinary::Input::CheckHostKeyMaterial(
         ordinary::CheckHostKeyMaterial::new(ordinary::KeyMaterialQuery {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
@@ -143,7 +143,7 @@ fn check_host_key_material_reports_no_mismatches() {
 #[test]
 fn pin_unknown_generation_is_rejected() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Pin(meta::Pin::new(meta::PinRequest {
+    let input = nexus::RoutedMail::Meta(meta::Input::Pin(meta::Pin::new(meta::PinRequest {
         cluster_name: ordinary::ClusterName::new("alpha"),
         node_name: ordinary::NodeName::new("node-1"),
         generation_identifier: ordinary::GenerationIdentifier::new(42),
@@ -159,7 +159,7 @@ fn pin_unknown_generation_is_rejected() {
 #[test]
 fn retire_unknown_generation_is_rejected() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Retire(meta::Retire::new(
+    let input = nexus::RoutedMail::Meta(meta::Input::Retire(meta::Retire::new(
         meta::RetireRequest {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
@@ -192,7 +192,7 @@ fn host_deployment(
     }
 }
 
-fn deploy_rejection_reason(output: nexus::SignalOutput) -> meta::DeployRejectionReason {
+fn deploy_rejection_reason(output: nexus::RoutedReply) -> meta::DeployRejectionReason {
     match meta_reply(output) {
         meta::Output::DeployRejected(rejected) => rejected.payload().deploy_rejection_reason,
         other => panic!("expected DeployRejected, got {other:?}"),
@@ -209,7 +209,7 @@ fn deploy_rejection_reason(output: nexus::SignalOutput) -> meta::DeployRejection
 #[test]
 fn activating_deploy_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
+    let input = nexus::RoutedMail::Meta(meta::Input::Deploy(meta::Deploy::new(
         meta::DeployRequest::Host(host_deployment(
             None,
             ordinary::HostDeployAction::ActivateNow,
@@ -224,7 +224,7 @@ fn activating_deploy_enters_effect_pipeline() {
 #[test]
 fn user_environment_activate_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
+    let input = nexus::RoutedMail::Meta(meta::Input::Deploy(meta::Deploy::new(
         meta::DeployRequest::UserEnvironment(meta::UserEnvironmentDeployment {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
@@ -246,7 +246,7 @@ fn user_environment_activate_enters_effect_pipeline() {
 #[test]
 fn production_deploy_without_build_attribute_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
+    let input = nexus::RoutedMail::Meta(meta::Input::Deploy(meta::Deploy::new(
         meta::DeployRequest::Host(host_deployment(None, ordinary::HostDeployAction::Realize)),
     )));
     assert_eq!(
@@ -258,7 +258,7 @@ fn production_deploy_without_build_attribute_enters_effect_pipeline() {
 #[test]
 fn user_environment_realize_enters_effect_pipeline() {
     let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
+    let input = nexus::RoutedMail::Meta(meta::Input::Deploy(meta::Deploy::new(
         meta::DeployRequest::UserEnvironment(meta::UserEnvironmentDeployment {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
@@ -291,7 +291,7 @@ fn production_eval_materializes_horizon_inputs_and_returns_deploy_accepted() {
     deployment.source = ordinary::ProposalSource::new(cluster_path.display().to_string());
     deployment.flake =
         ordinary::FlakeReference::new(format!("path:{}", directory.path().join("flake").display()));
-    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
+    let input = nexus::RoutedMail::Meta(meta::Input::Deploy(meta::Deploy::new(
         meta::DeployRequest::Host(deployment),
     )));
 

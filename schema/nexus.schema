@@ -4,7 +4,7 @@
 ;; ordinary/meta Signal roots and the local SEMA roots, then names the lojix
 ;; daemon's decision/effect language. Shape follows cloud/schema/nexus.schema
 ;; exactly: imports block, [NexusWork] / [NexusAction] operation roots, then
-;; the record body that declares SignalInput/SignalOutput unions, the
+;; the record body that declares routed mail/reply unions, the
 ;; EffectCommand catalog (= the deploy pipeline), EffectResult, and the
 ;; NexusWork/NexusAction model.
 ;;
@@ -43,6 +43,7 @@
 {
   signal-lojix.[Input Output]
   meta-signal-lojix.[Input Output]
+  lojix.sema.[SemaReadInput SemaReadOutput SemaWriteInput SemaWriteOutput]
   signal-lojix.lib.ClusterName
   signal-lojix.lib.NodeName
   signal-lojix.lib.ClosurePath
