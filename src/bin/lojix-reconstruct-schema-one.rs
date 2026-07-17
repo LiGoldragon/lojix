@@ -1,4 +1,4 @@
-//! Read-only schema-one to schema-two store reconstruction CLI.
+//! Read-only schema-one to schema-three store reconstruction CLI.
 
 use std::ffi::OsString;
 

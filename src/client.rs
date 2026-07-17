@@ -67,6 +67,13 @@ impl OrdinaryClient {
         Self::from_argument(argument)?.run()
     }
 
+    /// Build a client from a contract value without round-tripping through the
+    /// CLI's human-facing NOTA projection. Read-only diagnostic tools use this
+    /// typed boundary so health attribution cannot depend on rendered text.
+    pub fn from_input(input: signal_lojix::schema::lib::Input) -> Self {
+        Self { input }
+    }
+
     pub fn from_argument(argument: ComponentArgument) -> Result<Self> {
         let input = match argument {
             ComponentArgument::SignalFile(file) => Self::decode_signal_file(file.as_path())?,

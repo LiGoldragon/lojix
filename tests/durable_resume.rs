@@ -28,6 +28,7 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
             cluster_name: cluster.clone(),
             node_name: node.clone(),
             generation_artifact: ordinary::GenerationArtifact::BaseHost,
+            optional_user_name: None,
             activation_effect: ordinary::ActivationEffect::LiveActivation,
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path: closure.clone(),

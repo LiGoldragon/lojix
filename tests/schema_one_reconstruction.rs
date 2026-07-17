@@ -4,8 +4,10 @@
 use std::path::Path;
 
 use lojix::Store;
-use lojix::reconstruction::{OmittedDeployJobReason, SchemaOneReconstructor};
-use lojix::schema::sema::{DeployJobPhase, GcRoot, LiveGeneration};
+use lojix::reconstruction::{
+    LegacyLiveGeneration, OmittedDeployJobReason, SchemaOneReconstructor, test_fixture,
+};
+use lojix::schema::sema::DeployJobPhase;
 use redb::{Database, TableDefinition};
 use signal_lojix::schema::lib as ordinary;
 use tempfile::TempDir;
@@ -13,37 +15,8 @@ use tempfile::TempDir;
 const META: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");
 const SCHEMA_VERSION: &str = "schema_version";
 
-fn activation(identifier: u64) -> (LiveGeneration, GcRoot) {
-    let generation_identifier = ordinary::GenerationIdentifier::new(identifier);
-    let cluster_name = ordinary::ClusterName::new("goldragon");
-    let node_name = ordinary::NodeName::new("dune");
-    let closure_path = ordinary::ClosurePath::new("/nix/store/schema-one");
-    (
-        LiveGeneration {
-            deployment_identifier: ordinary::DeploymentIdentifier::new(identifier),
-            generation_identifier: generation_identifier.clone(),
-            cluster_name: cluster_name.clone(),
-            node_name: node_name.clone(),
-            generation_artifact: ordinary::GenerationArtifact::BaseHost,
-            activation_effect: ordinary::ActivationEffect::LiveActivation,
-            generation_slot: ordinary::GenerationSlot::Current,
-            closure_path: closure_path.clone(),
-            source_revision_record: ordinary::SourceRevisionRecord {
-                source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
-                requested_ref: ordinary::FlakeReference::new("github:owner/repo"),
-                resolved_ref: ordinary::FlakeReference::new("github:owner/repo?rev=abc"),
-                string: "abc".to_string(),
-            },
-        },
-        GcRoot {
-            generation_identifier,
-            cluster_name,
-            node_name,
-            generation_slot: ordinary::GenerationSlot::Current,
-            closure_path,
-            optional_pin_label: None,
-        },
-    )
+fn activation(identifier: u64) -> (LegacyLiveGeneration, lojix::schema::sema::GcRoot) {
+    test_fixture::legacy_activation(identifier)
 }
 
 fn source(directory: &TempDir) -> std::path::PathBuf {
@@ -71,7 +44,7 @@ fn row(path: &Path, table: &str, key: &str, bytes: &[u8]) {
 }
 
 #[test]
-fn valid_schema_one_store_reconstructs_to_a_reopenable_schema_two_store() {
+fn valid_schema_one_store_reconstructs_to_a_reopenable_schema_three_store() {
     let directory = tempfile::tempdir().expect("temporary paths");
     let source = source(&directory);
     let (generation, root) = activation(1);
@@ -91,7 +64,7 @@ fn valid_schema_one_store_reconstructs_to_a_reopenable_schema_two_store() {
             .expect("encode root")
             .as_ref(),
     );
-    let destination = directory.path().join("schema-two.sema");
+    let destination = directory.path().join("schema-three.sema");
     let source_before = std::fs::read(&source).expect("source bytes before reconstruction");
 
     let report = SchemaOneReconstructor::new(&source, &destination)
@@ -137,7 +110,7 @@ fn mismatched_generation_root_rejects_without_creating_destination() {
             .expect("encode root")
             .as_ref(),
     );
-    let destination = directory.path().join("schema-two.sema");
+    let destination = directory.path().join("schema-three.sema");
 
     assert!(
         SchemaOneReconstructor::new(&source, &destination)
@@ -163,7 +136,7 @@ fn corrupt_source_row_rejects_without_creating_destination() {
         .insert("bad", &[1, 2, 3][..])
         .expect("corrupt row");
     write.commit().expect("commit corrupt row");
-    let destination = directory.path().join("schema-two.sema");
+    let destination = directory.path().join("schema-three.sema");
 
     assert!(
         SchemaOneReconstructor::new(&source, &destination)
@@ -177,7 +150,7 @@ fn corrupt_source_row_rejects_without_creating_destination() {
 fn existing_destination_is_rejected_idempotently_without_writes() {
     let directory = tempfile::tempdir().expect("temporary paths");
     let source = source(&directory);
-    let destination = directory.path().join("schema-two.sema");
+    let destination = directory.path().join("schema-three.sema");
     std::fs::write(&destination, b"keep").expect("existing destination");
 
     for _ in 0..2 {
@@ -209,7 +182,7 @@ fn legacy_pre_activation_job_is_omitted_with_typed_reason() {
             .expect("encode legacy job")
             .as_ref(),
     );
-    let destination = directory.path().join("schema-two.sema");
+    let destination = directory.path().join("schema-three.sema");
 
     let report = SchemaOneReconstructor::new(&source, &destination)
         .reconstruct()

@@ -23,6 +23,7 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
             cluster_name: cluster.clone(),
             node_name: node.clone(),
             generation_artifact: ordinary::GenerationArtifact::BaseHost,
+            optional_user_name: None,
             activation_effect: ordinary::ActivationEffect::LiveActivation,
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path: closure.clone(),
@@ -73,7 +74,7 @@ fn registered_tables_with_no_rows_report_empty() {
     assert!(matches!(inspection.database(), DatabaseInspection::Opened));
     assert_eq!(
         inspection.schema(),
-        &SchemaInspection::Matches { version: 2 }
+        &SchemaInspection::Matches { version: 3 }
     );
     assert_eq!(
         inspection

@@ -1,5 +1,5 @@
 //! Typed, read-only reconstruction of a schema-one Lojix store into a new
-//! final schema-two store.
+//! final schema-three store.
 //!
 //! The source is opened through redb's read-only API. It is never registered,
 //! compacted, or otherwise written. Every preservable row is decoded and every
@@ -33,7 +33,7 @@ const CONTAINER_LIFECYCLE_TABLE: &str = "container-lifecycle";
 const DEPLOY_JOB_TABLE: &str = "deploy-job";
 const TEST_RUN_TABLE: &str = "test-run";
 
-/// A reason a schema-one deploy cursor cannot be reproduced in schema two.
+/// A reason a schema-one deploy cursor cannot be reproduced in schema three.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OmittedDeployJobReason {
     /// Schema one did not persist a `DeploySubmission`; inventing either a
@@ -168,7 +168,10 @@ impl SchemaOneSnapshot {
         }
         let legacy_jobs = Self::rows::<LegacyDeployJob>(&database, DEPLOY_JOB_TABLE)?;
         Ok(Self {
-            generations: Self::rows(&database, LIVE_SET_TABLE)?,
+            generations: Self::rows::<LegacyLiveGeneration>(&database, LIVE_SET_TABLE)?
+                .into_iter()
+                .map(LegacyLiveGeneration::into_current)
+                .collect(),
             roots: Self::rows(&database, GC_ROOTS_TABLE)?,
             events: Self::rows(&database, EVENT_LOG_TABLE)?,
             containers: Self::rows(&database, CONTAINER_LIFECYCLE_TABLE)?,
@@ -314,6 +317,41 @@ impl SchemaOneSnapshot {
     }
 }
 
+// Schema one persisted generations before a user-environment closure carried
+// its target user. Decode the historic layout exactly, then preserve it in the
+// new store with `None`: a reconstructed legacy user generation cannot stand
+// in for Bird's later exact-user health evidence.
+#[derive(Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[doc(hidden)]
+pub struct LegacyLiveGeneration {
+    deployment_identifier: signal_lojix::schema::lib::DeploymentIdentifier,
+    generation_identifier: signal_lojix::schema::lib::GenerationIdentifier,
+    cluster_name: signal_lojix::schema::lib::ClusterName,
+    node_name: signal_lojix::schema::lib::NodeName,
+    generation_artifact: signal_lojix::schema::lib::GenerationArtifact,
+    activation_effect: signal_lojix::schema::lib::ActivationEffect,
+    generation_slot: signal_lojix::schema::lib::GenerationSlot,
+    closure_path: signal_lojix::schema::lib::ClosurePath,
+    source_revision_record: signal_lojix::schema::lib::SourceRevisionRecord,
+}
+
+impl LegacyLiveGeneration {
+    fn into_current(self) -> LiveGeneration {
+        LiveGeneration {
+            deployment_identifier: self.deployment_identifier,
+            generation_identifier: self.generation_identifier,
+            cluster_name: self.cluster_name,
+            node_name: self.node_name,
+            generation_artifact: self.generation_artifact,
+            optional_user_name: None,
+            activation_effect: self.activation_effect,
+            generation_slot: self.generation_slot,
+            closure_path: self.closure_path,
+            source_revision_record: self.source_revision_record,
+        }
+    }
+}
+
 // Schema one persisted only this incomplete cursor. It deliberately has no
 // DeploySubmission field; decoding it is how reconstruction proves that a
 // restartable Host/UserEnvironment request cannot be honestly invented.
@@ -337,6 +375,47 @@ pub struct LegacyDeployJob {
 #[doc(hidden)]
 pub mod test_fixture {
     use super::*;
+
+    pub fn legacy_activation(deployment_identifier: u64) -> (LegacyLiveGeneration, GcRoot) {
+        let generation_identifier =
+            signal_lojix::schema::lib::GenerationIdentifier::new(deployment_identifier);
+        let cluster_name = signal_lojix::schema::lib::ClusterName::new("goldragon");
+        let node_name = signal_lojix::schema::lib::NodeName::new("dune");
+        let closure_path = signal_lojix::schema::lib::ClosurePath::new("/nix/store/schema-one");
+        (
+            LegacyLiveGeneration {
+                deployment_identifier: signal_lojix::schema::lib::DeploymentIdentifier::new(
+                    deployment_identifier,
+                ),
+                generation_identifier: generation_identifier.clone(),
+                cluster_name: cluster_name.clone(),
+                node_name: node_name.clone(),
+                generation_artifact: signal_lojix::schema::lib::GenerationArtifact::BaseHost,
+                activation_effect: signal_lojix::schema::lib::ActivationEffect::LiveActivation,
+                generation_slot: signal_lojix::schema::lib::GenerationSlot::Current,
+                closure_path: closure_path.clone(),
+                source_revision_record: signal_lojix::schema::lib::SourceRevisionRecord {
+                    source_revision_policy:
+                        signal_lojix::schema::lib::SourceRevisionPolicy::ResolveAndRecord,
+                    requested_ref: signal_lojix::schema::lib::FlakeReference::new(
+                        "github:owner/repo",
+                    ),
+                    resolved_ref: signal_lojix::schema::lib::FlakeReference::new(
+                        "github:owner/repo?rev=abc",
+                    ),
+                    string: "abc".to_string(),
+                },
+            },
+            GcRoot {
+                generation_identifier,
+                cluster_name,
+                node_name,
+                generation_slot: signal_lojix::schema::lib::GenerationSlot::Current,
+                closure_path,
+                optional_pin_label: None,
+            },
+        )
+    }
 
     pub fn legacy_job(deployment_identifier: u64, phase: DeployJobPhase) -> LegacyDeployJob {
         LegacyDeployJob {

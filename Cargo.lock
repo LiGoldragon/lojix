@@ -337,7 +337,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lojix"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "horizon-lib",
  "kameo",
@@ -364,8 +364,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-lojix"
-version = "0.4.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?rev=904d1969313994ee36ebb688c07fc095fdc66b01#904d1969313994ee36ebb688c07fc095fdc66b01"
+version = "0.6.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?rev=543b15d8d1745f9e92c684045eca0e6dcf0092a8#543b15d8d1745f9e92c684045eca0e6dcf0092a8"
 dependencies = [
  "nota",
  "rkyv",
@@ -704,8 +704,8 @@ dependencies = [
 
 [[package]]
 name = "signal-lojix"
-version = "0.4.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix.git?rev=8893cd4bb239fec87d23ae145ea751893050a8a1#8893cd4bb239fec87d23ae145ea751893050a8a1"
+version = "0.5.0"
+source = "git+https://github.com/LiGoldragon/signal-lojix.git?rev=3002a2073303d8f785bbfb58d5dbdbd2edb7a07b#3002a2073303d8f785bbfb58d5dbdbd2edb7a07b"
 dependencies = [
  "nota",
  "rkyv",

@@ -25,7 +25,7 @@ impl SchemaBuild {
 
         let dependencies = ContractSchemaDependencies::from_environment();
         dependencies.emit_rerun_instructions();
-        let Some(plan) = dependencies.into_generation_plan(&self.crate_root, "lojix", "0.4.0")
+        let Some(plan) = dependencies.into_generation_plan(&self.crate_root, "lojix", "0.6.0")
         else {
             return;
         };
@@ -47,18 +47,18 @@ impl ContractSchemaDependencies {
     fn from_environment() -> Self {
         // These versions name the imported contract schemas. The shared
         // frame mechanics remain signal-frame 0.3.0; both lojix contracts are
-        // independently versioned 0.4.0 packages.
+        // independently versioned 0.5.0 (ordinary) and 0.6.0 (meta) packages.
         Self {
             ordinary_signal: DependencySchema::from_cargo_metadata(
                 "signal-lojix",
                 "signal-lojix",
-                "0.4.0",
+                "0.5.0",
             )
             .expect("read signal-lojix schema metadata"),
             meta_signal: DependencySchema::from_cargo_metadata(
                 "meta-signal-lojix",
                 "meta-signal-lojix",
-                "0.4.0",
+                "0.6.0",
             )
             .expect("read meta-signal-lojix schema metadata"),
         }

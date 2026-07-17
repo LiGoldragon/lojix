@@ -893,6 +893,16 @@ impl DeployAction {
         }
     }
 
+    /// The user whose home closure this action activates. Host generations have
+    /// no user identity, while each user-environment generation carries the
+    /// exact target user through persistence and the ordinary query projection.
+    fn user_name(&self) -> Option<ordinary::UserName> {
+        match self {
+            Self::Host(_) => None,
+            Self::UserEnvironment { user, .. } => Some(user.clone()),
+        }
+    }
+
     /// The production flake attribute for this action — used when no direct
     /// `build_attribute` override is given. Host deploys build the node
     /// toplevel (node identity injected by the horizon override);
@@ -1348,6 +1358,7 @@ impl DeployPipeline {
             node_name: self.node_name.clone(),
             generation_slot: self.activation_slot?,
             closure_path: self.closure_path.clone()?,
+            optional_user_name: self.action.user_name(),
             source_revision_record: self.source_revision.clone()?,
         })
     }
@@ -1573,6 +1584,7 @@ impl sema::DeployJob {
             // and a daemon host is a complete host, so the recorded artifact is
             // CompleteHost and the effect a live activation.
             generation_artifact: ordinary::GenerationArtifact::CompleteHost,
+            optional_user_name: None,
             activation_effect: ordinary::ActivationEffect::LiveActivation,
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path: closure_path.clone(),
@@ -2800,14 +2812,26 @@ impl SchemaRuntime {
         // R5) — a mid-pipeline effect failure must not leak `active_operation`.
         self.active_deploy = None;
         self.active_operation = None;
-        let reason = match failure.effect_stage {
+        let reason = Self::deploy_effect_failure_reason(failure.effect_stage);
+        Self::reply_meta(meta::Output::DeployRejected(
+            meta::DeployRejectedPayload::new(self.deploy_rejection(reason)),
+        ))
+    }
+
+    /// Project a failed deploy effect onto the public owner-contract reason.
+    /// Source-reference syntax is validated before effects run, so an Eval
+    /// failure is an evaluated-output failure, never a false claim that the
+    /// already-accepted immutable reference was malformed.
+    fn deploy_effect_failure_reason(stage: nexus::EffectStage) -> meta::DeployRejectionReason {
+        match stage {
             nexus::EffectStage::FlakeAuth => meta::DeployRejectionReason::ProposalSourceUnreachable,
             nexus::EffectStage::MaterializeHorizon => {
                 meta::DeployRejectionReason::ProposalSourceUnreachable
             }
-            nexus::EffectStage::Eval => meta::DeployRejectionReason::FlakeReferenceMalformed,
-            nexus::EffectStage::Build => meta::DeployRejectionReason::FlakeReferenceMalformed,
-            nexus::EffectStage::CopyClosure => meta::DeployRejectionReason::BuilderUnreachable,
+            nexus::EffectStage::Eval => meta::DeployRejectionReason::FlakeEvaluationFailed,
+            nexus::EffectStage::Build | nexus::EffectStage::CopyClosure => {
+                meta::DeployRejectionReason::BuilderUnreachable
+            }
             nexus::EffectStage::Activate => meta::DeployRejectionReason::ActivationFailed,
             nexus::EffectStage::Gc => meta::DeployRejectionReason::DeploymentInFlight,
             // The test-only effect stages never reach the DEPLOY pipeline's
@@ -2816,10 +2840,7 @@ impl SchemaRuntime {
             nexus::EffectStage::HermeticCheck
             | nexus::EffectStage::BringUpTestVm
             | nexus::EffectStage::TearDownTestVm => meta::DeployRejectionReason::InternalError,
-        };
-        Self::reply_meta(meta::Output::DeployRejected(
-            meta::DeployRejectedPayload::new(self.deploy_rejection(reason)),
-        ))
+        }
     }
 
     // ---- sema apply / observe (the four tables) -------------------------
@@ -2955,6 +2976,7 @@ impl SchemaRuntime {
             cluster_name: commit.cluster_name.clone(),
             node_name: commit.node_name.clone(),
             generation_artifact,
+            optional_user_name: commit.optional_user_name.clone(),
             activation_effect,
             generation_slot: commit.generation_slot,
             closure_path: commit.closure_path.clone(),
@@ -3243,6 +3265,7 @@ impl SchemaRuntime {
             cluster_name: live.cluster_name.clone(),
             node_name: live.node_name.clone(),
             generation_artifact: live.generation_artifact,
+            optional_user_name: live.optional_user_name.clone(),
             activation_effect: live.activation_effect,
             generation_slot: live.generation_slot,
             closure_path: live.closure_path.clone(),
@@ -5109,6 +5132,18 @@ mod tests {
 
     fn node() -> ordinary::NodeName {
         ordinary::NodeName::new("node-1")
+    }
+
+    #[test]
+    fn evaluation_effect_failure_is_not_reported_as_a_malformed_reference() {
+        assert_eq!(
+            SchemaRuntime::deploy_effect_failure_reason(nexus::EffectStage::Eval),
+            meta::DeployRejectionReason::FlakeEvaluationFailed
+        );
+        assert_eq!(
+            SchemaRuntime::deploy_effect_failure_reason(nexus::EffectStage::Build),
+            meta::DeployRejectionReason::BuilderUnreachable
+        );
     }
 
     // ---- Step 1: closure-threading onto the activate command ----

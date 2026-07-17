@@ -25,6 +25,7 @@
   signal-lojix.lib.CacheRetentionTransitionEvent
   signal-lojix.lib.ClusterName
   signal-lojix.lib.NodeName
+  signal-lojix.lib.UserName
   signal-lojix.lib.PinLabel
   signal-lojix.lib.ClosurePath
   signal-lojix.lib.FlakeReference
@@ -68,7 +69,7 @@
   ;; rewrites the row at each phase transition as the real dispatch runs.
   SemaWriteInput.[(RecordDeploySubmitted DeploySubmission) (RecordPhaseTransition DeploymentPhaseEvent) (RecordGenerationActivated ActivationCommit) (PinGeneration PinRequest) (UnpinGeneration UnpinRequest) (RetireGeneration RetireRequest) (RecordContainerTransition ContainerTransition) (RecordTestRun TestRunRecord)]
   DeploySubmission.[(Host HostDeployment) (UserEnvironment UserEnvironmentDeployment)]
-  ActivationCommit.{ GenerationIdentifier ClusterName NodeName GenerationSlot ClosurePath SourceRevisionRecord }
+  ActivationCommit.{ GenerationIdentifier ClusterName NodeName GenerationSlot ClosurePath Optional.UserName SourceRevisionRecord }
   ContainerTransition.{ ClusterName NodeName ContainerName ContainerState }
   ContainerName.String
   ContainerState.[Starting Started Stopping Stopped Failed]
@@ -85,7 +86,7 @@
   StateDigest.Integer
 
   LiveSetTable.{ Vector.LiveGeneration }
-  LiveGeneration.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName GenerationArtifact ActivationEffect GenerationSlot ClosurePath SourceRevisionRecord }
+  LiveGeneration.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName GenerationArtifact Optional.UserName ActivationEffect GenerationSlot ClosurePath SourceRevisionRecord }
 
   GcRootsTable.{ Vector.GcRoot }
   GcRoot.{ GenerationIdentifier ClusterName NodeName GenerationSlot ClosurePath Optional.PinLabel }

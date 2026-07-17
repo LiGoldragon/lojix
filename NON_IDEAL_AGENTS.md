@@ -107,6 +107,21 @@ realized, set the profile (generation 15), and activated; the ByNode query recor
 bird's home-manager profile pointer and `current-home` gcroot both point at that
 closure.
 
+## CriomOS-test-cluster eval fixture has a stale fixed-output hash
+
+- **Symptom:** The ignored `build_smoke::eval_dune_fixture_through_the_engine`
+  Lojix external witness reaches `nix eval` but the CriomOS-test-cluster fixture
+  fails while building its pinned Rust channel file because the declared fixed-output
+  hash no longer matches the fetched content. The failure is an evaluated-output
+  problem, not a malformed flake reference.
+- **Current workaround:** Do not count this ignored external test as release-green;
+  use the hermetic Lojix test and disposable-store rehearsal while the fixture is
+  repaired. The Lojix public rejection is `FlakeEvaluationFailed` so callers can
+  distinguish it from `FlakeReferenceMalformed`.
+- **Proper fix:** Update the fixed-output hash or pin in CriomOS-test-cluster, then
+  rerun the ignored eval and build-smoke witnesses. This is fixture-source work, not
+  a Lojix deploy or production-state repair.
+
 - `ActivateNow` sets the profile and runs the activation package; `SetProfile` sets
   the profile only; `Realize` builds and realizes the closure on the target store
   and stops (no profile, no activate).

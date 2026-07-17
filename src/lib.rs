@@ -33,16 +33,17 @@ use crate::schema::sema::{
 pub mod client;
 pub mod daemon;
 pub mod inspection;
+pub mod post_activation_ledger;
 pub mod reconstruction;
 pub mod schema;
 pub mod schema_runtime;
 
-/// The lojix durable-store schema version. Schema 2 enables the engine's
-/// versioned log so event retention compacts both materialized rows and their
-/// raw history. Every future bump is a deliberate HARD migration (the workspace
-/// no-backward-compat override), not a soft upgrade — the kernel hard-fails to
-/// open a store stamped at a different version.
-const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(2);
+/// The lojix durable-store schema version. Schema 3 persists the user identity
+/// beside each user-environment generation, so a Bird home closure cannot be
+/// attributed to another user's deployment. Every bump is a deliberate HARD
+/// migration (the workspace no-backward-compat override), not a soft upgrade —
+/// the kernel hard-fails to open a store stamped at a different version.
+const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(3);
 
 /// The five durable table names. One row per element (a keyed record family),
 /// not one blob per table — the sema-engine model. `deploy-job` is the
@@ -96,6 +97,12 @@ pub enum Error {
 
     #[error("expected exactly one argument")]
     ExpectedSingleArgument,
+
+    #[error("Lojix generation query was rejected: {0}")]
+    LedgerQueryRejected(String),
+
+    #[error("Lojix generation query returned an unexpected output: {0}")]
+    LedgerQueryUnexpectedOutput(String),
 
     #[error("expected source and destination paths")]
     ExpectedSourceAndDestination,
@@ -191,6 +198,18 @@ impl From<signal_lojix::schema::lib::SignalFrameError> for Error {
 impl From<meta_signal_lojix::schema::lib::SignalFrameError> for Error {
     fn from(error: meta_signal_lojix::schema::lib::SignalFrameError) -> Self {
         Self::MetaFrame(error)
+    }
+}
+
+impl Error {
+    /// The typed startup category projected by `lojix-daemon` before any socket
+    /// can serve a Signal reply. A store compatibility failure therefore never
+    /// collapses into a client-side `InternalError` or an unclassified exit.
+    pub fn daemon_rejection_name(&self) -> &'static str {
+        match self {
+            Self::StoreStartupCompatibility { .. } => "StoreStartupCompatibility",
+            _ => "StartupFailure",
+        }
     }
 }
 

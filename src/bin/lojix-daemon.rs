@@ -7,7 +7,11 @@ fn main() {
     match run() {
         Ok(()) => {}
         Err(error) => {
-            eprintln!("(DaemonRejected [{error}])");
+            eprintln!(
+                "(DaemonRejected ({} [{}]))",
+                error.daemon_rejection_name(),
+                error
+            );
             std::process::exit(2);
         }
     }

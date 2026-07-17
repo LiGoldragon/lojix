@@ -1,6 +1,6 @@
 [package]
 name         = "lojix"
-version      = "0.9.0"
+version      = "0.10.0"
 edition      = "2024"
 rust-version = "1.89"
 license      = "MIT OR Apache-2.0"
@@ -35,6 +35,10 @@ path = "src/bin/lojix-inspect-store.rs"
 name = "lojix-reconstruct-schema-one"
 path = "src/bin/lojix-reconstruct-schema-one.rs"
 
+[[bin]]
+name = "lojix-post-activation-ledger"
+path = "src/bin/lojix-post-activation-ledger.rs"
+
 [features]
 default   = []
 nota-text = ["signal-lojix/nota-text", "meta-signal-lojix/nota-text"]
@@ -43,8 +47,8 @@ nota-text = ["signal-lojix/nota-text", "meta-signal-lojix/nota-text"]
 horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", rev = "a6300bccc4b6" }
 kameo             = { git = "https://github.com/LiGoldragon/kameo.git", rev = "f491b45d" }
 nota         = { git = "https://github.com/LiGoldragon/nota.git", rev = "f8de7a516b769fc544c7f8c0030e258833c1cf9b" }
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix.git", rev = "904d1969313994ee36ebb688c07fc095fdc66b01" }
-signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix.git", rev = "8893cd4bb239fec87d23ae145ea751893050a8a1" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix.git", rev = "543b15d8d1745f9e92c684045eca0e6dcf0092a8" }
+signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix.git", rev = "3002a2073303d8f785bbfb58d5dbdbd2edb7a07b" }
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 redb              = "4"
 rustix            = { version = "1", default-features = false, features = ["process"] }
