@@ -33,6 +33,7 @@ use crate::schema::sema::{
 pub mod client;
 pub mod daemon;
 pub mod inspection;
+pub mod post_activation_ledger;
 pub mod reconstruction;
 pub mod schema;
 pub mod schema_runtime;

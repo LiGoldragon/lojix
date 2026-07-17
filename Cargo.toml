@@ -1,6 +1,6 @@
 [package]
 name         = "lojix"
-version      = "0.9.0"
+version      = "0.10.0"
 edition      = "2024"
 rust-version = "1.89"
 license      = "MIT OR Apache-2.0"
@@ -34,6 +34,10 @@ path = "src/bin/lojix-inspect-store.rs"
 [[bin]]
 name = "lojix-reconstruct-schema-one"
 path = "src/bin/lojix-reconstruct-schema-one.rs"
+
+[[bin]]
+name = "lojix-post-activation-ledger"
+path = "src/bin/lojix-post-activation-ledger.rs"
 
 [features]
 default   = []

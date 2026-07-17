@@ -1,6 +1,10 @@
 use lojix::schema::sema::{GcRoot, LiveGeneration};
 use lojix::{Error, Store};
 use redb::{Database, TableDefinition};
+use sema_engine::{
+    Engine, EngineOpen, FamilyName, SchemaHash, SchemaVersion, TableDescriptor, TableName,
+    VersionedHistoryRetention, VersionedStoreName, VersioningPolicy,
+};
 use signal_lojix::schema::lib as ordinary;
 use tempfile::TempDir;
 
@@ -59,6 +63,61 @@ fn current_store_reopens_through_startup_gate() {
         .expect("query generation after startup gate");
 
     assert_eq!(generations.len(), 1);
+}
+
+#[test]
+fn store_schema_version_mismatch_is_typed_at_the_open_boundary() {
+    let directory = TempDir::new().expect("tempdir");
+    let path = directory.path().join("lojix.sema");
+    let _legacy = Engine::open(EngineOpen::new(path.clone(), SchemaVersion::new(1)))
+        .expect("create disposable schema-one envelope");
+    drop(_legacy);
+
+    let error = Store::open(&path).expect_err("schema mismatch must stop startup");
+    match error {
+        Error::StoreStartupCompatibility { stage, source, .. } => {
+            assert_eq!(stage, "opening sema-engine");
+            assert!(
+                source.to_string().contains("schema"),
+                "diagnostic must attribute the store schema boundary: {source}"
+            );
+        }
+        other => panic!("unexpected startup error: {other}"),
+    }
+}
+
+#[test]
+fn table_family_identity_mismatch_is_typed_before_serving() {
+    let directory = TempDir::new().expect("tempdir");
+    let path = directory.path().join("lojix.sema");
+    let mut incompatible = Engine::open(
+        EngineOpen::new(path.clone(), SchemaVersion::new(2)).with_versioning(
+            VersioningPolicy::new(VersionedStoreName::new("lojix"))
+                .with_retention(VersionedHistoryRetention::new(4_096)),
+        ),
+    )
+    .expect("create disposable schema-two envelope");
+    incompatible
+        .register_table::<LiveGeneration>(TableDescriptor::new(
+            TableName::new("live-set"),
+            FamilyName::new("SpiritFamily"),
+            SchemaHash::new([99; 32]),
+        ))
+        .expect("register deliberately incompatible table identity");
+    drop(incompatible);
+
+    let error = Store::open(&path).expect_err("table identity mismatch must stop startup");
+    match error {
+        Error::StoreStartupCompatibility { stage, source, .. } => {
+            assert_eq!(stage, "registering live-set table");
+            let diagnostic = source.to_string();
+            assert!(
+                diagnostic.contains("live-set") || diagnostic.contains("family"),
+                "diagnostic must attribute table identity: {diagnostic}"
+            );
+        }
+        other => panic!("unexpected startup error: {other}"),
+    }
 }
 
 #[test]
