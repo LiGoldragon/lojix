@@ -90,6 +90,13 @@
             // {
               inherit cargoArtifacts;
               cargoExtraArgs = "--features nota-text";
+              # The check's contract is the cargo test result, not Cargo's
+              # timestamped target artifacts. Keep only a deterministic witness.
+              doInstallCargoArtifacts = false;
+              installPhaseCommand = ''
+                mkdir -p "$out"
+                printf '%s\n' 'lojix cargo test passed' > "$out/result"
+              '';
             }
           );
 
