@@ -1,6 +1,6 @@
 [package]
 name         = "lojix"
-version      = "0.9.0"
+version      = "0.10.0"
 edition      = "2024"
 rust-version = "1.89"
 license      = "MIT OR Apache-2.0"
@@ -36,7 +36,7 @@ default   = []
 nota-text = ["signal-lojix/nota-text", "meta-signal-lojix/nota-text"]
 
 [dependencies]
-horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", rev = "2a29bad2f27e08b914978de34ca4b42014b9a538" }
+horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", rev = "1f583e1cea4989e2463623a715c619cdec4ec38f" }
 kameo             = "0.20"
 nota         = { git = "https://github.com/LiGoldragon/nota.git", branch = "main" }
 meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix.git", branch = "main" }

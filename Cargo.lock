@@ -276,8 +276,8 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "horizon-lib"
-version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/horizon-rs.git?rev=2a29bad2f27e08b914978de34ca4b42014b9a538#2a29bad2f27e08b914978de34ca4b42014b9a538"
+version = "0.3.0"
+source = "git+https://github.com/LiGoldragon/horizon-rs.git?rev=1f583e1cea4989e2463623a715c619cdec4ec38f#1f583e1cea4989e2463623a715c619cdec4ec38f"
 dependencies = [
  "ipnet",
  "nota",
@@ -408,7 +408,7 @@ checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
 name = "lojix"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "horizon-lib",
  "kameo 0.20.0 (registry+https://github.com/rust-lang/crates.io-index)",

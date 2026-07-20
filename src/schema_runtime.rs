@@ -5850,6 +5850,118 @@ mod tests {
     }
 
     #[test]
+    fn materialized_horizon_json_preserves_agent_intercom_roles() {
+        use std::collections::BTreeMap;
+
+        use horizon_lib::address::{YggAddress, YggSubnet};
+        use horizon_lib::domain::DomainConfiguration;
+        use horizon_lib::io::Io;
+        use horizon_lib::machine::Machine;
+        use horizon_lib::magnitude::Magnitude;
+        use horizon_lib::name::{ClusterName, NodeName};
+        use horizon_lib::proposal::{
+            ClusterTrust, NodeProposal, NodePubKeys, NodeService, YggPubKeyEntry,
+        };
+        use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
+        use horizon_lib::species::{Arch, Bootloader, Keyboard, MachineSpecies, NodeSpecies};
+
+        let node = |services| NodeProposal {
+            species: NodeSpecies::EdgeTesting,
+            size: Magnitude::Large,
+            trust: Magnitude::Max,
+            machine: Machine {
+                species: MachineSpecies::Metal,
+                arch: Some(Arch::X86_64),
+                cores: 4,
+                model: None,
+                mother_board: None,
+                super_node: None,
+                super_user: None,
+                chip_gen: None,
+                ram_gb: None,
+                disk_gb: None,
+                location: None,
+                super_nodes: Vec::new(),
+            },
+            io: Io {
+                keyboard: Keyboard::Qwerty,
+                bootloader: Bootloader::Uefi,
+                disks: BTreeMap::new(),
+                swap_devices: Vec::new(),
+                compressed_swap: None,
+            },
+            pub_keys: NodePubKeys {
+                ssh: SshPubKey::try_new("AAA=").expect("valid SSH public key"),
+                nix: Some(
+                    NixPubKey::try_new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+                        .expect("valid Nix public key"),
+                ),
+                yggdrasil: Some(YggPubKeyEntry {
+                    pub_key: YggPubKey::try_new("a".repeat(64)).expect("valid Yggdrasil key"),
+                    address: YggAddress::try_new("200::1").expect("valid Yggdrasil address"),
+                    subnet: YggSubnet::try_new("300:ca41:6b12:fba")
+                        .expect("valid Yggdrasil subnet"),
+                }),
+            },
+            link_local_ips: Vec::new(),
+            node_ip: None,
+            wireguard_pub_key: None,
+            nordvpn: false,
+            wifi_cert: false,
+            wireguard_untrusted_proxies: Vec::new(),
+            wants_printing: false,
+            wants_hw_video_accel: false,
+            router_interfaces: None,
+            online: None,
+            services,
+        };
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            NodeName::try_new("gateway").expect("gateway name"),
+            node(vec![NodeService::AgentIntercomGateway {}]),
+        );
+        nodes.insert(
+            NodeName::try_new("peer").expect("peer name"),
+            node(vec![NodeService::AgentIntercomPeer {}]),
+        );
+        let proposal = ClusterProposal {
+            nodes,
+            users: BTreeMap::new(),
+            domains: BTreeMap::new(),
+            trust: ClusterTrust {
+                cluster: Magnitude::Max,
+                clusters: BTreeMap::new(),
+                nodes: BTreeMap::new(),
+                users: BTreeMap::new(),
+            },
+            domain_configuration: DomainConfiguration::default(),
+        };
+        let horizon = proposal
+            .project(&Viewpoint {
+                cluster: ClusterName::try_new("test-cluster").expect("cluster name"),
+                node: NodeName::try_new("gateway").expect("gateway name"),
+            })
+            .expect("Agent Intercom projection");
+        let directory = tempfile::tempdir().expect("materialization directory");
+        GeneratedInputDirectory::new(directory.path().join("horizon"))
+            .write_horizon(&horizon)
+            .expect("write horizon input");
+        let horizon_json: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.path().join("horizon/horizon.json")).expect("read horizon JSON"),
+        )
+        .expect("parse materialized horizon JSON");
+
+        assert_eq!(
+            horizon_json["node"]["services"],
+            serde_json::json!([{"AgentIntercomGateway": {}}])
+        );
+        assert_eq!(
+            horizon_json["exNodes"]["peer"]["services"],
+            serde_json::json!([{"AgentIntercomPeer": {}}])
+        );
+    }
+
+    #[test]
     fn deployment_input_maps_complete_and_base_host_materialization() {
         let complete = DeploymentInput::from_shape(&nexus::MaterializationShape::CompleteHost)
             .expect("complete host deployment input");

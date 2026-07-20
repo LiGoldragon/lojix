@@ -684,7 +684,9 @@ impl Store {
     /// Append one event-log entry, keyed by its position (decision 4).
     pub fn append_event_log_entry(&self, entry: EventLogEntry) -> Result<()> {
         self.database.commit_atomic(
-            self.database.begin_atomic_commit().assert(self.event_log, entry),
+            self.database
+                .begin_atomic_commit()
+                .assert(self.event_log, entry),
         )?;
         self.maintain_event_history()?;
         Ok(())
@@ -701,7 +703,8 @@ impl Store {
     /// Record the live generation and its GC root as one durable commit.
     pub fn record_activation(&self, generation: LiveGeneration, root: GcRoot) -> Result<()> {
         self.database.commit_atomic(
-            self.database.begin_atomic_commit()
+            self.database
+                .begin_atomic_commit()
                 .assert(self.live_set, generation)
                 .assert(self.gc_roots, root),
         )?;
@@ -743,7 +746,8 @@ impl Store {
         entry: EventLogEntry,
     ) -> Result<()> {
         self.database.commit_atomic(
-            self.database.begin_atomic_commit()
+            self.database
+                .begin_atomic_commit()
                 .assert(self.containers, record)
                 .assert(self.event_log, entry),
         )?;
