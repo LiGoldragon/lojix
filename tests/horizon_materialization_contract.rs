@@ -3,6 +3,8 @@
 //! must name materialization as a real engine feature, not hide it behind an
 //! inline Rust shortcut.
 
+use horizon_lib::proposal::{NodeService, NodeServiceKind};
+
 #[test]
 fn nexus_schema_names_horizon_materialization_and_eval_overrides() {
     let schema = include_str!("../schema/nexus.schema");
@@ -18,4 +20,16 @@ fn runtime_no_longer_rejects_absent_build_attribute_as_unsupported() {
     assert!(!runtime.contains("deployment.build_attribute.is_some()"));
     assert!(runtime.contains("needs_horizon_materialization"));
     assert!(runtime.contains("EffectCommand::MaterializeHorizon"));
+}
+
+#[test]
+fn deploy_projection_uses_the_agent_intercom_gateway_and_peer_schema() {
+    assert_eq!(
+        NodeService::AgentIntercomGateway {}.kind(),
+        NodeServiceKind::AgentIntercomGateway
+    );
+    assert_eq!(
+        NodeService::AgentIntercomPeer {}.kind(),
+        NodeServiceKind::AgentIntercomPeer
+    );
 }
