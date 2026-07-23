@@ -23,13 +23,13 @@ fn runtime_no_longer_rejects_absent_build_attribute_as_unsupported() {
 }
 
 #[test]
-fn deploy_projection_uses_the_agent_intercom_gateway_and_peer_schema() {
+fn deploy_projection_uses_local_and_graphical_agent_intercom_capabilities() {
     assert_eq!(
-        NodeService::AgentIntercomGateway {}.kind(),
-        NodeServiceKind::AgentIntercomGateway
+        NodeService::AgentIntercomLocal {}.kind(),
+        NodeServiceKind::AgentIntercomLocal
     );
     assert_eq!(
-        NodeService::AgentIntercomPeer {}.kind(),
-        NodeServiceKind::AgentIntercomPeer
+        NodeService::AgentIntercomGraphical {}.kind(),
+        NodeServiceKind::AgentIntercomGraphical
     );
 }

@@ -5850,7 +5850,7 @@ mod tests {
     }
 
     #[test]
-    fn materialized_horizon_json_preserves_agent_intercom_roles() {
+    fn materialized_horizon_json_preserves_local_agent_intercom_capabilities() {
         use std::collections::BTreeMap;
 
         use horizon_lib::address::{YggAddress, YggSubnet};
@@ -5917,12 +5917,15 @@ mod tests {
         };
         let mut nodes = BTreeMap::new();
         nodes.insert(
-            NodeName::try_new("gateway").expect("gateway name"),
-            node(vec![NodeService::AgentIntercomGateway {}]),
+            NodeName::try_new("graphical").expect("graphical node name"),
+            node(vec![
+                NodeService::AgentIntercomLocal {},
+                NodeService::AgentIntercomGraphical {},
+            ]),
         );
         nodes.insert(
-            NodeName::try_new("peer").expect("peer name"),
-            node(vec![NodeService::AgentIntercomPeer {}]),
+            NodeName::try_new("headless").expect("headless node name"),
+            node(vec![NodeService::AgentIntercomLocal {}]),
         );
         let proposal = ClusterProposal {
             nodes,
@@ -5939,9 +5942,9 @@ mod tests {
         let horizon = proposal
             .project(&Viewpoint {
                 cluster: ClusterName::try_new("test-cluster").expect("cluster name"),
-                node: NodeName::try_new("gateway").expect("gateway name"),
+                node: NodeName::try_new("graphical").expect("graphical node name"),
             })
-            .expect("Agent Intercom projection");
+            .expect("local Agent Intercom projection");
         let directory = tempfile::tempdir().expect("materialization directory");
         GeneratedInputDirectory::new(directory.path().join("horizon"))
             .write_horizon(&horizon)
@@ -5953,11 +5956,11 @@ mod tests {
 
         assert_eq!(
             horizon_json["node"]["services"],
-            serde_json::json!([{"AgentIntercomGateway": {}}])
+            serde_json::json!([{"AgentIntercomLocal": {}}, {"AgentIntercomGraphical": {}}])
         );
         assert_eq!(
-            horizon_json["exNodes"]["peer"]["services"],
-            serde_json::json!([{"AgentIntercomPeer": {}}])
+            horizon_json["exNodes"]["headless"]["services"],
+            serde_json::json!([{"AgentIntercomLocal": {}}])
         );
     }
 
