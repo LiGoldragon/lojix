@@ -18,6 +18,22 @@ Storage lives in `sema-engine`; wire framing uses `signal-frame`. The
 ordinary contract repo is `signal-lojix`; the owner/meta contract repo is
 `meta-signal-lojix`.
 
+## Store migration
+
+Run the packaged migrator as a service pre-start step, while the daemon is
+stopped:
+
+```sh
+lojix-migrate-store /var/lib/lojix/lojix.sema
+```
+
+The command is idempotent for a missing store or schema 2. For schema 1 it
+validates the source read-only, preserves
+`lojix.sema.schema-v1.backup` byte-for-byte, reconstructs and reopens a schema-2
+staging store, and atomically replaces the canonical path only after validation.
+Corrupt rows, unknown tables, relation mismatches, or a conflicting backup stop
+the migration without changing the canonical store.
+
 ## Related
 
 - `signal-lojix` — ordinary peer-callable wire contract.

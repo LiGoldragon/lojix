@@ -173,8 +173,12 @@ Each daemon actor is a Kameo actor per
   persisted rows, so they no longer reset to zero on restart. Storage schema 2
   enables the engine's versioned log: the verified local checkpoint is the
   recovery floor for retention because lojix has no external mirror consumer.
-  The schema bump deliberately hard-rejects schema-1 stores rather than
-  silently deleting or rewriting deployed state.
+  The daemon deliberately opens only schema-2 stores. The idempotent
+  `lojix-migrate-store` pre-start step handles schema 1 explicitly: it validates
+  every known row and relation read-only, retains a byte-identical permanent
+  backup, reconstructs and reopens a schema-2 staging store, then atomically
+  replaces the canonical path. Corrupt or unknown input remains untouched and
+  prevents daemon startup.
 - **Wire:** `signal-frame` records carrying `signal-lojix` on the
   ordinary socket and `meta-signal-lojix` on the owner/meta socket.
   Length-prefixed rkyv archives over Unix sockets.

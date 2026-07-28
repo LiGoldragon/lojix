@@ -33,17 +33,18 @@ use crate::schema::sema::{
 pub mod client;
 pub mod daemon;
 pub mod inspection;
+pub mod reconstruction;
 pub mod schema;
 pub mod schema_runtime;
 
 /// The lojix durable-store schema version. Schema 2 enables the engine's
 /// versioned log so event retention compacts both materialized rows and their
-/// raw history. Every future bump is a deliberate HARD migration (the workspace
-/// no-backward-compat override), not a soft upgrade — the kernel hard-fails to
-/// open a store stamped at a different version.
+/// raw history. The daemon still opens only the current schema; explicit,
+/// one-way pre-start migration preserves and reconstructs older stores before
+/// the daemon is admitted.
 const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(2);
 
-/// The five durable table names. One row per element (a keyed record family),
+/// The six durable table names. One row per element (a keyed record family),
 /// not one blob per table — the sema-engine model. `deploy-job` is the
 /// in-flight deploy-job mirror (up9q): one row per submitted deploy, rewritten
 /// per phase transition, read on daemon start so an in-flight deploy resumes
@@ -139,6 +140,9 @@ pub enum Error {
 
     #[error("sema database engine error: {0}")]
     Database(#[from] sema_engine::Error),
+
+    #[error("store migration rejected: {0}")]
+    Migration(String),
 
     #[error(
         "lojix store at {path:?} cannot be used by this daemon's startup schema/layout gate while {stage}; daemon startup stopped before serving requests; inspect the store with `lojix-inspect-store {path:?}`: {source}"
@@ -671,11 +675,23 @@ impl Store {
             .unwrap_or(1))
     }
 
-    /// The next event-log position derives from the engine's durable commit
-    /// high-water mark, not retained row count. It remains unique after event
-    /// compaction and across a daemon restart.
+    /// The next event-log position is never below either the engine's durable
+    /// commit high-water mark or one past the maximum persisted event. The
+    /// persisted floor keeps sparse reconstructed history collision-free;
+    /// the commit sequence keeps allocation monotonic after compaction.
     pub fn next_event_log_position(&self) -> Result<u64> {
-        self.commit_sequence()
+        let persisted_floor = match self
+            .event_log_entries()?
+            .iter()
+            .map(|entry| *entry.event_log_position.payload())
+            .max()
+        {
+            Some(position) => position.checked_add(1).ok_or_else(|| {
+                Error::Migration("event-log position space exhausted".to_string())
+            })?,
+            None => 0,
+        };
+        Ok(self.commit_sequence()?.max(persisted_floor))
     }
 
     /// The next subscription token: an in-memory atomic fetch-add. Subscriptions
@@ -712,6 +728,63 @@ impl Store {
                 .assert(self.gc_roots, root),
         )?;
         Ok(())
+    }
+
+    /// Seed a fully validated schema-one snapshot as one schema-two commit.
+    ///
+    /// This is crate-visible because only the read-only migration module may
+    /// construct it. The destination is a new staging store, never the
+    /// canonical schema-one path.
+    pub(crate) fn seed_migration(
+        &self,
+        generations: Vec<LiveGeneration>,
+        roots: Vec<GcRoot>,
+        events: Vec<EventLogEntry>,
+        containers: Vec<ContainerLifecycleRecord>,
+        deploy_jobs: Vec<DeployJob>,
+        test_runs: Vec<StoredTestRun>,
+    ) -> Result<()> {
+        let mut seed = self.database.begin_atomic_commit();
+        let mut populated = false;
+        for generation in generations {
+            seed = seed.assert(self.live_set, generation);
+            populated = true;
+        }
+        for root in roots {
+            seed = seed.assert(self.gc_roots, root);
+            populated = true;
+        }
+        for container in containers {
+            seed = seed.assert(self.containers, container);
+            populated = true;
+        }
+        for event in events {
+            seed = seed.assert(self.event_log, event);
+            populated = true;
+        }
+        for job in deploy_jobs {
+            seed = seed.assert(self.deploy_jobs, job);
+            populated = true;
+        }
+        for run in test_runs {
+            seed = seed.assert(self.test_runs, run);
+            populated = true;
+        }
+        if populated {
+            self.database.commit_atomic(seed)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn migration_counts(&self) -> Result<crate::reconstruction::StoreCounts> {
+        Ok(crate::reconstruction::StoreCounts {
+            generations: self.live_generations()?.len(),
+            gc_roots: self.gc_root_records()?.len(),
+            event_log_entries: self.event_log_entries()?.len(),
+            container_lifecycle_records: self.container_lifecycle_records()?.len(),
+            deploy_jobs: self.deploy_jobs()?.len(),
+            test_runs: self.test_runs()?.len(),
+        })
     }
 
     /// Append one GC-root, keyed by its generation identifier (decision 4).
