@@ -531,6 +531,7 @@ fn write_test_daemon_configuration(
         owner_socket_mode: 0o660,
         state_directory_path: directory.join("state").display().to_string(),
         daemon_host: "ouranos".to_string(),
+        effect_timeout_seconds: 60,
         test_defaults: Some(lojix::TestDefaults {
             cluster: "goldragon".to_string(),
             default_vm_host: "prometheus".to_string(),
@@ -599,6 +600,7 @@ fn engine_with_projection() -> (tempfile::TempDir, SchemaRuntime) {
         owner_socket_mode: 0o660,
         state_directory_path: directory.path().join("state").display().to_string(),
         daemon_host: "ouranos".to_string(),
+        effect_timeout_seconds: 60,
         test_defaults: Some(lojix::TestDefaults {
             cluster: "goldragon".to_string(),
             default_vm_host: "atlas".to_string(),
@@ -737,6 +739,7 @@ fn check_without_configured_defaults_is_rejected_no_test_defaults() {
         owner_socket_mode: 0o660,
         state_directory_path: directory.path().join("state").display().to_string(),
         daemon_host: "ouranos".to_string(),
+        effect_timeout_seconds: 60,
         test_defaults: None,
     };
     let store = Arc::new(

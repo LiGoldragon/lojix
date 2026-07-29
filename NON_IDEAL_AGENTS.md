@@ -47,14 +47,15 @@ permission, or stall a deploy that operates within it. `AGENTS.md` and
   (`ProposalFile` in `src/schema_runtime.rs`). The cluster `secrets/` directory is
   inferred as that file's sibling, `<source-parent>/secrets`
   (`ClusterSecretsDirectory::from_proposal_source`).
-- **Deploys to a non-daemon node build on the target's own store.** When the target
-  is not the daemon host, lojix evaluates and realizes the closure directly in the
-  target's store over `ssh-ng://root@<node>.<cluster>.criome`, so a node's
-  model-bearing closure never transits the daemon host (`ARCHITECTURE.md`
-  "Build-on-target"; `eval_drv_path` / `build_closure_in_store` in
-  `src/schema_runtime.rs`). The `root` reach is `li`'s admin keys in each node's
-  `root` `authorized_keys` (CriomOS-home `ARCHITECTURE.md` "Cluster-host update
-  authority": the maintainer has root SSH on all cluster hosts).
+- **Deploys evaluate and build locally, then copy the exact closure.** Lojix
+  evaluates and realizes the immutable closure in its authenticated local Nix
+  context, copies that closure with `nix copy --to ssh-ng://root@<node>…`, and
+  only then connects as root for the target-side profile/system operation. It
+  never runs `nix eval --store ssh-ng://…`: that remote-store transport can
+  wedge while Nix and SSH wait on one another. The `root` reach is `li`'s admin
+  keys in each node's `root` `authorized_keys` (CriomOS-home `ARCHITECTURE.md`
+  "Cluster-host update authority": the maintainer has root SSH on all cluster
+  hosts).
 - **A first build is slow; re-evaluating the same immutable pin is not.** A deploy's
   real cost is the closure build. The eval itself only forces a full flake-tree
   re-evaluation (`nix eval --refresh`) for a mutable reference. Since lojix `0.4.6`
@@ -77,6 +78,11 @@ permission, or stall a deploy that operates within it. `AGENTS.md` and
   privilege drop landed in lojix `0.4.5` and is carried by the `0.4.6` that
   `CriomOS/flake.lock` now pins; on a daemon host still running an earlier lojix,
   redeploy the daemon host to the pinned lojix to enable it.
+- **Every external effect is bounded.** Each Nix, SSH, copy, and activation
+  command runs in its own session/process group. The daemon terminates that
+  group on the configured timeout, escalates to kill if needed, reaps the
+  direct child, and records a terminal deploy rejection. CriomOS defaults this
+  per-effect deadline to 45 minutes through `services.lojix.effectTimeoutSeconds`.
 
 ## Deploying a different user on a different node (for example `bird` on `zeus`)
 

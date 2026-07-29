@@ -21,7 +21,7 @@ fn write_configuration_round_trips_through_rkyv() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos (TestDefaults (goldragon prometheus Hermetic github:LiGoldragon/CriomOS-test-cluster /var/lib/lojix/cluster.nota)) {}))",
+        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos 60 (TestDefaults (goldragon prometheus Hermetic github:LiGoldragon/CriomOS-test-cluster /var/lib/lojix/cluster.nota)) {}))",
         output.display()
     );
 
@@ -35,6 +35,7 @@ fn write_configuration_round_trips_through_rkyv() {
     assert_eq!(configuration.owner_socket_mode, 0o600);
     assert_eq!(configuration.state_directory_path, "/var/lib/lojix");
     assert_eq!(configuration.daemon_host, "ouranos");
+    assert_eq!(configuration.effect_timeout_seconds, 60);
     let test_defaults = configuration
         .test_defaults
         .expect("the (TestDefaults …) form lowers to a baked fixture");
@@ -55,14 +56,37 @@ fn write_configuration_bakes_no_test_defaults_for_production() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos NoTestDefaults {}))",
+        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos 60 NoTestDefaults {}))",
         output.display()
     );
 
     let configuration = write_configuration(&request, &output);
     assert_eq!(configuration.daemon_host, "ouranos");
+    assert_eq!(configuration.effect_timeout_seconds, 60);
     assert!(
         configuration.test_defaults.is_none(),
         "a production node bakes no test-op fixture"
+    );
+}
+
+#[test]
+fn write_configuration_rejects_a_zero_effect_timeout() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let output = directory.path().join("startup.rkyv");
+    let request = format!(
+        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos 0 NoTestDefaults {}))",
+        output.display()
+    );
+    let status = Command::new(env!("CARGO_BIN_EXE_lojix-write-configuration"))
+        .arg(request)
+        .status()
+        .expect("run lojix-write-configuration");
+    assert!(
+        !status.success(),
+        "zero must not become an unbounded timeout"
+    );
+    assert!(
+        !output.exists(),
+        "writer must not emit invalid startup config"
     );
 }

@@ -13,7 +13,9 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use horizon_lib::name::{
     ClusterName as HorizonClusterName, CriomeDomainName, NodeName as HorizonNodeName,
@@ -22,7 +24,9 @@ use horizon_lib::name::{
 use horizon_lib::{ClusterProposal, Horizon, Viewpoint};
 use meta_signal_lojix::schema::lib as meta;
 use nota::NotaSource;
+use rustix::process::{Pid, Signal, kill_process_group};
 use signal_lojix::schema::lib as ordinary;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::schema::nexus::NexusEngine;
@@ -58,14 +62,16 @@ pub struct SchemaRuntime {
 #[derive(Debug, Clone)]
 pub struct RuntimeConfiguration {
     generated_inputs_directory: PathBuf,
-    /// The node this daemon runs on (e.g. `ouranos`). The build-on-target
-    /// decision (`DeployPipeline::build_target`) compares the deploy's target
-    /// node against this: equal → build LOCALLY (the host's store already holds
-    /// any model-bearing closure); different → realize the node's closure in
-    /// the TARGET node's own store over `ssh-ng`, so the daemon host never
-    /// holds a node's model-bearing closure (Spirit ufjd / 0a9p / lc28, report
-    /// 150). Decoded once from the daemon's binary startup configuration.
+    /// The node this daemon runs on (e.g. `ouranos`). Activation uses this to
+    /// recognize a self-targeting system switch and retain its detached-safe
+    /// behavior. Deploy evaluation/build is local for every target and does
+    /// not use this name to select a remote Nix store.
     daemon_host: ordinary::NodeName,
+    /// Execution policy shared by every external Nix, SSH, and process effect.
+    /// It provides one bounded deadline and owns whole-process-group cleanup,
+    /// so a lost remote transport cannot leave an eternal Building job or an
+    /// SSH descendant behind.
+    effect_execution: EffectExecution,
     /// A test-only gate that the deploy pipeline awaits before its first effect
     /// runs. `None` in production (the pipeline runs straight through). A test
     /// holds the barrier closed to prove the daemon replies the accepted handle
@@ -79,6 +85,43 @@ pub struct RuntimeConfiguration {
     /// test defaults; a `(Check …)` then rejects with `NoTestDefaults` rather
     /// than guessing.
     test_defaults: Option<TestDefaults>,
+}
+
+/// Bounded execution settings for commands that leave the daemon process.
+///
+/// The optional program directory is a hermetic test seam: production resolves
+/// command names through the daemon service PATH; focused tests install fake
+/// `nix` and `ssh` programs in their own directory without modifying process
+/// environment shared by other tests.
+#[derive(Debug, Clone)]
+struct EffectExecution {
+    timeout: Duration,
+    program_directory: Option<PathBuf>,
+}
+
+impl EffectExecution {
+    const TERMINATION_GRACE: Duration = Duration::from_secs(5);
+
+    fn production(timeout_seconds: u64) -> Self {
+        Self {
+            timeout: Duration::from_secs(timeout_seconds),
+            program_directory: None,
+        }
+    }
+
+    fn test(program_directory: PathBuf, timeout: Duration) -> Self {
+        Self {
+            timeout,
+            program_directory: Some(program_directory),
+        }
+    }
+
+    fn program(&self, program: &str) -> PathBuf {
+        self.program_directory
+            .as_ref()
+            .map(|directory| directory.join(program))
+            .unwrap_or_else(|| PathBuf::from(program))
+    }
 }
 
 /// The runtime projection of the config-default test selection. A daemon-side
@@ -551,8 +594,13 @@ impl HermeticCheck {
     /// Run the real `nix build <installable> --print-out-paths`. On exit 0 the
     /// first printed line is the realised check out-path (the closure under
     /// test); on a non-zero exit the build/test failed.
-    async fn run(&self) -> std::result::Result<ordinary::ClosurePath, String> {
-        let output = NixCommand::build_check(&self.installable()).run().await?;
+    async fn run(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<ordinary::ClosurePath, String> {
+        let output = NixCommand::build_check(&self.installable())
+            .run(execution)
+            .await?;
         Ok(ordinary::ClosurePath::new(NixCommand::first_line(&output)))
     }
 }
@@ -676,6 +724,7 @@ impl RuntimeConfiguration {
             generated_inputs_directory: PathBuf::from(&configuration.state_directory_path)
                 .join("generated-inputs"),
             daemon_host: ordinary::NodeName::new(configuration.daemon_host.clone()),
+            effect_execution: EffectExecution::production(configuration.effect_timeout_seconds),
             effect_barrier: None,
             test_defaults: configuration.test_defaults.as_ref().map(TestDefaults::from),
         }
@@ -685,6 +734,7 @@ impl RuntimeConfiguration {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
             daemon_host: ordinary::NodeName::new("daemon-host"),
+            effect_execution: EffectExecution::production(60),
             effect_barrier: None,
             test_defaults: Some(TestDefaults::test_default()),
         }
@@ -696,42 +746,50 @@ impl RuntimeConfiguration {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
             daemon_host: ordinary::NodeName::new("daemon-host"),
+            effect_execution: EffectExecution::production(60),
             effect_barrier: Some(barrier),
             test_defaults: Some(TestDefaults::test_default()),
         }
     }
 
-    /// The build target for a deploy whose closure must land on
-    /// `cluster_name`/`node_name`. When the target node IS this daemon's host,
-    /// the build stays `Local` — the host's store already holds any
-    /// model-bearing closure, so a `Switch`-on-self or an ouranos-from-ouranos
-    /// deploy realizes in place. When the target node is a DIFFERENT node, the
-    /// build realizes in that node's own store over
-    /// `ssh-ng://root@<node>.<cluster>.criome`, so a model-bearing node closure
-    /// never transits the daemon host (Spirit ufjd / 0a9p / lc28, report 150).
-    /// An explicit `builder` override still wins (it lowers to `Remote` upstream
-    /// of this call); this method only chooses between local and target-store.
+    /// A hermetic focused-test configuration whose external command names are
+    /// resolved from `program_directory` and bounded by `effect_timeout`.
+    /// Production configuration cannot set this directory; it resolves command
+    /// names through the declarative service PATH.
+    pub fn test_with_effect_program_directory(
+        generated_inputs_directory: PathBuf,
+        program_directory: PathBuf,
+        effect_timeout: Duration,
+    ) -> Self {
+        Self {
+            generated_inputs_directory,
+            daemon_host: ordinary::NodeName::new("daemon-host"),
+            effect_execution: EffectExecution::test(program_directory, effect_timeout),
+            effect_barrier: None,
+            test_defaults: Some(TestDefaults::test_default()),
+        }
+    }
+
+    /// The ordinary owner transport always evaluates and realizes the immutable
+    /// activation in the authenticated local Lojix context. It then copies that
+    /// exact closure to the target before target-side activation. In particular,
+    /// the deploy path never evaluates a flake through an `ssh-ng` store: that
+    /// transport can stall indefinitely while a remote Nix daemon waits on its
+    /// SSH session.
     fn build_target_for(
         &self,
-        cluster_name: &ordinary::ClusterName,
-        node_name: &ordinary::NodeName,
+        _cluster_name: &ordinary::ClusterName,
+        _node_name: &ordinary::NodeName,
     ) -> nexus::BuildTarget {
-        if node_name.payload() == self.daemon_host.payload() {
-            return nexus::BuildTarget::Local;
-        }
-        match SshTarget::root_at_node(cluster_name, node_name) {
-            Ok(target) => nexus::BuildTarget::target_store(target.ssh_uri()),
-            // A target whose names fail horizon validation can't be addressed
-            // for a remote store; fall back to a local build rather than emit a
-            // malformed `--store` URI. A submitted deploy never has invalid
-            // names (validated at submit), so this arm is unreachable in
-            // practice and never silently pulls a model closure for a real node.
-            Err(_) => nexus::BuildTarget::Local,
-        }
+        nexus::BuildTarget::Local
     }
 
     fn effect_barrier(&self) -> Option<&EffectBarrier> {
         self.effect_barrier.as_ref()
+    }
+
+    fn effect_execution(&self) -> &EffectExecution {
+        &self.effect_execution
     }
 
     /// The node this daemon runs on — used to detect a self-targeting deploy so
@@ -1197,12 +1255,9 @@ impl DeployPipeline {
             .collect()
     }
 
-    /// The build target for this deploy. An explicit `builder` override always
-    /// wins — it dispatches to the named Nix builder machine. Otherwise the
-    /// daemon's configuration decides build-on-target: a target node that is
-    /// the daemon host builds `Local`, a different target node realizes in its
-    /// own store over `ssh-ng` so its model-bearing closure never transits the
-    /// daemon host (Spirit ufjd / 0a9p / lc28, report 150).
+    /// The build command runs through the local daemon Nix client. An explicit
+    /// builder override still selects a configured Nix builder, whose result is
+    /// imported locally before the transport copies the exact closure onward.
     fn build_target(&self, configuration: &RuntimeConfiguration) -> nexus::BuildTarget {
         match &self.builder {
             Some(builder) => nexus::BuildTarget::Remote(nexus::BuilderNode::new(builder.clone())),
@@ -1259,12 +1314,9 @@ impl DeployPipeline {
             source_revision: self.source_revision_record(),
             attribute: self.target_attribute(),
             overrides: self.input_overrides.clone(),
-            // Build-on-target (Spirit ufjd / 0a9p / lc28, report 150): the eval
-            // step must resolve `.drvPath` against the SAME store the build will
-            // realize into. A target node that is not the daemon host references
-            // model `.drv`s that exist only in its own store, so a daemon-host
-            // local eval cannot find them. Mirroring `nix_build_command`'s target
-            // points the eval at the target store where those paths already live.
+            // The ordinary owner transport resolves and realizes locally, then
+            // copies the exact closure to the target. This deliberately never
+            // selects an ssh-ng evaluation store.
             target: self.build_target(configuration),
         }
     }
@@ -3208,7 +3260,7 @@ impl SchemaRuntime {
         // typed SourceRevisionRecord produced here is carried through the
         // eval/build path, event log, deploy-job row, and live-generation state.
         match NixCommand::flake_metadata(request.flake.payload())
-            .run()
+            .run(self.configuration.effect_execution())
             .await
         {
             Ok(output) => match NixFlakeMetadata::parse(&output) {
@@ -3238,7 +3290,7 @@ impl SchemaRuntime {
         let refresh =
             EvalRefresh::for_source(command.source_revision.policy, command.flake.payload());
         match NixCommand::eval_drv_path(&attribute, &command.overrides, &command.target, refresh)
-            .run()
+            .run(self.configuration.effect_execution())
             .await
         {
             Ok(output) => nexus::EffectResult::ClosureEvaluated(nexus::EvaluatedClosure {
@@ -3250,15 +3302,10 @@ impl SchemaRuntime {
     }
 
     async fn run_nix_build(&self, command: nexus::NixBuildCommand) -> nexus::EffectResult {
-        // Honoring the dropped local-build guard `783n`: a `BuildTarget::Local`
-        // builds on the local dispatcher (no remote builder); `Remote` dispatches
-        // the build to the named builder machine; `TargetStore` realizes the
-        // closure directly in the target node's own store over `ssh-ng`, so a
-        // model-bearing node closure never transits the daemon host (Spirit
-        // ufjd / 0a9p / lc28, report 150). All run the same `nix build` shape;
-        // `Remote` adds the daemon machine file and `TargetStore` adds the
-        // `--store <uri>` redirect ALONE (NO `--eval-store auto`) so eval and
-        // build both operate on the target store.
+        // The default owner transport realizes in the authenticated local Lojix
+        // context. An explicit builder still uses the local Nix client and
+        // imports its result locally; no deploy stage builds through an ssh-ng
+        // target store. The following copy stage transports this exact output.
         let invocation = match &command.target {
             nexus::BuildTarget::Local => {
                 NixCommand::build_closure(command.closure_path.payload(), &command.substituters)
@@ -3267,13 +3314,11 @@ impl SchemaRuntime {
                 command.closure_path.payload(),
                 &command.substituters,
             ),
-            nexus::BuildTarget::TargetStore(store) => NixCommand::build_closure_in_store(
-                command.closure_path.payload(),
-                store.payload(),
-                &command.substituters,
-            ),
+            nexus::BuildTarget::TargetStore(_) => {
+                NixCommand::build_closure(command.closure_path.payload(), &command.substituters)
+            }
         };
-        match invocation.run().await {
+        match invocation.run(self.configuration.effect_execution()).await {
             Ok(output) => nexus::EffectResult::ClosureBuilt(nexus::BuiltClosure {
                 generation_identifier: command.generation_identifier,
                 closure_path: ordinary::ClosurePath::new(NixCommand::first_line_or(
@@ -3292,14 +3337,10 @@ impl SchemaRuntime {
             closure_path: command.closure_path.clone(),
         });
         let copy = match ClosureCopy::from_command(&command) {
-            // A build-on-target build already realized the closure in the target
-            // node's own store (Spirit lc28, report 150), so the copy is a no-op:
-            // report the closure copied without opening an `ssh-ng` transfer.
-            Ok(None) => return copied,
-            Ok(Some(copy)) => copy,
+            Ok(copy) => copy,
             Err(detail) => return Self::effect_failed(nexus::EffectStage::CopyClosure, detail),
         };
-        match copy.run().await {
+        match copy.run(self.configuration.effect_execution()).await {
             Ok(()) => copied,
             Err(detail) => Self::effect_failed(nexus::EffectStage::CopyClosure, detail),
         }
@@ -3315,7 +3356,7 @@ impl SchemaRuntime {
                 Ok(activation) => activation,
                 Err(detail) => return Self::effect_failed(nexus::EffectStage::Activate, detail),
             };
-        match activation.run().await {
+        match activation.run(self.configuration.effect_execution()).await {
             Ok(()) => nexus::EffectResult::GenerationActivated(nexus::ActivatedGeneration {
                 generation_identifier: command.generation_identifier,
                 node_name: command.node_name,
@@ -3337,7 +3378,7 @@ impl SchemaRuntime {
 
     async fn run_path_info_gc(&self, command: nexus::PathInfoGcCommand) -> nexus::EffectResult {
         match NixCommand::collect_garbage(command.node_name.payload())
-            .run()
+            .run(self.configuration.effect_execution())
             .await
         {
             Ok(output) => nexus::EffectResult::PathsCollected(nexus::GarbageCollected {
@@ -3361,7 +3402,10 @@ impl SchemaRuntime {
     ) -> nexus::EffectResult {
         let cluster_name = command.cluster_name.clone();
         let node_name = command.node_name.clone();
-        match HermeticCheck::new(command).run().await {
+        match HermeticCheck::new(command)
+            .run(self.configuration.effect_execution())
+            .await
+        {
             Ok(closure_path) => nexus::EffectResult::HermeticCheckBuilt(nexus::CheckBuilt {
                 cluster_name,
                 node_name,
@@ -3450,7 +3494,7 @@ impl HorizonMaterialization {
         root.prepare()?;
         let secrets_source = ClusterSecretsDirectory::from_proposal_source(&self.command.source);
         MaterializedInputSet::new(root, horizon, self.command.shape.clone(), secrets_source)
-            .write()
+            .write(self.configuration.effect_execution())
             .await
     }
 }
@@ -3561,20 +3605,20 @@ impl MaterializedInputSet {
         }
     }
 
-    async fn write(&self) -> Result<nexus::MaterializedInputs> {
+    async fn write(&self, execution: &EffectExecution) -> Result<nexus::MaterializedInputs> {
         let mut inputs = Vec::new();
         inputs.push(
             self.root
                 .input_directory(GeneratedInputName::Horizon)
                 .write_horizon(&self.horizon)?
-                .to_override(GeneratedInputName::Horizon)
+                .to_override(GeneratedInputName::Horizon, execution)
                 .await?,
         );
         inputs.push(
             self.root
                 .input_directory(GeneratedInputName::System)
                 .write_system(&self.horizon.node.system)?
-                .to_override(GeneratedInputName::System)
+                .to_override(GeneratedInputName::System, execution)
                 .await?,
         );
         if let Some(deployment) = DeploymentInput::from_shape(&self.shape) {
@@ -3582,7 +3626,7 @@ impl MaterializedInputSet {
                 self.root
                     .input_directory(GeneratedInputName::Deployment)
                     .write_deployment(&deployment)?
-                    .to_override(GeneratedInputName::Deployment)
+                    .to_override(GeneratedInputName::Deployment, execution)
                     .await?,
             );
         }
@@ -3590,7 +3634,7 @@ impl MaterializedInputSet {
             self.root
                 .input_directory(GeneratedInputName::Secrets)
                 .write_secrets(&self.secrets_source)?
-                .to_override(GeneratedInputName::Secrets)
+                .to_override(GeneratedInputName::Secrets, execution)
                 .await?,
         );
         Ok(nexus::MaterializedInputs::new(inputs))
@@ -3695,8 +3739,12 @@ impl GeneratedInputDirectory {
         Ok(())
     }
 
-    async fn to_override(&self, name: GeneratedInputName) -> Result<nexus::FlakeInputOverride> {
-        let hash = NarHash::from_path(&self.path).await?;
+    async fn to_override(
+        &self,
+        name: GeneratedInputName,
+        execution: &EffectExecution,
+    ) -> Result<nexus::FlakeInputOverride> {
+        let hash = NarHash::from_path(&self.path, execution).await?;
         Ok(nexus::FlakeInputOverride {
             name: name.as_str().to_string(),
             reference: nexus::FlakeInputReference {
@@ -3881,10 +3929,13 @@ impl NixSystemName {
 struct NarHash(String);
 
 impl NarHash {
-    async fn from_path(path: &Path) -> Result<Self> {
-        let output = NixCommand::hash_path(path).run().await.map_err(|detail| {
-            std::io::Error::other(format!("failed to hash generated input: {detail}"))
-        })?;
+    async fn from_path(path: &Path, execution: &EffectExecution) -> Result<Self> {
+        let output = NixCommand::hash_path(path)
+            .run(execution)
+            .await
+            .map_err(|detail| {
+                std::io::Error::other(format!("failed to hash generated input: {detail}"))
+            })?;
         Ok(Self(NixCommand::first_line(&output)))
     }
 
@@ -4015,12 +4066,10 @@ impl ShellArgument {
     }
 }
 
-/// Move a closure from the dispatcher store to the activation target. Always
-/// passes `--substitute-on-destination` so the target pulls signed paths from
-/// the cluster cache when available; unsigned daemon-to-daemon transfer is
-/// rejected under `require-sigs` (risk R6). Remote builds use the configured
-/// Nix machine file and copy their result back into the dispatcher store, so
-/// the copy command never opens a direct root SSH source to the builder.
+/// Move the locally realized immutable closure from the dispatcher store to
+/// the activation target. Always passes `--substitute-on-destination` so the
+/// target pulls signed paths from the cluster cache when available; unsigned
+/// daemon-to-daemon transfer is rejected under `require-sigs` (risk R6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClosureCopy {
     store_path: String,
@@ -4028,22 +4077,12 @@ struct ClosureCopy {
 }
 
 impl ClosureCopy {
-    /// `Ok(None)` when the build already realized the closure in the target
-    /// node's own store (`BuildTarget::TargetStore`, Spirit lc28 / report 150) —
-    /// the closure is already on the target, so there is nothing to copy.
-    /// `Ok(Some(copy))` for `Local` / `Remote` builds whose result lives in the
-    /// dispatcher store and must be pushed to the target.
-    fn from_command(
-        command: &nexus::CopyClosureCommand,
-    ) -> std::result::Result<Option<Self>, String> {
-        if matches!(command.source, nexus::BuildTarget::TargetStore(_)) {
-            return Ok(None);
-        }
+    fn from_command(command: &nexus::CopyClosureCommand) -> std::result::Result<Self, String> {
         let target = SshTarget::root_at_node(&command.cluster_name, &command.node_name)?;
-        Ok(Some(Self {
+        Ok(Self {
             store_path: command.closure_path.payload().clone(),
             target,
-        }))
+        })
     }
 
     /// Copy is idempotent: if the closure already exists on the target, Nix
@@ -4059,8 +4098,8 @@ impl ClosureCopy {
         NixCommand::new("nix", arguments)
     }
 
-    async fn run(&self) -> std::result::Result<(), String> {
-        self.invocation().run().await.map(|_| ())
+    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
+        self.invocation().run(execution).await.map(|_| ())
     }
 }
 
@@ -4106,10 +4145,10 @@ impl Activation {
         }
     }
 
-    async fn run(&self) -> std::result::Result<(), String> {
+    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
         match self {
-            Self::Host(activation) => activation.run().await,
-            Self::UserEnvironment(activation) => activation.run().await,
+            Self::Host(activation) => activation.run(execution).await,
+            Self::UserEnvironment(activation) => activation.run(execution).await,
         }
     }
 }
@@ -4324,13 +4363,13 @@ impl HostActivation {
             .remote_invocation(ShellCommand::from_raw("bootctl set-oneshot ''"))
     }
 
-    async fn run(&self) -> std::result::Result<(), String> {
+    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
         if self.runs_detached_self_switch() {
-            return self.run_self_switch().await;
+            return self.run_self_switch(execution).await;
         }
         match self.action {
-            ordinary::HostDeployAction::ScheduleBootOnce => self.run_boot_once().await,
-            _ => self.run_simple().await,
+            ordinary::HostDeployAction::ScheduleBootOnce => self.run_boot_once(execution).await,
+            _ => self.run_simple(execution).await,
         }
     }
 
@@ -4338,40 +4377,50 @@ impl HostActivation {
     /// PID-1-owned transient unit (the BootOnce mechanism, carrying Switch
     /// semantics) so `switch-to-configuration switch` restarting the dispatching
     /// daemon does not kill the activation's foreground ssh (report 150).
-    async fn run_self_switch(&self) -> std::result::Result<(), String> {
+    async fn run_self_switch(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<(), String> {
         let unit_name = self.self_switch_unit_name();
         self.detached_invocation(&unit_name, self.self_switch_script())
-            .run()
+            .run(execution)
             .await
             .map(|_| ())
     }
 
-    async fn run_simple(&self) -> std::result::Result<(), String> {
+    async fn run_simple(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
         match self.ssh_invocation() {
-            Some(invocation) => invocation.run().await.map(|_| ())?,
+            Some(invocation) => invocation.run(execution).await.map(|_| ())?,
             None => {
                 return Err(format!("no simple activation for action {:?}", self.action));
             }
         }
         if self.requires_efi_reconcile() {
-            self.reconcile_efi().await?;
+            self.reconcile_efi(execution).await?;
         }
         Ok(())
     }
 
-    async fn reconcile_efi(&self) -> std::result::Result<(), String> {
-        let output = self.step_readlink_system_profile_invocation().run().await?;
+    async fn reconcile_efi(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
+        let output = self
+            .step_readlink_system_profile_invocation()
+            .run(execution)
+            .await?;
         let link = SystemProfileLink::try_new(output.trim())?;
         let entry = link.generation().boot_entry();
-        self.step_set_efi_default_invocation(&entry).run().await?;
-        self.step_clear_efi_oneshot_invocation().run().await?;
+        self.step_set_efi_default_invocation(&entry)
+            .run(execution)
+            .await?;
+        self.step_clear_efi_oneshot_invocation()
+            .run(execution)
+            .await?;
         Ok(())
     }
 
-    async fn run_boot_once(&self) -> std::result::Result<(), String> {
+    async fn run_boot_once(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
         let unit_name = self.unit_name();
         self.systemd_run_invocation(&unit_name)
-            .run()
+            .run(execution)
             .await
             .map(|_| ())
     }
@@ -4450,41 +4499,53 @@ impl UserEnvironmentActivation {
             )))
     }
 
-    async fn run(&self) -> std::result::Result<(), String> {
+    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
         match self.mode {
             meta::UserEnvironmentAction::Realize => Ok(()),
-            meta::UserEnvironmentAction::SetProfile => self.run_profile().await,
+            meta::UserEnvironmentAction::SetProfile => self.run_profile(execution).await,
             meta::UserEnvironmentAction::ActivateNow => {
-                self.run_profile().await?;
-                self.run_activate().await
+                self.run_profile(execution).await?;
+                self.run_activate(execution).await
             }
         }
     }
 
-    async fn run_profile(&self) -> std::result::Result<(), String> {
-        if !self.is_local_context().await {
-            return self.remote_profile_invocation().run().await.map(|_| ());
+    async fn run_profile(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
+        if !self.is_local_context(execution).await {
+            return self
+                .remote_profile_invocation()
+                .run(execution)
+                .await
+                .map(|_| ());
         }
         let home = std::env::var("HOME")
             .map_err(|_| "HOME is unset for local home activation".to_string())?;
         self.local_profile_invocation(Path::new(&home))
-            .run()
+            .run(execution)
             .await
             .map(|_| ())
     }
 
-    async fn run_activate(&self) -> std::result::Result<(), String> {
-        if !self.is_local_context().await {
-            return self.remote_activate_invocation().run().await.map(|_| ());
+    async fn run_activate(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
+        if !self.is_local_context(execution).await {
+            return self
+                .remote_activate_invocation()
+                .run(execution)
+                .await
+                .map(|_| ());
         }
-        self.local_activate_invocation().run().await.map(|_| ())
+        self.local_activate_invocation()
+            .run(execution)
+            .await
+            .map(|_| ())
     }
 
     /// The local fast-path predicate: the dispatcher is already the requested
     /// user on the target node, so activation runs locally without ssh.
-    async fn is_local_context(&self) -> bool {
+    async fn is_local_context(&self, execution: &EffectExecution) -> bool {
         self.current_user().as_deref() == Some(self.user.as_str())
-            && self.current_node().await.as_deref() == Some(self.node_name.payload().as_str())
+            && self.current_node(execution).await.as_deref()
+                == Some(self.node_name.payload().as_str())
     }
 
     fn current_user(&self) -> Option<String> {
@@ -4493,11 +4554,11 @@ impl UserEnvironmentActivation {
             .ok()
     }
 
-    async fn current_node(&self) -> Option<String> {
+    async fn current_node(&self, execution: &EffectExecution) -> Option<String> {
         // The local-context node match compares the dispatcher's short hostname
         // against the deploy cursor's node name.
         let output = NixCommand::new("hostname", vec!["-s".to_string()])
-            .run()
+            .run(execution)
             .await
             .ok()?;
         Some(output.trim().to_string())
@@ -4578,26 +4639,11 @@ impl NixCommand {
         )
     }
 
-    /// Resolve the toplevel `.drvPath` BEFORE the build, INSTANTIATING against
-    /// the target store so target-only `.drv`s resolve (Spirit ufjd / 0a9p /
-    /// lc28, report 150; verified 2026-06-20). A build-on-target node's config
-    /// references model `.drv`s (multi-tens-of-gigabyte GGUFs) that exist ONLY
-    /// in the target's own store, so the eval must instantiate there or it fails
-    /// with `... .drv does not exist`. For `BuildTarget::TargetStore` the eval
-    /// adds `--store <uri>` ALONE — pointing instantiation at the target store —
-    /// and deliberately NOT `--eval-store auto`: `--eval-store auto` pins
-    /// instantiation local, which is exactly the failure mode (an `--eval-store
-    /// auto --store <uri>` eval still cannot find the target-only `.drv`). The
-    /// build step (`build_closure_in_store`) now uses the SAME flags —
-    /// `--store <uri>` ALONE, NO `--eval-store auto` — so eval and build operate
-    /// consistently on the target store: the eval instantiates the toplevel
-    /// `.drv` INTO the target store and the build finds and realizes it there.
-    /// `Local` (target IS the daemon host) adds no store flags — the host store
-    /// already holds everything. `Remote` keeps the eval host-local too (no
-    /// store redirect): the remote builder is for the BUILD, not the eval, and
-    /// the `.drv` is instantiated against the daemon host's store, matching
-    /// `build_closure_remote`. The `--override-input` flags and `.drvPath`
-    /// selector are preserved in every case.
+    /// Resolve the toplevel `.drvPath` before building in the daemon's local
+    /// Nix context. The target parameter is retained in the generated command
+    /// contract, but it deliberately contributes no `--store` redirect: an
+    /// ssh-ng evaluation can deadlock in remote transport. The exact built
+    /// output is copied to the target in the next stage instead.
     fn eval_drv_path(
         attribute: &str,
         overrides: &[nexus::FlakeInputOverride],
@@ -4612,24 +4658,10 @@ impl NixCommand {
             arguments.push("--refresh".to_string());
         }
         arguments.push("--raw".to_string());
-        match target {
-            nexus::BuildTarget::TargetStore(store) => {
-                arguments.extend(Self::store_options(store.payload()));
-            }
-            nexus::BuildTarget::Local | nexus::BuildTarget::Remote(_) => {}
-        }
+        let _ = target;
         arguments.extend(Self::override_input_options(overrides));
         arguments.push(format!("{attribute}.drvPath"));
         Self::new("nix", arguments)
-    }
-
-    /// The shared `--store <uri>` argument pair, the one place the store-URI
-    /// argument is formatted for nix. Both the eval (instantiate against the
-    /// target store) and the build (realize into the target store) reuse it; the
-    /// `--eval-store auto` flag differs between them and is added by the caller,
-    /// not here.
-    fn store_options(store_uri: &str) -> Vec<String> {
-        vec!["--store".to_string(), store_uri.to_string()]
     }
 
     fn hash_path(path: &Path) -> Self {
@@ -4688,42 +4720,6 @@ impl NixCommand {
             "@/etc/nix/machines".to_string(),
             Self::output_installable(closure_path),
         ];
-        arguments.extend(Self::substituter_options(substituters));
-        Self::new("nix", arguments)
-    }
-
-    /// Build-on-target (Spirit ufjd / 0a9p / lc28, report 150; verified
-    /// 2026-06-20): realize the closure in the TARGET node's own store instead
-    /// of the daemon host's. Build-on-target now does EVAL AND BUILD ENTIRELY on
-    /// the target store — `--store <uri>` ALONE, NO `--eval-store auto` —
-    /// consistent with the eval step (`eval_drv_path`). The eval instantiates
-    /// the toplevel `.drv` INTO the target store (0.3.9, `--store <uri>` alone),
-    /// so the `.drv` lives in the target store; the build must use the SAME
-    /// store to find and realize it. Re-adding `--eval-store auto` makes the
-    /// build look in the LOCAL store for the toplevel `.drv` it cannot find
-    /// there, reintroducing the live failure `error: path
-    /// '/nix/store/...nixos-system-...drv' is not valid`. With `--store <uri>`
-    /// alone the drv resolves valid and builds on the target (verified: ~184/185
-    /// derivations realized on prometheus). `--store <store_uri>` also directs
-    /// REALIZATION — every output path build or substitute, including any
-    /// multi-tens-of-gigabyte model NAR — into the target store, so the daemon
-    /// host never holds the node's model-bearing closure. `store_uri` is the
-    /// `ssh-ng://root@<node>.<cluster>.criome` form (`SshTarget::ssh_uri`). The
-    /// `^*` output selector resolves the threaded `.drv` to its realised
-    /// outputs, same as the local build. The `--store <uri>` pair comes from the
-    /// shared `store_options`, the single place that argument is formatted.
-    fn build_closure_in_store(
-        closure_path: &str,
-        store_uri: &str,
-        substituters: &[nexus::ExtraSubstituter],
-    ) -> Self {
-        let mut arguments = vec![
-            "build".to_string(),
-            "--no-link".to_string(),
-            "--print-out-paths".to_string(),
-        ];
-        arguments.extend(Self::store_options(store_uri));
-        arguments.push(Self::output_installable(closure_path));
         arguments.extend(Self::substituter_options(substituters));
         Self::new("nix", arguments)
     }
@@ -4788,21 +4784,105 @@ impl NixCommand {
         )
     }
 
-    async fn run(&self) -> std::result::Result<String, String> {
-        let output = Command::new(&self.program)
+    /// Run the command in a fresh session/process group with bounded wall-clock
+    /// time. `setsid` execs the requested program as the session leader, so the
+    /// child pid is also the process-group id. A timeout first sends TERM to the
+    /// whole group, then KILL after a short grace period, and always waits for
+    /// the direct child before returning. This prevents a wedged Nix transport
+    /// (or SSH descendant it started) from leaving a deploy permanently in
+    /// Building or Copying.
+    async fn run(&self, execution: &EffectExecution) -> std::result::Result<String, String> {
+        let mut command = Command::new("setsid");
+        command
+            .arg("--")
+            .arg(execution.program(&self.program))
             .args(&self.arguments)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("failed to spawn session for {}: {error}", self.program))?;
+        let process_group = child
+            .id()
+            .and_then(|raw| i32::try_from(raw).ok())
+            .and_then(Pid::from_raw)
+            .ok_or_else(|| format!("spawned {} without a usable process id", self.program))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| format!("spawned {} without a stdout pipe", self.program))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| format!("spawned {} without a stderr pipe", self.program))?;
+        let stdout_task = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            let mut stdout = stdout;
+            stdout.read_to_end(&mut bytes).await.map(|_| bytes)
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            let mut stderr = stderr;
+            stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+        });
+
+        let outcome = match tokio::time::timeout(execution.timeout, child.wait()).await {
+            Ok(Ok(status)) => Ok(status),
+            Ok(Err(error)) => Err(format!(
+                "failed while waiting for {}: {error}",
+                self.program
+            )),
+            Err(_) => {
+                let terminate = kill_process_group(process_group, Signal::TERM)
+                    .map_err(|error| error.to_string());
+                let reap =
+                    tokio::time::timeout(EffectExecution::TERMINATION_GRACE, child.wait()).await;
+                let detail = match reap {
+                    Ok(Ok(_)) => format!(
+                        "{} timed out after {:?}; terminated its process group ({terminate:?})",
+                        self.program, execution.timeout
+                    ),
+                    Ok(Err(error)) => {
+                        let kill = kill_process_group(process_group, Signal::KILL)
+                            .map_err(|kill_error| kill_error.to_string());
+                        let retry = child.wait().await;
+                        format!(
+                            "{} timed out after {:?}; TERM result {terminate:?}; KILL result {kill:?}; reaping failed: {error}; retry result {retry:?}",
+                            self.program, execution.timeout
+                        )
+                    }
+                    Err(_) => {
+                        let kill = kill_process_group(process_group, Signal::KILL)
+                            .map_err(|error| error.to_string());
+                        let reap_after_kill = child.wait().await;
+                        format!(
+                            "{} timed out after {:?}; TERM result {terminate:?}; KILL result {kill:?}; final reap result {reap_after_kill:?}",
+                            self.program, execution.timeout
+                        )
+                    }
+                };
+                Err(detail)
+            }
+        };
+        let stdout = stdout_task
             .await
-            .map_err(|error| format!("failed to spawn {}: {error}", self.program))?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+            .map_err(|error| format!("failed to join {} stdout reader: {error}", self.program))?
+            .map_err(|error| format!("failed to read {} stdout: {error}", self.program))?;
+        let stderr = stderr_task
+            .await
+            .map_err(|error| format!("failed to join {} stderr reader: {error}", self.program))?
+            .map_err(|error| format!("failed to read {} stderr: {error}", self.program))?;
+        let status = outcome?;
+        if status.success() {
+            Ok(String::from_utf8_lossy(&stdout).into_owned())
         } else {
             Err(format!(
                 "{} {} exited with {}: {}",
                 self.program,
                 self.arguments.join(" "),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                status,
+                String::from_utf8_lossy(&stderr).trim()
             ))
         }
     }
@@ -5360,7 +5440,6 @@ mod tests {
     #[test]
     fn copy_from_dispatcher_uses_to_only_with_substitute() {
         let copy = ClosureCopy::from_command(&copy_command(nexus::BuildTarget::Local))
-            .expect("copy")
             .expect("local build copies from the dispatcher store");
         let invocation = copy.invocation();
         assert_eq!(invocation.program(), "nix");
@@ -5379,7 +5458,6 @@ mod tests {
         let builder = ordinary::NodeName::new("builder-node");
         let source = nexus::BuildTarget::Remote(nexus::BuilderNode::new(builder));
         let copy = ClosureCopy::from_command(&copy_command(source))
-            .expect("copy")
             .expect("a remote builder copies its result from the dispatcher store");
         let invocation = copy.invocation();
         let argv = invocation.joined_arguments();
@@ -5395,7 +5473,6 @@ mod tests {
     fn copy_builder_equals_target_still_runs_idempotent_target_copy() {
         let source = nexus::BuildTarget::Remote(nexus::BuilderNode::new(node()));
         let copy = ClosureCopy::from_command(&copy_command(source))
-            .expect("copy")
             .expect("a remote builder copies its result from the dispatcher store");
         let invocation = copy.invocation();
         let argv = invocation.joined_arguments();
@@ -5406,20 +5483,17 @@ mod tests {
         );
     }
 
-    // ---- build-on-target: target-store build copy is a no-op ----
+    // ---- copy is always explicit, even for a legacy target-store command ----
 
     #[test]
-    fn target_store_build_skips_the_copy_entirely() {
-        // A build-on-target build already realized the closure in the target
-        // node's own store (Spirit lc28 / report 150), so there is nothing to
-        // push: `from_command` returns `None` and no `ssh-ng` transfer runs.
+    fn target_store_command_still_copies_the_exact_closure() {
+        // The durable transport always makes the copy stage explicit. This also
+        // prevents a legacy target-store command from silently bypassing the
+        // source-of-truth closure transfer.
         let source =
             nexus::BuildTarget::target_store("ssh-ng://root@node-1.alpha.criome".to_string());
         let copy = ClosureCopy::from_command(&copy_command(source)).expect("copy");
-        assert!(
-            copy.is_none(),
-            "target-store build must skip the copy; the closure is already on the target"
-        );
+        assert!(copy.invocation().joined_arguments().contains(STORE));
     }
 
     fn activate_command(
@@ -5762,7 +5836,7 @@ mod tests {
         assert!(pipeline.boot_once_unit().is_none());
     }
 
-    // ---- build-on-target: selection of the build store (report 150) ----
+    // ---- local owner transport: selection of the build context ----
 
     fn configuration_on_host(host: &str) -> RuntimeConfiguration {
         let mut configuration = RuntimeConfiguration::test_default();
@@ -5771,26 +5845,21 @@ mod tests {
     }
 
     #[test]
-    fn build_on_a_different_target_realizes_in_the_target_store() {
-        // The reason for the fix: deploying node-1 from a daemon hosted on
-        // ouranos must NOT realize node-1's (model-bearing) closure on ouranos.
-        // The build target is the target node's own store over ssh-ng.
+    fn build_on_a_different_target_stays_in_the_local_owner_context() {
+        // Remote activation targets now evaluate/build locally and copy their
+        // exact immutable output afterwards; no eval or build targets ssh-ng.
         let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
         let configuration = configuration_on_host("ouranos");
-        match pipeline.build_target(&configuration) {
-            nexus::BuildTarget::TargetStore(store) => {
-                assert_eq!(store.payload(), "ssh-ng://root@node-1.alpha.criome");
-            }
-            other => panic!("expected a target-store build for a remote node, got {other:?}"),
-        }
+        assert!(matches!(
+            pipeline.build_target(&configuration),
+            nexus::BuildTarget::Local
+        ));
     }
 
     #[test]
     fn build_on_the_daemon_host_stays_local() {
-        // Deploying the daemon's own host (e.g. ouranos from the ouranos-hosted
-        // daemon) must stay local — its store already holds any model closure,
-        // and an ssh-ng-to-self build would be wrong. `host_pipeline` targets
-        // node `node-1`, so a daemon hosted on `node-1` builds locally.
+        // Deploying the daemon's own host also stays local. The same transport
+        // invariant applies to every target, including the daemon host.
         let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
         let configuration = configuration_on_host("node-1");
         assert!(matches!(
@@ -5800,10 +5869,9 @@ mod tests {
     }
 
     #[test]
-    fn explicit_builder_override_wins_over_build_on_target() {
+    fn explicit_builder_override_wins_over_the_default_local_builder() {
         // An operator-named builder still dispatches to that Nix builder machine
-        // regardless of daemon host — the build-on-target decision only governs
-        // the default (no-builder) path.
+        // through the local Nix client; only the default has no named builder.
         let mut pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
         pipeline.builder = Some(ordinary::NodeName::new("big-builder"));
         let configuration = configuration_on_host("ouranos");
@@ -5814,38 +5882,19 @@ mod tests {
     }
 
     #[test]
-    fn target_store_build_realizes_on_target_store_no_eval_store_auto() {
-        // The target-store nix invocation must operate ENTIRELY on the target
-        // store — `--store <uri>` ALONE, NO `--eval-store auto` — consistent
-        // with the eval step. The eval instantiates the toplevel `.drv` INTO the
-        // target store, so the build must use the same store to FIND it;
-        // re-adding `--eval-store auto` makes the build look in the local store
-        // and fails with `... .drv is not valid`. Still selects the drv outputs
-        // with `^*`.
-        let invocation = NixCommand::build_closure_in_store(
-            DERIVATION,
-            "ssh-ng://root@node-1.alpha.criome",
-            &[],
-        );
+    fn build_closure_stays_local_and_selects_the_realised_output() {
+        let invocation = NixCommand::build_closure(DERIVATION, &[]);
         assert_eq!(invocation.program(), "nix");
         let argv = invocation.joined_arguments();
         assert!(
-            argv.contains("--store ssh-ng://root@node-1.alpha.criome"),
-            "eval+build must target the node store: {argv}"
-        );
-        assert!(
-            !argv.contains("--eval-store"),
-            "build must NOT pin instantiation local — `--eval-store auto` makes \
-             the build look in the local store for the target-only `.drv` and \
-             reintroduces the `.drv is not valid` failure: {argv}"
+            !argv.contains("--store") && !argv.contains("--eval-store"),
+            "build must remain in the local owner context: {argv}"
         );
         assert!(argv.contains("--print-out-paths"), "{argv}");
         assert!(
             argv.contains(&format!("{DERIVATION}^*")),
-            "target-store build must carry the `^*` output selector: {argv}"
+            "local build must carry the `^*` output selector: {argv}"
         );
-        // A target-store build NEVER offloads to the daemon machine file — that
-        // would copy the result back into the daemon host store (report 150).
         assert!(!argv.contains("--builders"), "{argv}");
     }
 
@@ -5987,17 +6036,9 @@ mod tests {
     }
 
     #[test]
-    fn target_store_eval_instantiates_against_the_target_store_no_eval_store_auto() {
-        // The Eval step resolves `.drvPath` BEFORE the build by INSTANTIATING
-        // against the target store. A build-on-target node's config references
-        // model `.drv`s that live ONLY in the target store, so the eval must add
-        // `--store <uri>` ALONE — NOT `--eval-store auto --store <uri>` —
-        // because `--eval-store auto` pins instantiation local and the
-        // target-only `.drv` then `... .drv does not exist` (verified
-        // 2026-06-20, report 150). The BUILD step
-        // (`build_closure_in_store`) now uses the SAME `--store <uri>` alone, so
-        // eval and build operate consistently on the target store. The
-        // `--override-input` flags and `.drvPath` selector are preserved.
+    fn target_store_command_never_redirects_eval_over_ssh_ng() {
+        // Even a legacy TargetStore command cannot restore remote evaluation:
+        // the transport invariant is that eval stays in Lojix's local context.
         let store = nexus::BuildTarget::TargetStore(nexus::TargetStore::new(
             "ssh-ng://root@node-1.alpha.criome",
         ));
@@ -6006,13 +6047,8 @@ mod tests {
         assert_eq!(invocation.program(), "nix");
         let argv = invocation.joined_arguments();
         assert!(
-            argv.contains("--store ssh-ng://root@node-1.alpha.criome"),
-            "eval must instantiate against the target store: {argv}"
-        );
-        assert!(
-            !argv.contains("--eval-store"),
-            "eval must NOT pin instantiation local — `--eval-store auto` is the \
-             failure mode for target-only drvs: {argv}"
+            !argv.contains("--store") && !argv.contains("--eval-store"),
+            "eval must remain local: {argv}"
         );
         assert!(argv.contains("--refresh"), "{argv}");
         assert!(argv.contains("--raw"), "{argv}");
@@ -6037,8 +6073,8 @@ mod tests {
         );
         assert!(argv.contains("--raw"), "{argv}");
         assert!(
-            argv.contains("--store ssh-ng://root@node-1.alpha.criome"),
-            "the target-store redirect is independent of refresh: {argv}"
+            !argv.contains("--store"),
+            "immutable eval remains local: {argv}"
         );
         assert!(argv.ends_with(".#toplevel.drvPath"), "{argv}");
     }

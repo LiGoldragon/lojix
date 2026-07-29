@@ -32,6 +32,7 @@ struct ConfigurationWriteRequest {
     owner_socket_mode: WriterMode,
     state_directory_path: WriterPath,
     daemon_host: WriterCluster,
+    effect_timeout_seconds: WriterSeconds,
     test_defaults: WriterTestDefaultsChoice,
     output_path: WriterPath,
 }
@@ -81,6 +82,9 @@ struct WriterPath(String);
 #[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
 struct WriterMode(u32);
 
+#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+struct WriterSeconds(u64);
+
 impl ConfigurationWriterCli {
     fn from_environment() -> Self {
         Self {
@@ -125,6 +129,9 @@ impl ConfigurationWriterInput {
 
 impl ConfigurationWriteRequest {
     fn write(self) -> Result<PathBuf, ConfigurationWriterError> {
+        if self.effect_timeout_seconds.0 == 0 {
+            return Err(ConfigurationWriterError::ZeroEffectTimeout);
+        }
         let output_path = self.output_path.path_buf();
         let configuration = DaemonConfiguration {
             ordinary_socket_path: self.ordinary_socket_path.0,
@@ -133,6 +140,7 @@ impl ConfigurationWriteRequest {
             owner_socket_mode: self.owner_socket_mode.0,
             state_directory_path: self.state_directory_path.0,
             daemon_host: self.daemon_host.0,
+            effect_timeout_seconds: self.effect_timeout_seconds.0,
             test_defaults: self.test_defaults.into_config(),
         };
         configuration
@@ -187,6 +195,8 @@ enum ConfigurationWriterError {
     },
     #[error("signal-encoded configuration requests are not supported: {}", path.display())]
     UnsupportedSignalFile { path: PathBuf },
+    #[error("effect timeout must be at least one second")]
+    ZeroEffectTimeout,
     #[error(transparent)]
     Decode(#[from] NotaDecodeError),
     #[error("write configuration archive: {0}")]
