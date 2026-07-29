@@ -200,14 +200,11 @@ pub struct DaemonConfiguration {
     pub owner_socket_path: String,
     pub owner_socket_mode: u32,
     pub state_directory_path: String,
-    /// The node name of the host this daemon runs on (e.g. `ouranos`). The
-    /// build-on-target decision compares the deploy's target node against this:
-    /// a target == daemon host builds LOCALLY (its store already holds any
-    /// model-bearing paths), while a target != daemon host realizes the node's
-    /// closure in the TARGET node's own store over `ssh-ng`, so a node's
-    /// model-bearing closure never transits the daemon host (Spirit ufjd /
-    /// 0a9p / lc28, report 150). Decoded from the same rkyv startup file — not a
-    /// flag, not a runtime `Configure`.
+    /// The node name of the host this daemon runs on (e.g. `ouranos`). It is
+    /// retained as deployment identity, while every immutable generation is
+    /// evaluated and built locally, copied to its target, then activated there.
+    /// Decoded from the same rkyv startup file — not a flag, not a runtime
+    /// `Configure`.
     pub daemon_host: String,
     /// Maximum wall-clock duration for one external Nix, SSH, or activation
     /// command. The daemon owns timeout and cancellation for every such stage;
