@@ -40,7 +40,7 @@ default   = []
 nota-text = ["signal-lojix/nota-text", "meta-signal-lojix/nota-text"]
 
 [dependencies]
-horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", rev = "f9d8676c4d245921f4b0799f6736e89c020c7f75" }
+horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", rev = "ed1111c89fb86215580d8edcb21884f4748ca262" }
 kameo             = "0.20"
 nota         = { git = "https://github.com/LiGoldragon/nota.git", branch = "main" }
 meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix.git", branch = "main" }

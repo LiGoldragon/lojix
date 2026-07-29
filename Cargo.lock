@@ -276,8 +276,8 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "horizon-lib"
-version = "0.3.0"
-source = "git+https://github.com/LiGoldragon/horizon-rs.git?rev=f9d8676c4d245921f4b0799f6736e89c020c7f75#f9d8676c4d245921f4b0799f6736e89c020c7f75"
+version = "0.3.1"
+source = "git+https://github.com/LiGoldragon/horizon-rs.git?rev=ed1111c89fb86215580d8edcb21884f4748ca262#ed1111c89fb86215580d8edcb21884f4748ca262"
 dependencies = [
  "ipnet",
  "nota",
@@ -478,8 +478,8 @@ dependencies = [
 
 [[package]]
 name = "nota"
-version = "0.5.1"
-source = "git+https://github.com/LiGoldragon/nota.git?branch=main#ce7c564de0a0518eaa1938d55dccc460a67cadb4"
+version = "0.9.0"
+source = "git+https://github.com/LiGoldragon/nota.git?branch=main#89dc3c85a9ff96d4e4d53accfd867df672cae5a8"
 dependencies = [
  "nota-derive",
  "rkyv",
@@ -487,8 +487,8 @@ dependencies = [
 
 [[package]]
 name = "nota-derive"
-version = "0.3.0"
-source = "git+https://github.com/LiGoldragon/nota.git?branch=main#ce7c564de0a0518eaa1938d55dccc460a67cadb4"
+version = "0.4.0"
+source = "git+https://github.com/LiGoldragon/nota.git?branch=main#89dc3c85a9ff96d4e4d53accfd867df672cae5a8"
 dependencies = [
  "proc-macro2",
  "quote",
