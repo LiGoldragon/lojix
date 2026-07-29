@@ -52,6 +52,9 @@
         commonArguments = {
           src = source;
           strictDeps = true;
+          # The bounded-effect runner starts every external command with
+          # `setsid`; package checks need that executable in their sandbox.
+          nativeBuildInputs = [ pkgs.util-linux ];
         };
         cargoArtifacts = craneLib.buildDepsOnly (
           commonArguments
