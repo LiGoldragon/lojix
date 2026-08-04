@@ -34,11 +34,11 @@ const MAXIMUM_REQUEST_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 use crate::schema::nexus::{self, NexusEngine};
+use crate::schema::sema;
 use crate::schema_runtime::{
     DeploySubmissionOutcome, RuntimeConfiguration, SchemaRuntime, TestSubmissionOutcome,
 };
 use crate::{DaemonConfiguration, Error, Result, Store};
-use meta_signal_lojix::schema::lib as meta;
 
 /// Which authority-tiered socket an arriving stream belongs to. Ordinary is the
 /// peer-callable `signal-lojix` surface; Owner is the `meta-signal-lojix`
@@ -316,18 +316,19 @@ impl RequestWorker {
 
     async fn serve_ordinary(&self, connection: &mut AcceptedConnection) -> Result<()> {
         let body = self.read_body(connection).await?;
-        let (_, input) = signal_lojix::schema::lib::Input::decode_signal_frame(body.bytes())?;
+        let (exchange, input) =
+            signal_lojix::schema::lib::ContractMarker::decode_single_request(body.bytes())?;
         let output = self
             .execute_request(
                 ListenerRole::Ordinary,
-                nexus::SignalInput::OrdinaryInput(input),
+                nexus::SignalInput::OrdinaryInput(crate::adapters::ordinary_ingress(input)),
             )
-            .await;
-        let reply = Self::ordinary_reply(output)?;
+            .await?;
+        let reply = crate::adapters::ordinary_egress(Self::ordinary_reply(output)?)?;
         self.codec
             .write_body_async(
                 connection.stream_mut(),
-                &FrameBody::new(reply.encode_signal_frame()?),
+                &FrameBody::new(reply.encode_reply_frame(exchange)?),
             )
             .await?;
         Ok(())
@@ -336,29 +337,32 @@ impl RequestWorker {
     async fn serve_owner(&self, connection: &mut AcceptedConnection) -> Result<()> {
         self.owner_authority.authorize(connection.context())?;
         let body = self.read_body(connection).await?;
-        let (_, input) = meta_signal_lojix::schema::lib::Input::decode_signal_frame(body.bytes())?;
+        let (exchange, input) =
+            meta_signal_lojix::schema::lib::ContractMarker::decode_single_request(body.bytes())?;
+        let input = crate::adapters::meta_ingress(input);
         // A `Deploy` decouples from this connection task: the deploy-job actor
         // owns the pipeline, this task only submits and replies the accepted
         // handle. Pin/Unpin/Retire are fast single writes and stay synchronous
         // on this task (up9q surface a — only Deploy decouples).
         let reply = match input {
-            meta::Input::Deploy(request) => self.submit_deploy(request.into_payload()).await,
+            sema::MetaIngress::Deploy(request) => self.submit_deploy(request).await?,
             // A `Test` decouples from this connection task exactly like a
             // `Deploy` (Unit 2b): the test-job actor owns the dispatch pipeline
             // (the real `nix build` of the hermetic check, or the gated live
             // cycle), this task only submits and replies the accepted handle.
-            meta::Input::Test(request) => self.submit_test(request.into_payload()).await,
+            sema::MetaIngress::Test(request) => self.submit_test(request).await?,
             other => {
                 let output = self
                     .execute_request(ListenerRole::Owner, nexus::SignalInput::MetaInput(other))
-                    .await;
+                    .await?;
                 Self::meta_reply(output)?
             }
         };
+        let reply = crate::adapters::meta_egress(reply)?;
         self.codec
             .write_body_async(
                 connection.stream_mut(),
-                &FrameBody::new(reply.encode_signal_frame()?),
+                &FrameBody::new(reply.encode_reply_frame(exchange)?),
             )
             .await?;
         Ok(())
@@ -372,23 +376,18 @@ impl RequestWorker {
     /// runs. When the cap is full it replies `DeploymentInFlight`. This task's
     /// only remaining work is writing this reply frame; dropping it (a client
     /// disconnect) cannot cancel the spawned pipeline.
-    async fn submit_deploy(&self, request: meta::DeployRequest) -> meta::Output {
+    async fn submit_deploy(&self, request: sema::DeploySubmission) -> Result<sema::MetaEgress> {
         match self.deploy_jobs.ask(AdmitDeploy { request }).await {
             Ok(DeployAdmission::Accepted(accepted)) => {
-                meta::Output::DeployAccepted(meta::DeployAccepted::new(accepted))
+                Ok(sema::MetaEgress::DeployAccepted(accepted))
             }
             Ok(DeployAdmission::Rejected(rejected)) => {
-                meta::Output::DeployRejected(meta::DeployRejected::new(rejected))
+                Ok(sema::MetaEgress::DeployRejected(rejected))
             }
             // The deploy-job actor is daemon-lifetime; a send error means the
             // runtime is tearing down. Reply a typed internal rejection rather
             // than dropping the connection without a frame.
-            Err(_) => {
-                meta::Output::DeployRejected(meta::DeployRejected::new(meta::RejectedDeploy {
-                    deploy_rejection_reason: meta::DeployRejectionReason::InternalError,
-                    database_marker: Self::zero_marker(),
-                }))
-            }
+            Err(_) => Err(Error::UnexpectedFrame),
         }
     }
 
@@ -400,25 +399,11 @@ impl RequestWorker {
     /// — all before the build runs. Dropping this task (a client disconnect)
     /// cannot cancel the spawned pipeline; the result lands durably and is read
     /// over the ordinary `(ByTestRun …)` query.
-    async fn submit_test(&self, request: meta::TestRequest) -> meta::Output {
+    async fn submit_test(&self, request: sema::TestRequest) -> Result<sema::MetaEgress> {
         match self.test_jobs.ask(AdmitTest { request }).await {
-            Ok(TestAdmission::Accepted(accepted)) => {
-                meta::Output::Tested(meta::Tested::new(accepted))
-            }
-            Ok(TestAdmission::Rejected(rejected)) => {
-                meta::Output::TestRejected(meta::TestRejected::new(rejected))
-            }
-            Err(_) => meta::Output::TestRejected(meta::TestRejected::new(meta::RejectedTest {
-                test_rejection_reason: meta::TestRejectionReason::InternalError,
-                database_marker: Self::zero_marker(),
-            })),
-        }
-    }
-
-    fn zero_marker() -> meta::DatabaseMarker {
-        meta::DatabaseMarker {
-            commit_sequence: signal_lojix::schema::lib::CommitSequence::new(0),
-            state_digest: signal_lojix::schema::lib::StateDigest::new(0),
+            Ok(TestAdmission::Accepted(accepted)) => Ok(sema::MetaEgress::Tested(accepted)),
+            Ok(TestAdmission::Rejected(rejected)) => Ok(sema::MetaEgress::TestRejected(rejected)),
+            Err(_) => Err(Error::UnexpectedFrame),
         }
     }
 
@@ -436,7 +421,7 @@ impl RequestWorker {
         &self,
         listener: ListenerRole,
         signal_input: nexus::SignalInput,
-    ) -> nexus::SignalOutput {
+    ) -> Result<nexus::SignalOutput> {
         Self::execute_with_store(
             self.store.clone(),
             self.configuration.clone(),
@@ -456,61 +441,30 @@ impl RequestWorker {
         configuration: Arc<RuntimeConfiguration>,
         listener: ListenerRole,
         signal_input: nexus::SignalInput,
-    ) -> nexus::SignalOutput {
+    ) -> Result<nexus::SignalOutput> {
         let mut engine = SchemaRuntime::with_store_and_configuration(store, configuration);
         let work = nexus::NexusWork::SignalArrived(signal_input)
             .with_origin_route(nexus::OriginRoute::new(0));
         match engine.execute(work).await.into_root() {
-            nexus::NexusAction::ReplyToSignal(output) => output,
+            nexus::NexusAction::ReplyToSignal(output) => Ok(output),
             // `execute` always terminates the runner with a reply; any other
             // action escaping is a runtime invariant violation. Reply with a
             // typed rejection on the SAME authority tier the request arrived on
             // (audit R4), so the client decodes a real reply, not an EOF.
-            _ => Self::invariant_rejection(listener),
+            _ => Err(Error::Invariant(format!(
+                "generated Nexus runner terminated without a reply for {listener}"
+            ))),
         }
     }
 
-    fn invariant_rejection(listener: ListenerRole) -> nexus::SignalOutput {
-        match listener {
-            ListenerRole::Owner => nexus::SignalOutput::MetaOutput(
-                meta_signal_lojix::schema::lib::Output::DeployRejected(
-                    meta_signal_lojix::schema::lib::DeployRejected::new(
-                        meta_signal_lojix::schema::lib::RejectedDeploy {
-                            deploy_rejection_reason:
-                                meta_signal_lojix::schema::lib::DeployRejectionReason::InternalError,
-                            database_marker: meta_signal_lojix::schema::lib::DatabaseMarker {
-                                commit_sequence: signal_lojix::schema::lib::CommitSequence::new(0),
-                                state_digest: signal_lojix::schema::lib::StateDigest::new(0),
-                            },
-                        },
-                    ),
-                ),
-            ),
-            ListenerRole::Ordinary => nexus::SignalOutput::OrdinaryOutput(
-                signal_lojix::schema::lib::Output::QueryRejected(
-                    signal_lojix::schema::lib::QueryRejected::new(
-                        signal_lojix::schema::lib::RejectedQuery {
-                            query_rejection_reason:
-                                signal_lojix::schema::lib::QueryRejectionReason::MalformedSelector,
-                            database_marker: signal_lojix::schema::lib::DatabaseMarker {
-                                commit_sequence: signal_lojix::schema::lib::CommitSequence::new(0),
-                                state_digest: signal_lojix::schema::lib::StateDigest::new(0),
-                            },
-                        },
-                    ),
-                ),
-            ),
-        }
-    }
-
-    fn ordinary_reply(output: nexus::SignalOutput) -> Result<signal_lojix::schema::lib::Output> {
+    fn ordinary_reply(output: nexus::SignalOutput) -> Result<sema::OrdinaryEgress> {
         match output {
             nexus::SignalOutput::OrdinaryOutput(output) => Ok(output),
             nexus::SignalOutput::MetaOutput(_) => Err(Error::UnexpectedFrame),
         }
     }
 
-    fn meta_reply(output: nexus::SignalOutput) -> Result<meta_signal_lojix::schema::lib::Output> {
+    fn meta_reply(output: nexus::SignalOutput) -> Result<sema::MetaEgress> {
         match output {
             nexus::SignalOutput::MetaOutput(output) => Ok(output),
             nexus::SignalOutput::OrdinaryOutput(_) => Err(Error::UnexpectedFrame),
@@ -519,7 +473,7 @@ impl RequestWorker {
 }
 
 /// The daemon-owned deploy-job executor (up9q surface a). A kameo actor whose
-/// `ActorRef` lives on [`LojixRuntime`] for the daemon's whole lifetime, NOT on
+/// `ActorRef` lives on `LojixRuntime` for the daemon's whole lifetime, NOT on
 /// any connection task. It owns the deploy-job admission cap and the in-flight
 /// count; on each accepted `Deploy` it runs the synchronous submit and then
 /// launches the deploy pipeline as an independent runtime task (decoupled from
@@ -559,17 +513,6 @@ impl DeployJobs {
         self.active_count >= self.cap
     }
 
-    fn deployment_in_flight_rejection(&self) -> meta::RejectedDeploy {
-        let commit_sequence = self.store.commit_sequence().unwrap_or(0);
-        meta::RejectedDeploy {
-            deploy_rejection_reason: meta::DeployRejectionReason::DeploymentInFlight,
-            database_marker: meta::DatabaseMarker {
-                commit_sequence: signal_lojix::schema::lib::CommitSequence::new(commit_sequence),
-                state_digest: signal_lojix::schema::lib::StateDigest::new(commit_sequence),
-            },
-        }
-    }
-
     /// Launch one admitted deploy's pipeline as an independent daemon runtime
     /// task and return immediately. The task owns the seeded engine and drives
     /// the full effect chain to completion, then reports `DeployCompleted` so
@@ -579,7 +522,8 @@ impl DeployJobs {
     fn launch_pipeline(&self, mut engine: SchemaRuntime, jobs: ActorRef<DeployJobs>) {
         tokio::spawn(async move {
             let terminal = engine.drive_submitted_deploy().await;
-            eprintln!("lojix deploy pipeline terminal output: {terminal:?}");
+            let _ = terminal;
+            eprintln!("lojix deploy pipeline reached a terminal state");
             // Free the cap slot. `tell` is safe: `DeployCompleted` has an
             // infallible `()` reply, so it cannot crash the actor.
             let _ = jobs.tell(DeployCompleted).await;
@@ -595,7 +539,7 @@ impl DeployJobs {
     /// so this start path computes and (for terminal rows) clears, leaving live
     /// resumption to S5. Pre-activation rows are dropped here so they do not
     /// wedge the cap; they are re-submittable by the operator.
-    fn reconcile_persisted_jobs(&self) {
+    fn reconcile_persisted_jobs(&mut self, actor: ActorRef<DeployJobs>) {
         let Ok(jobs) = self.store.deploy_jobs() else {
             return;
         };
@@ -603,6 +547,10 @@ impl DeployJobs {
         for job in jobs {
             let deployment_identifier = *job.deployment_identifier.payload();
             match job.resumption() {
+                crate::schema_runtime::DeployJobResumption::LegacyNonResumable => {
+                    // Owner-visible durable quarantine: v2 did not contain the
+                    // exact private submission needed for a safe replay.
+                }
                 // A detached self-switch (bead primary-7u8p): a host `ActivateNow`
                 // targeting the daemon's OWN host restarts the daemon inside the
                 // switch, so the terminal activation write never committed. Only
@@ -639,11 +587,32 @@ impl DeployJobs {
                     // outcome rather than re-activating. Until then leave the
                     // row so the operator sees the in-flight activation.
                 }
-                crate::schema_runtime::DeployJobResumption::RestartPipeline
-                | crate::schema_runtime::DeployJobResumption::AlreadyTerminal => {
-                    // Pre-activation work mutated no durable target state (or the
-                    // deploy already finished); drop the stale row so it does not
-                    // occupy a cap slot. Live re-drive is an S5 follow-on.
+                crate::schema_runtime::DeployJobResumption::RestartPipeline => {
+                    if self.at_capacity() {
+                        continue;
+                    }
+                    let mut engine = SchemaRuntime::with_store_and_configuration(
+                        self.store.clone(),
+                        self.configuration.clone(),
+                    );
+                    match engine.resume_deploy_job(job) {
+                        Ok(true) => {
+                            self.active_count += 1;
+                            self.launch_pipeline(engine, actor.clone());
+                        }
+                        Ok(false) => {
+                            let _ = self.store.retract_deploy_job(deployment_identifier);
+                        }
+                        Err(_) => {
+                            // Preserve the original durable cursor for the next
+                            // start; a failed reconstruction must not erase an
+                            // accepted deployment.
+                        }
+                    }
+                }
+                crate::schema_runtime::DeployJobResumption::AlreadyTerminal => {
+                    // Terminal correlation is durable; the stale convenience
+                    // cursor can be retired without losing the public outcome.
                     let _ = self.store.retract_deploy_job(deployment_identifier);
                 }
             }
@@ -711,15 +680,15 @@ impl Actor for DeployJobs {
 /// submit, and on accept launch the pipeline. The reply is the immediate
 /// admission verdict.
 pub struct AdmitDeploy {
-    pub request: meta::DeployRequest,
+    pub request: sema::DeploySubmission,
 }
 
 /// The immediate admission verdict for an `AdmitDeploy` — the wire reply the
 /// daemon sends the owner connection before any pipeline effect runs.
 #[derive(Debug, Clone, PartialEq, Eq, kameo::Reply)]
 pub enum DeployAdmission {
-    Accepted(meta::DeployHandle),
-    Rejected(meta::RejectedDeploy),
+    Accepted(sema::DeployHandle),
+    Rejected(sema::RejectedDeploy),
 }
 
 impl Message<AdmitDeploy> for DeployJobs {
@@ -731,7 +700,11 @@ impl Message<AdmitDeploy> for DeployJobs {
         context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if self.at_capacity() {
-            return DeployAdmission::Rejected(self.deployment_in_flight_rejection());
+            let engine = SchemaRuntime::with_store_and_configuration(
+                self.store.clone(),
+                self.configuration.clone(),
+            );
+            return DeployAdmission::Rejected(engine.reject_deployment_in_flight(message.request));
         }
         let mut engine = SchemaRuntime::with_store_and_configuration(
             self.store.clone(),
@@ -772,14 +745,14 @@ impl Message<ReconcilePersistedJobs> for DeployJobs {
     async fn handle(
         &mut self,
         _message: ReconcilePersistedJobs,
-        _context: &mut Context<Self, Self::Reply>,
+        context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.reconcile_persisted_jobs();
+        self.reconcile_persisted_jobs(context.actor_ref().clone());
     }
 }
 
 /// The daemon-owned TEST-job executor (Unit 2b, the test analogue of
-/// [`DeployJobs`]). A kameo actor whose `ActorRef` lives on [`LojixRuntime`] for
+/// [`DeployJobs`]). A kameo actor whose `ActorRef` lives on `LojixRuntime` for
 /// the daemon's whole lifetime, NOT on any connection task. On each accepted
 /// `Test` it runs the synchronous submit (lower + validate + persist the
 /// Pending row), then launches the dispatch pipeline — the real hermetic
@@ -814,13 +787,16 @@ impl TestJobs {
         self.active_count >= self.cap
     }
 
-    fn substrate_unavailable_rejection(&self) -> meta::RejectedTest {
-        let commit_sequence = self.store.commit_sequence().unwrap_or(0);
-        meta::RejectedTest {
-            test_rejection_reason: meta::TestRejectionReason::SubstrateUnavailable,
-            database_marker: meta::DatabaseMarker {
-                commit_sequence: signal_lojix::schema::lib::CommitSequence::new(commit_sequence),
-                state_digest: signal_lojix::schema::lib::StateDigest::new(commit_sequence),
+    fn substrate_unavailable_rejection(&self) -> sema::RejectedTest {
+        let commit_sequence = self
+            .store
+            .commit_sequence()
+            .expect("read durable state marker for test rejection");
+        sema::RejectedTest {
+            test_rejection_reason: sema::TestRejectionReason::SubstrateUnavailable,
+            state_marker: sema::StateMarker {
+                commit_sequence: sema::CommitSequence::new(commit_sequence),
+                state_digest: sema::StateDigest::new(commit_sequence),
             },
         }
     }
@@ -834,7 +810,8 @@ impl TestJobs {
     fn launch_pipeline(&self, mut engine: SchemaRuntime, jobs: ActorRef<TestJobs>) {
         tokio::spawn(async move {
             let terminal = engine.drive_submitted_test().await;
-            eprintln!("lojix test pipeline terminal output: {terminal:?}");
+            let _ = terminal;
+            eprintln!("lojix test pipeline reached a terminal state");
             let _ = jobs.tell(TestCompleted).await;
         });
     }
@@ -856,15 +833,15 @@ impl Actor for TestJobs {
 /// and on accept launch the dispatch pipeline. The reply is the immediate
 /// admission verdict the daemon sends the owner connection.
 pub struct AdmitTest {
-    pub request: meta::TestRequest,
+    pub request: sema::TestRequest,
 }
 
 /// The immediate admission verdict for an `AdmitTest` — the wire reply the
 /// daemon sends before any dispatch effect runs.
 #[derive(Debug, Clone, PartialEq, Eq, kameo::Reply)]
 pub enum TestAdmission {
-    Accepted(meta::AcceptedTest),
-    Rejected(meta::RejectedTest),
+    Accepted(sema::AcceptedTest),
+    Rejected(sema::RejectedTest),
 }
 
 impl Message<AdmitTest> for TestJobs {

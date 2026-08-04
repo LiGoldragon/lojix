@@ -41,57 +41,38 @@
 ;; the BootOnce window can then reconcile by polling that unit (report 150).
 
 {
-  OrdinaryInput signal-lojix:lib:Input
-  OrdinaryOutput signal-lojix:lib:Output
-  MetaInput meta-signal-lojix:lib:Input
-  MetaOutput meta-signal-lojix:lib:Output
-  SemaReadInput lojix:sema:SemaReadInput
-  SemaReadOutput lojix:sema:SemaReadOutput
-  SemaWriteInput lojix:sema:SemaWriteInput
-  SemaWriteOutput lojix:sema:SemaWriteOutput
-  ClusterName signal-lojix:lib:ClusterName
-  NodeName signal-lojix:lib:NodeName
-  ClosurePath signal-lojix:lib:ClosurePath
-  FlakeReference signal-lojix:lib:FlakeReference
-  ProposalSource signal-lojix:lib:ProposalSource
-  SourceRevisionPolicy signal-lojix:lib:SourceRevisionPolicy
-  SourceRevisionRecord signal-lojix:lib:SourceRevisionRecord
-  UserName signal-lojix:lib:UserName
-  GenerationIdentifier signal-lojix:lib:GenerationIdentifier
-  DeploymentIdentifier signal-lojix:lib:DeploymentIdentifier
-  GenerationSlot signal-lojix:lib:GenerationSlot
-  ActivationEffect signal-lojix:lib:ActivationEffect
-  HostDeployAction signal-lojix:lib:HostDeployAction
-  HostComposition signal-lojix:lib:HostComposition
-  GenerationArtifact signal-lojix:lib:GenerationArtifact
-  UserEnvironmentAction signal-lojix:lib:UserEnvironmentAction
+  lojix.sema.[OrdinaryIngress OrdinaryEgress MetaIngress MetaEgress SemaReadInput SemaReadOutput SemaWriteInput SemaWriteOutput ClusterName NodeName ClosurePath FlakeReference ProposalSource UserName GenerationIdentifier DeploymentIdentifier GenerationSlot ActivationEffect HostDeployAction HostComposition GenerationArtifact UserEnvironmentAction SourceRevisionPolicy SourceRevisionRecord]
 }
-[NexusWork]
-[NexusAction]
+[Work.NexusWork]
+[Action.NexusAction]
 {
-  SignalInput [(OrdinaryInput OrdinaryInput) (MetaInput MetaInput)]
-  SignalOutput [(OrdinaryOutput OrdinaryOutput) (MetaOutput MetaOutput)]
+  SignalInput.[(OrdinaryInput OrdinaryIngress) (MetaInput MetaIngress)]
+  SignalOutput.[(OrdinaryOutput OrdinaryEgress) (MetaOutput MetaEgress)]
 
-  BuilderNode { NodeName }
-  TargetStore { store_uri.String }
-  BuildTarget [Local (Remote BuilderNode) (TargetStore TargetStore)]
-  ExtraSubstituter { url.String public_key.String }
+  ;; All deploy nouns come from the local SEMA plane.  Nexus owns commands and
+  ;; continuations, rather than a second shadow family of durable values.
+  StoreUri.String
 
-  FlakeAuthRequest { source.ProposalSource flake.FlakeReference SourceRevisionPolicy }
-  ResolvedFlake { source_revision.SourceRevisionRecord }
-  UserEnvironmentMaterialization { UserName }
-  MaterializationShape [CompleteHost BaseHost (UserEnvironment UserEnvironmentMaterialization)]
-  HorizonMaterializationCommand { ClusterName NodeName source.ProposalSource shape.MaterializationShape }
-  FlakeInputReference { url.String nix_archive_hash.String }
-  FlakeInputOverride { name.String reference.FlakeInputReference }
-  MaterializedInputs { overrides.(Vector FlakeInputOverride) }
-  NixEvalCommand { ClusterName NodeName GenerationArtifact flake.FlakeReference source_revision.SourceRevisionRecord attribute.String overrides.(Vector FlakeInputOverride) target.BuildTarget }
-  NixBuildCommand { GenerationIdentifier ClosurePath target.BuildTarget substituters.(Vector ExtraSubstituter) }
-  CopyClosureCommand { GenerationIdentifier ClusterName NodeName ClosurePath source.BuildTarget }
-  UserEnvironmentActivationProfile { action.UserEnvironmentAction user.UserName }
-  ActivationProfile [(Host HostDeployAction) (UserEnvironment UserEnvironmentActivationProfile)]
-  ActivateGenerationCommand { DeploymentIdentifier GenerationIdentifier ClusterName NodeName ClosurePath ActivationEffect profile.ActivationProfile }
-  PathInfoGcCommand { ClusterName NodeName }
+  BuilderNode.{ NodeName }
+  TargetStore.{ StoreUri }
+  BuildTarget.[Local (Remote BuilderNode) (Target TargetStore)]
+  ExtraSubstituter.{ url.String public_key.String }
+
+  FlakeAuthRequest.{ ProposalSource FlakeReference SourceRevisionPolicy }
+  ResolvedFlake.{ SourceRevisionRecord }
+  UserEnvironmentMaterialization.{ UserName }
+  MaterializationShape.[CompleteHost BaseHost (UserEnvironment UserEnvironmentMaterialization)]
+  HorizonMaterializationCommand.{ ClusterName NodeName ProposalSource MaterializationShape }
+  FlakeInputReference.{ url.String nix_archive_hash.String }
+  FlakeInputOverride.{ String FlakeInputReference }
+  MaterializedInputs.{ Vector.FlakeInputOverride }
+  NixEvalCommand.{ GenerationIdentifier ClusterName NodeName GenerationArtifact FlakeReference SourceRevisionRecord String Vector.FlakeInputOverride BuildTarget }
+  NixBuildCommand.{ GenerationIdentifier ClosurePath BuildTarget Vector.ExtraSubstituter }
+  CopyClosureCommand.{ GenerationIdentifier ClusterName NodeName ClosurePath BuildTarget }
+  UserEnvironmentActivationProfile.{ UserEnvironmentAction UserName }
+  ActivationProfile.[(Host HostDeployAction) (UserEnvironment UserEnvironmentActivationProfile)]
+  ActivateGenerationCommand.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName ClosurePath ActivationEffect ActivationProfile }
+  PathInfoGcCommand.{ ClusterName NodeName }
 
   ;; HERMETIC test dispatch (report 54 §5.2). Build the pre-declared
   ;; auto-pickup nixos test `<flake>#checks.<system>.vm-<node>` (the
@@ -99,8 +80,8 @@
   ;; host). Pass/fail IS the build exit status; the realised out-path is the
   ;; check's closure. The daemon is a pure dispatcher selecting a check by
   ;; name — no nix authoring at runtime.
-  HermeticCheckCommand { ClusterName NodeName flake.FlakeReference system.String }
-  CheckBuilt { ClusterName NodeName ClosurePath }
+  HermeticCheckCommand.{ ClusterName NodeName FlakeReference String }
+  CheckBuilt.{ ClusterName NodeName ClosurePath }
 
   ;; LIVE test dispatch (report 54 §5.2, report 47 v2 / report 51 §3). Two
   ;; daemon-owned effects bracket the existing deploy chain: BringUpTestVm
@@ -111,23 +92,25 @@
   ;; TearDownTestVm stops the user units so the tap + route vanish with the
   ;; namespace, host netns byte-identical. BUILT but NOT run live here (the
   ;; first Prometheus cycle is psyche-gated).
-  BringUpTestVmCommand { ClusterName NodeName host.NodeName runner.ClosurePath guest_ip.String }
-  TearDownTestVmCommand { ClusterName NodeName host.NodeName }
-  TestVmBroughtUp { ClusterName NodeName host.NodeName }
-  TestVmTornDown { ClusterName NodeName host.NodeName }
+  BringUpTestVmCommand.{ ClusterName node.NodeName host.NodeName ClosurePath String }
+  TearDownTestVmCommand.{ ClusterName node.NodeName host.NodeName }
+  TestVmBroughtUp.{ ClusterName node.NodeName host.NodeName }
+  TestVmTornDown.{ ClusterName node.NodeName host.NodeName }
 
-  EffectCommand [(ResolveFlakeAuth FlakeAuthRequest) (MaterializeHorizon HorizonMaterializationCommand) (NixEval NixEvalCommand) (NixBuild NixBuildCommand) (CopyClosure CopyClosureCommand) (ActivateGeneration ActivateGenerationCommand) (PathInfoGc PathInfoGcCommand) (HermeticCheck HermeticCheckCommand) (BringUpTestVm BringUpTestVmCommand) (TearDownTestVm TearDownTestVmCommand)]
+  EffectCommand.[(ResolveFlakeAuth FlakeAuthRequest) (MaterializeHorizon HorizonMaterializationCommand) (NixEval NixEvalCommand) (NixBuild NixBuildCommand) (CopyClosure CopyClosureCommand) (ActivateGeneration ActivateGenerationCommand) (PathInfoGc PathInfoGcCommand) (HermeticCheck HermeticCheckCommand) (BringUpTestVm BringUpTestVmCommand) (TearDownTestVm TearDownTestVmCommand)]
 
-  EvaluatedClosure { GenerationIdentifier ClosurePath }
-  BuiltClosure { GenerationIdentifier ClosurePath }
-  CopiedClosure { GenerationIdentifier NodeName ClosurePath }
-  ActivatedGeneration { GenerationIdentifier NodeName GenerationSlot }
-  GarbageCollected { ClusterName NodeName reclaimed_paths.Integer }
-  EffectFailure { stage.EffectStage detail.String }
-  EffectStage [FlakeAuth MaterializeHorizon Eval Build CopyClosure Activate Gc HermeticCheck BringUpTestVm TearDownTestVm]
+  EvaluatedClosure.{ GenerationIdentifier ClosurePath }
+  BuiltClosure.{ GenerationIdentifier ClosurePath }
+  CopiedClosure.{ GenerationIdentifier NodeName ClosurePath }
+  ActivatedGeneration.{ GenerationIdentifier NodeName GenerationSlot }
+  GarbageCollected.{ ClusterName NodeName Integer }
+  EffectFailure.{ EffectStage String }
+  EffectStage.[FlakeAuth MaterializeHorizon Eval Build CopyClosure Activate Gc HermeticCheck BringUpTestVm TearDownTestVm]
 
-  EffectResult [(FlakeResolved ResolvedFlake) (HorizonMaterialized MaterializedInputs) (ClosureEvaluated EvaluatedClosure) (ClosureBuilt BuiltClosure) (ClosureCopied CopiedClosure) (GenerationActivated ActivatedGeneration) (PathsCollected GarbageCollected) (HermeticCheckBuilt CheckBuilt) (TestVmBroughtUp TestVmBroughtUp) (TestVmTornDown TestVmTornDown) (EffectFailed EffectFailure)]
+  EffectResult.[(FlakeResolved ResolvedFlake) (HorizonMaterialized MaterializedInputs) (ClosureEvaluated EvaluatedClosure) (ClosureBuilt BuiltClosure) (ClosureCopied CopiedClosure) (GenerationActivated ActivatedGeneration) (PathsCollected GarbageCollected) (HermeticCheckBuilt CheckBuilt) (TestVmStarted TestVmBroughtUp) (TestVmStopped TestVmTornDown) (EffectFailed EffectFailure)]
 
-  NexusWork [(SignalArrived SignalInput) (SemaReadCompleted SemaReadOutput) (SemaWriteCompleted SemaWriteOutput) (EffectCompleted EffectResult)]
-  NexusAction [(CommandSemaRead SemaReadInput) (CommandSemaWrite SemaWriteInput) (CommandEffect EffectCommand) (ReplyToSignal SignalOutput) (Continue NexusWork)]
+  NexusWork.[(SignalArrived SignalInput) (SemaReadCompleted SemaReadOutput) (SemaWriteCompleted SemaWriteOutput) (EffectCompleted EffectResult)]
+  NexusAction.[(CommandSemaRead SemaReadInput) (CommandSemaWrite SemaWriteInput) (CommandEffect EffectCommand) (ReplyToSignal SignalOutput) (Continue NexusWork)]
 }
+{}
+{}

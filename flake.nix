@@ -38,7 +38,7 @@
             path: type:
             (craneLib.filterCargoSources path type)
             || (type == "regular" && pkgs.lib.hasSuffix ".schema" path)
-            || (type == "regular" && pkgs.lib.hasSuffix ".nota" path)
+            || (type == "regular" && pkgs.lib.hasSuffix ".dotos" path)
             || (
               type == "regular"
               && builtins.elem (baseNameOf path) [
@@ -59,7 +59,7 @@
         cargoArtifacts = craneLib.buildDepsOnly (
           commonArguments
           // {
-            cargoExtraArgs = "--features nota-text";
+            cargoExtraArgs = "--features dotos-text";
           }
         );
         daemonCargoArtifacts = craneLib.buildDepsOnly commonArguments;
@@ -70,7 +70,7 @@
             commonArguments
             // {
               inherit cargoArtifacts;
-              cargoExtraArgs = "--features nota-text";
+              cargoExtraArgs = "--features dotos-text";
             }
           );
 
@@ -92,21 +92,21 @@
             commonArguments
             // {
               inherit cargoArtifacts;
-              cargoExtraArgs = "--features nota-text";
+              cargoExtraArgs = "--features dotos-text";
             }
           );
 
-          daemon-startup-rejects-nota =
+          daemon-startup-rejects-dotos =
             let
               package = self.packages.${system}.default;
             in
-            pkgs.runCommand "lojix-daemon-startup-rejects-nota" { } ''
+            pkgs.runCommand "lojix-daemon-startup-rejects-dotos" { } ''
               set +e
               ${package}/bin/lojix-daemon '(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix /run/lojix/startup.rkyv))' >stdout 2>stderr
               status=$?
               set -e
               if [ "$status" -eq 0 ]; then
-                echo 'lojix-daemon accepted inline NOTA startup' >&2
+                echo 'lojix-daemon accepted inline DOTOS startup' >&2
                 exit 1
               fi
               if ! grep -Eq 'ExpectedSignalFile|signal file|DaemonRejected' stderr; then
@@ -114,7 +114,7 @@
                 cat stderr >&2
                 exit 1
               fi
-              printf 'lojix daemon rejects NOTA startup\n' > "$out"
+              printf 'lojix daemon rejects DOTOS startup\n' > "$out"
             '';
 
           fmt = craneLib.cargoFmt {
@@ -125,7 +125,7 @@
             commonArguments
             // {
               inherit cargoArtifacts;
-              cargoClippyExtraArgs = "--all-targets --features nota-text -- -D warnings";
+              cargoClippyExtraArgs = "--all-targets --features dotos-text -- -D warnings";
             }
           );
         };

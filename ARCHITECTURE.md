@@ -113,7 +113,7 @@ streams subscription events.
 - **Container lifecycle observation** — systemd dbus subscriptions
   for `containers.<name>.service` transitions; mirrors into the
   event log.
-- **Thin CLI** — `lojix` binary reads a single NOTA request per the
+- **Thin CLI** — `lojix` binary reads a single DOTOS request per the
   one-record operator-surface discipline, forwards it as a
   `signal-lojix` frame to the daemon, and prints the reply or
   streams events.
@@ -164,21 +164,30 @@ Each daemon actor is a Kameo actor per
 ## 4 · Storage and wire
 
 - **Storage:** schema-derived SEMA tables over a durable `sema-engine`
-  store — a `*.sema` file under `<state-directory>/lojix.sema`. The six
+  store — a `*.sema` file under `<state-directory>/lojix.sema`. The eleven
   record families (live set, gc-roots, event log, container lifecycle,
-  deploy job, test run) are keyed rows, one per element; `Engine::open`
+  deploy job, test run, deployment record, identifier allocation, deployment
+  outbox, pending transition intent, and legacy-event quarantine) are keyed
+  rows, one per element; `Engine::open`
   resumes the persisted catalog, commit sequence, and records on restart, so
   daemon state survives a process stop with no replay code. The identifier
   counters (generation, deployment, event-log position) derive from the
-  persisted rows, so they no longer reset to zero on restart. Storage schema 2
-  enables the engine's versioned log: the verified local checkpoint is the
-  recovery floor for retention because lojix has no external mirror consumer.
-  The daemon deliberately opens only schema-2 stores. The idempotent
-  `lojix-migrate-store` pre-start step handles schema 1 explicitly: it validates
-  every known row and relation read-only, retains a byte-identical permanent
-  backup, reconstructs and reopens a schema-2 staging store, then atomically
-  replaces the canonical path. Corrupt or unknown input remains untouched and
-  prevents daemon startup.
+  persisted rows, so they no longer reset to zero on restart. Storage schema 3
+  adds correlation records, a global high-water allocation row, and the
+  transition intent/outbox protocol. Each deploy admission, phase, and
+  terminal update atomically writes its durable record/job mutation plus an
+  intent; its marker is bound from that exact versioned commit, then
+  dispatch/journal/local acknowledgement proceeds in order. The runtime never
+  advances to a later effect before acknowledgement. Retention can compact an
+  acknowledged event and outbox together, while the acknowledged intent keeps
+  restart from reconstructing or re-delivering that historical transition.
+  The idempotent `lojix-migrate-store` pre-start step accepts schema 2 only:
+  it validates every known row and relation read-only, retains a byte-identical
+  `.schema-pre-v3.backup`, reconstructs and reopens a schema-3 staging store,
+  then atomically replaces the canonical path. Legacy deployment events remain
+  private quarantine evidence; legacy jobs are non-resumable and legacy
+  current-slot claims are historical, never a v3 live owner. Corrupt or
+  unknown input remains untouched and prevents daemon startup.
 - **Wire:** `signal-frame` records carrying `signal-lojix` on the
   ordinary socket and `meta-signal-lojix` on the owner/meta socket.
   Length-prefixed rkyv archives over Unix sockets.
@@ -197,10 +206,20 @@ Each daemon actor is a Kameo actor per
 ## 5 · Constraints
 
 - The daemon binds two Unix sockets from its binary rkyv startup
-  configuration: ordinary and owner/meta. Inline NOTA and `.nota` files
+  configuration: ordinary and owner/meta. Inline DOTOS and `.dotos` files
   are rejected at daemon startup; launch tooling must encode
   configuration before exec. The owner/meta socket refuses any mode with
   "other" access and admits only same-uid/gid owner peers.
+- `lojix-write-configuration` is the launch-only DOTOS boundary: it writes
+  the rkyv signal file from the ordered socket/mode, state-directory,
+  daemon-host, timeout, test-default, and output-path request. Production
+  writes `NoTestDefaults`; the daemon receives only the resulting signal file.
+- A deploy proposal source is an existing, direct, regular absolute `.dotos`
+  file with no traversal, symlink, control, or credential-shaped path and a
+  valid cluster-proposal parse. A closure is usable by an effect or a fresh
+  durable v3 row only as a canonical immutable Nix store-item root. Public
+  adapters redact every other path and never project raw proposal sources,
+  flake references, or daemon error text.
 - The startup configuration carries the test-op defaults as an OPTIONAL
   fixture: `DaemonConfiguration.test_defaults` is `Option<TestDefaults>` and the
   writer's field-7 `WriterTestDefaultsChoice` is `NoTestDefaults` (production)
@@ -208,8 +227,8 @@ Each daemon actor is a Kameo actor per
   `None`, so a bare `(Check …)`/`(Run …)` is rejected with `NoTestDefaults`
   rather than resolving against a per-node baked test cluster. Test fixtures are
   supplied only by test code (the workspace deployment-independence discipline).
-- The CLI sends one NOTA-encoded `signal-lojix` request per
-  invocation and prints one NOTA-encoded reply (or streams events
+- The CLI sends one DOTOS-encoded `signal-lojix` request per
+  invocation and prints one DOTOS-encoded reply (or streams events
   until the subscription closes).
 - Every external operation is a typed `signal-lojix` variant;
   there is no untyped escape hatch on the wire.
@@ -221,12 +240,11 @@ Each daemon actor is a Kameo actor per
   durable `sema-engine` Store is the only shared point and is locked
   only briefly per sema op; long nix effects hold no global lock
   (Spirit `2alg`).
-- The daemon's shared store is durable `sema-engine` backing; cross-table
-  atomicity (an activation writes the live-set row then the gc-root row as
-  two sequential keyed asserts) awaits a multi-table commit enhancement in
-  `sema-engine`. The keyed asserts are fail-safe — a duplicate key errors
-  rather than clobbering — but a crash mid-activation leaves a torn write
-  with no reopen reconciliation, tracked as the follow-on.
+- The daemon's shared store uses `sema-engine` multi-table atomic commits for
+  activation (live generation, GC root, and allocation) and for every deploy
+  transition (correlation state/job plus intent, then acknowledgement and any
+  terminal job retraction). A crash therefore cannot expose one half of those
+  coupled facts; reopen finishes only pending intent delivery.
 - Subscription events ride on the acceptor's outbound lane via
   `StreamingFrameBody::SubscriptionEvent`; the daemon mints each
   event's `StreamEventIdentifier` from the lane's monotonic

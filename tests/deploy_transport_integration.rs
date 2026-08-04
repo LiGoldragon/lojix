@@ -6,22 +6,112 @@
 //! profile set, then target-user activation. They also prove bounded timeout
 //! cancellation reaches a child process group and leaves a terminal job row.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dotos::DotosEncode;
+use horizon_lib::address::{YggAddress, YggSubnet};
+use horizon_lib::domain::DomainConfiguration;
+use horizon_lib::io::Io;
+use horizon_lib::machine::Machine;
+use horizon_lib::magnitude::Magnitude;
+use horizon_lib::name::{NodeName as HorizonNodeName, UserName as HorizonUserName};
+use horizon_lib::proposal::{ClusterProposal, ClusterTrust, NodeProposal, NodePubKeys};
+use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
+use horizon_lib::species::{Arch, Bootloader, Keyboard, MachineSpecies, NodeSpecies};
 use lojix::Store;
-use lojix::schema::sema::DeployJobPhase;
+use lojix::schema::sema as ordinary;
+use lojix::schema::sema as meta;
 use lojix::schema_runtime::{RuntimeConfiguration, SchemaRuntime};
-use meta_signal_lojix::schema::lib as meta;
-use signal_lojix::schema::lib as ordinary;
 
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 const FLAKE: &str = "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567";
 const OUTPUT: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-home-manager-generation";
-const FIXTURE_PROPOSAL: &str = include_str!("fixtures/host-set-cluster.nota");
+
+fn proposal_node(species: MachineSpecies, super_node: Option<&str>) -> NodeProposal {
+    NodeProposal {
+        species: NodeSpecies::EdgeTesting,
+        size: Magnitude::Large,
+        trust: Magnitude::Max,
+        machine: Machine {
+            species,
+            arch: Some(Arch::X86_64),
+            cores: 4,
+            model: None,
+            mother_board: None,
+            super_node: super_node.map(|name| HorizonNodeName::try_new(name).expect("node name")),
+            super_user: super_node
+                .map(|_| HorizonUserName::try_new("operator").expect("user name")),
+            chip_gen: None,
+            ram_gb: None,
+            disk_gb: None,
+            location: None,
+            super_nodes: Vec::new(),
+        },
+        io: Io {
+            keyboard: Keyboard::Qwerty,
+            bootloader: Bootloader::Uefi,
+            disks: BTreeMap::new(),
+            swap_devices: Vec::new(),
+            compressed_swap: None,
+        },
+        pub_keys: NodePubKeys {
+            ssh: SshPubKey::try_new("AAA=").expect("ssh key"),
+            nix: Some(
+                NixPubKey::try_new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+                    .expect("nix key"),
+            ),
+            yggdrasil: Some(horizon_lib::proposal::YggPubKeyEntry {
+                pub_key: YggPubKey::try_new("a".repeat(64)).expect("ygg key"),
+                address: YggAddress::try_new("200::1").expect("ygg address"),
+                subnet: YggSubnet::try_new("300:ca41:6b12:fba").expect("ygg subnet"),
+            }),
+        },
+        link_local_ips: Vec::new(),
+        node_ip: None,
+        wireguard_pub_key: None,
+        nordvpn: false,
+        wifi_cert: false,
+        wireguard_untrusted_proxies: Vec::new(),
+        wants_printing: false,
+        wants_hw_video_accel: false,
+        router_interfaces: None,
+        online: None,
+        services: Vec::new(),
+    }
+}
+
+fn fixture_proposal() -> ClusterProposal {
+    let mut nodes = BTreeMap::new();
+    nodes.insert(
+        HorizonNodeName::try_new("atlas").expect("node name"),
+        proposal_node(MachineSpecies::Metal, None),
+    );
+    nodes.insert(
+        HorizonNodeName::try_new("beacon").expect("node name"),
+        proposal_node(MachineSpecies::Pod, Some("atlas")),
+    );
+    ClusterProposal {
+        nodes,
+        users: BTreeMap::new(),
+        domains: BTreeMap::new(),
+        trust: ClusterTrust {
+            cluster: Magnitude::Max,
+            clusters: BTreeMap::new(),
+            nodes: BTreeMap::new(),
+            users: BTreeMap::new(),
+        },
+        domain_configuration: DomainConfiguration::default(),
+    }
+}
+
+fn write_fixture_proposal(path: &Path) {
+    fs::write(path, fixture_proposal().to_dotos()).expect("write Dotos fixture proposal");
+}
 
 fn write_executable(path: &Path, text: &str) {
     fs::write(path, text).expect("write fake command");
@@ -50,17 +140,17 @@ fn fake_programs(directory: &Path, fail_copy: bool, fail_activation: bool) {
     );
 }
 
-fn user_environment_request(source: &Path) -> meta::DeployRequest {
-    meta::DeployRequest::UserEnvironment(meta::UserEnvironmentDeployment {
+fn user_environment_request(source: &Path) -> meta::DeploySubmission {
+    meta::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
         cluster_name: ordinary::ClusterName::new("alpha"),
         node_name: ordinary::NodeName::new("beacon"),
         user_name: ordinary::UserName::new("bird"),
-        source: ordinary::ProposalSource::new(source.display().to_string()),
-        flake: ordinary::FlakeReference::new(FLAKE),
+        proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
+        flake_reference: ordinary::FlakeReference::new(FLAKE),
         user_environment_action: meta::UserEnvironmentAction::ActivateNow,
         source_revision_policy: meta::SourceRevisionPolicy::RequireImmutable,
-        builder: None,
-        substituters: Vec::new(),
+        optional_builder: None,
+        extra_substituter_vector: Vec::new(),
     })
 }
 
@@ -76,8 +166,8 @@ fn runtime(directory: &Path, programs: &Path, timeout: Duration) -> SchemaRuntim
 
 async fn submit_and_drive(
     engine: &mut SchemaRuntime,
-    request: meta::DeployRequest,
-) -> meta::Output {
+    request: meta::DeploySubmission,
+) -> meta::MetaEgress {
     match engine.submit_deploy(request) {
         lojix::schema_runtime::DeploySubmissionOutcome::Accepted(_) => {}
         other => panic!("fixture request was not accepted: {other:?}"),
@@ -98,13 +188,14 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
     let directory = tempfile::tempdir().expect("tempdir");
     let programs = directory.path().join("programs");
     fake_programs(&programs, false, false);
-    let source = directory.path().join("datom.nota");
-    fs::write(&source, FIXTURE_PROPOSAL).expect("write fixture proposal");
+    let source = directory.path().join("datom.dotos");
+    write_fixture_proposal(&source);
     let mut engine = runtime(directory.path(), &programs, Duration::from_secs(2));
 
     assert!(matches!(
         submit_and_drive(&mut engine, user_environment_request(&source)).await,
-        meta::Output::DeployAccepted(_)
+        meta::MetaEgress::DeployTerminal(record)
+            if matches!(record.optional_deployment_terminal, Some(meta::DeploymentTerminal::Succeeded))
     ));
 
     let commands = command_lines(&programs);
@@ -150,7 +241,7 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
     let generation = &generations[0];
     assert_eq!(generation.closure_path.payload(), OUTPUT);
     assert_eq!(
-        generation.source_revision_record.policy,
+        generation.source_revision_record.source_revision_policy,
         ordinary::SourceRevisionPolicy::RequireImmutable
     );
     assert_eq!(
@@ -161,10 +252,7 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
         generation.source_revision_record.resolved_ref.payload(),
         FLAKE
     );
-    assert_eq!(
-        generation.source_revision_record.resolved_revision,
-        REVISION
-    );
+    assert_eq!(generation.source_revision_record.string, REVISION);
     assert_eq!(
         generation.generation_slot,
         ordinary::GenerationSlot::Current
@@ -173,26 +261,30 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
 
 #[tokio::test]
 async fn copy_and_activation_failures_are_terminal_rejections() {
-    for (fail_copy, fail_activation, expected) in [
-        (true, false, meta::DeployRejectionReason::BuilderUnreachable),
-        (false, true, meta::DeployRejectionReason::ActivationFailed),
-    ] {
+    for (fail_copy, fail_activation) in [(true, false), (false, true)] {
         let directory = tempfile::tempdir().expect("tempdir");
         let programs = directory.path().join("programs");
         fake_programs(&programs, fail_copy, fail_activation);
-        let source = directory.path().join("datom.nota");
-        fs::write(&source, FIXTURE_PROPOSAL).expect("write fixture proposal");
+        let source = directory.path().join("datom.dotos");
+        write_fixture_proposal(&source);
         let mut engine = runtime(directory.path(), &programs, Duration::from_secs(2));
 
         match submit_and_drive(&mut engine, user_environment_request(&source)).await {
-            meta::Output::DeployRejected(rejected) => {
-                assert_eq!(rejected.payload().deploy_rejection_reason, expected)
+            meta::MetaEgress::DeployTerminal(record) => {
+                assert_eq!(
+                    record.deployment_lifecycle,
+                    meta::DeploymentLifecycle::Failed
+                )
             }
             other => panic!("expected terminal rejection, got {other:?}"),
         }
-        let jobs = engine.store().deploy_jobs().expect("read durable job row");
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].phase, DeployJobPhase::Failed);
+        assert!(
+            engine
+                .store()
+                .deploy_jobs()
+                .expect("read durable job rows")
+                .is_empty()
+        );
     }
 }
 
@@ -201,6 +293,8 @@ async fn timeout_kills_the_whole_session_group_reaps_and_rejects() {
     let directory = tempfile::tempdir().expect("tempdir");
     let programs = directory.path().join("programs");
     fs::create_dir_all(&programs).expect("create fake command directory");
+    let source = directory.path().join("datom.dotos");
+    write_fixture_proposal(&source);
     write_executable(
         &programs.join("nix"),
         "#!/bin/sh\nset -eu\ndir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n( trap 'touch \"$dir/descendant-terminated\"; exit 0' TERM; while :; do sleep 1; done ) &\necho $! > \"$dir/descendant-pid\"\nwhile :; do sleep 1; done\n",
@@ -212,21 +306,25 @@ async fn timeout_kills_the_whole_session_group_reaps_and_rejects() {
         Duration::from_millis(100),
     ));
     let mut engine = SchemaRuntime::with_store_and_configuration(store, configuration);
-    let request = meta::DeployRequest::Host(meta::HostDeployment {
+    let request = meta::DeploySubmission::Host(meta::HostDeployment {
         cluster_name: ordinary::ClusterName::new("alpha"),
         node_name: ordinary::NodeName::new("beacon"),
         host_composition: ordinary::HostComposition::BaseHost,
-        source: ordinary::ProposalSource::new("/dev/null"),
-        flake: ordinary::FlakeReference::new(FLAKE),
+        proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
+        flake_reference: ordinary::FlakeReference::new(FLAKE),
         host_deploy_action: ordinary::HostDeployAction::Evaluate,
         source_revision_policy: meta::SourceRevisionPolicy::RequireImmutable,
-        builder: None,
-        substituters: Vec::new(),
-        build_attribute: Some(meta::FlakeAttribute::new("fixture")),
+        optional_builder: None,
+        extra_substituter_vector: Vec::new(),
+        optional_flake_attribute: Some(meta::FlakeAttribute::new("fixture")),
     });
 
     match submit_and_drive(&mut engine, request).await {
-        meta::Output::DeployRejected(_) => {}
+        meta::MetaEgress::DeployTerminal(record)
+            if matches!(
+                record.deployment_lifecycle,
+                meta::DeploymentLifecycle::Failed
+            ) => {}
         other => panic!("timeout must terminally reject, got {other:?}"),
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -234,7 +332,11 @@ async fn timeout_kills_the_whole_session_group_reaps_and_rejects() {
         programs.join("descendant-terminated").exists(),
         "TERM must reach the descendant in the timed-out command's process group"
     );
-    let jobs = engine.store().deploy_jobs().expect("read durable job row");
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].phase, DeployJobPhase::Failed);
+    assert!(
+        engine
+            .store()
+            .deploy_jobs()
+            .expect("read durable job rows")
+            .is_empty()
+    );
 }

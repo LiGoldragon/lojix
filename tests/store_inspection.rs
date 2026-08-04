@@ -3,9 +3,8 @@ use lojix::inspection::{
     DatabaseInspection, SchemaInspection, StoreInspectionCommand, StoreInspector,
     TableInspectionStatus,
 };
-use lojix::schema::sema::{GcRoot, LiveGeneration};
+use lojix::schema::sema::{self as ordinary, GcRoot, LiveGeneration};
 use redb::{Database, TableDefinition};
-use signal_lojix::schema::lib as ordinary;
 use tempfile::TempDir;
 
 const RAW_LIVE_SET: TableDefinition<String, &[u8]> = TableDefinition::new("live-set");
@@ -15,24 +14,27 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
     let generation = ordinary::GenerationIdentifier::new(generation_identifier);
     let cluster = ordinary::ClusterName::new("goldragon");
     let node = ordinary::NodeName::new("dune");
-    let closure = ordinary::ClosurePath::new("/nix/store/inspection-closure");
+    let closure = ordinary::ClosurePath::new(
+        "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-inspection-closure",
+    );
     (
         LiveGeneration {
             deployment_identifier: ordinary::DeploymentIdentifier::new(generation_identifier),
             generation_identifier: generation.clone(),
             cluster_name: cluster.clone(),
             node_name: node.clone(),
+            deployment_environment: ordinary::DeploymentEnvironment::HostEnvironment,
             generation_artifact: ordinary::GenerationArtifact::BaseHost,
             activation_effect: ordinary::ActivationEffect::LiveActivation,
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path: closure.clone(),
             source_revision_record: ordinary::SourceRevisionRecord {
-                policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
+                source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
                 requested_ref: ordinary::FlakeReference::new("github:owner/repo/main"),
                 resolved_ref: ordinary::FlakeReference::new(
                     "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 ),
-                resolved_revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                string: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             },
         },
         GcRoot {
@@ -41,7 +43,7 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
             node_name: node,
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path: closure,
-            label: None,
+            optional_pin_label: None,
         },
     )
 }
@@ -73,7 +75,7 @@ fn registered_tables_with_no_rows_report_empty() {
     assert!(matches!(inspection.database(), DatabaseInspection::Opened));
     assert_eq!(
         inspection.schema(),
-        &SchemaInspection::Matches { version: 2 }
+        &SchemaInspection::Matches { version: 3 }
     );
     assert_eq!(
         inspection

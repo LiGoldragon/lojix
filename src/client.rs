@@ -2,19 +2,20 @@
 //! authority-tiered socket.
 //!
 //! Each client takes the single `ComponentArgument` (per the no-flags /
-//! NOTA-only rule), decodes it into exactly one contract `Input` (a
-//! signal-encoded file decoded directly; inline / NOTA-file text via the
-//! optional `nota-text` feature), connects to its socket, and exchanges one
+//! DOTOS-only rule), decodes it into exactly one contract `Input` (a
+//! signal-encoded file decoded directly; inline / DOTOS-file text via the
+//! optional `dotos-text` feature), connects to its socket, and exchanges one
 //! length-prefixed frame. Because each client parses only its own contract
 //! there is no cross-tier classification step — the prior unified client's
 //! audit-R7 short-header collision (meta `Deploy` == ordinary `Query` == 0x0)
 //! is avoided structurally rather than disambiguated by rkyv layout. Socket
 //! paths come from the environment (`LOJIX_ORDINARY_SOCKET` /
-//! `LOJIX_OWNER_SOCKET`) — env vars are a NOTA host, not flags.
+//! `LOJIX_OWNER_SOCKET`) — env vars are a DOTOS host, not flags.
 
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
+use signal_frame::{ExchangeIdentifier, ExchangeLane, LaneSequence, Reply, SessionEpoch, SubReply};
 use triad_runtime::{ComponentArgument, ComponentCommand, FrameBody, LengthPrefixedCodec};
 
 use crate::{Error, Result};
@@ -23,6 +24,14 @@ const ORDINARY_SOCKET_ENV: &str = "LOJIX_ORDINARY_SOCKET";
 const OWNER_SOCKET_ENV: &str = "LOJIX_OWNER_SOCKET";
 const DEFAULT_ORDINARY_SOCKET: &str = "/run/lojix/ordinary.sock";
 const DEFAULT_OWNER_SOCKET: &str = "/run/lojix/owner.sock";
+
+fn exchange_identifier() -> ExchangeIdentifier {
+    ExchangeIdentifier::new(
+        SessionEpoch::new(1),
+        ExchangeLane::Connector,
+        LaneSequence::first(),
+    )
+}
 
 /// A length-prefixed framed exchange over one Unix socket: connect, write the
 /// request frame, read the single reply frame. Tier-agnostic at the byte level;
@@ -63,22 +72,17 @@ pub struct OrdinaryClient {
 
 impl OrdinaryClient {
     pub fn run_from_environment() -> Result<signal_lojix::schema::lib::Output> {
-        let argument = ComponentCommand::from_environment().nota_argument()?;
+        let argument = ComponentCommand::from_environment().dotos_argument()?;
         Self::from_argument(argument)?.run()
     }
 
     pub fn from_argument(argument: ComponentArgument) -> Result<Self> {
         let input = match argument {
             ComponentArgument::SignalFile(file) => Self::decode_signal_file(file.as_path())?,
-            ComponentArgument::NotaFile(file) => {
-                let path = file.as_path();
-                if path.extension().and_then(|extension| extension.to_str()) == Some("nota") {
-                    Self::decode_nota_text(&std::fs::read_to_string(path)?)?
-                } else {
-                    Self::decode_signal_file(path)?
-                }
+            ComponentArgument::DotosFile(file) => {
+                Self::decode_dotos_text(&std::fs::read_to_string(file.as_path())?)?
             }
-            ComponentArgument::InlineNota(inline) => Self::decode_nota_text(inline.as_str())?,
+            ComponentArgument::InlineDotos(inline) => Self::decode_dotos_text(inline.as_str())?,
         };
         Ok(Self { input })
     }
@@ -90,26 +94,53 @@ impl OrdinaryClient {
     pub fn run(self) -> Result<signal_lojix::schema::lib::Output> {
         let exchange =
             SocketExchange::for_environment(ORDINARY_SOCKET_ENV, DEFAULT_ORDINARY_SOCKET);
-        let reply = exchange.exchange(self.input.encode_signal_frame()?)?;
-        let (_, output) = signal_lojix::schema::lib::Output::decode_signal_frame(&reply)?;
-        Ok(output)
+        let identifier = exchange_identifier();
+        let reply = exchange.exchange(self.input.encode_request_frame(identifier)?)?;
+        Self::decode_reply(&reply, identifier)
     }
 
     fn decode_signal_file(path: &Path) -> Result<signal_lojix::schema::lib::Input> {
         let bytes = std::fs::read(path)?;
-        let (_, input) = signal_lojix::schema::lib::Input::decode_signal_frame(&bytes)?;
+        let (_, input) = signal_lojix::schema::lib::ContractMarker::decode_single_request(&bytes)?;
         Ok(input)
     }
 
-    #[cfg(feature = "nota-text")]
-    fn decode_nota_text(text: &str) -> Result<signal_lojix::schema::lib::Input> {
-        text.parse::<signal_lojix::schema::lib::Input>()
-            .map_err(|error| Error::NotaRequestText(error.to_string()))
+    fn decode_reply(
+        bytes: &[u8],
+        expected_exchange: ExchangeIdentifier,
+    ) -> Result<signal_lojix::schema::lib::Output> {
+        let frame = signal_lojix::schema::lib::ContractMarker::decode_frame(bytes)?;
+        match frame.into_body() {
+            signal_lojix::schema::lib::FrameBody::Reply { exchange, reply }
+                if exchange == expected_exchange =>
+            {
+                match reply {
+                    Reply::Accepted { per_operation, .. } => match per_operation.into_head() {
+                        SubReply::Ok(output)
+                        | SubReply::Failed {
+                            detail: Some(output),
+                            ..
+                        } => Ok(output),
+                        SubReply::Invalidated
+                        | SubReply::Skipped
+                        | SubReply::Failed { detail: None, .. } => Err(Error::UnexpectedFrame),
+                    },
+                    Reply::Rejected { .. } => Err(Error::UnexpectedFrame),
+                }
+            }
+            _ => Err(Error::UnexpectedFrame),
+        }
     }
 
-    #[cfg(not(feature = "nota-text"))]
-    fn decode_nota_text(_text: &str) -> Result<signal_lojix::schema::lib::Input> {
-        Err(Error::NotaTextUnsupported)
+    #[cfg(feature = "dotos-text")]
+    fn decode_dotos_text(text: &str) -> Result<signal_lojix::schema::lib::Input> {
+        text.parse::<signal_lojix::schema::lib::Input>()
+            .map_err(|error| Error::DotosRequestText(error.to_string()))
+    }
+
+    #[cfg(not(feature = "dotos-text"))]
+    fn decode_dotos_text(_text: &str) -> Result<signal_lojix::schema::lib::Input> {
+        Err(Error::DotosTextUnsupported)
     }
 }
 
@@ -123,22 +154,17 @@ pub struct MetaClient {
 
 impl MetaClient {
     pub fn run_from_environment() -> Result<meta_signal_lojix::schema::lib::Output> {
-        let argument = ComponentCommand::from_environment().nota_argument()?;
+        let argument = ComponentCommand::from_environment().dotos_argument()?;
         Self::from_argument(argument)?.run()
     }
 
     pub fn from_argument(argument: ComponentArgument) -> Result<Self> {
         let input = match argument {
             ComponentArgument::SignalFile(file) => Self::decode_signal_file(file.as_path())?,
-            ComponentArgument::NotaFile(file) => {
-                let path = file.as_path();
-                if path.extension().and_then(|extension| extension.to_str()) == Some("nota") {
-                    Self::decode_nota_text(&std::fs::read_to_string(path)?)?
-                } else {
-                    Self::decode_signal_file(path)?
-                }
+            ComponentArgument::DotosFile(file) => {
+                Self::decode_dotos_text(&std::fs::read_to_string(file.as_path())?)?
             }
-            ComponentArgument::InlineNota(inline) => Self::decode_nota_text(inline.as_str())?,
+            ComponentArgument::InlineDotos(inline) => Self::decode_dotos_text(inline.as_str())?,
         };
         Ok(Self { input })
     }
@@ -149,25 +175,53 @@ impl MetaClient {
 
     pub fn run(self) -> Result<meta_signal_lojix::schema::lib::Output> {
         let exchange = SocketExchange::for_environment(OWNER_SOCKET_ENV, DEFAULT_OWNER_SOCKET);
-        let reply = exchange.exchange(self.input.encode_signal_frame()?)?;
-        let (_, output) = meta_signal_lojix::schema::lib::Output::decode_signal_frame(&reply)?;
-        Ok(output)
+        let identifier = exchange_identifier();
+        let reply = exchange.exchange(self.input.encode_request_frame(identifier)?)?;
+        Self::decode_reply(&reply, identifier)
     }
 
     fn decode_signal_file(path: &Path) -> Result<meta_signal_lojix::schema::lib::Input> {
         let bytes = std::fs::read(path)?;
-        let (_, input) = meta_signal_lojix::schema::lib::Input::decode_signal_frame(&bytes)?;
+        let (_, input) =
+            meta_signal_lojix::schema::lib::ContractMarker::decode_single_request(&bytes)?;
         Ok(input)
     }
 
-    #[cfg(feature = "nota-text")]
-    fn decode_nota_text(text: &str) -> Result<meta_signal_lojix::schema::lib::Input> {
-        text.parse::<meta_signal_lojix::schema::lib::Input>()
-            .map_err(|error| Error::NotaRequestText(error.to_string()))
+    fn decode_reply(
+        bytes: &[u8],
+        expected_exchange: ExchangeIdentifier,
+    ) -> Result<meta_signal_lojix::schema::lib::Output> {
+        let frame = meta_signal_lojix::schema::lib::ContractMarker::decode_frame(bytes)?;
+        match frame.into_body() {
+            meta_signal_lojix::schema::lib::FrameBody::Reply { exchange, reply }
+                if exchange == expected_exchange =>
+            {
+                match reply {
+                    Reply::Accepted { per_operation, .. } => match per_operation.into_head() {
+                        SubReply::Ok(output)
+                        | SubReply::Failed {
+                            detail: Some(output),
+                            ..
+                        } => Ok(output),
+                        SubReply::Invalidated
+                        | SubReply::Skipped
+                        | SubReply::Failed { detail: None, .. } => Err(Error::UnexpectedFrame),
+                    },
+                    Reply::Rejected { .. } => Err(Error::UnexpectedFrame),
+                }
+            }
+            _ => Err(Error::UnexpectedFrame),
+        }
     }
 
-    #[cfg(not(feature = "nota-text"))]
-    fn decode_nota_text(_text: &str) -> Result<meta_signal_lojix::schema::lib::Input> {
-        Err(Error::NotaTextUnsupported)
+    #[cfg(feature = "dotos-text")]
+    fn decode_dotos_text(text: &str) -> Result<meta_signal_lojix::schema::lib::Input> {
+        text.parse::<meta_signal_lojix::schema::lib::Input>()
+            .map_err(|error| Error::DotosRequestText(error.to_string()))
+    }
+
+    #[cfg(not(feature = "dotos-text"))]
+    fn decode_dotos_text(_text: &str) -> Result<meta_signal_lojix::schema::lib::Input> {
+        Err(Error::DotosTextUnsupported)
     }
 }

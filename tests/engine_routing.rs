@@ -1,414 +1,77 @@
-//! Engine-routing tests: drive the generated `NexusEngine::execute` runner
-//! over `SchemaRuntime` for the non-IO paths (reads, subscription handshake,
-//! and the GC-roots mutations). The deploy pipeline shells out to real `nix`,
-//! so it is exercised only in a live environment, not here.
+//! Correlation-engine routing witnesses. These stay on the local SEMA side of
+//! the Dotos adapter boundary so they can prove durable state without a shell
+//! effect or a legacy protocol fixture.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 
+use dotos::DotosEncode;
 use horizon_lib::address::{YggAddress, YggSubnet};
 use horizon_lib::domain::DomainConfiguration;
 use horizon_lib::io::Io;
 use horizon_lib::machine::Machine;
 use horizon_lib::magnitude::Magnitude;
-use horizon_lib::name::NodeName;
+use horizon_lib::name::NodeName as HorizonNodeName;
 use horizon_lib::proposal::{ClusterProposal, ClusterTrust, NodeProposal, NodePubKeys};
 use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
 use horizon_lib::species::{Arch, Bootloader, Keyboard, MachineSpecies, NodeSpecies};
-use lojix::schema::nexus::{self, NexusEngine};
 use lojix::schema::sema;
-use lojix::schema_runtime::SchemaRuntime;
-use meta_signal_lojix::schema::lib as meta;
-use nota::NotaEncode;
-use signal_lojix::schema::lib as ordinary;
+use lojix::schema_runtime::{DeploySubmissionOutcome, SchemaRuntime};
 
-fn run(engine: &mut SchemaRuntime, input: nexus::SignalInput) -> nexus::SignalOutput {
-    let work = nexus::NexusWork::SignalArrived(input).with_origin_route(nexus::OriginRoute::new(0));
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    match runtime.block_on(async { engine.execute(work).await.into_root() }) {
-        nexus::NexusAction::ReplyToSignal(output) => output,
-        other => panic!("expected ReplyToSignal, got {other:?}"),
-    }
-}
-
-fn ordinary_reply(output: nexus::SignalOutput) -> ordinary::Output {
-    match output {
-        nexus::SignalOutput::OrdinaryOutput(output) => output,
-        nexus::SignalOutput::MetaOutput(output) => panic!("expected ordinary, got {output:?}"),
-    }
-}
-
-fn meta_reply(output: nexus::SignalOutput) -> meta::Output {
-    match output {
-        nexus::SignalOutput::MetaOutput(output) => output,
-        nexus::SignalOutput::OrdinaryOutput(output) => panic!("expected meta, got {output:?}"),
-    }
-}
-
-#[test]
-fn query_empty_live_set_returns_empty_listing() {
-    let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::Query(ordinary::Query::new(
-        ordinary::Selection::ByNode(ordinary::NodeSelector {
-            cluster_name: ordinary::ClusterName::new("alpha"),
-            node_name: ordinary::NodeName::new("node-1"),
-            artifact: None,
-        }),
-    )));
-    let output = ordinary_reply(run(&mut engine, input));
-    match output {
-        ordinary::Output::Queried(listing) => assert!(listing.payload().generations.is_empty()),
-        other => panic!("expected Queried, got {other:?}"),
-    }
-}
-
-#[test]
-fn query_by_event_log_returns_typed_deployment_events() {
-    let mut engine = SchemaRuntime::new();
-    engine
-        .store()
-        .append_event_log_entry(sema::EventLogEntry {
-            event_log_position: ordinary::EventLogPosition::new(0),
-            record: sema::LoggedEvent::Deployment(ordinary::DeploymentPhaseEvent {
-                deployment_identifier: ordinary::DeploymentIdentifier::new(7),
-                generation_identifier: ordinary::GenerationIdentifier::new(9),
-                cluster_name: ordinary::ClusterName::new("alpha"),
-                node_name: ordinary::NodeName::new("node-1"),
-                deployment_phase: ordinary::DeploymentPhase::Submitted,
-                event_log_position: ordinary::EventLogPosition::new(0),
-                detail: None,
-                source_revision: None,
+fn write_proposal(path: &Path) {
+    let node = NodeProposal {
+        species: NodeSpecies::EdgeTesting,
+        size: Magnitude::Large,
+        trust: Magnitude::Max,
+        machine: Machine {
+            species: MachineSpecies::Metal,
+            arch: Some(Arch::X86_64),
+            cores: 4,
+            model: None,
+            mother_board: None,
+            super_node: None,
+            super_user: None,
+            chip_gen: None,
+            ram_gb: None,
+            disk_gb: None,
+            location: None,
+            super_nodes: Vec::new(),
+        },
+        io: Io {
+            keyboard: Keyboard::Qwerty,
+            bootloader: Bootloader::Uefi,
+            disks: BTreeMap::new(),
+            swap_devices: Vec::new(),
+            compressed_swap: None,
+        },
+        pub_keys: NodePubKeys {
+            ssh: SshPubKey::try_new("AAA=").expect("ssh key"),
+            nix: Some(
+                NixPubKey::try_new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+                    .expect("nix key"),
+            ),
+            yggdrasil: Some(horizon_lib::proposal::YggPubKeyEntry {
+                pub_key: YggPubKey::try_new("a".repeat(64)).expect("ygg key"),
+                address: YggAddress::try_new("200::1").expect("ygg address"),
+                subnet: YggSubnet::try_new("300:ca41:6b12:fba").expect("ygg subnet"),
             }),
-        })
-        .expect("append event");
-
-    let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::Query(ordinary::Query::new(
-        ordinary::Selection::ByEventLog(ordinary::EventLogRange {
-            from: ordinary::EventLogPosition::new(0),
-            until: ordinary::EventLogPosition::new(1),
-        }),
-    )));
-    let output = ordinary_reply(run(&mut engine, input));
-    match output {
-        ordinary::Output::DeploymentEventsQueried(page) => {
-            let page = page.payload();
-            assert_eq!(page.deployment_events.len(), 1);
-            assert!(page.retention_events.is_empty());
-        }
-        other => panic!("expected DeploymentEventsQueried, got {other:?}"),
-    }
-}
-
-#[test]
-fn watch_deployments_mints_subscription_token() {
-    let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::WatchDeployments(
-        ordinary::WatchDeployments::new(ordinary::DeploymentWatch {
-            deployment: None,
-            cluster: None,
-            node: None,
-        }),
-    ));
-    let output = ordinary_reply(run(&mut engine, input));
-    match output {
-        ordinary::Output::Watching(opened) => {
-            assert_eq!(*opened.payload().subscription_token.payload(), 1)
-        }
-        other => panic!("expected Watching, got {other:?}"),
-    }
-}
-
-#[test]
-fn check_host_key_material_reports_no_mismatches() {
-    let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::OrdinaryInput(ordinary::Input::CheckHostKeyMaterial(
-        ordinary::CheckHostKeyMaterial::new(ordinary::KeyMaterialQuery {
-            cluster_name: ordinary::ClusterName::new("alpha"),
-            node_name: ordinary::NodeName::new("node-1"),
-            source: ordinary::ProposalSource::new("github:owner/repo"),
-        }),
-    ));
-    let output = ordinary_reply(run(&mut engine, input));
-    match output {
-        ordinary::Output::KeyMaterialChecked(report) => {
-            assert_eq!(report.payload().node_name.payload(), "node-1");
-            assert!(report.payload().mismatches.is_empty());
-        }
-        other => panic!("expected KeyMaterialChecked, got {other:?}"),
-    }
-}
-
-#[test]
-fn pin_unknown_generation_is_rejected() {
-    let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Pin(meta::Pin::new(meta::PinRequest {
-        cluster_name: ordinary::ClusterName::new("alpha"),
-        node_name: ordinary::NodeName::new("node-1"),
-        generation_identifier: ordinary::GenerationIdentifier::new(42),
-        pin_label: ordinary::PinLabel::new("keep"),
-    })));
-    let output = meta_reply(run(&mut engine, input));
-    match output {
-        meta::Output::PinRejected(_) => {}
-        other => panic!("expected PinRejected for unknown generation, got {other:?}"),
-    }
-}
-
-#[test]
-fn retire_unknown_generation_is_rejected() {
-    let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Retire(meta::Retire::new(
-        meta::RetireRequest {
-            cluster_name: ordinary::ClusterName::new("alpha"),
-            node_name: ordinary::NodeName::new("node-1"),
-            generation_identifier: ordinary::GenerationIdentifier::new(7),
         },
-    )));
-    let output = meta_reply(run(&mut engine, input));
-    match output {
-        meta::Output::RetireRejected(_) => {}
-        other => panic!("expected RetireRejected for unknown generation, got {other:?}"),
-    }
-}
-
-/// A host deploy submission with the given `build_attribute` and action.
-fn host_deployment(
-    build_attribute: Option<&str>,
-    action: ordinary::HostDeployAction,
-) -> meta::HostDeployment {
-    meta::HostDeployment {
-        cluster_name: ordinary::ClusterName::new("alpha"),
-        node_name: ordinary::NodeName::new("node-1"),
-        host_composition: ordinary::HostComposition::BaseHost,
-        source: ordinary::ProposalSource::new("/dev/null"),
-        flake: ordinary::FlakeReference::new("github:owner/repo"),
-        host_deploy_action: action,
-        source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-        builder: None,
-        substituters: Vec::new(),
-        build_attribute: build_attribute.map(meta::FlakeAttribute::new),
-    }
-}
-
-fn deploy_rejection_reason(output: nexus::SignalOutput) -> meta::DeployRejectionReason {
-    match meta_reply(output) {
-        meta::Output::DeployRejected(rejected) => rejected.payload().deploy_rejection_reason,
-        other => panic!("expected DeployRejected, got {other:?}"),
-    }
-}
-
-// ---- Deploy guard: every declared action now enters the effect pipeline
-// (S4a opened the activating actions — host SetBootProfile/ActivateNow/TestActivation/ScheduleBootOnce, user-environment
-// Profile/Activate — by making copy + activate target-safe). These tests drive
-// the cursor with intentionally bogus proposal sources, so an opened action
-// reaches the pipeline and fails at the IO stage with ProposalSourceUnreachable
-// rather than being rejected up front as UnsupportedDeployAction.
-
-#[test]
-fn activating_deploy_enters_effect_pipeline() {
-    let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
-        meta::DeployRequest::Host(host_deployment(
-            None,
-            ordinary::HostDeployAction::ActivateNow,
-        )),
-    )));
-    assert_eq!(
-        deploy_rejection_reason(run(&mut engine, input)),
-        meta::DeployRejectionReason::ProposalSourceUnreachable,
-    );
-}
-
-#[test]
-fn user_environment_activate_enters_effect_pipeline() {
-    let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
-        meta::DeployRequest::UserEnvironment(meta::UserEnvironmentDeployment {
-            cluster_name: ordinary::ClusterName::new("alpha"),
-            node_name: ordinary::NodeName::new("node-1"),
-            user_name: ordinary::UserName::new("li"),
-            source: ordinary::ProposalSource::new("/dev/null"),
-            flake: ordinary::FlakeReference::new("github:owner/repo"),
-            user_environment_action: meta::UserEnvironmentAction::ActivateNow,
-            source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-            builder: None,
-            substituters: Vec::new(),
-        }),
-    )));
-    assert_eq!(
-        deploy_rejection_reason(run(&mut engine, input)),
-        meta::DeployRejectionReason::ProposalSourceUnreachable,
-    );
-}
-
-#[test]
-fn production_deploy_without_build_attribute_enters_effect_pipeline() {
-    let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
-        meta::DeployRequest::Host(host_deployment(None, ordinary::HostDeployAction::Realize)),
-    )));
-    assert_eq!(
-        deploy_rejection_reason(run(&mut engine, input)),
-        meta::DeployRejectionReason::ProposalSourceUnreachable,
-    );
-}
-
-#[test]
-fn user_environment_realize_enters_effect_pipeline() {
-    let mut engine = SchemaRuntime::new();
-    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
-        meta::DeployRequest::UserEnvironment(meta::UserEnvironmentDeployment {
-            cluster_name: ordinary::ClusterName::new("alpha"),
-            node_name: ordinary::NodeName::new("node-1"),
-            user_name: ordinary::UserName::new("li"),
-            source: ordinary::ProposalSource::new("/dev/null"),
-            flake: ordinary::FlakeReference::new("github:owner/repo"),
-            user_environment_action: meta::UserEnvironmentAction::Realize,
-            source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-            builder: None,
-            substituters: Vec::new(),
-        }),
-    )));
-    assert_eq!(
-        deploy_rejection_reason(run(&mut engine, input)),
-        meta::DeployRejectionReason::ProposalSourceUnreachable,
-    );
-}
-
-#[test]
-#[ignore = "runs real `nix flake metadata` and `nix eval`; cheap but external"]
-fn production_eval_materializes_horizon_inputs_and_returns_deploy_accepted() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let cluster_path = directory.path().join("cluster.nota");
-    std::fs::write(&cluster_path, fixture_cluster_proposal().to_nota()).expect("write cluster");
-    let flake_directory = directory.path().join("flake");
-    FixtureFlake::new(flake_directory).write();
-
-    let mut engine = SchemaRuntime::new();
-    let mut deployment = host_deployment(None, ordinary::HostDeployAction::Evaluate);
-    deployment.source = ordinary::ProposalSource::new(cluster_path.display().to_string());
-    deployment.flake =
-        ordinary::FlakeReference::new(format!("path:{}", directory.path().join("flake").display()));
-    let input = nexus::SignalInput::MetaInput(meta::Input::Deploy(meta::Deploy::new(
-        meta::DeployRequest::Host(deployment),
-    )));
-
-    match meta_reply(run(&mut engine, input)) {
-        meta::Output::DeployAccepted(accepted) => {
-            assert_eq!(*accepted.payload().deployment_identifier.payload(), 1);
-            assert_eq!(
-                *accepted.payload().database_marker.commit_sequence.payload(),
-                1
-            );
-        }
-        other => panic!("expected DeployAccepted, got {other:?}"),
-    }
-}
-
-struct FixtureFlake {
-    directory: std::path::PathBuf,
-}
-
-impl FixtureFlake {
-    fn new(directory: std::path::PathBuf) -> Self {
-        Self { directory }
-    }
-
-    fn write(&self) {
-        self.write_stub_input("horizon", "horizon = { node = { name = \"stub\"; }; };");
-        self.write_stub_input("system", "system = \"x86_64-linux\";");
-        self.write_stub_input(
-            "deployment",
-            "deployment = { includeHome = false; includeAllFirmware = true; };",
-        );
-        std::fs::create_dir_all(&self.directory).expect("flake dir");
-        std::fs::write(
-            self.directory.join("flake.nix"),
-            r#"{
-  inputs.horizon.url = "path:./horizon";
-  inputs.system.url = "path:./system";
-  inputs.deployment.url = "path:./deployment";
-  outputs = inputs: {
-    nixosConfigurations.target.config.system.build.toplevel = derivation {
-      name = "lojix-materialization-eval";
-      system = inputs.system.system;
-      builder = "/bin/sh";
-      args = [ "-c" "echo ok > $out" ];
+        link_local_ips: Vec::new(),
+        node_ip: None,
+        wireguard_pub_key: None,
+        nordvpn: false,
+        wifi_cert: false,
+        wireguard_untrusted_proxies: Vec::new(),
+        wants_printing: false,
+        wants_hw_video_accel: false,
+        router_interfaces: None,
+        online: None,
+        services: Vec::new(),
     };
-  };
-}
-"#,
-        )
-        .expect("fixture flake");
-    }
-
-    fn write_stub_input(&self, name: &str, output: &str) {
-        let directory = self.directory.join(name);
-        std::fs::create_dir_all(&directory).expect("stub dir");
-        std::fs::write(
-            directory.join("flake.nix"),
-            format!("{{ outputs = _: {{ {output} }}; }}\n"),
-        )
-        .expect("stub flake");
-    }
-}
-
-fn fixture_cluster_proposal() -> ClusterProposal {
     let mut nodes = BTreeMap::new();
-    nodes.insert(
-        NodeName::try_new("node-1").unwrap(),
-        NodeProposal {
-            species: NodeSpecies::EdgeTesting,
-            size: Magnitude::Large,
-            trust: Magnitude::Max,
-            machine: Machine {
-                species: MachineSpecies::Metal,
-                arch: Some(Arch::X86_64),
-                cores: 4,
-                model: None,
-                mother_board: None,
-                super_node: None,
-                super_user: None,
-                chip_gen: None,
-                ram_gb: None,
-                disk_gb: None,
-                location: None,
-                super_nodes: Vec::new(),
-            },
-            io: Io {
-                keyboard: Keyboard::Qwerty,
-                bootloader: Bootloader::Uefi,
-                disks: BTreeMap::new(),
-                swap_devices: Vec::new(),
-                compressed_swap: None,
-            },
-            pub_keys: NodePubKeys {
-                ssh: SshPubKey::try_new("AAA=").unwrap(),
-                nix: Some(
-                    NixPubKey::try_new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap(),
-                ),
-                yggdrasil: Some(horizon_lib::proposal::YggPubKeyEntry {
-                    pub_key: YggPubKey::try_new("a".repeat(64)).unwrap(),
-                    address: YggAddress::try_new("200::1").unwrap(),
-                    subnet: YggSubnet::try_new("300:ca41:6b12:fba").unwrap(),
-                }),
-            },
-            link_local_ips: Vec::new(),
-            node_ip: None,
-            wireguard_pub_key: None,
-            nordvpn: false,
-            wifi_cert: false,
-            wireguard_untrusted_proxies: Vec::new(),
-            wants_printing: false,
-            wants_hw_video_accel: false,
-            router_interfaces: None,
-            online: None,
-            services: Vec::new(),
-        },
-    );
-    ClusterProposal {
+    nodes.insert(HorizonNodeName::try_new("node-1").expect("node name"), node);
+    let proposal = ClusterProposal {
         nodes,
         users: BTreeMap::new(),
         domains: BTreeMap::new(),
@@ -419,5 +82,69 @@ fn fixture_cluster_proposal() -> ClusterProposal {
             users: BTreeMap::new(),
         },
         domain_configuration: DomainConfiguration::default(),
-    }
+    };
+    fs::write(path, proposal.to_dotos()).expect("write proposal");
+}
+
+fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
+    sema::DeploySubmission::Host(sema::HostDeployment {
+        cluster_name: sema::ClusterName::new("alpha"),
+        node_name: sema::NodeName::new("node-1"),
+        host_composition: sema::HostComposition::BaseHost,
+        proposal_source: sema::ProposalSource::new(proposal_source.display().to_string()),
+        flake_reference: sema::FlakeReference::new("github:example/fixture"),
+        host_deploy_action: sema::HostDeployAction::Realize,
+        source_revision_policy: sema::SourceRevisionPolicy::ResolveAndRecord,
+        optional_builder: None,
+        extra_substituter_vector: Vec::new(),
+        optional_flake_attribute: None,
+    })
+}
+
+#[test]
+fn accepted_submission_creates_a_correlated_durable_record() {
+    let directory = tempfile::tempdir().expect("temporary proposal directory");
+    let proposal_source = directory.path().join("cluster.dotos");
+    write_proposal(&proposal_source);
+    let mut engine = SchemaRuntime::new();
+    let accepted = match engine.submit_deploy(host_submission(&proposal_source)) {
+        DeploySubmissionOutcome::Accepted(handle) => handle,
+        other => panic!("expected accepted submission, got {other:?}"),
+    };
+    let identifier = *accepted.deployment_identifier.payload();
+    assert_ne!(identifier, 0);
+    let records = engine.store().deployment_records().expect("read records");
+    let record = records
+        .into_iter()
+        .find(|record| *record.deployment_identifier.payload() == identifier)
+        .expect("accepted submission has a durable record");
+    assert!(record.optional_admission_marker.is_some());
+    assert_eq!(
+        record.deployment_lifecycle,
+        sema::DeploymentLifecycle::Submitted
+    );
+    assert!(record.optional_deployment_terminal.is_none());
+}
+
+#[test]
+fn capacity_rejection_is_a_correlated_terminal_record() {
+    let directory = tempfile::tempdir().expect("temporary proposal directory");
+    let proposal_source = directory.path().join("cluster.dotos");
+    write_proposal(&proposal_source);
+    let engine = SchemaRuntime::new();
+    let rejected = engine.reject_deployment_in_flight(host_submission(&proposal_source));
+    let record = rejected.into_payload();
+    assert_ne!(*record.deployment_identifier.payload(), 0);
+    assert!(record.optional_admission_marker.is_none());
+    assert_eq!(
+        record.deployment_lifecycle,
+        sema::DeploymentLifecycle::Rejected
+    );
+    assert!(matches!(
+        record.optional_deployment_terminal,
+        Some(sema::DeploymentTerminal::Rejected(
+            sema::DeploymentTerminalReason::DeploymentInFlight
+        ))
+    ));
+    assert!(record.optional_terminal_marker.is_some());
 }

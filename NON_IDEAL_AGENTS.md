@@ -42,8 +42,8 @@ permission, or stall a deploy that operates within it. `AGENTS.md` and
 ## Operating the deploy path
 
 - **Proposal source is a local file.** The deploy's proposal source is a filesystem
-  path to the cluster's `datom.nota` (for example
-  `/home/li/primary/repos/goldragon/datom.nota`), read directly by the daemon
+  path to the cluster's `datom.dotos` (for example
+  `/home/li/primary/repos/goldragon/datom.dotos`), read directly by the daemon
   (`ProposalFile` in `src/schema_runtime.rs`). The cluster `secrets/` directory is
   inferred as that file's sibling, `<source-parent>/secrets`
   (`ClusterSecretsDirectory::from_proposal_source`).
@@ -116,7 +116,7 @@ closure.
 - `ActivateNow` sets the profile and runs the activation package; `SetProfile` sets
   the profile only; `Realize` builds and realizes the closure on the target store
   and stops (no profile, no activate).
-- `<proposal-source>` is the local `datom.nota` path; `<criomos-flake-ref>` is the
+- `<proposal-source>` is the local `datom.dotos` path; `<criomos-flake-ref>` is the
   pinned CriomOS reference. Under `RequireImmutable` the reference must carry its
   immutable identity in the query string —
   `github:LiGoldragon/CriomOS?rev=<full-40-char-commit>` (or `?narHash=sha256-...`).

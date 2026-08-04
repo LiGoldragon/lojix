@@ -1,6 +1,6 @@
 [package]
 name         = "lojix"
-version      = "0.11.0"
+version      = "0.12.0"
 edition      = "2024"
 rust-version = "1.89"
 license      = "MIT OR Apache-2.0"
@@ -37,14 +37,15 @@ path = "src/bin/lojix-migrate-store.rs"
 
 [features]
 default   = []
-nota-text = ["signal-lojix/nota-text", "meta-signal-lojix/nota-text"]
+dotos-text = ["signal-lojix/dotos-text", "meta-signal-lojix/dotos-text"]
 
 [dependencies]
-horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", rev = "ed1111c89fb86215580d8edcb21884f4748ca262" }
+horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", rev = "c62b38193cd482d31a88dc5633de4cda32beb3f3" }
 kameo             = "0.20"
-nota         = { git = "https://github.com/LiGoldragon/nota.git", branch = "main" }
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix.git", branch = "main" }
-signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix.git", branch = "main" }
+dotos        = { package = "dotos", git = "https://github.com/LiGoldragon/dotos.git", rev = "80c7b17f7ad3cf547d2624c6a243e5de5f85c9f3" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix.git", rev = "1b6d3b207991f00e2c2f8825fc4d5cfd62657f77" }
+signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix.git", rev = "9cd59d691f0a119550a5175b43fcf96f81a1602b" }
+signal-frame      = { git = "https://github.com/LiGoldragon/signal-frame.git", rev = "01676293a623d97b65e320d4138c4b480c6d5dad", default-features = false }
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 redb              = "4"
 rustix            = { version = "1", default-features = false, features = ["fs", "process"] }
@@ -55,7 +56,7 @@ tokio             = { version = "1", features = ["io-util", "process", "rt-multi
 triad-runtime     = { git = "https://github.com/LiGoldragon/triad-runtime.git", branch = "main" }
 
 [build-dependencies]
-schema-rust = { git = "https://github.com/LiGoldragon/schema-rust.git", branch = "main" }
+schema-rust = { git = "https://github.com/LiGoldragon/schema-rust.git", rev = "ee9e287c313684e8fd5c651c69ad04a1fa9624b8" }
 
 [dev-dependencies]
 tempfile = "3"

@@ -49,13 +49,13 @@ impl ContractSchemaDependencies {
             ordinary_signal: DependencySchema::from_cargo_metadata(
                 "signal-lojix",
                 "signal-lojix",
-                "0.2.0",
+                "0.4.0",
             )
             .expect("read signal-lojix schema metadata"),
             meta_signal: DependencySchema::from_cargo_metadata(
                 "meta-signal-lojix",
                 "meta-signal-lojix",
-                "0.2.0",
+                "0.4.0",
             )
             .expect("read meta-signal-lojix schema metadata"),
         }

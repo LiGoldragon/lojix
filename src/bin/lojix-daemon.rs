@@ -1,6 +1,6 @@
 //! lojix daemon entry — one rkyv startup file decodes the daemon configuration,
 //! then the daemon binds the ordinary + owner sockets and drives the Nexus
-//! runner. The daemon rejects inline NOTA and `.nota` startup files through the
+//! runner. The daemon rejects inline DOTOS and `.dotos` startup files through the
 //! component argument parser's signal-file boundary.
 
 fn main() {

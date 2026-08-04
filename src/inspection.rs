@@ -21,7 +21,8 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize};
 use sema_engine::TableRegistration;
 
 use crate::schema::sema::{
-    ContainerLifecycleRecord, DeployJob, EventLogEntry, GcRoot, LiveGeneration, StoredTestRun,
+    ContainerLifecycleRecord, DeployJob, DeploymentRecord, EventLogEntry, GcRoot,
+    IdentifierAllocation, LiveGeneration, StoredTestRun,
 };
 use crate::{Error, Result};
 
@@ -40,6 +41,10 @@ const DEPLOY_JOB_INSPECTION: TableInspectionTarget<DeployJob> =
     TableInspectionTarget::new("deploy-job", "in-flight deploy job rows");
 const TEST_RUN_INSPECTION: TableInspectionTarget<StoredTestRun> =
     TableInspectionTarget::new("test-run", "test-run rows");
+const DEPLOYMENT_RECORD_INSPECTION: TableInspectionTarget<DeploymentRecord> =
+    TableInspectionTarget::new("deployment-record", "durable deployment correlation rows");
+const IDENTIFIER_ALLOCATION_INSPECTION: TableInspectionTarget<IdentifierAllocation> =
+    TableInspectionTarget::new("identifier-allocation", "global identifier high-water row");
 
 pub struct StoreInspectionCommand {
     path: PathBuf,
@@ -426,6 +431,8 @@ impl<'database> StoreTableReader<'database> {
             self.inspect(CONTAINER_LIFECYCLE_INSPECTION),
             self.inspect(DEPLOY_JOB_INSPECTION),
             self.inspect(TEST_RUN_INSPECTION),
+            self.inspect(DEPLOYMENT_RECORD_INSPECTION),
+            self.inspect(IDENTIFIER_ALLOCATION_INSPECTION),
         ]
     }
 

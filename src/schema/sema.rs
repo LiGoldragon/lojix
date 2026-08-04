@@ -10,92 +10,1214 @@ pub type Boolean = bool;
 pub type Path = std::string::String;
 
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::Selection as Selection;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::GenerationListing as GenerationListing;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::Generation as Generation;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::KeyMaterialQuery as KeyMaterialQuery;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::KeyMaterialReport as KeyMaterialReport;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::EventLogRange as EventLogRange;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::EventLogPosition as EventLogPosition;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::DeploymentPhaseEvent as DeploymentPhaseEvent;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::CacheRetentionTransitionEvent as CacheRetentionTransitionEvent;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::ClusterName as ClusterName;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::NodeName as NodeName;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::PinLabel as PinLabel;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::ClosurePath as ClosurePath;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::FlakeReference as FlakeReference;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::SourceRevisionPolicy as SourceRevisionPolicy;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::SourceRevisionRecord as SourceRevisionRecord;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::DeploymentIdentifier as DeploymentIdentifier;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::GenerationIdentifier as GenerationIdentifier;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::TestRunIdentifier as TestRunIdentifier;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::GenerationArtifact as GenerationArtifact;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::ActivationEffect as ActivationEffect;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::GenerationSlot as GenerationSlot;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::TestMode as TestMode;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::TestRunRecord as TestRunRecord;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::TestRunListing as TestRunListing;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::TestRunLookup as TestRunLookup;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::TestRunPhase as TestRunPhase;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::TestOutcome as TestOutcome;
-#[rustfmt::skip]
-pub use signal_lojix::schema::lib::FailureStage as FailureStage;
-#[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::HostDeployment as HostDeployment;
-#[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::UserEnvironmentDeployment as UserEnvironmentDeployment;
-#[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::PinRequest as PinRequest;
-#[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::UnpinRequest as UnpinRequest;
-#[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::RetireRequest as RetireRequest;
-#[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::DeployHandle as DeployHandle;
-#[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::AcceptedTest as AcceptedTest;
-#[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::AppliedPin as AppliedPin;
-#[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::AppliedUnpin as AppliedUnpin;
-#[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::AppliedRetire as AppliedRetire;
-
-#[rustfmt::skip]
-#[cfg(feature = "nota-text")]
-pub use nota::{NotaDecodeError, NotaEncode, NotaSource};
+#[cfg(feature = "dotos-text")]
+pub use dotos::{DotosDecodeError, DotosEncode, DotosSource};
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ClusterName(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NodeName(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UserName(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PinLabel(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ClosurePath(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FlakeReference(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ProposalSource(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ImmutableRevision(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentIdentifier(Integer);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct GenerationIdentifier(Integer);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TestRunIdentifier(Integer);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionToken(Integer);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct EventLogPosition(Integer);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CommitSequence(Integer);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StateDigest(Integer);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum SourceRevisionPolicy {
+    RequireImmutable,
+    ResolveAndRecord,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum GenerationArtifact {
+    CompleteHost,
+    BaseHost,
+    UserEnvironment,
+    LegacyUnknown,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum ActivationEffect {
+    LiveActivation,
+    BootProfile,
+    TestActivation,
+    BootOnceProfile,
+    ProfileOnly,
+    LegacyUnknown,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum GenerationSlot {
+    Current,
+    BootPending,
+    Rollback,
+    Pinned,
+    Recent,
+    LegacyUnknown,
+    LegacyAmbiguous,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum TestMode {
+    Hermetic,
+    Live,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum TestRunPhase {
+    Submitted,
+    BringingUp,
+    Deploying,
+    Asserting,
+    TearingDown,
+    Completed,
+    Failed,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum FailureStage {
+    BringUp,
+    Deploy,
+    Assert,
+    TearDown,
+    HermeticCheck,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum TestOutcome {
+    Pending,
+    Passed,
+    Failed(FailureStage),
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StateMarker {
+    pub commit_sequence: CommitSequence,
+    pub state_digest: StateDigest,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseMarker(StateMarker);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AdmissionMarker(StateMarker);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TerminalMarker(StateMarker);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TransitionMarker(StateMarker);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NodeSelector {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub optional_generation_artifact: Option<GenerationArtifact>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct GenerationLookup(GenerationIdentifier);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentLookup(DeploymentIdentifier);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct EventLogRange {
+    pub from: EventLogPosition,
+    pub until: EventLogPosition,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TestRunLookup {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub optional_test_run_identifier: Option<TestRunIdentifier>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum Selection {
+    ByNode(NodeSelector),
+    ByGeneration(GenerationLookup),
+    ByDeployment(DeploymentLookup),
+    ByEventLog(EventLogRange),
+    ByTestRun(TestRunLookup),
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SourceRevisionRecord {
+    pub source_revision_policy: SourceRevisionPolicy,
+    pub requested_ref: FlakeReference,
+    pub resolved_ref: FlakeReference,
+    pub string: String,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Generation {
+    pub generation_identifier: GenerationIdentifier,
+    pub deployment_identifier: DeploymentIdentifier,
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub generation_artifact: GenerationArtifact,
+    pub activation_effect: ActivationEffect,
+    pub generation_slot: GenerationSlot,
+    pub closure_path: ClosurePath,
+    pub optional_immutable_revision: Option<ImmutableRevision>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum DeploymentEnvironment {
+    HostEnvironment,
+    UserEnvironment(UserName),
+    LegacyUnknownEnvironment,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum RequestedDeploymentAction {
+    Host(HostDeployAction),
+    UserEnvironment(UserEnvironmentAction),
+    LegacyUnknownAction,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum DeploymentLifecycle {
+    Submitted,
+    Building,
+    Built,
+    Copying,
+    Activating,
+    Activated,
+    Completed,
+    Rejected,
+    Failed,
+    LegacyUnknown,
+    LegacyAmbiguous,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum DeploymentFailureStage {
+    Admission,
+    FlakeAuth,
+    MaterializeHorizon,
+    Eval,
+    Build,
+    CopyClosure,
+    Activate,
+    Daemon,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum DeploymentTerminalReason {
+    ClusterUnknown,
+    NodeUnknown,
+    ProposalSourceUnreachable,
+    FlakeReferenceMalformed,
+    BuilderUnreachable,
+    SubstituterUnreachable,
+    DeploymentInFlight,
+    UnsupportedDeployAction,
+    InternalError,
+    ActivationFailed,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentFailure {
+    pub deployment_failure_stage: DeploymentFailureStage,
+    pub deployment_terminal_reason: DeploymentTerminalReason,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum DeploymentTerminal {
+    Succeeded,
+    Rejected(DeploymentTerminalReason),
+    Failed(DeploymentFailure),
+    LegacyUnknown,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentRequestIdentity {
+    pub deployment_environment: DeploymentEnvironment,
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub generation_artifact: GenerationArtifact,
+    pub requested_deployment_action: RequestedDeploymentAction,
+    pub activation_effect: ActivationEffect,
+    pub source_revision_policy: SourceRevisionPolicy,
+    pub optional_immutable_revision: Option<ImmutableRevision>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentRecord {
+    pub deployment_identifier: DeploymentIdentifier,
+    pub generation_identifier: GenerationIdentifier,
+    pub deployment_request_identity: DeploymentRequestIdentity,
+    pub optional_admission_marker: Option<AdmissionMarker>,
+    pub deployment_lifecycle: DeploymentLifecycle,
+    pub optional_terminal_marker: Option<TerminalMarker>,
+    pub optional_deployment_terminal: Option<DeploymentTerminal>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct IdentifierAllocation {
+    pub next_deployment_identifier: Integer,
+    pub next_generation_identifier: Integer,
+    pub next_event_log_position: Integer,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct GenerationListing {
+    pub generation_vector: Vec<Generation>,
+    pub deployment_record_vector: Vec<DeploymentRecord>,
+    pub state_marker: StateMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct KeyMaterialQuery {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub proposal_source: ProposalSource,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct KeyMaterialReport {
+    pub node_name: NodeName,
+    pub string_vector: Vec<String>,
+    pub state_marker: StateMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum DeploymentPhase {
+    Submitted,
+    Building,
+    Built,
+    Copying,
+    Activating,
+    Activated,
+    Completed,
+    Rejected,
+    Failed,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentPhaseEvent {
+    pub deployment_identifier: DeploymentIdentifier,
+    pub generation_identifier: GenerationIdentifier,
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub deployment_phase: DeploymentPhase,
+    pub event_log_position: EventLogPosition,
+    pub state_marker: StateMarker,
+    pub optional_immutable_revision: Option<ImmutableRevision>,
+    pub optional_deployment_terminal: Option<DeploymentTerminal>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum OutboxDeliveryState {
+    Pending,
+    Dispatched,
+    Acknowledged,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OutboxRetryCount(Integer);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TransitionOrdinal(Integer);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentOutboxRecord {
+    pub deployment_identifier: DeploymentIdentifier,
+    pub transition_marker: TransitionMarker,
+    pub deployment_phase_event: DeploymentPhaseEvent,
+    pub outbox_delivery_state: OutboxDeliveryState,
+    pub outbox_retry_count: OutboxRetryCount,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingTransitionIntent {
+    pub deployment_identifier: DeploymentIdentifier,
+    pub generation_identifier: GenerationIdentifier,
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub deployment_phase: DeploymentPhase,
+    pub event_log_position: EventLogPosition,
+    pub optional_immutable_revision: Option<ImmutableRevision>,
+    pub optional_deployment_terminal: Option<DeploymentTerminal>,
+    pub transition_ordinal: TransitionOrdinal,
+    pub optional_transition_marker: Option<TransitionMarker>,
+    pub transition_intent_state: TransitionIntentState,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum TransitionIntentState {
+    Pending,
+    Bound,
+    Appended,
+    Acknowledged,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LegacyEventArchive(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LegacyDeploymentEventQuarantine {
+    pub event_log_position: EventLogPosition,
+    pub legacy_event_archive: LegacyEventArchive,
+    pub state_marker: StateMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum CacheRetentionTransition {
+    Pinned,
+    Unpinned,
+    Promoted,
+    Demoted,
+    Retired,
+    Evicted,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CacheRetentionTransitionEvent {
+    pub generation_identifier: GenerationIdentifier,
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub cache_retention_transition: CacheRetentionTransition,
+    pub generation_slot: GenerationSlot,
+    pub optional_generation_slot: Option<GenerationSlot>,
+    pub optional_pin_label: Option<PinLabel>,
+    pub event_log_position: EventLogPosition,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TestRunRecord {
+    pub test_run_identifier: TestRunIdentifier,
+    pub cluster_name: ClusterName,
+    pub node: NodeName,
+    pub host: NodeName,
+    pub test_mode: TestMode,
+    pub test_run_phase: TestRunPhase,
+    pub test_outcome: TestOutcome,
+    pub optional_closure_path: Option<ClosurePath>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TestRunListing {
+    pub test_run_record_vector: Vec<TestRunRecord>,
+    pub database_marker: DatabaseMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentWatch {
+    pub optional_deployment_identifier: Option<DeploymentIdentifier>,
+    pub optional_cluster_name: Option<ClusterName>,
+    pub optional_node_name: Option<NodeName>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CacheRetentionWatch {
+    pub optional_cluster_name: Option<ClusterName>,
+    pub optional_node_name: Option<NodeName>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionClose(SubscriptionToken);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionOpened {
+    pub subscription_token: SubscriptionToken,
+    pub commit_sequence: CommitSequence,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionClosed(SubscriptionToken);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum HostDeployAction {
+    Evaluate,
+    Realize,
+    SetBootProfile,
+    ActivateNow,
+    TestActivation,
+    ScheduleBootOnce,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum HostComposition {
+    CompleteHost,
+    BaseHost,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum UserEnvironmentAction {
+    Realize,
+    SetProfile,
+    ActivateNow,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum HostSelection {
+    DefaultHost,
+    OnHost(NodeName),
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum NodeSelection {
+    Nodes(Vec<NodeName>),
+    All,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TestRun {
+    pub cluster_name: ClusterName,
+    pub node_selection: NodeSelection,
+    pub host_selection: HostSelection,
+    pub test_mode: TestMode,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct QuickCheck(Vec<NodeName>);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum TestRequest {
+    Run(TestRun),
+    Check(QuickCheck),
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ExtraSubstituter {
+    pub url: String,
+    pub public_key: String,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Builder(NodeName);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FlakeAttribute(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct HostDeployment {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub host_composition: HostComposition,
+    pub proposal_source: ProposalSource,
+    pub flake_reference: FlakeReference,
+    pub host_deploy_action: HostDeployAction,
+    pub source_revision_policy: SourceRevisionPolicy,
+    pub optional_builder: Option<Builder>,
+    pub extra_substituter_vector: Vec<ExtraSubstituter>,
+    pub optional_flake_attribute: Option<FlakeAttribute>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UserEnvironmentDeployment {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub user_name: UserName,
+    pub proposal_source: ProposalSource,
+    pub flake_reference: FlakeReference,
+    pub user_environment_action: UserEnvironmentAction,
+    pub source_revision_policy: SourceRevisionPolicy,
+    pub optional_builder: Option<Builder>,
+    pub extra_substituter_vector: Vec<ExtraSubstituter>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PinRequest {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub generation_identifier: GenerationIdentifier,
+    pub pin_label: PinLabel,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UnpinRequest {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub pin_label: PinLabel,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RetireRequest {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub generation_identifier: GenerationIdentifier,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeployHandle {
+    pub deployment_identifier: DeploymentIdentifier,
+    pub state_marker: StateMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AcceptedTest {
+    pub test_run_identifier: TestRunIdentifier,
+    pub state_marker: StateMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AppliedPin {
+    pub generation_identifier: GenerationIdentifier,
+    pub pin_label: PinLabel,
+    pub from_slot: GenerationSlot,
+    pub to_slot: GenerationSlot,
+    pub state_marker: StateMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AppliedUnpin {
+    pub generation_identifier: GenerationIdentifier,
+    pub pin_label: PinLabel,
+    pub from_slot: GenerationSlot,
+    pub to_slot: GenerationSlot,
+    pub state_marker: StateMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AppliedRetire {
+    pub generation_identifier: GenerationIdentifier,
+    pub generation_slot: GenerationSlot,
+    pub state_marker: StateMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum SemaReadInput {
@@ -107,8 +1229,8 @@ pub enum SemaReadInput {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum SemaReadOutput {
@@ -121,20 +1243,20 @@ pub enum SemaReadOutput {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct EventLogPage {
-    pub deployment_events: Vec<DeploymentPhaseEvent>,
-    pub retention_events: Vec<CacheRetentionTransitionEvent>,
+    pub deployment_phase_event_vector: Vec<DeploymentPhaseEvent>,
+    pub cache_retention_transition_event_vector: Vec<CacheRetentionTransitionEvent>,
     pub state_marker: StateMarker,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum SemaWriteInput {
@@ -150,8 +1272,8 @@ pub enum SemaWriteInput {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum DeploySubmission {
@@ -161,14 +1283,15 @@ pub enum DeploySubmission {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ActivationCommit {
     pub generation_identifier: GenerationIdentifier,
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
+    pub deployment_environment: DeploymentEnvironment,
     pub generation_slot: GenerationSlot,
     pub closure_path: ClosurePath,
     pub source_revision_record: SourceRevisionRecord,
@@ -176,29 +1299,29 @@ pub struct ActivationCommit {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ContainerTransition {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub container: ContainerName,
-    pub state: ContainerState,
+    pub container_name: ContainerName,
+    pub container_state: ContainerState,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ContainerName(String);
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -220,8 +1343,8 @@ pub enum ContainerState {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum SemaWriteOutput {
@@ -238,8 +1361,8 @@ pub enum SemaWriteOutput {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PhaseReceipt {
@@ -249,8 +1372,8 @@ pub struct PhaseReceipt {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AppliedActivation {
@@ -261,8 +1384,8 @@ pub struct AppliedActivation {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ContainerReceipt {
@@ -272,19 +1395,19 @@ pub struct ContainerReceipt {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RejectionReport {
-    pub reason: RejectionReason,
-    pub marker: StateMarker,
+    pub rejection_reason: RejectionReason,
+    pub state_marker: StateMarker,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -311,43 +1434,395 @@ pub enum RejectionReason {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct StateMarker {
-    pub commit_sequence: CommitSequence,
-    pub state_digest: StateDigest,
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum QueryRejectionReason {
+    GenerationUnknown,
+    NodeUnknown,
+    EventLogPositionOutOfRange,
+    MalformedSelector,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct CommitSequence(Integer);
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum WatchRejectionReason {
+    SubscriptionLimitReached,
+    MalformedWatch,
+    StreamUnavailable,
+}
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct StateDigest(Integer);
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum UnwatchRejectionReason {
+    SubscriptionTokenUnknown,
+    SubscriptionAlreadyClosed,
+}
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum KeyMaterialCheckRejectionReason {
+    NodeUnknown,
+    ProposalSourceUnreachable,
+    HostUnreachable,
+    PublicationMalformed,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RejectedQuery {
+    pub query_rejection_reason: QueryRejectionReason,
+    pub state_marker: StateMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RejectedWatch(WatchRejectionReason);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RejectedUnwatch {
+    pub unwatch_rejection_reason: UnwatchRejectionReason,
+    pub subscription_token: SubscriptionToken,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RejectedKeyMaterialCheck {
+    pub key_material_check_rejection_reason: KeyMaterialCheckRejectionReason,
+    pub state_marker: StateMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum PinRejectionReason {
+    GenerationUnknown,
+    NodeUnknown,
+    PinLabelInUse,
+    PinSlotExhausted,
+    InternalError,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum UnpinRejectionReason {
+    PinLabelUnknown,
+    NodeUnknown,
+    GenerationNotPinned,
+    InternalError,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum RetireRejectionReason {
+    GenerationUnknown,
+    NodeUnknown,
+    GenerationActive,
+    GenerationPinned,
+    InternalError,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum TestRejectionReason {
+    ClusterUnknown,
+    NodeUnknown,
+    VmHostNotDeclaredForNode,
+    HostDeclaresNoVmHost,
+    NoTestDefaults,
+    LiveNotYetEnabled,
+    SubstrateUnavailable,
+    InternalError,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RejectedDeploy(DeploymentRecord);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RejectedPin {
+    pub pin_rejection_reason: PinRejectionReason,
+    pub state_marker: StateMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RejectedUnpin {
+    pub unpin_rejection_reason: UnpinRejectionReason,
+    pub state_marker: StateMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RejectedRetire {
+    pub retire_rejection_reason: RetireRejectionReason,
+    pub state_marker: StateMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RejectedTest {
+    pub test_rejection_reason: TestRejectionReason,
+    pub state_marker: StateMarker,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum OrdinaryIngress {
+    Query(Selection),
+    WatchDeployments(DeploymentWatch),
+    WatchCacheRetention(CacheRetentionWatch),
+    Unwatch(SubscriptionClose),
+    CheckHostKeyMaterial(KeyMaterialQuery),
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum OrdinaryEgress {
+    Queried(GenerationListing),
+    DeploymentEventsQueried(EventLogPage),
+    TestRunsQueried(TestRunListing),
+    Watching(SubscriptionOpened),
+    Unwatched(SubscriptionClosed),
+    KeyMaterialChecked(KeyMaterialReport),
+    QueryRejected(RejectedQuery),
+    WatchRejected(RejectedWatch),
+    UnwatchRejected(RejectedUnwatch),
+    KeyMaterialCheckRejected(RejectedKeyMaterialCheck),
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum MetaIngress {
+    Deploy(DeploySubmission),
+    Pin(PinRequest),
+    Unpin(UnpinRequest),
+    Retire(RetireRequest),
+    Test(TestRequest),
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum MetaEgress {
+    DeployAccepted(DeployHandle),
+    DeployRejected(RejectedDeploy),
+    DeployTerminal(DeploymentRecord),
+    Pinned(AppliedPin),
+    PinRejected(RejectedPin),
+    Unpinned(AppliedUnpin),
+    UnpinRejected(RejectedUnpin),
+    Retired(AppliedRetire),
+    RetireRejected(RejectedRetire),
+    Tested(AcceptedTest),
+    TestRejected(RejectedTest),
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct LiveSetTable(Vec<LiveGeneration>);
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentRecordTable(Vec<DeploymentRecord>);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct IdentifierAllocationTable(Vec<IdentifierAllocation>);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentOutboxTable(Vec<DeploymentOutboxRecord>);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingTransitionIntentTable(Vec<PendingTransitionIntent>);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LegacyDeploymentEventQuarantineTable(Vec<LegacyDeploymentEventQuarantine>);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct LiveGeneration {
@@ -355,6 +1830,7 @@ pub struct LiveGeneration {
     pub generation_identifier: GenerationIdentifier,
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
+    pub deployment_environment: DeploymentEnvironment,
     pub generation_artifact: GenerationArtifact,
     pub activation_effect: ActivationEffect,
     pub generation_slot: GenerationSlot,
@@ -364,16 +1840,16 @@ pub struct LiveGeneration {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct GcRootsTable(Vec<GcRoot>);
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct GcRoot {
@@ -382,32 +1858,32 @@ pub struct GcRoot {
     pub node_name: NodeName,
     pub generation_slot: GenerationSlot,
     pub closure_path: ClosurePath,
-    pub label: Option<PinLabel>,
+    pub optional_pin_label: Option<PinLabel>,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct EventLogTable(Vec<EventLogEntry>);
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct EventLogEntry {
     pub event_log_position: EventLogPosition,
-    pub record: LoggedEvent,
+    pub logged_event: LoggedEvent,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum LoggedEvent {
@@ -418,38 +1894,87 @@ pub enum LoggedEvent {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ContainerLifecycleTable(Vec<ContainerLifecycleRecord>);
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ContainerLifecycleRecord {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub container: ContainerName,
-    pub state: ContainerState,
+    pub container_name: ContainerName,
+    pub container_state: ContainerState,
     pub event_log_position: EventLogPosition,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DeployJobTable(Vec<DeployJob>);
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PersistedFlakeInputReference {
+    pub url: String,
+    pub nix_archive_hash: String,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PersistedFlakeInputOverride {
+    pub string: String,
+    pub persisted_flake_input_reference: PersistedFlakeInputReference,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum DeployResumeStage {
+    ResolveFlakeAuth,
+    MaterializeHorizon,
+    RecordBuilding,
+    NixEval,
+    NixBuild,
+    CopyClosure,
+    ActivateGeneration,
+    RecordGenerationActivated,
+    FinishDeployment,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DeployJob {
@@ -457,20 +1982,25 @@ pub struct DeployJob {
     pub generation_identifier: GenerationIdentifier,
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub phase: DeployJobPhase,
-    pub closure_path: Option<ClosurePath>,
+    pub deploy_job_phase: DeployJobPhase,
+    pub optional_closure_path: Option<ClosurePath>,
     pub source_revision_policy: SourceRevisionPolicy,
-    pub requested_ref: FlakeReference,
-    pub resolved_ref: Option<FlakeReference>,
+    pub flake_reference: FlakeReference,
+    pub optional_flake_reference: Option<FlakeReference>,
     pub resolved_revision: Option<String>,
     pub resolved_target: Option<String>,
     pub boot_once_unit: Option<String>,
+    pub optional_generation_slot: Option<GenerationSlot>,
+    pub persisted_flake_input_override_vector: Vec<PersistedFlakeInputOverride>,
+    pub deploy_resume_stage: DeployResumeStage,
+    pub optional_phase_receipt: Option<PhaseReceipt>,
+    pub optional_deploy_submission: Option<DeploySubmission>,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -490,57 +2020,58 @@ pub enum DeployJobPhase {
     Activating,
     Activated,
     Failed,
+    LegacyNonResumable,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TestRunTable(Vec<StoredTestRun>);
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct StoredTestRun {
     pub test_run_identifier: TestRunIdentifier,
     pub cluster_name: ClusterName,
-    pub node_name: NodeName,
+    pub node: NodeName,
     pub host: NodeName,
-    pub mode: TestMode,
-    pub phase: TestRunPhase,
-    pub outcome: TestOutcome,
-    pub closure_path: Option<ClosurePath>,
+    pub test_mode: TestMode,
+    pub test_run_phase: TestRunPhase,
+    pub test_outcome: TestOutcome,
+    pub optional_closure_path: Option<ClosurePath>,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Input {
-    SemaReadInput(SemaReadInput),
-    SemaWriteInput(SemaWriteInput),
+    Read(SemaReadInput),
+    Write(SemaWriteInput),
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Output {
-    SemaReadOutput(SemaReadOutput),
-    SemaWriteOutput(SemaWriteOutput),
+    ReadCompleted(SemaReadOutput),
+    WriteCompleted(SemaWriteOutput),
 }
 
 #[rustfmt::skip]
-impl ContainerName {
+impl ClusterName {
     pub fn new(payload: impl Into<String>) -> Self {
         Self(payload.into())
     }
@@ -552,8 +2083,236 @@ impl ContainerName {
     }
 }
 #[rustfmt::skip]
-impl From<String> for ContainerName {
+impl From<String> for ClusterName {
     fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl NodeName {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for NodeName {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl UserName {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for UserName {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl PinLabel {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for PinLabel {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl ClosurePath {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for ClosurePath {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl FlakeReference {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for FlakeReference {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl ProposalSource {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for ProposalSource {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl ImmutableRevision {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for ImmutableRevision {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl DeploymentIdentifier {
+    pub fn new(payload: Integer) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Integer {
+        &self.0
+    }
+    pub fn into_payload(self) -> Integer {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Integer> for DeploymentIdentifier {
+    fn from(payload: Integer) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl GenerationIdentifier {
+    pub fn new(payload: Integer) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Integer {
+        &self.0
+    }
+    pub fn into_payload(self) -> Integer {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Integer> for GenerationIdentifier {
+    fn from(payload: Integer) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl TestRunIdentifier {
+    pub fn new(payload: Integer) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Integer {
+        &self.0
+    }
+    pub fn into_payload(self) -> Integer {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Integer> for TestRunIdentifier {
+    fn from(payload: Integer) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl SubscriptionToken {
+    pub fn new(payload: Integer) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Integer {
+        &self.0
+    }
+    pub fn into_payload(self) -> Integer {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Integer> for SubscriptionToken {
+    fn from(payload: Integer) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl EventLogPosition {
+    pub fn new(payload: Integer) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Integer {
+        &self.0
+    }
+    pub fn into_payload(self) -> Integer {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Integer> for EventLogPosition {
+    fn from(payload: Integer) -> Self {
         Self::new(payload)
     }
 }
@@ -597,6 +2356,329 @@ impl From<Integer> for StateDigest {
 }
 
 #[rustfmt::skip]
+impl DatabaseMarker {
+    pub fn new(payload: StateMarker) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &StateMarker {
+        &self.0
+    }
+    pub fn into_payload(self) -> StateMarker {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<StateMarker> for DatabaseMarker {
+    fn from(payload: StateMarker) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl AdmissionMarker {
+    pub fn new(payload: StateMarker) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &StateMarker {
+        &self.0
+    }
+    pub fn into_payload(self) -> StateMarker {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<StateMarker> for AdmissionMarker {
+    fn from(payload: StateMarker) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl TerminalMarker {
+    pub fn new(payload: StateMarker) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &StateMarker {
+        &self.0
+    }
+    pub fn into_payload(self) -> StateMarker {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<StateMarker> for TerminalMarker {
+    fn from(payload: StateMarker) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl TransitionMarker {
+    pub fn new(payload: StateMarker) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &StateMarker {
+        &self.0
+    }
+    pub fn into_payload(self) -> StateMarker {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<StateMarker> for TransitionMarker {
+    fn from(payload: StateMarker) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl GenerationLookup {
+    pub fn new(payload: GenerationIdentifier) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &GenerationIdentifier {
+        &self.0
+    }
+    pub fn into_payload(self) -> GenerationIdentifier {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<GenerationIdentifier> for GenerationLookup {
+    fn from(payload: GenerationIdentifier) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl DeploymentLookup {
+    pub fn new(payload: DeploymentIdentifier) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &DeploymentIdentifier {
+        &self.0
+    }
+    pub fn into_payload(self) -> DeploymentIdentifier {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<DeploymentIdentifier> for DeploymentLookup {
+    fn from(payload: DeploymentIdentifier) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl OutboxRetryCount {
+    pub fn new(payload: Integer) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Integer {
+        &self.0
+    }
+    pub fn into_payload(self) -> Integer {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Integer> for OutboxRetryCount {
+    fn from(payload: Integer) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl TransitionOrdinal {
+    pub fn new(payload: Integer) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Integer {
+        &self.0
+    }
+    pub fn into_payload(self) -> Integer {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Integer> for TransitionOrdinal {
+    fn from(payload: Integer) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl LegacyEventArchive {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for LegacyEventArchive {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl SubscriptionClose {
+    pub fn new(payload: SubscriptionToken) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &SubscriptionToken {
+        &self.0
+    }
+    pub fn into_payload(self) -> SubscriptionToken {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<SubscriptionToken> for SubscriptionClose {
+    fn from(payload: SubscriptionToken) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl SubscriptionClosed {
+    pub fn new(payload: SubscriptionToken) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &SubscriptionToken {
+        &self.0
+    }
+    pub fn into_payload(self) -> SubscriptionToken {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<SubscriptionToken> for SubscriptionClosed {
+    fn from(payload: SubscriptionToken) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl QuickCheck {
+    pub fn new(payload: Vec<NodeName>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Vec<NodeName> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Vec<NodeName> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Vec<NodeName>> for QuickCheck {
+    fn from(payload: Vec<NodeName>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl Builder {
+    pub fn new(payload: NodeName) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &NodeName {
+        &self.0
+    }
+    pub fn into_payload(self) -> NodeName {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<NodeName> for Builder {
+    fn from(payload: NodeName) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl FlakeAttribute {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for FlakeAttribute {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl ContainerName {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for ContainerName {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl RejectedWatch {
+    pub fn new(payload: WatchRejectionReason) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &WatchRejectionReason {
+        &self.0
+    }
+    pub fn into_payload(self) -> WatchRejectionReason {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<WatchRejectionReason> for RejectedWatch {
+    fn from(payload: WatchRejectionReason) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl RejectedDeploy {
+    pub fn new(payload: DeploymentRecord) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &DeploymentRecord {
+        &self.0
+    }
+    pub fn into_payload(self) -> DeploymentRecord {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<DeploymentRecord> for RejectedDeploy {
+    fn from(payload: DeploymentRecord) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl LiveSetTable {
     pub fn new(payload: Vec<LiveGeneration>) -> Self {
         Self(payload)
@@ -611,6 +2693,102 @@ impl LiveSetTable {
 #[rustfmt::skip]
 impl From<Vec<LiveGeneration>> for LiveSetTable {
     fn from(payload: Vec<LiveGeneration>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl DeploymentRecordTable {
+    pub fn new(payload: Vec<DeploymentRecord>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Vec<DeploymentRecord> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Vec<DeploymentRecord> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Vec<DeploymentRecord>> for DeploymentRecordTable {
+    fn from(payload: Vec<DeploymentRecord>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl IdentifierAllocationTable {
+    pub fn new(payload: Vec<IdentifierAllocation>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Vec<IdentifierAllocation> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Vec<IdentifierAllocation> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Vec<IdentifierAllocation>> for IdentifierAllocationTable {
+    fn from(payload: Vec<IdentifierAllocation>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl DeploymentOutboxTable {
+    pub fn new(payload: Vec<DeploymentOutboxRecord>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Vec<DeploymentOutboxRecord> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Vec<DeploymentOutboxRecord> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Vec<DeploymentOutboxRecord>> for DeploymentOutboxTable {
+    fn from(payload: Vec<DeploymentOutboxRecord>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl PendingTransitionIntentTable {
+    pub fn new(payload: Vec<PendingTransitionIntent>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Vec<PendingTransitionIntent> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Vec<PendingTransitionIntent> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Vec<PendingTransitionIntent>> for PendingTransitionIntentTable {
+    fn from(payload: Vec<PendingTransitionIntent>) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl LegacyDeploymentEventQuarantineTable {
+    pub fn new(payload: Vec<LegacyDeploymentEventQuarantine>) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &Vec<LegacyDeploymentEventQuarantine> {
+        &self.0
+    }
+    pub fn into_payload(self) -> Vec<LegacyDeploymentEventQuarantine> {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<Vec<LegacyDeploymentEventQuarantine>>
+for LegacyDeploymentEventQuarantineTable {
+    fn from(payload: Vec<LegacyDeploymentEventQuarantine>) -> Self {
         Self::new(payload)
     }
 }
@@ -707,6 +2885,83 @@ impl TestRunTable {
 impl From<Vec<StoredTestRun>> for TestRunTable {
     fn from(payload: Vec<StoredTestRun>) -> Self {
         Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl TestOutcome {
+    pub fn failed(payload: FailureStage) -> Self {
+        Self::Failed(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl Selection {
+    pub fn by_node(payload: NodeSelector) -> Self {
+        Self::ByNode(payload)
+    }
+    pub fn by_generation(payload: GenerationIdentifier) -> Self {
+        Self::ByGeneration(GenerationLookup::new(payload))
+    }
+    pub fn by_deployment(payload: DeploymentIdentifier) -> Self {
+        Self::ByDeployment(DeploymentLookup::new(payload))
+    }
+    pub fn by_event_log(payload: EventLogRange) -> Self {
+        Self::ByEventLog(payload)
+    }
+    pub fn by_test_run(payload: TestRunLookup) -> Self {
+        Self::ByTestRun(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl DeploymentEnvironment {
+    pub fn user_environment(payload: String) -> Self {
+        Self::UserEnvironment(UserName::new(payload))
+    }
+}
+
+#[rustfmt::skip]
+impl RequestedDeploymentAction {
+    pub fn host(payload: HostDeployAction) -> Self {
+        Self::Host(payload)
+    }
+    pub fn user_environment(payload: UserEnvironmentAction) -> Self {
+        Self::UserEnvironment(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl DeploymentTerminal {
+    pub fn rejected(payload: DeploymentTerminalReason) -> Self {
+        Self::Rejected(payload)
+    }
+    pub fn failed(payload: DeploymentFailure) -> Self {
+        Self::Failed(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl HostSelection {
+    pub fn on_host(payload: String) -> Self {
+        Self::OnHost(NodeName::new(payload))
+    }
+}
+
+#[rustfmt::skip]
+impl NodeSelection {
+    pub fn nodes(payload: Vec<NodeName>) -> Self {
+        Self::Nodes(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl TestRequest {
+    pub fn run(payload: TestRun) -> Self {
+        Self::Run(payload)
+    }
+    pub fn check(payload: Vec<NodeName>) -> Self {
+        Self::Check(QuickCheck::new(payload))
     }
 }
 
@@ -815,6 +3070,115 @@ impl SemaWriteOutput {
 }
 
 #[rustfmt::skip]
+impl OrdinaryIngress {
+    pub fn query(payload: Selection) -> Self {
+        Self::Query(payload)
+    }
+    pub fn watch_deployments(payload: DeploymentWatch) -> Self {
+        Self::WatchDeployments(payload)
+    }
+    pub fn watch_cache_retention(payload: CacheRetentionWatch) -> Self {
+        Self::WatchCacheRetention(payload)
+    }
+    pub fn unwatch(payload: SubscriptionToken) -> Self {
+        Self::Unwatch(SubscriptionClose::new(payload))
+    }
+    pub fn check_host_key_material(payload: KeyMaterialQuery) -> Self {
+        Self::CheckHostKeyMaterial(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl OrdinaryEgress {
+    pub fn queried(payload: GenerationListing) -> Self {
+        Self::Queried(payload)
+    }
+    pub fn deployment_events_queried(payload: EventLogPage) -> Self {
+        Self::DeploymentEventsQueried(payload)
+    }
+    pub fn test_runs_queried(payload: TestRunListing) -> Self {
+        Self::TestRunsQueried(payload)
+    }
+    pub fn watching(payload: SubscriptionOpened) -> Self {
+        Self::Watching(payload)
+    }
+    pub fn unwatched(payload: SubscriptionToken) -> Self {
+        Self::Unwatched(SubscriptionClosed::new(payload))
+    }
+    pub fn key_material_checked(payload: KeyMaterialReport) -> Self {
+        Self::KeyMaterialChecked(payload)
+    }
+    pub fn query_rejected(payload: RejectedQuery) -> Self {
+        Self::QueryRejected(payload)
+    }
+    pub fn watch_rejected(payload: WatchRejectionReason) -> Self {
+        Self::WatchRejected(RejectedWatch::new(payload))
+    }
+    pub fn unwatch_rejected(payload: RejectedUnwatch) -> Self {
+        Self::UnwatchRejected(payload)
+    }
+    pub fn key_material_check_rejected(payload: RejectedKeyMaterialCheck) -> Self {
+        Self::KeyMaterialCheckRejected(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl MetaIngress {
+    pub fn deploy(payload: DeploySubmission) -> Self {
+        Self::Deploy(payload)
+    }
+    pub fn pin(payload: PinRequest) -> Self {
+        Self::Pin(payload)
+    }
+    pub fn unpin(payload: UnpinRequest) -> Self {
+        Self::Unpin(payload)
+    }
+    pub fn retire(payload: RetireRequest) -> Self {
+        Self::Retire(payload)
+    }
+    pub fn test(payload: TestRequest) -> Self {
+        Self::Test(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl MetaEgress {
+    pub fn deploy_accepted(payload: DeployHandle) -> Self {
+        Self::DeployAccepted(payload)
+    }
+    pub fn deploy_rejected(payload: DeploymentRecord) -> Self {
+        Self::DeployRejected(RejectedDeploy::new(payload))
+    }
+    pub fn deploy_terminal(payload: DeploymentRecord) -> Self {
+        Self::DeployTerminal(payload)
+    }
+    pub fn pinned(payload: AppliedPin) -> Self {
+        Self::Pinned(payload)
+    }
+    pub fn pin_rejected(payload: RejectedPin) -> Self {
+        Self::PinRejected(payload)
+    }
+    pub fn unpinned(payload: AppliedUnpin) -> Self {
+        Self::Unpinned(payload)
+    }
+    pub fn unpin_rejected(payload: RejectedUnpin) -> Self {
+        Self::UnpinRejected(payload)
+    }
+    pub fn retired(payload: AppliedRetire) -> Self {
+        Self::Retired(payload)
+    }
+    pub fn retire_rejected(payload: RejectedRetire) -> Self {
+        Self::RetireRejected(payload)
+    }
+    pub fn tested(payload: AcceptedTest) -> Self {
+        Self::Tested(payload)
+    }
+    pub fn test_rejected(payload: RejectedTest) -> Self {
+        Self::TestRejected(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl LoggedEvent {
     pub fn deployment(payload: DeploymentPhaseEvent) -> Self {
         Self::Deployment(payload)
@@ -829,21 +3193,119 @@ impl LoggedEvent {
 
 #[rustfmt::skip]
 impl Input {
-    pub fn sema_read_input(payload: SemaReadInput) -> Self {
-        Self::SemaReadInput(payload)
+    pub fn read(payload: SemaReadInput) -> Self {
+        Self::Read(payload)
     }
-    pub fn sema_write_input(payload: SemaWriteInput) -> Self {
-        Self::SemaWriteInput(payload)
+    pub fn write(payload: SemaWriteInput) -> Self {
+        Self::Write(payload)
     }
 }
 
 #[rustfmt::skip]
 impl Output {
-    pub fn sema_read_output(payload: SemaReadOutput) -> Self {
-        Self::SemaReadOutput(payload)
+    pub fn read_completed(payload: SemaReadOutput) -> Self {
+        Self::ReadCompleted(payload)
     }
-    pub fn sema_write_output(payload: SemaWriteOutput) -> Self {
-        Self::SemaWriteOutput(payload)
+    pub fn write_completed(payload: SemaWriteOutput) -> Self {
+        Self::WriteCompleted(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<FailureStage> for TestOutcome {
+    fn from(payload: FailureStage) -> Self {
+        Self::Failed(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<NodeSelector> for Selection {
+    fn from(payload: NodeSelector) -> Self {
+        Self::ByNode(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<GenerationLookup> for Selection {
+    fn from(payload: GenerationLookup) -> Self {
+        Self::ByGeneration(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<DeploymentLookup> for Selection {
+    fn from(payload: DeploymentLookup) -> Self {
+        Self::ByDeployment(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<EventLogRange> for Selection {
+    fn from(payload: EventLogRange) -> Self {
+        Self::ByEventLog(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<TestRunLookup> for Selection {
+    fn from(payload: TestRunLookup) -> Self {
+        Self::ByTestRun(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<UserName> for DeploymentEnvironment {
+    fn from(payload: UserName) -> Self {
+        Self::UserEnvironment(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<HostDeployAction> for RequestedDeploymentAction {
+    fn from(payload: HostDeployAction) -> Self {
+        Self::Host(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<UserEnvironmentAction> for RequestedDeploymentAction {
+    fn from(payload: UserEnvironmentAction) -> Self {
+        Self::UserEnvironment(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<DeploymentTerminalReason> for DeploymentTerminal {
+    fn from(payload: DeploymentTerminalReason) -> Self {
+        Self::Rejected(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<DeploymentFailure> for DeploymentTerminal {
+    fn from(payload: DeploymentFailure) -> Self {
+        Self::Failed(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<NodeName> for HostSelection {
+    fn from(payload: NodeName) -> Self {
+        Self::OnHost(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<TestRun> for TestRequest {
+    fn from(payload: TestRun) -> Self {
+        Self::Run(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<QuickCheck> for TestRequest {
+    fn from(payload: QuickCheck) -> Self {
+        Self::Check(payload)
     }
 }
 
@@ -1044,6 +3506,223 @@ impl From<RejectionReport> for SemaWriteOutput {
 }
 
 #[rustfmt::skip]
+impl From<Selection> for OrdinaryIngress {
+    fn from(payload: Selection) -> Self {
+        Self::Query(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<DeploymentWatch> for OrdinaryIngress {
+    fn from(payload: DeploymentWatch) -> Self {
+        Self::WatchDeployments(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<CacheRetentionWatch> for OrdinaryIngress {
+    fn from(payload: CacheRetentionWatch) -> Self {
+        Self::WatchCacheRetention(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<SubscriptionClose> for OrdinaryIngress {
+    fn from(payload: SubscriptionClose) -> Self {
+        Self::Unwatch(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<KeyMaterialQuery> for OrdinaryIngress {
+    fn from(payload: KeyMaterialQuery) -> Self {
+        Self::CheckHostKeyMaterial(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<GenerationListing> for OrdinaryEgress {
+    fn from(payload: GenerationListing) -> Self {
+        Self::Queried(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<EventLogPage> for OrdinaryEgress {
+    fn from(payload: EventLogPage) -> Self {
+        Self::DeploymentEventsQueried(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<TestRunListing> for OrdinaryEgress {
+    fn from(payload: TestRunListing) -> Self {
+        Self::TestRunsQueried(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<SubscriptionOpened> for OrdinaryEgress {
+    fn from(payload: SubscriptionOpened) -> Self {
+        Self::Watching(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<SubscriptionClosed> for OrdinaryEgress {
+    fn from(payload: SubscriptionClosed) -> Self {
+        Self::Unwatched(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<KeyMaterialReport> for OrdinaryEgress {
+    fn from(payload: KeyMaterialReport) -> Self {
+        Self::KeyMaterialChecked(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<RejectedQuery> for OrdinaryEgress {
+    fn from(payload: RejectedQuery) -> Self {
+        Self::QueryRejected(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<RejectedWatch> for OrdinaryEgress {
+    fn from(payload: RejectedWatch) -> Self {
+        Self::WatchRejected(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<RejectedUnwatch> for OrdinaryEgress {
+    fn from(payload: RejectedUnwatch) -> Self {
+        Self::UnwatchRejected(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<RejectedKeyMaterialCheck> for OrdinaryEgress {
+    fn from(payload: RejectedKeyMaterialCheck) -> Self {
+        Self::KeyMaterialCheckRejected(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<DeploySubmission> for MetaIngress {
+    fn from(payload: DeploySubmission) -> Self {
+        Self::Deploy(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<PinRequest> for MetaIngress {
+    fn from(payload: PinRequest) -> Self {
+        Self::Pin(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<UnpinRequest> for MetaIngress {
+    fn from(payload: UnpinRequest) -> Self {
+        Self::Unpin(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<RetireRequest> for MetaIngress {
+    fn from(payload: RetireRequest) -> Self {
+        Self::Retire(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<TestRequest> for MetaIngress {
+    fn from(payload: TestRequest) -> Self {
+        Self::Test(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<DeployHandle> for MetaEgress {
+    fn from(payload: DeployHandle) -> Self {
+        Self::DeployAccepted(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<RejectedDeploy> for MetaEgress {
+    fn from(payload: RejectedDeploy) -> Self {
+        Self::DeployRejected(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<DeploymentRecord> for MetaEgress {
+    fn from(payload: DeploymentRecord) -> Self {
+        Self::DeployTerminal(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<AppliedPin> for MetaEgress {
+    fn from(payload: AppliedPin) -> Self {
+        Self::Pinned(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<RejectedPin> for MetaEgress {
+    fn from(payload: RejectedPin) -> Self {
+        Self::PinRejected(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<AppliedUnpin> for MetaEgress {
+    fn from(payload: AppliedUnpin) -> Self {
+        Self::Unpinned(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<RejectedUnpin> for MetaEgress {
+    fn from(payload: RejectedUnpin) -> Self {
+        Self::UnpinRejected(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<AppliedRetire> for MetaEgress {
+    fn from(payload: AppliedRetire) -> Self {
+        Self::Retired(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<RejectedRetire> for MetaEgress {
+    fn from(payload: RejectedRetire) -> Self {
+        Self::RetireRejected(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<AcceptedTest> for MetaEgress {
+    fn from(payload: AcceptedTest) -> Self {
+        Self::Tested(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl From<RejectedTest> for MetaEgress {
+    fn from(payload: RejectedTest) -> Self {
+        Self::TestRejected(payload)
+    }
+}
+
+#[rustfmt::skip]
 impl From<DeploymentPhaseEvent> for LoggedEvent {
     fn from(payload: DeploymentPhaseEvent) -> Self {
         Self::Deployment(payload)
@@ -1067,67 +3746,67 @@ impl From<ContainerLifecycleRecord> for LoggedEvent {
 #[rustfmt::skip]
 impl From<SemaReadInput> for Input {
     fn from(payload: SemaReadInput) -> Self {
-        Self::SemaReadInput(payload)
+        Self::Read(payload)
     }
 }
 
 #[rustfmt::skip]
 impl From<SemaWriteInput> for Input {
     fn from(payload: SemaWriteInput) -> Self {
-        Self::SemaWriteInput(payload)
+        Self::Write(payload)
     }
 }
 
 #[rustfmt::skip]
 impl From<SemaReadOutput> for Output {
     fn from(payload: SemaReadOutput) -> Self {
-        Self::SemaReadOutput(payload)
+        Self::ReadCompleted(payload)
     }
 }
 
 #[rustfmt::skip]
 impl From<SemaWriteOutput> for Output {
     fn from(payload: SemaWriteOutput) -> Self {
-        Self::SemaWriteOutput(payload)
+        Self::WriteCompleted(payload)
     }
 }
 
 #[rustfmt::skip]
-#[cfg(feature = "nota-text")]
+#[cfg(feature = "dotos-text")]
 impl std::str::FromStr for Input {
-    type Err = NotaDecodeError;
+    type Err = DotosDecodeError;
     fn from_str(source: &str) -> Result<Self, Self::Err> {
-        NotaSource::new(source).parse::<Self>()
+        DotosSource::new(source).parse::<Self>()
     }
 }
 #[rustfmt::skip]
-#[cfg(feature = "nota-text")]
+#[cfg(feature = "dotos-text")]
 impl std::fmt::Display for Input {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&<Self as NotaEncode>::to_nota(self))
+        formatter.write_str(&<Self as DotosEncode>::to_dotos(self))
     }
 }
 
 #[rustfmt::skip]
-#[cfg(feature = "nota-text")]
+#[cfg(feature = "dotos-text")]
 impl std::str::FromStr for Output {
-    type Err = NotaDecodeError;
+    type Err = DotosDecodeError;
     fn from_str(source: &str) -> Result<Self, Self::Err> {
-        NotaSource::new(source).parse::<Self>()
+        DotosSource::new(source).parse::<Self>()
     }
 }
 #[rustfmt::skip]
-#[cfg(feature = "nota-text")]
+#[cfg(feature = "dotos-text")]
 impl std::fmt::Display for Output {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&<Self as NotaEncode>::to_nota(self))
+        formatter.write_str(&<Self as DotosEncode>::to_dotos(self))
     }
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -1160,8 +3839,8 @@ impl SemaReadInput {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -1196,8 +3875,8 @@ impl SemaReadOutput {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -1242,8 +3921,8 @@ impl SemaWriteInput {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -1286,8 +3965,8 @@ impl SemaWriteOutput {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -1401,8 +4080,8 @@ impl SemaObjectName {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -1419,8 +4098,8 @@ pub enum ObjectName {
 }
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -1456,8 +4135,8 @@ impl TraceEvent {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,

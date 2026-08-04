@@ -1,7 +1,7 @@
-//! Bootstrap config-writer round trip: the NOTA-to-rkyv `lojix-write-configuration`
+//! Bootstrap config-writer round trip: the DOTOS-to-rkyv `lojix-write-configuration`
 //! tool produces a startup file that the daemon's
 //! `DaemonConfiguration::from_rkyv_file` reads back unchanged. This is the
-//! NOTA-to-binary boundary at deploy time — the daemon never parses NOTA.
+//! DOTOS-to-binary boundary at deploy time — the daemon never parses DOTOS.
 
 use std::process::Command;
 
@@ -21,7 +21,7 @@ fn write_configuration_round_trips_through_rkyv() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos 60 (TestDefaults (goldragon prometheus Hermetic github:LiGoldragon/CriomOS-test-cluster /var/lib/lojix/cluster.nota)) {}))",
+        "ConfigurationWriteRequest.{{/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos 60 TestDefaults.{{goldragon prometheus Hermetic github:LiGoldragon/CriomOS-test-cluster /var/lib/lojix/cluster.dotos}} {}}}",
         output.display()
     );
 
@@ -45,7 +45,10 @@ fn write_configuration_round_trips_through_rkyv() {
         test_defaults.test_flake,
         "github:LiGoldragon/CriomOS-test-cluster"
     );
-    assert_eq!(test_defaults.proposal_source, "/var/lib/lojix/cluster.nota");
+    assert_eq!(
+        test_defaults.proposal_source,
+        "/var/lib/lojix/cluster.dotos"
+    );
 }
 
 /// The production posture: a `NoTestDefaults` choice lowers to `None`, so the
@@ -56,7 +59,7 @@ fn write_configuration_bakes_no_test_defaults_for_production() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos 60 NoTestDefaults {}))",
+        "ConfigurationWriteRequest.{{/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos 60 NoTestDefaults {}}}",
         output.display()
     );
 
@@ -74,7 +77,7 @@ fn write_configuration_rejects_a_zero_effect_timeout() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos 0 NoTestDefaults {}))",
+        "ConfigurationWriteRequest.{{/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos 0 NoTestDefaults {}}}",
         output.display()
     );
     let status = Command::new(env!("CARGO_BIN_EXE_lojix-write-configuration"))

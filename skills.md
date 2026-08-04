@@ -60,7 +60,7 @@ these):
 - `sema-engine` — typed database engine; depend on this rather than
   `sema` directly.
 - `horizon-rs` — cluster proposal projection; read-only per request.
-- `goldragon` — cluster proposal source (Nota records read by
+- `goldragon` — cluster proposal source (Dotos records read by
   horizon-rs).
 - `clavifaber` — per-host key material; separate component.
 - `meta-signal-lojix` — owner/meta deploy and retention mutation

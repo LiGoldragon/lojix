@@ -17,21 +17,207 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dotos::DotosSource;
 use horizon_lib::name::{
     ClusterName as HorizonClusterName, CriomeDomainName, NodeName as HorizonNodeName,
     UserName as HorizonUserName,
 };
 use horizon_lib::{ClusterProposal, Horizon, Viewpoint};
-use meta_signal_lojix::schema::lib as meta;
-use nota::NotaSource;
 use rustix::process::{Pid, Signal, kill_process_group};
-use signal_lojix::schema::lib as ordinary;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::schema::nexus::NexusEngine;
 use crate::schema::{nexus, sema};
-use crate::{DaemonConfiguration, Result, Store};
+
+fn canonical_nix_store_root(value: &str) -> bool {
+    let Some(item) = value.strip_prefix("/nix/store/") else {
+        return false;
+    };
+    let Some((hash, name)) = item.split_once('-') else {
+        return false;
+    };
+    hash.len() == 32
+        && hash.bytes().all(|byte| {
+            matches!(byte, b'0'..=b'9' | b'a'..=b'z') && !matches!(byte, b'e' | b'o' | b't' | b'u')
+        })
+        && !name.is_empty()
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'_' | b'-'))
+        && !credential_like(value)
+}
+
+fn credential_like(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "credential",
+        "apikey",
+        "api-key",
+        "api_key",
+        "auth",
+    ]
+    .into_iter()
+    .any(|term| value.contains(term))
+}
+
+// The engine has no public-contract nouns.  These small local facades retain
+// the names used by the pre-v3 engine while lowering them to the new private
+// ingress/egress roots.  They are deliberately value-only shims: no wire type
+// can cross this module boundary.
+#[allow(clippy::new_ret_no_self)]
+mod ordinary {
+    pub use crate::schema::sema::*;
+
+    pub type Input = OrdinaryIngress;
+    pub type Output = OrdinaryEgress;
+
+    pub struct Watching;
+    impl Watching {
+        pub fn new(payload: SubscriptionOpened) -> SubscriptionOpened {
+            payload
+        }
+    }
+    pub struct WatchRejected;
+    impl WatchRejected {
+        pub fn new(payload: RejectedWatch) -> RejectedWatch {
+            payload
+        }
+    }
+    pub struct Unwatched;
+    impl Unwatched {
+        pub fn new(payload: SubscriptionClosed) -> SubscriptionClosed {
+            payload
+        }
+    }
+    pub struct Queried;
+    impl Queried {
+        pub fn new(payload: GenerationListing) -> GenerationListing {
+            payload
+        }
+    }
+    pub struct KeyMaterialChecked;
+    impl KeyMaterialChecked {
+        pub fn new(payload: KeyMaterialReport) -> KeyMaterialReport {
+            payload
+        }
+    }
+    pub struct TestRunsQueried;
+    impl TestRunsQueried {
+        pub fn new(payload: TestRunListing) -> TestRunListing {
+            payload
+        }
+    }
+    pub struct DeploymentEventsQueried;
+    impl DeploymentEventsQueried {
+        pub fn new(payload: EventLogPage) -> EventLogPage {
+            payload
+        }
+    }
+    pub struct QueryRejected;
+    impl QueryRejected {
+        pub fn new(payload: RejectedQuery) -> RejectedQuery {
+            payload
+        }
+    }
+}
+
+#[allow(clippy::new_ret_no_self)]
+mod meta {
+    pub use crate::schema::sema::*;
+
+    pub type Input = MetaIngress;
+    pub type Output = MetaEgress;
+    pub type DeployRequest = DeploySubmission;
+
+    /// Private classification used only while lowering a failed deploy into a
+    /// correlated local `DeploymentRecord`. It is never a wire type.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum DeployRejectionReason {
+        ClusterUnknown,
+        NodeUnknown,
+        ProposalSourceUnreachable,
+        FlakeReferenceMalformed,
+        BuilderUnreachable,
+        DeploymentInFlight,
+        UnsupportedDeployAction,
+        InternalError,
+        ActivationFailed,
+    }
+
+    pub struct DeployAccepted;
+    impl DeployAccepted {
+        pub fn new(payload: DeployHandle) -> DeployHandle {
+            payload
+        }
+    }
+    pub struct DeployRejected;
+    impl DeployRejected {
+        pub fn new(payload: RejectedDeploy) -> RejectedDeploy {
+            payload
+        }
+    }
+    pub struct Pinned;
+    impl Pinned {
+        pub fn new(payload: AppliedPin) -> AppliedPin {
+            payload
+        }
+    }
+    pub struct PinRejected;
+    impl PinRejected {
+        pub fn new(payload: RejectedPin) -> RejectedPin {
+            payload
+        }
+    }
+    pub struct Unpinned;
+    impl Unpinned {
+        pub fn new(payload: AppliedUnpin) -> AppliedUnpin {
+            payload
+        }
+    }
+    pub struct UnpinRejected;
+    impl UnpinRejected {
+        pub fn new(payload: RejectedUnpin) -> RejectedUnpin {
+            payload
+        }
+    }
+    pub struct Retired;
+    impl Retired {
+        pub fn new(payload: AppliedRetire) -> AppliedRetire {
+            payload
+        }
+    }
+    pub struct RetireRejected;
+    impl RetireRejected {
+        pub fn new(payload: RejectedRetire) -> RejectedRetire {
+            payload
+        }
+    }
+    pub struct Tested;
+    impl Tested {
+        pub fn new(payload: AcceptedTest) -> AcceptedTest {
+            payload
+        }
+    }
+    pub struct TestRejected;
+    impl TestRejected {
+        pub fn new(payload: RejectedTest) -> RejectedTest {
+            payload
+        }
+    }
+    pub struct Test;
+    impl Test {
+        pub fn new(payload: TestRequest) -> TestRequest {
+            payload
+        }
+    }
+}
+use crate::{DaemonConfiguration, Error, Result, Store};
 
 /// The lojix engine noun. Carries the durable `Store` (the four sema tables)
 /// and, while a deploy is in flight, the pipeline cursor that threads the
@@ -138,7 +324,7 @@ pub struct TestDefaults {
     /// `#checks.<system>.vm-<node>` auto-pickup check the hermetic dispatch
     /// builds, and whose generated runner the live path brings up.
     test_flake: ordinary::FlakeReference,
-    /// The cluster proposal NOTA file projected to validate `(OnHost h)`
+    /// The cluster proposal DOTOS file projected to validate `(OnHost h)`
     /// against the node's declared host-set and to resolve `All` to the
     /// cluster's test-VM nodes. Empty when host-set validation is not
     /// configured.
@@ -259,7 +445,10 @@ impl From<&crate::TestDefaults> for TestDefaults {
         Self {
             cluster: ordinary::ClusterName::new(defaults.cluster.clone()),
             default_vm_host: ordinary::NodeName::new(defaults.default_vm_host.clone()),
-            default_mode: defaults.default_mode.into(),
+            default_mode: match defaults.default_mode {
+                crate::TestMode::Hermetic => ordinary::TestMode::Hermetic,
+                crate::TestMode::Live => ordinary::TestMode::Live,
+            },
             test_flake: ordinary::FlakeReference::new(defaults.test_flake.clone()),
             proposal_source: ordinary::ProposalSource::new(defaults.proposal_source.clone()),
         }
@@ -345,12 +534,12 @@ impl ResolvedTestRun {
         ordinary::TestRunRecord {
             test_run_identifier: identifier,
             cluster_name: self.cluster.clone(),
-            node_name: self.node.clone(),
+            node: self.node.clone(),
             host: self.host.clone(),
-            mode: self.mode,
-            phase: ordinary::TestRunPhase::Submitted,
-            outcome: ordinary::TestOutcome::Pending,
-            closure_path: None,
+            test_mode: self.mode,
+            test_run_phase: ordinary::TestRunPhase::Submitted,
+            test_outcome: ordinary::TestOutcome::Pending,
+            optional_closure_path: None,
         }
     }
 
@@ -363,8 +552,8 @@ impl ResolvedTestRun {
         nexus::HermeticCheckCommand {
             cluster_name: self.cluster.clone(),
             node_name: self.node.clone(),
-            flake: self.flake.clone(),
-            system: HermeticCheck::SYSTEM.to_string(),
+            flake_reference: self.flake.clone(),
+            string: HermeticCheck::SYSTEM.to_string(),
         }
     }
 
@@ -375,10 +564,10 @@ impl ResolvedTestRun {
     fn bring_up_command(&self, runner: ordinary::ClosurePath) -> nexus::BringUpTestVmCommand {
         nexus::BringUpTestVmCommand {
             cluster_name: self.cluster.clone(),
-            node_name: self.node.clone(),
+            node: self.node.clone(),
             host: self.host.clone(),
-            runner,
-            guest_ip: String::new(),
+            closure_path: runner,
+            string: String::new(),
         }
     }
 
@@ -387,7 +576,7 @@ impl ResolvedTestRun {
     fn tear_down_command(&self) -> nexus::TearDownTestVmCommand {
         nexus::TearDownTestVmCommand {
             cluster_name: self.cluster.clone(),
-            node_name: self.node.clone(),
+            node: self.node.clone(),
             host: self.host.clone(),
         }
     }
@@ -405,7 +594,7 @@ struct TestPipeline {
     identifier: ordinary::TestRunIdentifier,
     stage: TestStage,
     /// The accepted database marker, replayed on the terminal reply.
-    accepted_marker: ordinary::DatabaseMarker,
+    accepted_marker: ordinary::StateMarker,
 }
 
 /// The test pipeline cursor stage — the step that has just completed. The
@@ -429,7 +618,7 @@ impl TestPipeline {
             run,
             identifier,
             stage: TestStage::Submitted,
-            accepted_marker: ordinary::DatabaseMarker {
+            accepted_marker: ordinary::StateMarker {
                 commit_sequence: ordinary::CommitSequence::new(0),
                 state_digest: ordinary::StateDigest::new(0),
             },
@@ -449,12 +638,12 @@ impl TestPipeline {
         ordinary::TestRunRecord {
             test_run_identifier: self.identifier.clone(),
             cluster_name: self.run.cluster.clone(),
-            node_name: self.run.node.clone(),
+            node: self.run.node.clone(),
             host: self.run.host.clone(),
-            mode: self.run.mode,
-            phase,
-            outcome,
-            closure_path,
+            test_mode: self.run.mode,
+            test_run_phase: phase,
+            test_outcome: outcome,
+            optional_closure_path: closure_path,
         }
     }
 
@@ -466,8 +655,8 @@ impl TestPipeline {
         sema::ContainerTransition {
             cluster_name: self.run.cluster.clone(),
             node_name: self.run.node.clone(),
-            container: sema::ContainerName::new(format!("vm-{}", self.run.node.payload())),
-            state,
+            container_name: sema::ContainerName::new(format!("vm-{}", self.run.node.payload())),
+            container_state: state,
         }
     }
 }
@@ -483,7 +672,7 @@ pub enum TestSubmissionOutcome {
     Rejected(meta::RejectedTest),
 }
 
-/// A projected cluster — the proposal NOTA file the daemon reads to validate
+/// A projected cluster — the proposal DOTOS file the daemon reads to validate
 /// `(OnHost h)` against a node's declared host-set and to resolve `All` to the
 /// cluster's test-VM-host nodes (Unit 2b host/node selection). Wraps the parsed
 /// `ClusterProposal`; the host-set is read from each node's `Machine` primary
@@ -496,17 +685,11 @@ struct ClusterProjection {
 }
 
 impl ClusterProjection {
-    /// Load + parse the proposal NOTA file named by the proposal source. `None`
-    /// when the source is empty (host-set validation not configured) or the
-    /// file is unreadable / unparseable — host-set validation then does not
-    /// block, and `All` resolves to no nodes.
+    /// Load + parse the configured proposal.  An unavailable source never
+    /// silently disables host-set validation: deploy admission rejects it, and
+    /// this optional test-only projection simply has no trustworthy data.
     fn from_source(source: &ordinary::ProposalSource) -> Option<Self> {
-        let path = source.payload();
-        if path.is_empty() {
-            return None;
-        }
-        let text = fs::read_to_string(path).ok()?;
-        let proposal = NotaSource::new(&text).parse::<ClusterProposal>().ok()?;
+        let proposal = ProposalFile::available(source)?.load().ok()?;
         Some(Self { proposal })
     }
 
@@ -585,8 +768,8 @@ impl HermeticCheck {
     fn installable(&self) -> String {
         format!(
             "{}#checks.{}.vm-{}",
-            self.command.flake.payload(),
-            self.command.system,
+            self.command.flake_reference.payload(),
+            self.command.string,
             self.command.node_name.payload()
         )
     }
@@ -601,7 +784,10 @@ impl HermeticCheck {
         let output = NixCommand::build_check(&self.installable())
             .run(execution)
             .await?;
-        Ok(ordinary::ClosurePath::new(NixCommand::first_line(&output)))
+        let closure_path = NixCommand::first_line(&output);
+        canonical_nix_store_root(&closure_path)
+            .then(|| ordinary::ClosurePath::new(closure_path))
+            .ok_or_else(|| "nix hermetic check returned a noncanonical closure path".to_string())
     }
 }
 
@@ -629,16 +815,16 @@ impl LiveTestVm {
     fn from_bring_up(command: &nexus::BringUpTestVmCommand) -> Self {
         Self {
             target: Self::host_target(&command.cluster_name, &command.host),
-            node: command.node_name.clone(),
-            runner: command.runner.payload().clone(),
-            guest_ip: command.guest_ip.clone(),
+            node: command.node.clone(),
+            runner: command.closure_path.payload().clone(),
+            guest_ip: command.string.clone(),
         }
     }
 
     fn from_tear_down(command: &nexus::TearDownTestVmCommand) -> Self {
         Self {
             target: Self::host_target(&command.cluster_name, &command.host),
-            node: command.node_name.clone(),
+            node: command.node.clone(),
             runner: String::new(),
             guest_ip: String::new(),
         }
@@ -810,7 +996,7 @@ impl RuntimeConfiguration {
         self.generated_inputs_directory
             .join(cluster)
             .join(node)
-            .join(Self::shape_name(&command.shape))
+            .join(Self::shape_name(&command.materialization_shape))
     }
 
     fn shape_name(shape: &nexus::MaterializationShape) -> &'static str {
@@ -869,8 +1055,17 @@ struct DeployPipeline {
     substituters: Vec<nexus::ExtraSubstituter>,
     input_overrides: Vec<nexus::FlakeInputOverride>,
     closure_path: Option<ordinary::ClosurePath>,
-    accepted_marker: ordinary::DatabaseMarker,
+    accepted_marker: ordinary::StateMarker,
     stage: DeployStage,
+    /// The exact next continuation action, durably mirrored on `DeployJob`.
+    /// It advances only after the preceding materialization/result is stored.
+    resume_stage: sema::DeployResumeStage,
+    /// Exact receipt of the immediately preceding phase transition. It is
+    /// persisted only after Store returns the commit receipt; a restart uses
+    /// this real receipt to enter the generated continuation, never a zero or
+    /// predicted marker.
+    phase_receipt: Option<sema::PhaseReceipt>,
+    submission: sema::DeploySubmission,
 }
 
 /// The deploy pipeline cursor. Each value names the stage that has just
@@ -944,8 +1139,8 @@ impl DeployAction {
             Self::Host(action) => nexus::ActivationProfile::Host(*action),
             Self::UserEnvironment { action, user } => {
                 nexus::ActivationProfile::UserEnvironment(nexus::UserEnvironmentActivationProfile {
-                    action: *action,
-                    user: user.clone(),
+                    user_environment_action: *action,
+                    user_name: user.clone(),
                 })
             }
         }
@@ -974,10 +1169,166 @@ impl<'a> FlakeReferencePolicy<'a> {
         Self { reference }
     }
 
+    fn common_locator_and_query(&self) -> Option<(&str, Option<&str>)> {
+        let (locator, query) = match self.reference.split_once('?') {
+            Some((locator, query)) => (locator, Some(query)),
+            None => (self.reference, None),
+        };
+        if self.reference.contains('#')
+            || self.reference.contains('@')
+            || locator.contains("//")
+            || !locator.starts_with("github:")
+        {
+            return None;
+        }
+        let mut path = locator["github:".len()..].split('/');
+        let (Some(owner), Some(repository), None) = (path.next(), path.next(), path.next()) else {
+            return None;
+        };
+        if !Self::safe_locator_component(owner) || !Self::safe_locator_component(repository) {
+            return None;
+        }
+        Some((locator, query))
+    }
+
     fn is_immutable(&self) -> bool {
-        FlakeReferenceText::new(self.reference)
-            .query()
-            .is_some_and(|query| query.has_immutable_identity())
+        let Some((_, Some(query))) = self.common_locator_and_query() else {
+            return false;
+        };
+        let mut revision = None;
+        let mut directory = None;
+        for parameter in query.split('&') {
+            let Some((key, value)) = parameter.split_once('=') else {
+                return false;
+            };
+            if key.is_empty()
+                || value.is_empty()
+                || value.contains('=')
+                || Self::credential_like(key)
+                || Self::credential_like(value)
+            {
+                return false;
+            }
+            match key {
+                "rev" if revision.replace(value).is_none() => {}
+                "dir" if directory.replace(value).is_none() && Self::safe_relative_dir(value) => {}
+                _ => return false,
+            }
+        }
+        revision.is_some_and(|value| crate::immutable_revision(value).is_some())
+    }
+
+    fn is_resolve_and_record(&self) -> bool {
+        let Some((_, query)) = self.common_locator_and_query() else {
+            return false;
+        };
+        let Some(query) = query else {
+            return true;
+        };
+        let mut reference = None;
+        let mut directory = None;
+        for parameter in query.split('&') {
+            let Some((key, value)) = parameter.split_once('=') else {
+                return false;
+            };
+            if key.is_empty()
+                || value.is_empty()
+                || value.contains('=')
+                || Self::credential_like(key)
+                || Self::credential_like(value)
+            {
+                return false;
+            }
+            match key {
+                "ref" if reference.replace(value).is_none() && Self::safe_ref(value) => {}
+                "dir" if directory.replace(value).is_none() && Self::safe_relative_dir(value) => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    fn safe_locator_component(value: &str) -> bool {
+        !value.is_empty()
+            && value != "."
+            && value != ".."
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    }
+
+    fn safe_relative_dir(value: &str) -> bool {
+        !value.starts_with('/')
+            && !value.ends_with('/')
+            && value.split('/').all(Self::safe_locator_component)
+    }
+
+    fn safe_ref(value: &str) -> bool {
+        !value.starts_with('/')
+            && !value.ends_with('/')
+            && value.split('/').all(Self::safe_locator_component)
+    }
+
+    fn credential_like(value: &str) -> bool {
+        let Some(value) = Self::percent_decode_once(value) else {
+            return true;
+        };
+        let value = value.to_ascii_lowercase();
+        [
+            "token",
+            "secret",
+            "password",
+            "passwd",
+            "credential",
+            "apikey",
+            "api-key",
+            "api_key",
+            "auth",
+        ]
+        .into_iter()
+        .any(|term| value.contains(term))
+    }
+
+    /// Decode percent escapes exactly once before inspecting query values for
+    /// credential-like material. A remaining `%` would require a second decode
+    /// and is rejected rather than normalized ambiguously.
+    fn percent_decode_once(value: &str) -> Option<String> {
+        let bytes = value.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] != b'%' {
+                decoded.push(bytes[index]);
+                index += 1;
+                continue;
+            }
+            let high = *bytes.get(index + 1)?;
+            let low = *bytes.get(index + 2)?;
+            let hex = |byte| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            };
+            decoded.push((hex(high)? << 4) | hex(low)?);
+            index += 3;
+        }
+        let decoded = String::from_utf8(decoded).ok()?;
+        (!decoded.contains('%')).then_some(decoded)
+    }
+
+    fn immutable_revision(&self) -> Option<sema::ImmutableRevision> {
+        self.is_immutable().then(|| {
+            self.reference
+                .split_once('?')
+                .and_then(|(_, query)| {
+                    query
+                        .split('&')
+                        .find_map(|parameter| parameter.strip_prefix("rev="))
+                })
+                .and_then(crate::immutable_revision)
+                .expect("validated immutable reference has exactly one revision")
+        })
     }
 }
 
@@ -1017,91 +1368,6 @@ impl EvalRefresh {
     }
 }
 
-struct FlakeReferenceText<'a> {
-    raw: &'a str,
-}
-
-impl<'a> FlakeReferenceText<'a> {
-    fn new(raw: &'a str) -> Self {
-        Self { raw }
-    }
-
-    fn query(&self) -> Option<FlakeReferenceQuery<'a>> {
-        let (_, query) = self.raw.split_once('?')?;
-        Some(FlakeReferenceQuery { raw: query })
-    }
-}
-
-struct FlakeReferenceQuery<'a> {
-    raw: &'a str,
-}
-
-impl FlakeReferenceQuery<'_> {
-    fn has_immutable_identity(&self) -> bool {
-        self.raw
-            .split('&')
-            .filter_map(FlakeQueryParameter::parse)
-            .any(|parameter| parameter.is_immutable_identity())
-    }
-}
-
-struct FlakeQueryParameter<'a> {
-    key: &'a str,
-    value: &'a str,
-}
-
-impl<'a> FlakeQueryParameter<'a> {
-    fn parse(raw: &'a str) -> Option<Self> {
-        let (key, value) = raw.split_once('=')?;
-        if key.is_empty() || value.is_empty() || value.contains('=') {
-            return None;
-        }
-        Some(Self { key, value })
-    }
-
-    fn is_immutable_identity(&self) -> bool {
-        match self.key {
-            "rev" => RevisionText::new(self.value).is_full_commit_hash(),
-            "narHash" => NarHashText::new(self.value).is_sri_hash(),
-            _ => false,
-        }
-    }
-}
-
-struct RevisionText<'a> {
-    raw: &'a str,
-}
-
-impl<'a> RevisionText<'a> {
-    fn new(raw: &'a str) -> Self {
-        Self { raw }
-    }
-
-    fn is_full_commit_hash(&self) -> bool {
-        self.raw.len() == 40
-            && self
-                .raw
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
-    }
-}
-
-struct NarHashText<'a> {
-    raw: &'a str,
-}
-
-impl<'a> NarHashText<'a> {
-    fn new(raw: &'a str) -> Self {
-        Self { raw }
-    }
-
-    fn is_sri_hash(&self) -> bool {
-        self.raw
-            .strip_prefix("sha256-")
-            .is_some_and(|hash| !hash.is_empty())
-    }
-}
-
 struct NixFlakeMetadata {
     value: serde_json::Value,
 }
@@ -1124,10 +1390,10 @@ impl NixFlakeMetadata {
             .map(ordinary::FlakeReference::new)
             .unwrap_or_else(|| requested_ref.clone());
         ordinary::SourceRevisionRecord {
-            policy,
+            source_revision_policy: policy,
             requested_ref,
             resolved_ref,
-            resolved_revision: self.resolved_revision(),
+            string: self.resolved_revision(),
         }
     }
 
@@ -1150,12 +1416,56 @@ impl NixFlakeMetadata {
 }
 
 impl DeployPipeline {
+    fn deployment_request_identity(
+        submission: &sema::DeploySubmission,
+    ) -> sema::DeploymentRequestIdentity {
+        match submission {
+            sema::DeploySubmission::Host(deployment) => sema::DeploymentRequestIdentity {
+                deployment_environment: sema::DeploymentEnvironment::HostEnvironment,
+                cluster_name: deployment.cluster_name.clone(),
+                node_name: deployment.node_name.clone(),
+                generation_artifact: Self::host_generation_artifact(deployment.host_composition),
+                requested_deployment_action: sema::RequestedDeploymentAction::Host(
+                    deployment.host_deploy_action,
+                ),
+                activation_effect: Self::host_activation_effect(deployment.host_deploy_action),
+                source_revision_policy: deployment.source_revision_policy,
+                optional_immutable_revision: FlakeReferencePolicy::new(
+                    deployment.flake_reference.payload(),
+                )
+                .immutable_revision(),
+            },
+            sema::DeploySubmission::UserEnvironment(deployment) => {
+                sema::DeploymentRequestIdentity {
+                    deployment_environment: sema::DeploymentEnvironment::UserEnvironment(
+                        deployment.user_name.clone(),
+                    ),
+                    cluster_name: deployment.cluster_name.clone(),
+                    node_name: deployment.node_name.clone(),
+                    generation_artifact: sema::GenerationArtifact::UserEnvironment,
+                    requested_deployment_action: sema::RequestedDeploymentAction::UserEnvironment(
+                        deployment.user_environment_action,
+                    ),
+                    activation_effect: Self::user_environment_activation_effect(
+                        deployment.user_environment_action,
+                    ),
+                    source_revision_policy: deployment.source_revision_policy,
+                    optional_immutable_revision: FlakeReferencePolicy::new(
+                        deployment.flake_reference.payload(),
+                    )
+                    .immutable_revision(),
+                }
+            }
+        }
+    }
+
     fn from_submission(
         deployment_identifier: ordinary::DeploymentIdentifier,
         generation_identifier: ordinary::GenerationIdentifier,
-        accepted_marker: ordinary::DatabaseMarker,
+        accepted_marker: ordinary::StateMarker,
         submission: sema::DeploySubmission,
     ) -> Self {
+        let durable_submission = submission.clone();
         match submission {
             sema::DeploySubmission::Host(deployment) => Self {
                 deployment_identifier,
@@ -1165,19 +1475,24 @@ impl DeployPipeline {
                 generation_artifact: Self::host_generation_artifact(deployment.host_composition),
                 activation_effect: Self::host_activation_effect(deployment.host_deploy_action),
                 activation_slot: None,
-                source: deployment.source,
-                requested_flake: deployment.flake.clone(),
-                flake: deployment.flake,
-                build_attribute: deployment.build_attribute,
+                source: deployment.proposal_source,
+                requested_flake: deployment.flake_reference.clone(),
+                flake: deployment.flake_reference,
+                build_attribute: deployment.optional_flake_attribute,
                 action: DeployAction::Host(deployment.host_deploy_action),
                 source_revision_policy: deployment.source_revision_policy,
                 source_revision: None,
-                builder: deployment.builder.map(meta::Builder::into_payload),
-                substituters: Self::convert_substituters(deployment.substituters),
+                builder: deployment
+                    .optional_builder
+                    .map(|builder| builder.into_payload()),
+                substituters: Self::convert_substituters(deployment.extra_substituter_vector),
                 input_overrides: Vec::new(),
                 closure_path: None,
                 accepted_marker,
                 stage: DeployStage::Submitted,
+                resume_stage: sema::DeployResumeStage::ResolveFlakeAuth,
+                phase_receipt: None,
+                submission: durable_submission,
             },
             sema::DeploySubmission::UserEnvironment(deployment) => Self {
                 deployment_identifier,
@@ -1189,9 +1504,9 @@ impl DeployPipeline {
                     deployment.user_environment_action,
                 ),
                 activation_slot: None,
-                source: deployment.source,
-                requested_flake: deployment.flake.clone(),
-                flake: deployment.flake,
+                source: deployment.proposal_source,
+                requested_flake: deployment.flake_reference.clone(),
+                flake: deployment.flake_reference,
                 build_attribute: None,
                 action: DeployAction::UserEnvironment {
                     action: deployment.user_environment_action,
@@ -1199,12 +1514,17 @@ impl DeployPipeline {
                 },
                 source_revision_policy: deployment.source_revision_policy,
                 source_revision: None,
-                builder: deployment.builder.map(meta::Builder::into_payload),
-                substituters: Self::convert_substituters(deployment.substituters),
+                builder: deployment
+                    .optional_builder
+                    .map(|builder| builder.into_payload()),
+                substituters: Self::convert_substituters(deployment.extra_substituter_vector),
                 input_overrides: Vec::new(),
                 closure_path: None,
                 accepted_marker,
                 stage: DeployStage::Submitted,
+                resume_stage: sema::DeployResumeStage::ResolveFlakeAuth,
+                phase_receipt: None,
+                submission: durable_submission,
             },
         }
     }
@@ -1267,8 +1587,8 @@ impl DeployPipeline {
 
     fn flake_auth_request(&self) -> nexus::FlakeAuthRequest {
         nexus::FlakeAuthRequest {
-            source: self.source.clone(),
-            flake: self.flake.clone(),
+            proposal_source: self.source.clone(),
+            flake_reference: self.flake.clone(),
             source_revision_policy: self.source_revision_policy,
         }
     }
@@ -1281,8 +1601,8 @@ impl DeployPipeline {
         nexus::HorizonMaterializationCommand {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
-            source: self.source.clone(),
-            shape: self.materialization_shape(),
+            proposal_source: self.source.clone(),
+            materialization_shape: self.materialization_shape(),
         }
     }
 
@@ -1296,6 +1616,9 @@ impl DeployPipeline {
                 ordinary::GenerationArtifact::UserEnvironment => {
                     nexus::MaterializationShape::BaseHost
                 }
+                ordinary::GenerationArtifact::LegacyUnknown => {
+                    nexus::MaterializationShape::BaseHost
+                }
             },
             DeployAction::UserEnvironment { user, .. } => {
                 nexus::MaterializationShape::UserEnvironment(
@@ -1307,17 +1630,18 @@ impl DeployPipeline {
 
     fn nix_eval_command(&self, configuration: &RuntimeConfiguration) -> nexus::NixEvalCommand {
         nexus::NixEvalCommand {
+            generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             generation_artifact: self.generation_artifact,
-            flake: self.flake.clone(),
-            source_revision: self.source_revision_record(),
-            attribute: self.target_attribute(),
-            overrides: self.input_overrides.clone(),
+            flake_reference: self.flake.clone(),
+            source_revision_record: self.source_revision_record(),
+            string: self.target_attribute(),
+            flake_input_override_vector: self.input_overrides.clone(),
             // The ordinary owner transport resolves and realizes locally, then
             // copies the exact closure to the target. This deliberately never
             // selects an ssh-ng evaluation store.
-            target: self.build_target(configuration),
+            build_target: self.build_target(configuration),
         }
     }
 
@@ -1341,8 +1665,8 @@ impl DeployPipeline {
         nexus::NixBuildCommand {
             generation_identifier: self.generation_identifier.clone(),
             closure_path,
-            target: self.build_target(configuration),
-            substituters: self.substituters.clone(),
+            build_target: self.build_target(configuration),
+            extra_substituter_vector: self.substituters.clone(),
         }
     }
 
@@ -1356,7 +1680,7 @@ impl DeployPipeline {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             closure_path,
-            source: self.build_target(configuration),
+            build_target: self.build_target(configuration),
         }
     }
 
@@ -1371,7 +1695,7 @@ impl DeployPipeline {
             node_name: self.node_name.clone(),
             closure_path,
             activation_effect: self.activation_effect,
-            profile: self.action.activation_profile(),
+            activation_profile: self.action.activation_profile(),
         }
     }
 
@@ -1379,10 +1703,10 @@ impl DeployPipeline {
         self.source_revision
             .clone()
             .unwrap_or_else(|| ordinary::SourceRevisionRecord {
-                policy: self.source_revision_policy,
+                source_revision_policy: self.source_revision_policy,
                 requested_ref: self.requested_flake.clone(),
                 resolved_ref: self.flake.clone(),
-                resolved_revision: String::new(),
+                string: String::new(),
             })
     }
 
@@ -1398,6 +1722,7 @@ impl DeployPipeline {
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
+            deployment_environment: self.deployment_environment(),
             generation_slot: self.activation_slot?,
             closure_path: self.closure_path.clone()?,
             source_revision_record: self.source_revision.clone()?,
@@ -1408,7 +1733,7 @@ impl DeployPipeline {
         &self,
         phase: ordinary::DeploymentPhase,
         event_log_position: ordinary::EventLogPosition,
-        detail: Option<ordinary::PhaseDetail>,
+        _detail: Option<String>,
     ) -> ordinary::DeploymentPhaseEvent {
         ordinary::DeploymentPhaseEvent {
             deployment_identifier: self.deployment_identifier.clone(),
@@ -1417,8 +1742,12 @@ impl DeployPipeline {
             node_name: self.node_name.clone(),
             deployment_phase: phase,
             event_log_position,
-            detail,
-            source_revision: self.source_revision.clone(),
+            state_marker: self.accepted_marker.clone(),
+            optional_immutable_revision: self
+                .source_revision
+                .as_ref()
+                .and_then(|record| crate::immutable_revision(&record.string)),
+            optional_deployment_terminal: None,
         }
     }
 
@@ -1430,6 +1759,15 @@ impl DeployPipeline {
         SshTarget::root_at_node(&self.cluster_name, &self.node_name)
             .ok()
             .map(|target| target.as_ssh_arg())
+    }
+
+    fn deployment_environment(&self) -> sema::DeploymentEnvironment {
+        match &self.action {
+            DeployAction::Host(_) => sema::DeploymentEnvironment::HostEnvironment,
+            DeployAction::UserEnvironment { user, .. } => {
+                sema::DeploymentEnvironment::UserEnvironment(user.clone())
+            }
+        }
     }
 
     /// The BootOnce transient-unit name a resumed `Activating` job polls via
@@ -1457,20 +1795,38 @@ impl DeployPipeline {
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
-            phase,
-            closure_path: self.closure_path.clone(),
+            deploy_job_phase: phase,
+            optional_closure_path: self.closure_path.clone(),
             source_revision_policy: self.source_revision_policy,
-            requested_ref: self.requested_flake.clone(),
-            resolved_ref: self
+            flake_reference: self.requested_flake.clone(),
+            optional_flake_reference: self
                 .source_revision
                 .as_ref()
                 .map(|source_revision| source_revision.resolved_ref.clone()),
             resolved_revision: self
                 .source_revision
                 .as_ref()
-                .map(|source_revision| source_revision.resolved_revision.clone()),
+                .map(|source_revision| source_revision.string.clone()),
             resolved_target: self.resolved_target(),
             boot_once_unit: self.boot_once_unit(),
+            optional_generation_slot: self.activation_slot,
+            persisted_flake_input_override_vector: self
+                .input_overrides
+                .iter()
+                .map(|override_value| sema::PersistedFlakeInputOverride {
+                    string: override_value.string.clone(),
+                    persisted_flake_input_reference: sema::PersistedFlakeInputReference {
+                        url: override_value.flake_input_reference.url.clone(),
+                        nix_archive_hash: override_value
+                            .flake_input_reference
+                            .nix_archive_hash
+                            .clone(),
+                    },
+                })
+                .collect(),
+            deploy_resume_stage: self.resume_stage,
+            optional_phase_receipt: self.phase_receipt.clone(),
+            optional_deploy_submission: Some(self.submission.clone()),
         }
     }
 }
@@ -1483,6 +1839,10 @@ impl DeployPipeline {
 /// type is the read-on-start reconcile-decision scaffolding S4b lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeployJobResumption {
+    /// A v2 cursor retained for owner diagnostics. It lacks the private
+    /// submission snapshot required to reconstruct effects and must never be
+    /// retried, terminalized, or deleted automatically.
+    LegacyNonResumable,
     /// Phase reached `Activating`: the activate effect was in flight when the
     /// daemon stopped. Re-activating could double-switch, so poll the BootOnce
     /// transient unit (PID-1-owned, survives the daemon) via
@@ -1505,7 +1865,8 @@ impl sema::DeployJob {
     /// pure projection of the persisted phase cursor — the daemon calls it once
     /// per resumed row and acts on the typed verdict (up9q resume scaffolding).
     pub fn resumption(&self) -> DeployJobResumption {
-        match self.phase {
+        match self.deploy_job_phase {
+            sema::DeployJobPhase::LegacyNonResumable => DeployJobResumption::LegacyNonResumable,
             sema::DeployJobPhase::Activating => DeployJobResumption::PollActivationUnit {
                 unit: self.boot_once_unit.clone(),
             },
@@ -1544,24 +1905,25 @@ impl sema::DeployJob {
         &self,
         daemon_host_system_closure: Option<&str>,
     ) -> Option<(sema::LiveGeneration, sema::GcRoot)> {
-        let closure_path = self.closure_path.clone()?;
+        let closure_path = self.optional_closure_path.clone()?;
         if daemon_host_system_closure != Some(closure_path.payload().as_str()) {
             return None;
         }
         let source_revision_record = ordinary::SourceRevisionRecord {
-            policy: self.source_revision_policy,
-            requested_ref: self.requested_ref.clone(),
+            source_revision_policy: self.source_revision_policy,
+            requested_ref: self.flake_reference.clone(),
             resolved_ref: self
-                .resolved_ref
+                .optional_flake_reference
                 .clone()
-                .unwrap_or_else(|| self.requested_ref.clone()),
-            resolved_revision: self.resolved_revision.clone().unwrap_or_default(),
+                .unwrap_or_else(|| self.flake_reference.clone()),
+            string: self.resolved_revision.clone().unwrap_or_default(),
         };
         let generation = sema::LiveGeneration {
             deployment_identifier: self.deployment_identifier.clone(),
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
+            deployment_environment: sema::DeploymentEnvironment::HostEnvironment,
             // The detached self-switch is only reached by a host `ActivateNow`,
             // and a daemon host is a complete host, so the recorded artifact is
             // CompleteHost and the effect a live activation.
@@ -1577,7 +1939,7 @@ impl sema::DeployJob {
             node_name: self.node_name.clone(),
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path,
-            label: None,
+            optional_pin_label: None,
         };
         Some((generation, root))
     }
@@ -1591,12 +1953,12 @@ impl From<ordinary::TestRunRecord> for sema::StoredTestRun {
         Self {
             test_run_identifier: record.test_run_identifier,
             cluster_name: record.cluster_name,
-            node_name: record.node_name,
+            node: record.node,
             host: record.host,
-            mode: record.mode,
-            phase: record.phase,
-            outcome: record.outcome,
-            closure_path: record.closure_path,
+            test_mode: record.test_mode,
+            test_run_phase: record.test_run_phase,
+            test_outcome: record.test_outcome,
+            optional_closure_path: record.optional_closure_path,
         }
     }
 }
@@ -1608,12 +1970,12 @@ impl From<sema::StoredTestRun> for ordinary::TestRunRecord {
         Self {
             test_run_identifier: run.test_run_identifier,
             cluster_name: run.cluster_name,
-            node_name: run.node_name,
+            node: run.node,
             host: run.host,
-            mode: run.mode,
-            phase: run.phase,
-            outcome: run.outcome,
-            closure_path: run.closure_path,
+            test_mode: run.test_mode,
+            test_run_phase: run.test_run_phase,
+            test_outcome: run.test_outcome,
+            optional_closure_path: run.optional_closure_path,
         }
     }
 }
@@ -1630,6 +1992,9 @@ impl From<ordinary::DeploymentPhase> for sema::DeployJobPhase {
             ordinary::DeploymentPhase::Copying => Self::Copying,
             ordinary::DeploymentPhase::Activating => Self::Activating,
             ordinary::DeploymentPhase::Activated => Self::Activated,
+            ordinary::DeploymentPhase::Completed | ordinary::DeploymentPhase::Rejected => {
+                Self::Failed
+            }
             ordinary::DeploymentPhase::Failed => Self::Failed,
         }
     }
@@ -1699,6 +2064,16 @@ impl SchemaRuntime {
             .map(|pipeline| pipeline.deployment_identifier.clone())
     }
 
+    /// Record a capacity refusal with the same durable correlation discipline
+    /// as every other rejected deploy. The daemon calls this before any pipeline
+    /// is created, so a full queue still cannot return an anonymous rejection.
+    pub fn reject_deployment_in_flight(
+        &self,
+        request: sema::DeploySubmission,
+    ) -> sema::RejectedDeploy {
+        self.reject_submission(request, meta::DeployRejectionReason::DeploymentInFlight)
+    }
+
     /// Run ONLY the synchronous submit step of a `Deploy` (up9q surface a): the
     /// reject-guard, restart-safe identifier issuance, in-flight job-row
     /// persistence at `Submitted`, and cursor construction. Returns the typed
@@ -1709,12 +2084,16 @@ impl SchemaRuntime {
     /// [`Self::drive_submitted_deploy`]. The pipeline does NOT run here.
     pub fn submit_deploy(&mut self, request: meta::DeployRequest) -> DeploySubmissionOutcome {
         if let Some(reason) = Self::unsupported_deploy_reason(&request) {
-            return DeploySubmissionOutcome::Rejected(self.deploy_rejection(reason));
+            return DeploySubmissionOutcome::Rejected(self.reject_submission(request, reason));
+        }
+        if let Some(reason) = Self::proposal_source_rejection(&request) {
+            return DeploySubmissionOutcome::Rejected(self.reject_submission(request, reason));
         }
         if let Some(reason) = Self::source_revision_policy_rejection(&request) {
-            return DeploySubmissionOutcome::Rejected(self.deploy_rejection(reason));
+            return DeploySubmissionOutcome::Rejected(self.reject_submission(request, reason));
         }
         self.active_operation = Some(MetaOperation::Deploy);
+        let rejected_request = request.clone();
         let submission = match request {
             meta::DeployRequest::Host(deployment) => sema::DeploySubmission::Host(deployment),
             meta::DeployRequest::UserEnvironment(deployment) => {
@@ -1728,10 +2107,10 @@ impl SchemaRuntime {
             sema::SemaWriteOutput::WriteRejected(report) => {
                 self.active_operation = None;
                 self.active_deploy = None;
-                DeploySubmissionOutcome::Rejected(meta::RejectedDeploy {
-                    deploy_rejection_reason: Self::deploy_reason(report.reason),
-                    database_marker: Self::marker(report.marker.commit_sequence.into_payload()),
-                })
+                DeploySubmissionOutcome::Rejected(self.reject_submission(
+                    rejected_request,
+                    Self::deploy_reason(report.rejection_reason),
+                ))
             }
             // `record_deploy_submitted` only ever returns the two arms above;
             // any other output is an internal invariant violation surfaced as a
@@ -1739,19 +2118,181 @@ impl SchemaRuntime {
             _ => {
                 self.active_operation = None;
                 self.active_deploy = None;
-                DeploySubmissionOutcome::Rejected(
-                    self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                )
+                DeploySubmissionOutcome::Rejected(self.reject_submission(
+                    rejected_request,
+                    meta::DeployRejectionReason::InternalError,
+                ))
             }
         }
+    }
+
+    /// Reconstruct an accepted deploy from its daemon-local persisted
+    /// submission and correlation receipt. This never allocates a second
+    /// identity or emits another Submitted event.
+    pub fn resume_deploy_job(&mut self, job: sema::DeployJob) -> Result<bool> {
+        let persisted_phase = job.deploy_job_phase;
+        let Some(submission) = job.optional_deploy_submission.clone() else {
+            return Ok(false);
+        };
+        if job
+            .optional_closure_path
+            .as_ref()
+            .is_some_and(|closure_path| !canonical_nix_store_root(closure_path.payload()))
+        {
+            return Err(Error::Invariant(
+                "persisted deploy job has a noncanonical closure path".to_string(),
+            ));
+        }
+        let record = self
+            .store
+            .deployment_records()?
+            .into_iter()
+            .find(|record| record.deployment_identifier == job.deployment_identifier)
+            .ok_or_else(|| {
+                Error::Invariant("persisted deploy job lacks correlation record".to_string())
+            })?;
+        let Some(admission) = record.optional_admission_marker else {
+            return Err(Error::Invariant(
+                "persisted deploy job lacks its admission receipt".to_string(),
+            ));
+        };
+        if matches!(
+            record.deployment_lifecycle,
+            sema::DeploymentLifecycle::Completed
+                | sema::DeploymentLifecycle::Rejected
+                | sema::DeploymentLifecycle::Failed
+        ) {
+            return Ok(false);
+        }
+        let mut pipeline = DeployPipeline::from_submission(
+            job.deployment_identifier.clone(),
+            job.generation_identifier.clone(),
+            admission.into_payload(),
+            submission,
+        );
+        pipeline.closure_path = job.optional_closure_path.clone();
+        pipeline.activation_slot = job.optional_generation_slot;
+        pipeline.input_overrides = job
+            .persisted_flake_input_override_vector
+            .iter()
+            .map(|override_value| nexus::FlakeInputOverride {
+                string: override_value.string.clone(),
+                flake_input_reference: nexus::FlakeInputReference {
+                    url: override_value.persisted_flake_input_reference.url.clone(),
+                    nix_archive_hash: override_value
+                        .persisted_flake_input_reference
+                        .nix_archive_hash
+                        .clone(),
+                },
+            })
+            .collect();
+        pipeline.resume_stage = job.deploy_resume_stage;
+        pipeline.phase_receipt = job.optional_phase_receipt.clone();
+        let mut recovered_phase_receipt = false;
+        if pipeline.phase_receipt.is_none()
+            && matches!(
+                pipeline.resume_stage,
+                sema::DeployResumeStage::NixEval
+                    | sema::DeployResumeStage::ActivateGeneration
+                    | sema::DeployResumeStage::RecordGenerationActivated
+            )
+        {
+            let expected_phase = match pipeline.resume_stage {
+                sema::DeployResumeStage::NixEval => ordinary::DeploymentPhase::Building,
+                sema::DeployResumeStage::ActivateGeneration => ordinary::DeploymentPhase::Copying,
+                sema::DeployResumeStage::RecordGenerationActivated => {
+                    ordinary::DeploymentPhase::Activated
+                }
+                _ => unreachable!("phase receipt is required only for recorded phases"),
+            };
+            let matching_intents: Vec<_> = self
+                .store
+                .pending_transition_intents()?
+                .into_iter()
+                .filter(|intent| {
+                    intent.deployment_identifier == pipeline.deployment_identifier
+                        && intent.deployment_phase == expected_phase
+                        && matches!(
+                            intent.transition_intent_state,
+                            sema::TransitionIntentState::Acknowledged
+                        )
+                })
+                .collect();
+            if matching_intents.len() != 1 {
+                return Err(Error::Invariant(
+                    "persisted resume stage lacks one acknowledged ordinal transition intent"
+                        .to_string(),
+                ));
+            }
+            let intent = matching_intents
+                .into_iter()
+                .next()
+                .expect("checked one intent");
+            let marker = intent
+                .optional_transition_marker
+                .ok_or_else(|| {
+                    Error::Invariant("acknowledged phase intent lacks a marker".to_string())
+                })?
+                .into_payload();
+            let matching_receipts: Vec<_> = self
+                .store
+                .event_log_in_range(0, u64::MAX)?
+                .into_iter()
+                .filter_map(|entry| match entry.logged_event {
+                    sema::LoggedEvent::Deployment(event)
+                        if event.deployment_identifier == pipeline.deployment_identifier
+                            && event.event_log_position == intent.event_log_position
+                            && event.state_marker == marker =>
+                    {
+                        Some(sema::PhaseReceipt {
+                            event_log_position: event.event_log_position,
+                            state_marker: event.state_marker,
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            if matching_receipts.len() != 1 {
+                return Err(Error::Invariant(
+                    "acknowledged transition intent lacks one exact journal receipt".to_string(),
+                ));
+            }
+            pipeline.phase_receipt = matching_receipts.into_iter().next();
+            recovered_phase_receipt = true;
+        }
+        pipeline.stage = match pipeline.resume_stage {
+            sema::DeployResumeStage::NixEval => DeployStage::Submitted,
+            sema::DeployResumeStage::ActivateGeneration => DeployStage::BuildingRecorded,
+            sema::DeployResumeStage::RecordGenerationActivated => DeployStage::CopyingRecorded,
+            sema::DeployResumeStage::FinishDeployment => DeployStage::ActivatedRecorded,
+            _ => DeployStage::Submitted,
+        };
+        pipeline.source_revision = job.optional_flake_reference.clone().map(|resolved_ref| {
+            ordinary::SourceRevisionRecord {
+                source_revision_policy: job.source_revision_policy,
+                requested_ref: job.flake_reference.clone(),
+                resolved_ref,
+                string: job.resolved_revision.clone().unwrap_or_default(),
+            }
+        });
+        if let Some(source_revision) = pipeline.source_revision.as_ref() {
+            pipeline.flake = source_revision.resolved_ref.clone();
+        }
+        self.active_operation = Some(MetaOperation::Deploy);
+        self.active_deploy = Some(pipeline);
+        if recovered_phase_receipt {
+            self.persist_job_phase(persisted_phase);
+        }
+        Ok(true)
     }
 
     /// Drive an already-submitted deploy's effect pipeline to its terminal
     /// reply (up9q surface a, the daemon-owned executor body). Requires the
     /// in-flight cursor to be set by a prior [`Self::submit_deploy`]; re-enters
-    /// the generated runner at the `DeploySubmitted` continuation, so it runs
-    /// the SAME flake-auth -> eval -> build -> copy -> activate -> record chain
-    /// the inline path ran, updating the durable job row at every phase. The
+    /// the generated runner at the persisted continuation. A newly submitted
+    /// job starts at `ResolveFlakeAuth`; a restarted job seeds the generated
+    /// runner with its durable predecessor result instead, so it never reruns
+    /// resolver/Horizon work that already committed. The
     /// returned `meta::Output` is daemon-internal executor evidence for logging
     /// and tests; the client already has its admission handle and re-observes
     /// the outcome by deployment identifier.
@@ -1759,7 +2300,7 @@ impl SchemaRuntime {
         let accepted = match self.active_deploy.as_ref() {
             Some(pipeline) => meta::DeployHandle {
                 deployment_identifier: pipeline.deployment_identifier.clone(),
-                database_marker: pipeline.accepted_marker.clone(),
+                state_marker: pipeline.accepted_marker.clone(),
             },
             None => {
                 return meta::Output::DeployRejected(meta::DeployRejected::new(
@@ -1767,9 +2308,84 @@ impl SchemaRuntime {
                 ));
             }
         };
-        let work =
-            nexus::NexusWork::SemaWriteCompleted(sema::SemaWriteOutput::DeploySubmitted(accepted))
-                .with_origin_route(nexus::OriginRoute::new(0));
+        let pipeline = self
+            .active_deploy
+            .as_ref()
+            .expect("active deploy checked above");
+        if matches!(
+            pipeline.resume_stage,
+            sema::DeployResumeStage::FinishDeployment
+        ) {
+            return match self.finish_deploy_pipeline() {
+                nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => {
+                    output
+                }
+                _ => meta::Output::DeployRejected(meta::DeployRejected::new(
+                    self.deploy_rejection(meta::DeployRejectionReason::InternalError),
+                )),
+            };
+        }
+        let work = match pipeline.resume_stage {
+            sema::DeployResumeStage::ResolveFlakeAuth => nexus::NexusWork::SemaWriteCompleted(
+                sema::SemaWriteOutput::DeploySubmitted(accepted),
+            ),
+            sema::DeployResumeStage::MaterializeHorizon => {
+                let Some(revision) = pipeline.source_revision.clone() else {
+                    return meta::Output::DeployRejected(meta::DeployRejected::new(
+                        self.deploy_rejection(meta::DeployRejectionReason::InternalError),
+                    ));
+                };
+                nexus::NexusWork::EffectCompleted(nexus::EffectResult::flake_resolved(revision))
+            }
+            sema::DeployResumeStage::RecordBuilding => nexus::NexusWork::EffectCompleted(
+                nexus::EffectResult::horizon_materialized(pipeline.input_overrides.clone()),
+            ),
+            sema::DeployResumeStage::NixEval => {
+                let Some(receipt) = pipeline.phase_receipt.clone() else {
+                    return meta::Output::DeployRejected(meta::DeployRejected::new(
+                        self.deploy_rejection(meta::DeployRejectionReason::InternalError),
+                    ));
+                };
+                nexus::NexusWork::SemaWriteCompleted(sema::SemaWriteOutput::PhaseRecorded(receipt))
+            }
+            sema::DeployResumeStage::NixBuild => {
+                let Some(closure_path) = pipeline.closure_path.clone() else {
+                    return meta::Output::DeployRejected(meta::DeployRejected::new(
+                        self.deploy_rejection(meta::DeployRejectionReason::InternalError),
+                    ));
+                };
+                nexus::NexusWork::EffectCompleted(nexus::EffectResult::closure_evaluated(
+                    nexus::EvaluatedClosure {
+                        generation_identifier: pipeline.generation_identifier.clone(),
+                        closure_path,
+                    },
+                ))
+            }
+            sema::DeployResumeStage::CopyClosure => {
+                let Some(closure_path) = pipeline.closure_path.clone() else {
+                    return meta::Output::DeployRejected(meta::DeployRejected::new(
+                        self.deploy_rejection(meta::DeployRejectionReason::InternalError),
+                    ));
+                };
+                nexus::NexusWork::EffectCompleted(nexus::EffectResult::closure_built(
+                    nexus::BuiltClosure {
+                        generation_identifier: pipeline.generation_identifier.clone(),
+                        closure_path,
+                    },
+                ))
+            }
+            sema::DeployResumeStage::ActivateGeneration
+            | sema::DeployResumeStage::RecordGenerationActivated => {
+                let Some(receipt) = pipeline.phase_receipt.clone() else {
+                    return meta::Output::DeployRejected(meta::DeployRejected::new(
+                        self.deploy_rejection(meta::DeployRejectionReason::InternalError),
+                    ));
+                };
+                nexus::NexusWork::SemaWriteCompleted(sema::SemaWriteOutput::PhaseRecorded(receipt))
+            }
+            sema::DeployResumeStage::FinishDeployment => unreachable!("handled above"),
+        }
+        .with_origin_route(nexus::OriginRoute::new(0));
         match self.execute(work).await.into_root() {
             nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => output,
             _ => meta::Output::DeployRejected(meta::DeployRejected::new(
@@ -1796,15 +2412,14 @@ impl SchemaRuntime {
             )) => {
                 // Stamp the accepted marker onto the cursor so the terminal
                 // outcome reply carries the acceptance marker (like deploy).
-                let accepted = accepted.into_payload();
                 if let Some(pipeline) = self.active_test.as_mut() {
-                    pipeline.accepted_marker = accepted.database_marker.clone();
+                    pipeline.accepted_marker = accepted.state_marker.clone();
                 }
                 TestSubmissionOutcome::Accepted(accepted)
             }
             nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
                 meta::Output::TestRejected(rejected),
-            )) => TestSubmissionOutcome::Rejected(rejected.into_payload()),
+            )) => TestSubmissionOutcome::Rejected(rejected),
             _ => TestSubmissionOutcome::Rejected(
                 self.test_rejection(meta::TestRejectionReason::InternalError),
             ),
@@ -1814,7 +2429,7 @@ impl SchemaRuntime {
     /// Drive an already-submitted test's REAL dispatch to its terminal outcome
     /// (Unit 2b, the daemon-owned executor body — mirrors
     /// [`Self::drive_submitted_deploy`]). Requires the in-flight test cursor set
-    /// by a prior [`Self::submit_test`] (or [`Self::decide_test`] for the
+    /// by a prior [`Self::submit_test`] (or `decide_test` for the
     /// in-process proof). Re-enters the generated runner at the cursor's first
     /// effect (the hermetic `nix build`, or the live bring-up), runs it for
     /// real, and rewrites the durable row through real phases to a terminal
@@ -1880,8 +2495,8 @@ impl SchemaRuntime {
         }
     }
 
-    fn marker(commit_sequence: u64) -> ordinary::DatabaseMarker {
-        ordinary::DatabaseMarker {
+    fn marker(commit_sequence: u64) -> ordinary::StateMarker {
+        ordinary::StateMarker {
             commit_sequence: ordinary::CommitSequence::new(commit_sequence),
             state_digest: ordinary::StateDigest::new(commit_sequence),
         }
@@ -1892,6 +2507,16 @@ impl SchemaRuntime {
             commit_sequence: sema::CommitSequence::new(commit_sequence),
             state_digest: sema::StateDigest::new(commit_sequence),
         }
+    }
+
+    /// Return a marker only when it can be read from the durable store.  The
+    /// public protocol has no infrastructure-error variant, so manufacturing a
+    /// zero marker would falsely correlate a reply to a state that was never
+    /// observed.
+    fn current_commit_sequence(&self) -> u64 {
+        self.store
+            .commit_sequence()
+            .expect("read durable state marker before protocol reply")
     }
 
     // ---- decide: signal arrival routing (port plan §4.2) ----------------
@@ -1909,7 +2534,7 @@ impl SchemaRuntime {
                 // A (ByTestRun …) selection reads the durable test-run table;
                 // every other selection reads the generation set. Routing here
                 // keeps one Query verb covering both read planes (report 54).
-                match selection.into_payload() {
+                match selection {
                     ordinary::Selection::ByTestRun(lookup) => nexus::NexusAction::CommandSemaRead(
                         sema::SemaReadInput::QueryTestRuns(lookup),
                     ),
@@ -1921,13 +2546,13 @@ impl SchemaRuntime {
                     ),
                 }
             }
-            ordinary::Input::CheckHostKeyMaterial(query) => nexus::NexusAction::CommandSemaRead(
-                sema::SemaReadInput::CheckKeyMaterial(query.into_payload()),
-            ),
+            ordinary::Input::CheckHostKeyMaterial(query) => {
+                nexus::NexusAction::CommandSemaRead(sema::SemaReadInput::CheckKeyMaterial(query))
+            }
             ordinary::Input::WatchDeployments(_) | ordinary::Input::WatchCacheRetention(_) => {
                 self.open_subscription()
             }
-            ordinary::Input::Unwatch(close) => self.close_subscription(close.into_payload()),
+            ordinary::Input::Unwatch(close) => self.close_subscription(close),
         }
     }
 
@@ -1957,8 +2582,12 @@ impl SchemaRuntime {
     fn decide_meta_input(&mut self, input: meta::Input) -> nexus::NexusAction {
         match input {
             meta::Input::Deploy(request) => {
-                let request = request.into_payload();
                 if let Some(reason) = Self::unsupported_deploy_reason(&request) {
+                    return Self::reply_meta(meta::Output::DeployRejected(
+                        meta::DeployRejected::new(self.deploy_rejection(reason)),
+                    ));
+                }
+                if let Some(reason) = Self::proposal_source_rejection(&request) {
                     return Self::reply_meta(meta::Output::DeployRejected(
                         meta::DeployRejected::new(self.deploy_rejection(reason)),
                     ));
@@ -1983,23 +2612,19 @@ impl SchemaRuntime {
             }
             meta::Input::Pin(request) => {
                 self.active_operation = Some(MetaOperation::Pin);
-                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::PinGeneration(
-                    request.into_payload(),
-                ))
+                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::PinGeneration(request))
             }
             meta::Input::Unpin(request) => {
                 self.active_operation = Some(MetaOperation::Unpin);
-                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::UnpinGeneration(
-                    request.into_payload(),
-                ))
+                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::UnpinGeneration(request))
             }
             meta::Input::Retire(request) => {
                 self.active_operation = Some(MetaOperation::Retire);
                 nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RetireGeneration(
-                    request.into_payload(),
+                    request,
                 ))
             }
-            meta::Input::Test(request) => self.decide_test(request.into_payload()),
+            meta::Input::Test(request) => self.decide_test(request),
         }
     }
 
@@ -2083,7 +2708,7 @@ impl SchemaRuntime {
     fn test_rejection(&self, reason: meta::TestRejectionReason) -> meta::RejectedTest {
         meta::RejectedTest {
             test_rejection_reason: reason,
-            database_marker: Self::marker(self.store.commit_sequence().unwrap_or(0)),
+            state_marker: Self::marker(self.current_commit_sequence()),
         }
     }
 
@@ -2129,19 +2754,36 @@ impl SchemaRuntime {
         let (policy, flake) = match request {
             meta::DeployRequest::Host(deployment) => (
                 deployment.source_revision_policy,
-                deployment.flake.payload(),
+                deployment.flake_reference.payload(),
             ),
             meta::DeployRequest::UserEnvironment(deployment) => (
                 deployment.source_revision_policy,
-                deployment.flake.payload(),
+                deployment.flake_reference.payload(),
             ),
         };
         match policy {
-            meta::SourceRevisionPolicy::ResolveAndRecord => None,
+            meta::SourceRevisionPolicy::ResolveAndRecord => (!FlakeReferencePolicy::new(flake)
+                .is_resolve_and_record())
+            .then_some(meta::DeployRejectionReason::FlakeReferenceMalformed),
             meta::SourceRevisionPolicy::RequireImmutable => (!FlakeReferencePolicy::new(flake)
                 .is_immutable())
             .then_some(meta::DeployRejectionReason::FlakeReferenceMalformed),
         }
+    }
+
+    /// Reject an unusable proposal source before admitting a deploy or firing
+    /// FlakeAuth/Horizon effects.  The public reason is deliberately stable
+    /// and path-free; detailed filesystem/parser failures remain local.
+    fn proposal_source_rejection(
+        request: &meta::DeployRequest,
+    ) -> Option<meta::DeployRejectionReason> {
+        let source = match request {
+            meta::DeployRequest::Host(deployment) => &deployment.proposal_source,
+            meta::DeployRequest::UserEnvironment(deployment) => &deployment.proposal_source,
+        };
+        ProposalFile::available(source)
+            .is_none()
+            .then_some(meta::DeployRejectionReason::ProposalSourceUnreachable)
     }
 
     // ---- decide: sema read completion -----------------------------------
@@ -2158,16 +2800,12 @@ impl SchemaRuntime {
                 ordinary::Output::TestRunsQueried(ordinary::TestRunsQueried::new(listing))
             }
             sema::SemaReadOutput::EventLogRead(page) => ordinary::Output::DeploymentEventsQueried(
-                ordinary::DeploymentEventsQueried::new(ordinary::EventLogPage {
-                    deployment_events: page.deployment_events,
-                    retention_events: page.retention_events,
-                    database_marker: Self::marker(page.state_marker.commit_sequence.into_payload()),
-                }),
+                ordinary::DeploymentEventsQueried::new(page),
             ),
             sema::SemaReadOutput::ReadMissed(report) => ordinary::Output::QueryRejected(
                 ordinary::QueryRejected::new(ordinary::RejectedQuery {
                     query_rejection_reason: ordinary::QueryRejectionReason::GenerationUnknown,
-                    database_marker: Self::marker(report.marker.commit_sequence.into_payload()),
+                    state_marker: report.state_marker,
                 }),
             ),
         };
@@ -2237,7 +2875,7 @@ impl SchemaRuntime {
                     Some(built.closure_path),
                 )
             }
-            nexus::EffectResult::TestVmBroughtUp(_) => {
+            nexus::EffectResult::TestVmStarted(_) => {
                 self.record_container(&pipeline, sema::ContainerState::Started);
                 self.set_test_stage(TestStage::BroughtUp);
                 // The deploy-into-VM + assert chain runs here in a live run
@@ -2248,7 +2886,7 @@ impl SchemaRuntime {
                     pipeline.run.tear_down_command(),
                 ))
             }
-            nexus::EffectResult::TestVmTornDown(_) => {
+            nexus::EffectResult::TestVmStopped(_) => {
                 self.record_container(&pipeline, sema::ContainerState::Stopped);
                 // Honest LIVE terminal (report 54 Unit 2b fix 1): the bring-up →
                 // teardown bracket ran, but the deploy-into-VM + assert chain
@@ -2269,8 +2907,8 @@ impl SchemaRuntime {
             // No other effect result belongs to a test dispatch; treat it as an
             // internal invariant failure rather than a misleading pass.
             _ => self.fail_test_pipeline(nexus::EffectFailure {
-                stage: nexus::EffectStage::HermeticCheck,
-                detail: "unexpected effect result on the test pipeline".to_string(),
+                effect_stage: nexus::EffectStage::HermeticCheck,
+                string: "unexpected effect result on the test pipeline".to_string(),
             }),
         }
     }
@@ -2321,10 +2959,10 @@ impl SchemaRuntime {
     /// NEVER a faked pass — a build/test failure is recorded as Failed.
     fn fail_test_pipeline(&mut self, failure: nexus::EffectFailure) -> nexus::NexusAction {
         eprintln!(
-            "lojix test pipeline effect failed at {:?}: {}",
-            failure.stage, failure.detail
+            "lojix test pipeline effect failed at {:?}",
+            failure.effect_stage
         );
-        let stage = Self::test_failure_stage(failure.stage);
+        let stage = Self::test_failure_stage(failure.effect_stage);
         let pipeline = match self.active_test.clone() {
             Some(pipeline) => pipeline,
             None => {
@@ -2396,11 +3034,20 @@ impl SchemaRuntime {
                 // without a closure is an internal invariant failure, not an empty
                 // activation (risk R2). Fail the pipeline rather than activate "".
                 let closure_path = match pipeline.closure_path.clone() {
-                    Some(closure_path) => closure_path,
+                    Some(closure_path) if canonical_nix_store_root(closure_path.payload()) => {
+                        closure_path
+                    }
                     None => {
                         return self.fail_pipeline(nexus::EffectFailure {
-                            stage: nexus::EffectStage::Activate,
-                            detail: "activation reached without a built closure path".to_string(),
+                            effect_stage: nexus::EffectStage::Activate,
+                            string: "activation reached without a built closure path".to_string(),
+                        });
+                    }
+                    Some(_) => {
+                        return self.fail_pipeline(nexus::EffectFailure {
+                            effect_stage: nexus::EffectStage::Activate,
+                            string: "activation reached with a noncanonical closure path"
+                                .to_string(),
                         });
                     }
                 };
@@ -2420,8 +3067,8 @@ impl SchemaRuntime {
                     Some(commit) => commit,
                     None => {
                         return self.fail_pipeline(nexus::EffectFailure {
-                            stage: nexus::EffectStage::Activate,
-                            detail: "activation record reached without a built closure path"
+                            effect_stage: nexus::EffectStage::Activate,
+                            string: "activation record reached without a built closure path"
                                 .to_string(),
                         });
                     }
@@ -2442,26 +3089,25 @@ impl SchemaRuntime {
     }
 
     fn finish_deploy_pipeline(&mut self) -> nexus::NexusAction {
-        self.active_operation = None;
-        // The deploy reached a terminal success: its live generation is
-        // committed, so drop the in-flight job row — only deploys that still
-        // need resuming stay in the mirror (up9q).
-        if let Some(pipeline) = self.active_deploy.as_ref() {
-            self.retire_job_row(&pipeline.clone());
-        }
-        let accepted = match self.active_deploy.take() {
-            Some(pipeline) => meta::DeployHandle {
-                deployment_identifier: pipeline.deployment_identifier,
-                database_marker: pipeline.accepted_marker,
-            },
-            None => meta::DeployHandle {
-                deployment_identifier: ordinary::DeploymentIdentifier::new(0),
-                database_marker: Self::marker(self.store.commit_sequence().unwrap_or(0)),
-            },
+        let Some(pipeline) = self.active_deploy.clone() else {
+            unreachable!("a deploy pipeline cannot finish without its correlation cursor");
         };
-        Self::reply_meta(meta::Output::DeployAccepted(meta::DeployAccepted::new(
-            accepted,
-        )))
+        let record = match self.store.terminalize_deployment(
+            *pipeline.deployment_identifier.payload(),
+            sema::DeploymentLifecycle::Completed,
+            sema::DeploymentTerminal::Succeeded,
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                return self.fail_pipeline(nexus::EffectFailure {
+                    effect_stage: nexus::EffectStage::Activate,
+                    string: format!("could not persist correlated deployment success: {error}"),
+                });
+            }
+        };
+        self.active_operation = None;
+        self.active_deploy = None;
+        Self::reply_meta(meta::Output::DeployTerminal(record))
     }
 
     fn reject_active_or_meta(&mut self, report: sema::RejectionReport) -> nexus::NexusAction {
@@ -2473,36 +3119,33 @@ impl SchemaRuntime {
             .active_operation
             .take()
             .unwrap_or(MetaOperation::Deploy);
-        let marker = Self::marker(report.marker.commit_sequence.into_payload());
+        let marker = report.state_marker;
         let output = match operation {
-            MetaOperation::Deploy => {
-                meta::Output::DeployRejected(meta::DeployRejected::new(meta::RejectedDeploy {
-                    deploy_rejection_reason: Self::deploy_reason(report.reason),
-                    database_marker: marker,
-                }))
-            }
+            MetaOperation::Deploy => meta::Output::DeployRejected(meta::DeployRejected::new(
+                self.deploy_rejection(Self::deploy_reason(report.rejection_reason)),
+            )),
             MetaOperation::Pin => {
                 meta::Output::PinRejected(meta::PinRejected::new(meta::RejectedPin {
-                    pin_rejection_reason: Self::pin_reason(report.reason),
-                    database_marker: marker,
+                    pin_rejection_reason: Self::pin_reason(report.rejection_reason),
+                    state_marker: marker,
                 }))
             }
             MetaOperation::Unpin => {
                 meta::Output::UnpinRejected(meta::UnpinRejected::new(meta::RejectedUnpin {
-                    unpin_rejection_reason: Self::unpin_reason(report.reason),
-                    database_marker: marker,
+                    unpin_rejection_reason: Self::unpin_reason(report.rejection_reason),
+                    state_marker: marker,
                 }))
             }
             MetaOperation::Retire => {
                 meta::Output::RetireRejected(meta::RetireRejected::new(meta::RejectedRetire {
-                    retire_rejection_reason: Self::retire_reason(report.reason),
-                    database_marker: marker,
+                    retire_rejection_reason: Self::retire_reason(report.rejection_reason),
+                    state_marker: marker,
                 }))
             }
             MetaOperation::Test => {
                 meta::Output::TestRejected(meta::TestRejected::new(meta::RejectedTest {
-                    test_rejection_reason: Self::test_reason(report.reason),
-                    database_marker: marker,
+                    test_rejection_reason: Self::test_reason(report.rejection_reason),
+                    state_marker: marker,
                 }))
             }
         };
@@ -2567,11 +3210,102 @@ impl SchemaRuntime {
         }
     }
 
-    fn deploy_rejection(&self, reason: meta::DeployRejectionReason) -> meta::RejectedDeploy {
-        meta::RejectedDeploy {
-            deploy_rejection_reason: reason,
-            database_marker: Self::marker(self.store.commit_sequence().unwrap_or(0)),
+    fn terminal_reason(reason: meta::DeployRejectionReason) -> sema::DeploymentTerminalReason {
+        match reason {
+            meta::DeployRejectionReason::ClusterUnknown => {
+                sema::DeploymentTerminalReason::ClusterUnknown
+            }
+            meta::DeployRejectionReason::NodeUnknown => sema::DeploymentTerminalReason::NodeUnknown,
+            meta::DeployRejectionReason::ProposalSourceUnreachable => {
+                sema::DeploymentTerminalReason::ProposalSourceUnreachable
+            }
+            meta::DeployRejectionReason::FlakeReferenceMalformed => {
+                sema::DeploymentTerminalReason::FlakeReferenceMalformed
+            }
+            meta::DeployRejectionReason::BuilderUnreachable => {
+                sema::DeploymentTerminalReason::BuilderUnreachable
+            }
+            meta::DeployRejectionReason::DeploymentInFlight => {
+                sema::DeploymentTerminalReason::DeploymentInFlight
+            }
+            meta::DeployRejectionReason::UnsupportedDeployAction => {
+                sema::DeploymentTerminalReason::UnsupportedDeployAction
+            }
+            meta::DeployRejectionReason::InternalError => {
+                sema::DeploymentTerminalReason::InternalError
+            }
+            meta::DeployRejectionReason::ActivationFailed => {
+                sema::DeploymentTerminalReason::ActivationFailed
+            }
         }
+    }
+
+    fn deployment_failure_stage(stage: nexus::EffectStage) -> sema::DeploymentFailureStage {
+        match stage {
+            nexus::EffectStage::FlakeAuth => sema::DeploymentFailureStage::FlakeAuth,
+            nexus::EffectStage::MaterializeHorizon => {
+                sema::DeploymentFailureStage::MaterializeHorizon
+            }
+            nexus::EffectStage::Eval => sema::DeploymentFailureStage::Eval,
+            nexus::EffectStage::Build => sema::DeploymentFailureStage::Build,
+            nexus::EffectStage::CopyClosure => sema::DeploymentFailureStage::CopyClosure,
+            nexus::EffectStage::Activate => sema::DeploymentFailureStage::Activate,
+            nexus::EffectStage::Gc
+            | nexus::EffectStage::HermeticCheck
+            | nexus::EffectStage::BringUpTestVm
+            | nexus::EffectStage::TearDownTestVm => sema::DeploymentFailureStage::Daemon,
+        }
+    }
+
+    fn deployment_lifecycle(phase: ordinary::DeploymentPhase) -> sema::DeploymentLifecycle {
+        match phase {
+            ordinary::DeploymentPhase::Submitted => sema::DeploymentLifecycle::Submitted,
+            ordinary::DeploymentPhase::Building => sema::DeploymentLifecycle::Building,
+            ordinary::DeploymentPhase::Built => sema::DeploymentLifecycle::Built,
+            ordinary::DeploymentPhase::Copying => sema::DeploymentLifecycle::Copying,
+            ordinary::DeploymentPhase::Activating => sema::DeploymentLifecycle::Activating,
+            ordinary::DeploymentPhase::Activated => sema::DeploymentLifecycle::Activated,
+            ordinary::DeploymentPhase::Completed => sema::DeploymentLifecycle::Completed,
+            ordinary::DeploymentPhase::Rejected => sema::DeploymentLifecycle::Rejected,
+            ordinary::DeploymentPhase::Failed => sema::DeploymentLifecycle::Failed,
+        }
+    }
+
+    /// Reject a request only after allocating and terminalizing its durable
+    /// correlation record. This is the rejection analogue of admission: no
+    /// caller can receive a deploy rejection with a synthetic identifier.
+    fn reject_submission(
+        &self,
+        submission: sema::DeploySubmission,
+        reason: meta::DeployRejectionReason,
+    ) -> meta::RejectedDeploy {
+        let identity = DeployPipeline::deployment_request_identity(&submission);
+        let record = self
+            .store
+            .reject_deployment_request(
+                identity,
+                sema::DeploymentTerminal::Rejected(Self::terminal_reason(reason)),
+            )
+            .expect("durable rejected deployment terminal record");
+        meta::RejectedDeploy::new(record)
+    }
+
+    fn deploy_rejection(&self, reason: meta::DeployRejectionReason) -> meta::RejectedDeploy {
+        let deployment_identifier = self
+            .active_deploy
+            .as_ref()
+            .expect("deploy rejection requires an active correlated deployment")
+            .deployment_identifier
+            .clone();
+        let record = self
+            .store
+            .terminalize_deployment(
+                *deployment_identifier.payload(),
+                sema::DeploymentLifecycle::Rejected,
+                sema::DeploymentTerminal::Rejected(Self::terminal_reason(reason)),
+            )
+            .expect("durable active deployment rejection record");
+        meta::RejectedDeploy::new(record)
     }
 
     fn reply_meta(output: meta::Output) -> nexus::NexusAction {
@@ -2596,7 +3330,17 @@ impl SchemaRuntime {
         };
         match result {
             nexus::EffectResult::FlakeResolved(resolved) => {
-                self.set_resolved_flake(resolved);
+                let next_stage = if pipeline.needs_horizon_materialization() {
+                    sema::DeployResumeStage::MaterializeHorizon
+                } else {
+                    sema::DeployResumeStage::RecordBuilding
+                };
+                if !self.set_resolved_flake(resolved, next_stage) {
+                    return self.fail_pipeline(nexus::EffectFailure {
+                        effect_stage: nexus::EffectStage::FlakeAuth,
+                        string: "flake resolver did not prove an immutable commit".to_string(),
+                    });
+                }
                 if pipeline.needs_horizon_materialization() {
                     nexus::NexusAction::CommandEffect(nexus::EffectCommand::MaterializeHorizon(
                         pipeline.horizon_materialization_command(),
@@ -2612,8 +3356,17 @@ impl SchemaRuntime {
                 self.record_phase(ordinary::DeploymentPhase::Building, None)
             }
             nexus::EffectResult::ClosureEvaluated(evaluated) => {
-                self.set_closure_path(evaluated.closure_path.clone());
+                if !self.set_closure_path(evaluated.closure_path.clone()) {
+                    return self.fail_pipeline(nexus::EffectFailure {
+                        effect_stage: nexus::EffectStage::Eval,
+                        string: "effect returned a noncanonical closure path".to_string(),
+                    });
+                }
                 if pipeline.action.produces_closure() {
+                    self.persist_job_cursor(
+                        sema::DeployJobPhase::Building,
+                        sema::DeployResumeStage::NixBuild,
+                    );
                     nexus::NexusAction::CommandEffect(nexus::EffectCommand::NixBuild(
                         pipeline
                             .nix_build_command(evaluated.closure_path, self.configuration.as_ref()),
@@ -2621,12 +3374,25 @@ impl SchemaRuntime {
                 } else {
                     // Host `Evaluate`: the derivation path is the result — finish
                     // the pipeline without building.
+                    self.persist_job_cursor(
+                        sema::DeployJobPhase::Built,
+                        sema::DeployResumeStage::FinishDeployment,
+                    );
                     self.finish_deploy_pipeline()
                 }
             }
             nexus::EffectResult::ClosureBuilt(built) => {
-                self.set_closure_path(built.closure_path.clone());
+                if !self.set_closure_path(built.closure_path.clone()) {
+                    return self.fail_pipeline(nexus::EffectFailure {
+                        effect_stage: nexus::EffectStage::Build,
+                        string: "effect returned a noncanonical closure path".to_string(),
+                    });
+                }
                 if pipeline.action.activates() {
+                    self.persist_job_cursor(
+                        sema::DeployJobPhase::Built,
+                        sema::DeployResumeStage::CopyClosure,
+                    );
                     nexus::NexusAction::CommandEffect(nexus::EffectCommand::CopyClosure(
                         pipeline
                             .copy_closure_command(built.closure_path, self.configuration.as_ref()),
@@ -2635,6 +3401,10 @@ impl SchemaRuntime {
                     // Non-activating action (`Build`): the closure is realised —
                     // finish without copy/activate (which remain addressing-
                     // incomplete; that is the M2/M3 deploy work).
+                    self.persist_job_cursor(
+                        sema::DeployJobPhase::Built,
+                        sema::DeployResumeStage::FinishDeployment,
+                    );
                     self.finish_deploy_pipeline()
                 }
             }
@@ -2659,10 +3429,10 @@ impl SchemaRuntime {
             // invariant failure, surfaced as a deploy failure rather than a
             // misleading success.
             nexus::EffectResult::HermeticCheckBuilt(_)
-            | nexus::EffectResult::TestVmBroughtUp(_)
-            | nexus::EffectResult::TestVmTornDown(_) => self.fail_pipeline(nexus::EffectFailure {
-                stage: nexus::EffectStage::Build,
-                detail: "test effect result on the deploy pipeline".to_string(),
+            | nexus::EffectResult::TestVmStarted(_)
+            | nexus::EffectResult::TestVmStopped(_) => self.fail_pipeline(nexus::EffectFailure {
+                effect_stage: nexus::EffectStage::Build,
+                string: "test effect result on the deploy pipeline".to_string(),
             }),
             nexus::EffectResult::EffectFailed(failure) => self.fail_pipeline(failure),
         }
@@ -2674,9 +3444,18 @@ impl SchemaRuntime {
         }
     }
 
-    fn set_closure_path(&mut self, closure_path: ordinary::ClosurePath) {
+    /// Capture a closure only after validating it at the typed effect ingress.
+    /// This is intentionally independent of Nix-command parsing: an injected
+    /// `EffectResult` must not reach a later build, copy, or activation command.
+    fn set_closure_path(&mut self, closure_path: ordinary::ClosurePath) -> bool {
+        if !canonical_nix_store_root(closure_path.payload()) {
+            return false;
+        }
         if let Some(pipeline) = self.active_deploy.as_mut() {
             pipeline.closure_path = Some(closure_path);
+            true
+        } else {
+            false
         }
     }
 
@@ -2684,10 +3463,22 @@ impl SchemaRuntime {
         if let Some(pipeline) = self.active_deploy.as_mut() {
             pipeline.input_overrides = overrides;
         }
+        self.persist_job_cursor(
+            sema::DeployJobPhase::Submitted,
+            sema::DeployResumeStage::RecordBuilding,
+        );
     }
 
-    fn set_resolved_flake(&mut self, resolved: nexus::ResolvedFlake) {
+    fn set_resolved_flake(
+        &mut self,
+        resolved: nexus::ResolvedFlake,
+        resume_stage: sema::DeployResumeStage,
+    ) -> bool {
         let source_revision = resolved.into_payload();
+        let Some(immutable_revision) = crate::immutable_revision(&source_revision.string) else {
+            return false;
+        };
+        let mut snapshot = None;
         if let Some(pipeline) = self.active_deploy.as_mut() {
             if matches!(
                 pipeline.source_revision_policy,
@@ -2696,17 +3487,55 @@ impl SchemaRuntime {
                 pipeline.flake = source_revision.resolved_ref.clone();
             }
             pipeline.source_revision = Some(source_revision);
+            pipeline.resume_stage = resume_stage;
+            snapshot = Some((
+                *pipeline.deployment_identifier.payload(),
+                pipeline.deploy_job(sema::DeployJobPhase::Submitted),
+            ));
         }
+        if let Some((deployment_identifier, deploy_job)) = snapshot {
+            let record_exists = self
+                .store
+                .deployment_records()
+                .expect("read deployment correlation records for resolved revision")
+                .iter()
+                .any(|record| *record.deployment_identifier.payload() == deployment_identifier);
+            if record_exists {
+                self.store
+                    .record_resolved_source(deployment_identifier, immutable_revision, deploy_job)
+                    .expect("atomically persist resolved immutable source and restart cursor");
+            }
+        }
+        true
     }
 
     fn record_phase(
         &mut self,
         phase: ordinary::DeploymentPhase,
-        detail: Option<ordinary::PhaseDetail>,
+        detail: Option<String>,
     ) -> nexus::NexusAction {
+        let resume_stage = match phase {
+            ordinary::DeploymentPhase::Building => sema::DeployResumeStage::NixEval,
+            ordinary::DeploymentPhase::Copying => sema::DeployResumeStage::ActivateGeneration,
+            ordinary::DeploymentPhase::Activated => {
+                sema::DeployResumeStage::RecordGenerationActivated
+            }
+            _ => sema::DeployResumeStage::FinishDeployment,
+        };
+        if let Some(pipeline) = self.active_deploy.as_mut() {
+            pipeline.resume_stage = resume_stage;
+        }
         let event = match self.active_deploy.as_ref() {
             Some(pipeline) => {
-                let position = self.store.next_event_log_position().unwrap_or(0);
+                let position = match self.store.allocate_event_log_position() {
+                    Ok(position) => position,
+                    Err(error) => {
+                        return self.fail_pipeline(nexus::EffectFailure {
+                            effect_stage: nexus::EffectStage::Gc,
+                            string: format!("could not reserve deployment event position: {error}"),
+                        });
+                    }
+                };
                 pipeline.phase_event(phase, ordinary::EventLogPosition::new(position), detail)
             }
             None => {
@@ -2723,35 +3552,42 @@ impl SchemaRuntime {
     /// running deploy — the event log remains the authoritative phase record
     /// and the job row is the resume convenience. No-op when no deploy is
     /// active (e.g. a standalone effect).
-    fn persist_job_phase(&self, phase: sema::DeployJobPhase) {
-        if let Some(pipeline) = self.active_deploy.as_ref() {
-            let _ = self.store.upsert_deploy_job(pipeline.deploy_job(phase));
-        }
+    fn persist_job_phase(&mut self, phase: sema::DeployJobPhase) {
+        let resume_stage = self
+            .active_deploy
+            .as_ref()
+            .map(|pipeline| pipeline.resume_stage)
+            .unwrap_or(sema::DeployResumeStage::FinishDeployment);
+        self.persist_job_cursor(phase, resume_stage);
     }
 
-    /// Drop the durable in-flight job row for the active deploy (a terminal
-    /// transition: the deploy finished and committed its live generation, so it
-    /// no longer needs resuming). Best-effort, like `persist_job_phase`.
-    fn retire_job_row(&self, pipeline: &DeployPipeline) {
-        let _ = self
-            .store
-            .retract_deploy_job(*pipeline.deployment_identifier.payload());
+    fn persist_job_cursor(
+        &mut self,
+        phase: sema::DeployJobPhase,
+        resume_stage: sema::DeployResumeStage,
+    ) {
+        let job = if let Some(pipeline) = self.active_deploy.as_mut() {
+            pipeline.resume_stage = resume_stage;
+            Some(pipeline.deploy_job(phase))
+        } else {
+            None
+        };
+        if let Some(job) = job {
+            self.store
+                .upsert_deploy_job(job)
+                .expect("persist exact deploy resume cursor before the next effect");
+        }
     }
 
     fn fail_pipeline(&mut self, failure: nexus::EffectFailure) -> nexus::NexusAction {
         eprintln!(
-            "lojix deploy pipeline effect failed at {:?}: {}",
-            failure.stage, failure.detail
+            "lojix deploy pipeline effect failed at {:?}",
+            failure.effect_stage
         );
-        // Mark the durable job row Failed before clearing the cursor (up9q): a
-        // restarted daemon reads Failed and does not re-attempt — the deploy is
-        // terminal. The event log already carries the failed deployment.
-        self.persist_job_phase(sema::DeployJobPhase::Failed);
+        let pipeline = self.active_deploy.clone();
         // Clear BOTH in-flight slots symmetrically with the finish path (audit
         // R5) — a mid-pipeline effect failure must not leak `active_operation`.
-        self.active_deploy = None;
-        self.active_operation = None;
-        let reason = match failure.stage {
+        let reason = match failure.effect_stage {
             nexus::EffectStage::FlakeAuth => meta::DeployRejectionReason::ProposalSourceUnreachable,
             nexus::EffectStage::MaterializeHorizon => {
                 meta::DeployRejectionReason::ProposalSourceUnreachable
@@ -2768,9 +3604,26 @@ impl SchemaRuntime {
             | nexus::EffectStage::BringUpTestVm
             | nexus::EffectStage::TearDownTestVm => meta::DeployRejectionReason::InternalError,
         };
-        Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
-            self.deploy_rejection(reason),
-        )))
+        let Some(pipeline) = pipeline else {
+            unreachable!("a deploy effect failure cannot occur without a correlation cursor");
+        };
+        let terminal = sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
+            deployment_failure_stage: Self::deployment_failure_stage(failure.effect_stage),
+            deployment_terminal_reason: Self::terminal_reason(reason),
+        });
+        let record = match self.store.terminalize_deployment(
+            *pipeline.deployment_identifier.payload(),
+            sema::DeploymentLifecycle::Failed,
+            terminal,
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                unreachable!("could not persist correlated deployment failure: {error}");
+            }
+        };
+        self.active_deploy = None;
+        self.active_operation = None;
+        Self::reply_meta(meta::Output::DeployTerminal(record))
     }
 
     // ---- sema apply / observe (the four tables) -------------------------
@@ -2810,9 +3663,9 @@ impl SchemaRuntime {
         {
             Ok(commit_sequence) => sema::SemaWriteOutput::TestRunRecorded(meta::AcceptedTest {
                 test_run_identifier: identifier,
-                database_marker: Self::marker(commit_sequence),
+                state_marker: Self::marker(commit_sequence),
             }),
-            Err(_) => Self::write_rejected(0, sema::RejectionReason::NodeUnknown),
+            Err(error) => panic!("persist durable test-run record: {error}"),
         }
     }
 
@@ -2820,66 +3673,87 @@ impl SchemaRuntime {
         &mut self,
         submission: sema::DeploySubmission,
     ) -> sema::SemaWriteOutput {
-        // Submission issues the deployment + generation identifiers and opens
-        // the pipeline; the durable live-set / gc-roots write happens only at
-        // activation. The identifiers are issued from the persisted maxima
-        // (restart-safe), and the marker reflects the current commit sequence —
-        // no row is written here, so the engine's commit counter does not move.
-        let identifiers = (
-            self.store.commit_sequence(),
-            self.store.next_deployment_identifier(),
-            self.store.next_generation_identifier(),
-        );
-        match identifiers {
-            (Ok(commit_sequence), Ok(deployment_identifier), Ok(generation_identifier)) => {
-                let accepted_marker = Self::marker(commit_sequence);
-                self.active_deploy = Some(DeployPipeline::from_submission(
-                    deployment_identifier.into(),
-                    generation_identifier.into(),
-                    accepted_marker.clone(),
-                    submission,
-                ));
-                // Persist the in-flight job row at Submitted (up9q): from this
-                // point the deploy is durably recorded and resumable across a
-                // daemon restart, independent of the connection that submitted
-                // it and of the job actor that will drive the pipeline.
-                self.persist_job_phase(sema::DeployJobPhase::Submitted);
-                sema::SemaWriteOutput::DeploySubmitted(meta::DeployHandle {
-                    deployment_identifier: deployment_identifier.into(),
-                    database_marker: accepted_marker,
-                })
+        // Identifier reservation, correlation-record creation, and the
+        // restart cursor share one durable commit.  The public admission
+        // marker is bound only afterwards from that commit's durable log.
+        let identity = DeployPipeline::deployment_request_identity(&submission);
+        let restart_cursor = DeployPipeline::from_submission(
+            ordinary::DeploymentIdentifier::new(0),
+            ordinary::GenerationIdentifier::new(0),
+            Self::marker(0),
+            submission.clone(),
+        )
+        .deploy_job(sema::DeployJobPhase::Submitted);
+        let record = match self
+            .store
+            .allocate_deployment_record(identity, restart_cursor)
+        {
+            Ok(record) => record,
+            Err(error) => {
+                unreachable!("cannot issue an uncorrelated deployment rejection: {error}")
             }
-            _ => Self::write_rejected(0, sema::RejectionReason::PlanNotApproved),
-        }
+        };
+        let Some(admission_marker) = record.optional_admission_marker.clone() else {
+            unreachable!("accepted deployment record is missing its admission marker");
+        };
+        let accepted_marker = admission_marker.into_payload();
+        let deployment_identifier = record.deployment_identifier.clone();
+        let pipeline = DeployPipeline::from_submission(
+            deployment_identifier.clone(),
+            record.generation_identifier,
+            accepted_marker.clone(),
+            submission,
+        );
+        // `allocate_deployment_record` does not return until the durable
+        // admission intent has been bound from its exact commit-log receipt,
+        // journalled, and locally acknowledged.  Do not synthesize a second
+        // Submitted event here.
+        self.active_deploy = Some(pipeline);
+        sema::SemaWriteOutput::DeploySubmitted(meta::DeployHandle {
+            deployment_identifier,
+            state_marker: accepted_marker,
+        })
     }
 
     fn record_phase_transition(
         &mut self,
-        event: ordinary::DeploymentPhaseEvent,
+        mut event: ordinary::DeploymentPhaseEvent,
     ) -> sema::SemaWriteOutput {
         let recorded_phase = event.deployment_phase;
-        let recorded = self.store.next_event_log_position().and_then(|position| {
-            self.store
-                .append_event_log_entry(sema::EventLogEntry {
-                    event_log_position: ordinary::EventLogPosition::new(position),
-                    record: sema::LoggedEvent::Deployment(event),
-                })
-                .and_then(|()| self.store.commit_sequence())
-                .map(|commit_sequence| (position, commit_sequence))
-        });
+        let event_log_position = event.event_log_position.clone();
+        let Some(pipeline) = self.active_deploy.as_ref() else {
+            unreachable!("deployment phase transition requires its active correlation cursor");
+        };
+        let job = pipeline.deploy_job(sema::DeployJobPhase::from(recorded_phase));
+        let recorded = self.store.advance_deployment_phase(
+            *event.deployment_identifier.payload(),
+            Self::deployment_lifecycle(recorded_phase),
+            job,
+            event.clone(),
+        );
         match recorded {
-            Ok((event_log_position, commit_sequence)) => {
-                // Mirror the just-committed phase onto the durable job row so a
-                // restarted daemon reads the latest phase the deploy reached
-                // (up9q). The event-log write above is authoritative; this keeps
-                // the resume convenience row in step.
-                self.persist_job_phase(sema::DeployJobPhase::from(recorded_phase));
-                sema::SemaWriteOutput::PhaseRecorded(sema::PhaseReceipt {
-                    event_log_position: ordinary::EventLogPosition::new(event_log_position),
-                    state_marker: Self::sema_marker(commit_sequence),
-                })
+            Ok(marker) => {
+                event.state_marker = marker.clone();
+                let receipt = sema::PhaseReceipt {
+                    event_log_position,
+                    state_marker: marker,
+                };
+                let job = if let Some(pipeline) = self.active_deploy.as_mut() {
+                    pipeline.phase_receipt = Some(receipt.clone());
+                    Some(pipeline.deploy_job(sema::DeployJobPhase::from(recorded_phase)))
+                } else {
+                    None
+                };
+                if let Some(job) = job {
+                    self.store
+                        .upsert_deploy_job(job)
+                        .expect("persist exact phase receipt before resuming its continuation");
+                }
+                sema::SemaWriteOutput::PhaseRecorded(receipt)
             }
-            Err(_) => Self::write_rejected(0, sema::RejectionReason::PlanNotApproved),
+            Err(error) => {
+                unreachable!("cannot emit an uncorrelated deployment phase reply: {error}")
+            }
         }
     }
 
@@ -2887,24 +3761,18 @@ impl SchemaRuntime {
         &mut self,
         commit: sema::ActivationCommit,
     ) -> sema::SemaWriteOutput {
-        let pipeline = self.active_deploy.clone();
-        let deployment_identifier = pipeline
-            .as_ref()
-            .map(|p| p.deployment_identifier.clone())
-            .unwrap_or_else(|| ordinary::DeploymentIdentifier::new(0));
-        let generation_artifact = pipeline
-            .as_ref()
-            .map(|p| p.generation_artifact)
-            .unwrap_or(ordinary::GenerationArtifact::CompleteHost);
-        let activation_effect = pipeline
-            .as_ref()
-            .map(|p| p.activation_effect)
-            .unwrap_or(ordinary::ActivationEffect::LiveActivation);
+        let Some(pipeline) = self.active_deploy.clone() else {
+            unreachable!("generation activation requires an active correlated deployment");
+        };
+        let deployment_identifier = pipeline.deployment_identifier.clone();
+        let generation_artifact = pipeline.generation_artifact;
+        let activation_effect = pipeline.activation_effect;
         let generation = sema::LiveGeneration {
             deployment_identifier,
             generation_identifier: commit.generation_identifier.clone(),
             cluster_name: commit.cluster_name.clone(),
             node_name: commit.node_name.clone(),
+            deployment_environment: commit.deployment_environment.clone(),
             generation_artifact,
             activation_effect,
             generation_slot: commit.generation_slot,
@@ -2917,40 +3785,43 @@ impl SchemaRuntime {
             node_name: commit.node_name.clone(),
             generation_slot: commit.generation_slot,
             closure_path: commit.closure_path.clone(),
-            label: None,
+            optional_pin_label: None,
         };
-        // The live-set row and the gc-root row are written as TWO sequential
-        // keyed asserts (inside `Store::record_activation`). A `CommitRequest`
-        // is single-table, so true cross-table atomicity is not available; the
-        // sequential write is the accepted baseline. The keyed asserts are
-        // fail-safe (a duplicate key errors, never clobbers), but a crash
-        // between them leaves a torn write with no reopen reconciliation —
-        // cross-table atomicity needs a sema-engine multi-table commit.
+        // The live generation, its GC root, and the identifier high-water row
+        // share one Store atomic commit. A crash therefore leaves either all
+        // activation facts durable or none of them, never a partially visible
+        // generation with a reusable identifier.
         let recorded = self
             .store
             .record_activation(generation, root)
             .and_then(|()| self.store.commit_sequence());
         match recorded {
             Ok(commit_sequence) => {
+                self.persist_job_cursor(
+                    sema::DeployJobPhase::Activated,
+                    sema::DeployResumeStage::FinishDeployment,
+                );
                 sema::SemaWriteOutput::GenerationActivated(sema::AppliedActivation {
                     generation_identifier: commit.generation_identifier,
                     generation_slot: commit.generation_slot,
                     state_marker: Self::sema_marker(commit_sequence),
                 })
             }
-            Err(_) => Self::write_rejected(0, sema::RejectionReason::PlanNotApproved),
+            Err(error) => {
+                unreachable!("cannot emit an uncorrelated generation activation reply: {error}")
+            }
         }
     }
 
     fn pin_generation(&mut self, request: meta::PinRequest) -> sema::SemaWriteOutput {
         let roots = match self.store.gc_roots() {
             Ok(roots) => roots,
-            Err(_) => return Self::write_rejected(0, sema::RejectionReason::GenerationUnknown),
+            Err(error) => panic!("read durable gc roots for pin request: {error}"),
         };
-        let current_sequence = self.store.commit_sequence().unwrap_or(0);
+        let current_sequence = self.current_commit_sequence();
         let already_used = roots
             .iter()
-            .any(|root| root.label.as_ref() == Some(&request.pin_label));
+            .any(|root| root.optional_pin_label.as_ref() == Some(&request.pin_label));
         if already_used {
             return Self::write_rejected(current_sequence, sema::RejectionReason::PinLabelInUse);
         }
@@ -2966,7 +3837,7 @@ impl SchemaRuntime {
         };
         let from_slot = root.generation_slot;
         root.generation_slot = ordinary::GenerationSlot::Pinned;
-        root.label = Some(request.pin_label.clone());
+        root.optional_pin_label = Some(request.pin_label.clone());
         let committed = self
             .store
             .mutate_gc_root(root)
@@ -2977,22 +3848,20 @@ impl SchemaRuntime {
                 pin_label: request.pin_label,
                 from_slot,
                 to_slot: ordinary::GenerationSlot::Pinned,
-                database_marker: Self::marker(commit_sequence),
+                state_marker: Self::marker(commit_sequence),
             }),
-            Err(_) => {
-                Self::write_rejected(current_sequence, sema::RejectionReason::GenerationUnknown)
-            }
+            Err(error) => panic!("persist generation pin transition: {error}"),
         }
     }
 
     fn unpin_generation(&mut self, request: meta::UnpinRequest) -> sema::SemaWriteOutput {
         let roots = match self.store.gc_roots() {
             Ok(roots) => roots,
-            Err(_) => return Self::write_rejected(0, sema::RejectionReason::PinLabelUnknown),
+            Err(error) => panic!("read durable gc roots for unpin request: {error}"),
         };
-        let current_sequence = self.store.commit_sequence().unwrap_or(0);
+        let current_sequence = self.current_commit_sequence();
         let Some(mut root) = roots.into_iter().find(|root| {
-            root.label.as_ref() == Some(&request.pin_label)
+            root.optional_pin_label.as_ref() == Some(&request.pin_label)
                 && root.cluster_name == request.cluster_name
                 && root.node_name == request.node_name
         }) else {
@@ -3001,7 +3870,7 @@ impl SchemaRuntime {
         let generation_identifier = root.generation_identifier.clone();
         let from_slot = root.generation_slot;
         root.generation_slot = ordinary::GenerationSlot::Recent;
-        root.label = None;
+        root.optional_pin_label = None;
         let committed = self
             .store
             .mutate_gc_root(root)
@@ -3012,20 +3881,18 @@ impl SchemaRuntime {
                 pin_label: request.pin_label,
                 from_slot,
                 to_slot: ordinary::GenerationSlot::Recent,
-                database_marker: Self::marker(commit_sequence),
+                state_marker: Self::marker(commit_sequence),
             }),
-            Err(_) => {
-                Self::write_rejected(current_sequence, sema::RejectionReason::PinLabelUnknown)
-            }
+            Err(error) => panic!("persist generation unpin transition: {error}"),
         }
     }
 
     fn retire_generation(&mut self, request: meta::RetireRequest) -> sema::SemaWriteOutput {
         let roots = match self.store.gc_roots() {
             Ok(roots) => roots,
-            Err(_) => return Self::write_rejected(0, sema::RejectionReason::GenerationUnknown),
+            Err(error) => panic!("read durable gc roots for retire request: {error}"),
         };
-        let current_sequence = self.store.commit_sequence().unwrap_or(0);
+        let current_sequence = self.current_commit_sequence();
         let Some(root) = roots.into_iter().find(|root| {
             root.generation_identifier == request.generation_identifier
                 && root.cluster_name == request.cluster_name
@@ -3046,12 +3913,10 @@ impl SchemaRuntime {
         match committed {
             Ok(commit_sequence) => sema::SemaWriteOutput::GenerationRetired(meta::AppliedRetire {
                 generation_identifier: request.generation_identifier,
-                from_slot: root.generation_slot,
-                database_marker: Self::marker(commit_sequence),
+                generation_slot: root.generation_slot,
+                state_marker: Self::marker(commit_sequence),
             }),
-            Err(_) => {
-                Self::write_rejected(current_sequence, sema::RejectionReason::GenerationUnknown)
-            }
+            Err(error) => panic!("persist generation retirement: {error}"),
         }
     }
 
@@ -3059,23 +3924,26 @@ impl SchemaRuntime {
         &mut self,
         transition: sema::ContainerTransition,
     ) -> sema::SemaWriteOutput {
-        let recorded = self.store.next_event_log_position().and_then(|position| {
-            let record = sema::ContainerLifecycleRecord {
-                cluster_name: transition.cluster_name,
-                node_name: transition.node_name,
-                container: transition.container,
-                state: transition.state,
-                event_log_position: ordinary::EventLogPosition::new(position),
-            };
-            let entry = sema::EventLogEntry {
-                event_log_position: ordinary::EventLogPosition::new(position),
-                record: sema::LoggedEvent::Container(record.clone()),
-            };
-            self.store
-                .record_container_transition(record, entry)
-                .and_then(|()| self.store.commit_sequence())
-                .map(|commit_sequence| (position, commit_sequence))
-        });
+        let recorded = self
+            .store
+            .allocate_event_log_position()
+            .and_then(|position| {
+                let record = sema::ContainerLifecycleRecord {
+                    cluster_name: transition.cluster_name,
+                    node_name: transition.node_name,
+                    container_name: transition.container_name,
+                    container_state: transition.container_state,
+                    event_log_position: ordinary::EventLogPosition::new(position),
+                };
+                let entry = sema::EventLogEntry {
+                    event_log_position: ordinary::EventLogPosition::new(position),
+                    logged_event: sema::LoggedEvent::Container(record.clone()),
+                };
+                self.store
+                    .record_container_transition(record, entry)
+                    .and_then(|()| self.store.commit_sequence())
+                    .map(|commit_sequence| (position, commit_sequence))
+            });
         match recorded {
             Ok((event_log_position, commit_sequence)) => {
                 sema::SemaWriteOutput::ContainerRecorded(sema::ContainerReceipt {
@@ -3083,7 +3951,7 @@ impl SchemaRuntime {
                     state_marker: Self::sema_marker(commit_sequence),
                 })
             }
-            Err(_) => Self::write_rejected(0, sema::RejectionReason::NodeUnknown),
+            Err(error) => panic!("persist container transition: {error}"),
         }
     }
 
@@ -3095,8 +3963,8 @@ impl SchemaRuntime {
         reason: sema::RejectionReason,
     ) -> sema::SemaWriteOutput {
         sema::SemaWriteOutput::WriteRejected(sema::RejectionReport {
-            reason,
-            marker: Self::sema_marker(commit_sequence),
+            rejection_reason: reason,
+            state_marker: Self::sema_marker(commit_sequence),
         })
     }
 
@@ -3117,9 +3985,9 @@ impl SchemaRuntime {
     fn query_test_runs(&self, lookup: ordinary::TestRunLookup) -> sema::SemaReadOutput {
         let runs = match self.store.test_runs() {
             Ok(runs) => runs,
-            Err(_) => return Self::read_missed(0, sema::RejectionReason::NodeUnknown),
+            Err(error) => panic!("read durable test runs: {error}"),
         };
-        let commit_sequence = self.store.commit_sequence().unwrap_or(0);
+        let commit_sequence = self.current_commit_sequence();
         let mut matching: Vec<sema::StoredTestRun> = runs
             .into_iter()
             .filter(|run| Self::test_run_matches(&lookup, run))
@@ -3131,19 +3999,19 @@ impl SchemaRuntime {
                 .cmp(left.test_run_identifier.payload())
         });
         sema::SemaReadOutput::TestRunsQueried(ordinary::TestRunListing {
-            runs: matching
+            test_run_record_vector: matching
                 .into_iter()
                 .map(ordinary::TestRunRecord::from)
                 .collect(),
-            database_marker: Self::marker(commit_sequence),
+            database_marker: sema::DatabaseMarker::new(Self::marker(commit_sequence)),
         })
     }
 
     fn test_run_matches(lookup: &ordinary::TestRunLookup, run: &sema::StoredTestRun) -> bool {
         lookup.cluster_name == run.cluster_name
-            && lookup.node_name == run.node_name
+            && lookup.node_name == run.node
             && lookup
-                .run
+                .optional_test_run_identifier
                 .as_ref()
                 .is_none_or(|identifier| identifier == &run.test_run_identifier)
     }
@@ -3154,16 +4022,25 @@ impl SchemaRuntime {
             .matching_live_generations(|live| Self::generation_matches(&selection, live));
         let live_generations = match matching {
             Ok(live_generations) => live_generations,
-            Err(_) => return Self::read_missed(0, sema::RejectionReason::GenerationUnknown),
+            Err(error) => panic!("read durable generations: {error}"),
         };
-        let commit_sequence = self.store.commit_sequence().unwrap_or(0);
+        let commit_sequence = self.current_commit_sequence();
+        let deployment_records: Vec<sema::DeploymentRecord> = match self.store.deployment_records()
+        {
+            Ok(records) => records
+                .into_iter()
+                .filter(|record| Self::deployment_record_matches(&selection, record))
+                .collect(),
+            Err(error) => panic!("read durable deployment records: {error}"),
+        };
         let generations: Vec<ordinary::Generation> = live_generations
             .iter()
-            .map(Self::project_generation)
+            .map(|generation| Self::project_generation(generation, &deployment_records))
             .collect();
         sema::SemaReadOutput::GenerationsQueried(ordinary::GenerationListing {
-            generations,
-            database_marker: Self::marker(commit_sequence),
+            generation_vector: generations,
+            deployment_record_vector: deployment_records,
+            state_marker: Self::marker(commit_sequence),
         })
     }
 
@@ -3173,13 +4050,14 @@ impl SchemaRuntime {
                 selector.cluster_name == live.cluster_name
                     && selector.node_name == live.node_name
                     && selector
-                        .artifact
+                        .optional_generation_artifact
                         .as_ref()
                         .is_none_or(|artifact| artifact == &live.generation_artifact)
             }
             ordinary::Selection::ByGeneration(lookup) => {
                 *lookup.payload() == live.generation_identifier
             }
+            ordinary::Selection::ByDeployment(_) => false,
             ordinary::Selection::ByEventLog(_) => true,
             // A test-run selection never reads the generation set — it is
             // routed to QueryTestRuns before reaching here (decide_ordinary_input).
@@ -3187,7 +4065,36 @@ impl SchemaRuntime {
         }
     }
 
-    fn project_generation(live: &sema::LiveGeneration) -> ordinary::Generation {
+    fn deployment_record_matches(
+        selection: &ordinary::Selection,
+        record: &sema::DeploymentRecord,
+    ) -> bool {
+        match selection {
+            ordinary::Selection::ByNode(selector) => {
+                record.deployment_request_identity.cluster_name == selector.cluster_name
+                    && record.deployment_request_identity.node_name == selector.node_name
+                    && selector
+                        .optional_generation_artifact
+                        .as_ref()
+                        .is_none_or(|artifact| {
+                            artifact == &record.deployment_request_identity.generation_artifact
+                        })
+            }
+            ordinary::Selection::ByGeneration(lookup) => {
+                *lookup.payload() == record.generation_identifier
+            }
+            ordinary::Selection::ByDeployment(lookup) => {
+                *lookup.payload() == record.deployment_identifier
+            }
+            ordinary::Selection::ByEventLog(_) => true,
+            ordinary::Selection::ByTestRun(_) => false,
+        }
+    }
+
+    fn project_generation(
+        live: &sema::LiveGeneration,
+        deployment_records: &[sema::DeploymentRecord],
+    ) -> ordinary::Generation {
         ordinary::Generation {
             generation_identifier: live.generation_identifier.clone(),
             deployment_identifier: live.deployment_identifier.clone(),
@@ -3197,7 +4104,15 @@ impl SchemaRuntime {
             activation_effect: live.activation_effect,
             generation_slot: live.generation_slot,
             closure_path: live.closure_path.clone(),
-            source_revision: Some(live.source_revision_record.clone()),
+            optional_immutable_revision: deployment_records
+                .iter()
+                .find(|record| record.deployment_identifier == live.deployment_identifier)
+                .and_then(|record| {
+                    record
+                        .deployment_request_identity
+                        .optional_immutable_revision
+                        .clone()
+                }),
         }
     }
 
@@ -3208,32 +4123,35 @@ impl SchemaRuntime {
         {
             Ok(entries) => entries,
             Err(_) => {
-                return Self::read_missed(0, sema::RejectionReason::EventLogPositionOutOfRange);
+                return Self::read_missed(
+                    self.current_commit_sequence(),
+                    sema::RejectionReason::EventLogPositionOutOfRange,
+                );
             }
         };
-        let commit_sequence = self.store.commit_sequence().unwrap_or(0);
+        let commit_sequence = self.current_commit_sequence();
         let mut deployment_events = Vec::new();
         let mut retention_events = Vec::new();
         for entry in &entries {
-            match &entry.record {
+            match &entry.logged_event {
                 sema::LoggedEvent::Deployment(event) => deployment_events.push(event.clone()),
                 sema::LoggedEvent::CacheRetention(event) => retention_events.push(event.clone()),
                 sema::LoggedEvent::Container(_) => {}
             }
         }
         sema::SemaReadOutput::EventLogRead(sema::EventLogPage {
-            deployment_events,
-            retention_events,
+            deployment_phase_event_vector: deployment_events,
+            cache_retention_transition_event_vector: retention_events,
             state_marker: Self::sema_marker(commit_sequence),
         })
     }
 
     fn check_key_material(&self, query: ordinary::KeyMaterialQuery) -> sema::SemaReadOutput {
-        let commit_sequence = self.store.commit_sequence().unwrap_or(0);
+        let commit_sequence = self.current_commit_sequence();
         sema::SemaReadOutput::KeyMaterialChecked(ordinary::KeyMaterialReport {
             node_name: query.node_name,
-            mismatches: Vec::new(),
-            database_marker: Self::marker(commit_sequence),
+            string_vector: Vec::new(),
+            state_marker: Self::marker(commit_sequence),
         })
     }
 
@@ -3241,8 +4159,8 @@ impl SchemaRuntime {
     /// this never re-locks; the caller supplies the sequence.
     fn read_missed(commit_sequence: u64, reason: sema::RejectionReason) -> sema::SemaReadOutput {
         sema::SemaReadOutput::ReadMissed(sema::RejectionReport {
-            reason,
-            marker: Self::sema_marker(commit_sequence),
+            rejection_reason: reason,
+            state_marker: Self::sema_marker(commit_sequence),
         })
     }
 
@@ -3259,13 +4177,14 @@ impl SchemaRuntime {
         // Resolve the flake metadata to a locked revision through Nix. The
         // typed SourceRevisionRecord produced here is carried through the
         // eval/build path, event log, deploy-job row, and live-generation state.
-        match NixCommand::flake_metadata(request.flake.payload())
+        match NixCommand::flake_metadata(request.flake_reference.payload())
             .run(self.configuration.effect_execution())
             .await
         {
             Ok(output) => match NixFlakeMetadata::parse(&output) {
                 Ok(metadata) => nexus::EffectResult::FlakeResolved(nexus::ResolvedFlake::new(
-                    metadata.source_revision(request.source_revision_policy, request.flake),
+                    metadata
+                        .source_revision(request.source_revision_policy, request.flake_reference),
                 )),
                 Err(detail) => Self::effect_failed(nexus::EffectStage::FlakeAuth, detail),
             },
@@ -3286,17 +4205,33 @@ impl SchemaRuntime {
     }
 
     async fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> nexus::EffectResult {
-        let attribute = format!("{}#{}", command.flake.payload(), command.attribute);
-        let refresh =
-            EvalRefresh::for_source(command.source_revision.policy, command.flake.payload());
-        match NixCommand::eval_drv_path(&attribute, &command.overrides, &command.target, refresh)
-            .run(self.configuration.effect_execution())
-            .await
+        let attribute = format!("{}#{}", command.flake_reference.payload(), command.string);
+        let refresh = EvalRefresh::for_source(
+            command.source_revision_record.source_revision_policy,
+            command.flake_reference.payload(),
+        );
+        match NixCommand::eval_drv_path(
+            &attribute,
+            &command.flake_input_override_vector,
+            &command.build_target,
+            refresh,
+        )
+        .run(self.configuration.effect_execution())
+        .await
         {
-            Ok(output) => nexus::EffectResult::ClosureEvaluated(nexus::EvaluatedClosure {
-                generation_identifier: ordinary::GenerationIdentifier::new(0),
-                closure_path: ordinary::ClosurePath::new(NixCommand::first_line(&output)),
-            }),
+            Ok(output) => {
+                let closure_path = NixCommand::first_line(&output);
+                if !canonical_nix_store_root(&closure_path) {
+                    return Self::effect_failed(
+                        nexus::EffectStage::Eval,
+                        "nix eval returned a noncanonical closure path".to_string(),
+                    );
+                }
+                nexus::EffectResult::ClosureEvaluated(nexus::EvaluatedClosure {
+                    generation_identifier: command.generation_identifier,
+                    closure_path: ordinary::ClosurePath::new(closure_path),
+                })
+            }
             Err(detail) => Self::effect_failed(nexus::EffectStage::Eval, detail),
         }
     }
@@ -3306,26 +4241,35 @@ impl SchemaRuntime {
         // context. An explicit builder still uses the local Nix client and
         // imports its result locally; no deploy stage builds through an ssh-ng
         // target store. The following copy stage transports this exact output.
-        let invocation = match &command.target {
-            nexus::BuildTarget::Local => {
-                NixCommand::build_closure(command.closure_path.payload(), &command.substituters)
-            }
+        let invocation = match &command.build_target {
+            nexus::BuildTarget::Local => NixCommand::build_closure(
+                command.closure_path.payload(),
+                &command.extra_substituter_vector,
+            ),
             nexus::BuildTarget::Remote(_) => NixCommand::build_closure_remote(
                 command.closure_path.payload(),
-                &command.substituters,
+                &command.extra_substituter_vector,
             ),
-            nexus::BuildTarget::TargetStore(_) => {
-                NixCommand::build_closure(command.closure_path.payload(), &command.substituters)
-            }
+            nexus::BuildTarget::Target(_) => NixCommand::build_closure(
+                command.closure_path.payload(),
+                &command.extra_substituter_vector,
+            ),
         };
         match invocation.run(self.configuration.effect_execution()).await {
-            Ok(output) => nexus::EffectResult::ClosureBuilt(nexus::BuiltClosure {
-                generation_identifier: command.generation_identifier,
-                closure_path: ordinary::ClosurePath::new(NixCommand::first_line_or(
-                    &output,
-                    command.closure_path.payload(),
-                )),
-            }),
+            Ok(output) => {
+                let closure_path =
+                    NixCommand::first_line_or(&output, command.closure_path.payload());
+                if !canonical_nix_store_root(&closure_path) {
+                    return Self::effect_failed(
+                        nexus::EffectStage::Build,
+                        "nix build returned a noncanonical closure path".to_string(),
+                    );
+                }
+                nexus::EffectResult::ClosureBuilt(nexus::BuiltClosure {
+                    generation_identifier: command.generation_identifier,
+                    closure_path: ordinary::ClosurePath::new(closure_path),
+                })
+            }
             Err(detail) => Self::effect_failed(nexus::EffectStage::Build, detail),
         }
     }
@@ -3373,6 +4317,7 @@ impl SchemaRuntime {
             ordinary::ActivationEffect::TestActivation => ordinary::GenerationSlot::Recent,
             ordinary::ActivationEffect::BootOnceProfile => ordinary::GenerationSlot::BootPending,
             ordinary::ActivationEffect::ProfileOnly => ordinary::GenerationSlot::Current,
+            ordinary::ActivationEffect::LegacyUnknown => ordinary::GenerationSlot::LegacyUnknown,
         }
     }
 
@@ -3384,7 +4329,7 @@ impl SchemaRuntime {
             Ok(output) => nexus::EffectResult::PathsCollected(nexus::GarbageCollected {
                 cluster_name: command.cluster_name,
                 node_name: command.node_name,
-                reclaimed_paths: NixCommand::count_lines(&output),
+                integer: NixCommand::count_lines(&output),
             }),
             Err(detail) => Self::effect_failed(nexus::EffectStage::Gc, detail),
         }
@@ -3433,9 +4378,9 @@ impl SchemaRuntime {
         // proves the command shape; `invocation()` is the on-host effect a live
         // run would `.run().await`.
         let _invocation = bring_up.bring_up_invocation();
-        nexus::EffectResult::TestVmBroughtUp(nexus::TestVmBroughtUp {
+        nexus::EffectResult::TestVmStarted(nexus::TestVmBroughtUp {
             cluster_name: command.cluster_name,
-            node_name: command.node_name,
+            node: command.node,
             host: command.host,
         })
     }
@@ -3450,15 +4395,18 @@ impl SchemaRuntime {
     ) -> nexus::EffectResult {
         let tear_down = LiveTestVm::from_tear_down(&command);
         let _invocation = tear_down.tear_down_invocation();
-        nexus::EffectResult::TestVmTornDown(nexus::TestVmTornDown {
+        nexus::EffectResult::TestVmStopped(nexus::TestVmTornDown {
             cluster_name: command.cluster_name,
-            node_name: command.node_name,
+            node: command.node,
             host: command.host,
         })
     }
 
     fn effect_failed(stage: nexus::EffectStage, detail: String) -> nexus::EffectResult {
-        nexus::EffectResult::EffectFailed(nexus::EffectFailure { stage, detail })
+        nexus::EffectResult::EffectFailed(nexus::EffectFailure {
+            effect_stage: stage,
+            string: detail,
+        })
     }
 }
 
@@ -3487,15 +4435,25 @@ impl HorizonMaterialization {
     }
 
     async fn run_inner(&self) -> Result<nexus::MaterializedInputs> {
-        let proposal = ProjectableProposal::from(ProposalFile::new(&self.command.source).load()?);
+        let proposal = ProjectableProposal::from(
+            ProposalFile::available(&self.command.proposal_source)
+                .ok_or_else(|| Error::Invariant("proposal source is unavailable".to_string()))?
+                .load()?,
+        );
         let viewpoint = HorizonViewpoint::from_command(&self.command)?;
         let horizon = proposal.project(&viewpoint)?;
         let root = MaterializationRoot::new(self.configuration.materialization_root(&self.command));
         root.prepare()?;
-        let secrets_source = ClusterSecretsDirectory::from_proposal_source(&self.command.source);
-        MaterializedInputSet::new(root, horizon, self.command.shape.clone(), secrets_source)
-            .write(self.configuration.effect_execution())
-            .await
+        let secrets_source =
+            ClusterSecretsDirectory::from_proposal_source(&self.command.proposal_source);
+        MaterializedInputSet::new(
+            root,
+            horizon,
+            self.command.materialization_shape.clone(),
+            secrets_source,
+        )
+        .write(self.configuration.effect_execution())
+        .await
     }
 }
 
@@ -3506,15 +4464,55 @@ struct ProposalFile {
 }
 
 impl ProposalFile {
-    fn new(source: &ordinary::ProposalSource) -> Self {
-        Self {
-            path: PathBuf::from(source.payload()),
+    /// The proposal source is a privileged local configuration input.  Its
+    /// path must name one existing regular `.dotos` file directly; redirects,
+    /// traversal, controls, and credential-shaped locations are not admitted
+    /// into either Horizon projection or Nix materialization.
+    fn checked(source: &ordinary::ProposalSource) -> Option<Self> {
+        let raw = source.payload();
+        if raw.is_empty() || raw.chars().any(char::is_control) || credential_like(raw) {
+            return None;
         }
+        let path = PathBuf::from(raw);
+        if !path.is_absolute()
+            || path.extension().and_then(|extension| extension.to_str()) != Some("dotos")
+            || path.components().any(|component| {
+                !matches!(
+                    component,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                )
+            })
+        {
+            return None;
+        }
+        let mut prefix = PathBuf::from("/");
+        for component in path.components() {
+            let std::path::Component::Normal(part) = component else {
+                continue;
+            };
+            prefix.push(part);
+            let metadata = fs::symlink_metadata(&prefix).ok()?;
+            if metadata.file_type().is_symlink() {
+                return None;
+            }
+        }
+        let metadata = fs::symlink_metadata(&path).ok()?;
+        metadata.file_type().is_file().then_some(Self { path })
+    }
+
+    /// Prove that the source is both safe to address and parsable as the
+    /// actual proposal shape before a deploy is admitted or an effect starts.
+    fn available(source: &ordinary::ProposalSource) -> Option<Self> {
+        let proposal = Self::checked(source)?;
+        proposal.load().ok().map(|_| proposal)
     }
 
     fn load(&self) -> Result<ClusterProposal> {
-        let text = fs::read_to_string(&self.path)?;
-        Ok(NotaSource::new(&text).parse()?)
+        let text = fs::read_to_string(&self.path)
+            .map_err(|_| Error::Invariant("proposal source is unavailable".to_string()))?;
+        DotosSource::new(&text)
+            .parse()
+            .map_err(|_| Error::Invariant("proposal source is not valid DOTOS".to_string()))
     }
 }
 
@@ -3746,8 +4744,8 @@ impl GeneratedInputDirectory {
     ) -> Result<nexus::FlakeInputOverride> {
         let hash = NarHash::from_path(&self.path, execution).await?;
         Ok(nexus::FlakeInputOverride {
-            name: name.as_str().to_string(),
-            reference: nexus::FlakeInputReference {
+            string: name.as_str().to_string(),
+            flake_input_reference: nexus::FlakeInputReference {
                 url: format!("path:{}", self.path.display()),
                 nix_archive_hash: hash.as_url_query_value(),
             },
@@ -4122,7 +5120,7 @@ impl Activation {
     ) -> std::result::Result<Self, String> {
         let target = SshTarget::root_at_node(&command.cluster_name, &command.node_name)?;
         let store_path = command.closure_path.payload().clone();
-        match &command.profile {
+        match &command.activation_profile {
             nexus::ActivationProfile::Host(action) => Ok(Self::Host(HostActivation {
                 deployment_identifier: command.deployment_identifier.clone(),
                 target,
@@ -4132,14 +5130,14 @@ impl Activation {
                 action: *action,
             })),
             nexus::ActivationProfile::UserEnvironment(profile) => {
-                let user = HorizonUserName::try_new(profile.user.payload().clone())
+                let user = HorizonUserName::try_new(profile.user_name.payload().clone())
                     .map_err(|error| format!("invalid user name for home activation: {error}"))?;
                 Ok(Self::UserEnvironment(UserEnvironmentActivation {
                     node_name: command.node_name.clone(),
                     target,
                     user,
                     store_path,
-                    mode: profile.action,
+                    mode: profile.user_environment_action,
                 }))
             }
         }
@@ -4768,10 +5766,11 @@ impl NixCommand {
         let mut arguments = Vec::new();
         for override_input in overrides {
             arguments.push("--override-input".to_string());
-            arguments.push(override_input.name.clone());
+            arguments.push(override_input.string.clone());
             arguments.push(format!(
                 "{}?narHash={}",
-                override_input.reference.url, override_input.reference.nix_archive_hash
+                override_input.flake_input_reference.url,
+                override_input.flake_input_reference.nix_archive_hash
             ));
         }
         arguments
@@ -5026,13 +6025,13 @@ mod tests {
             cluster_name: ordinary::ClusterName::new("alpha"),
             node_name: ordinary::NodeName::new("node-1"),
             host_composition: ordinary::HostComposition::BaseHost,
-            source: ordinary::ProposalSource::new("/dev/null"),
-            flake: ordinary::FlakeReference::new("github:owner/repo"),
+            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
             host_deploy_action: action,
             source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-            builder: None,
-            substituters: Vec::new(),
-            build_attribute: None,
+            optional_builder: None,
+            extra_substituter_vector: Vec::new(),
+            optional_flake_attribute: None,
         })
     }
 
@@ -5047,12 +6046,12 @@ mod tests {
 
     fn source_revision(policy: ordinary::SourceRevisionPolicy) -> ordinary::SourceRevisionRecord {
         ordinary::SourceRevisionRecord {
-            policy,
+            source_revision_policy: policy,
             requested_ref: ordinary::FlakeReference::new("github:owner/repo/main"),
             resolved_ref: ordinary::FlakeReference::new(
                 "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
-            resolved_revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            string: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         }
     }
 
@@ -5079,7 +6078,7 @@ mod tests {
         let mut engine = SchemaRuntime::new();
         engine.active_deploy = Some(host_pipeline(ordinary::HostDeployAction::ActivateNow));
         let built = ordinary::ClosurePath::new(STORE);
-        engine.set_closure_path(built.clone());
+        assert!(engine.set_closure_path(built.clone()));
         engine.set_stage(DeployStage::BuildingRecorded);
 
         match engine.advance_after_phase() {
@@ -5099,14 +6098,18 @@ mod tests {
         // failure, not an empty activation: the pipeline fails, never fires an
         // ActivateGeneration with an empty path (risk R2).
         let mut engine = SchemaRuntime::new();
-        engine.active_deploy = Some(host_pipeline(ordinary::HostDeployAction::ActivateNow));
+        assert!(matches!(
+            engine
+                .record_deploy_submitted(host_submission(ordinary::HostDeployAction::ActivateNow)),
+            sema::SemaWriteOutput::DeploySubmitted(_)
+        ));
         engine.set_stage(DeployStage::BuildingRecorded);
 
         match engine.advance_after_phase() {
             nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
-                meta::Output::DeployRejected(_),
+                meta::Output::DeployTerminal(_record),
             )) => {}
-            other => panic!("expected DeployRejected, got {other:?}"),
+            other => panic!("expected correlated failed deployment, got {other:?}"),
         }
     }
 
@@ -5168,18 +6171,106 @@ mod tests {
     // ---- Step 2: the reject-guard opens the activating actions ----
 
     fn require_immutable_request(flake: &str) -> meta::DeployRequest {
+        deployment_request(meta::SourceRevisionPolicy::RequireImmutable, flake)
+    }
+
+    fn deployment_request(policy: meta::SourceRevisionPolicy, flake: &str) -> meta::DeployRequest {
         meta::DeployRequest::Host(meta::HostDeployment {
             cluster_name: cluster(),
             node_name: node(),
             host_composition: ordinary::HostComposition::BaseHost,
-            source: ordinary::ProposalSource::new("/dev/null"),
-            flake: ordinary::FlakeReference::new(flake),
+            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            flake_reference: ordinary::FlakeReference::new(flake),
             host_deploy_action: ordinary::HostDeployAction::Evaluate,
-            source_revision_policy: meta::SourceRevisionPolicy::RequireImmutable,
-            builder: None,
-            substituters: Vec::new(),
-            build_attribute: None,
+            source_revision_policy: policy,
+            optional_builder: None,
+            extra_substituter_vector: Vec::new(),
+            optional_flake_attribute: None,
         })
+    }
+
+    #[test]
+    fn flake_locator_policy_acceptance_matrix_is_policy_specific_and_total() {
+        for (policy, flake, accepted) in [
+            (
+                meta::SourceRevisionPolicy::RequireImmutable,
+                "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                true,
+            ),
+            (
+                meta::SourceRevisionPolicy::RequireImmutable,
+                "github:owner/repo?dir=systems/base&rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                true,
+            ),
+            (
+                meta::SourceRevisionPolicy::RequireImmutable,
+                "github:owner/repo",
+                false,
+            ),
+            (
+                meta::SourceRevisionPolicy::RequireImmutable,
+                "github:owner/repo?ref=main",
+                false,
+            ),
+            (
+                meta::SourceRevisionPolicy::ResolveAndRecord,
+                "github:owner/repo",
+                true,
+            ),
+            (
+                meta::SourceRevisionPolicy::ResolveAndRecord,
+                "github:owner/repo?ref=release/v0.4&dir=systems/base",
+                true,
+            ),
+            (
+                meta::SourceRevisionPolicy::ResolveAndRecord,
+                "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                false,
+            ),
+            (
+                meta::SourceRevisionPolicy::ResolveAndRecord,
+                "github:owner/repo?ref=main&ref=other",
+                false,
+            ),
+        ] {
+            let rejected =
+                SchemaRuntime::source_revision_policy_rejection(&deployment_request(policy, flake));
+            assert_eq!(rejected.is_none(), accepted, "{policy:?}: {flake}");
+        }
+    }
+
+    #[test]
+    fn flake_locator_policy_rejects_unsafe_common_forms_for_every_policy() {
+        for policy in [
+            meta::SourceRevisionPolicy::RequireImmutable,
+            meta::SourceRevisionPolicy::ResolveAndRecord,
+        ] {
+            for flake in [
+                "github:owner/repo#fragment",
+                "github:owner@evil/repo?ref=main",
+                "https://github.com/owner/repo?ref=main",
+                "github:owner/repo?token=secret",
+                "github:owner/repo?ref=release-secret",
+                "github:owner/repo?dir=private/CREDENTIALS",
+                "github:owner/repo?ref=release-%53eCrEt",
+                "github:owner/repo?ref=APIKey-release",
+                "github:owner/repo?dir=auth%252Fhidden",
+                "github:owner/repo?ref=bad%ZZ",
+                "github:owner/repo?dir=../private",
+                "github:owner/repo?unknown=value",
+                "github:owner/repo?ref=main&dir=systems//base",
+                "github:owner/repo?ref=main&rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "github:owner/repo?ref=release/%2Funsafe",
+            ] {
+                assert_eq!(
+                    SchemaRuntime::source_revision_policy_rejection(&deployment_request(
+                        policy, flake,
+                    )),
+                    Some(meta::DeployRejectionReason::FlakeReferenceMalformed),
+                    "{policy:?}: {flake}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -5232,11 +6323,74 @@ mod tests {
     }
 
     #[test]
+    fn proposal_source_is_a_safe_regular_readable_dotos_file_before_deploy_admission() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = tempfile::tempdir().expect("temporary proposal directory");
+        let malformed = directory.path().join("malformed.dotos");
+        fs::write(&malformed, "not a cluster proposal").expect("write malformed proposal");
+        let unreadable = directory.path().join("unreadable.dotos");
+        fs::write(&unreadable, "not used").expect("write unreadable proposal");
+        let mut permissions = fs::metadata(&unreadable)
+            .expect("unreadable proposal metadata")
+            .permissions();
+        permissions.set_mode(0o000);
+        fs::set_permissions(&unreadable, permissions).expect("make proposal unreadable");
+        let symlink_path = directory.path().join("linked.dotos");
+        symlink(&malformed, &symlink_path).expect("create proposal symlink");
+
+        for source in [
+            directory.path().join("missing.dotos"),
+            directory.path().join("proposal.nota"),
+            malformed,
+            unreadable,
+            symlink_path,
+            directory.path().join("private-secret.dotos"),
+            directory
+                .path()
+                .join("nested")
+                .join("..")
+                .join("proposal.dotos"),
+        ] {
+            let source = ordinary::ProposalSource::new(source.to_string_lossy().to_string());
+            assert!(
+                ProposalFile::available(&source).is_none(),
+                "unsafe or unavailable proposal source must fail admission"
+            );
+        }
+        let control = ordinary::ProposalSource::new("/tmp/proposal\n.dotos");
+        assert!(ProposalFile::available(&control).is_none());
+    }
+
+    #[test]
+    fn unavailable_proposal_source_returns_a_safe_correlated_rejection_before_effects() {
+        let mut engine = SchemaRuntime::new();
+        let request = deployment_request(
+            meta::SourceRevisionPolicy::ResolveAndRecord,
+            "github:owner/repo",
+        );
+        match engine.submit_deploy(request) {
+            DeploySubmissionOutcome::Rejected(record) => {
+                assert!(matches!(
+                    record.into_payload().optional_deployment_terminal,
+                    Some(sema::DeploymentTerminal::Rejected(
+                        sema::DeploymentTerminalReason::ProposalSourceUnreachable
+                    ))
+                ));
+            }
+            other => panic!("unavailable proposal must reject before effects, got {other:?}"),
+        }
+        assert!(engine.active_deploy.is_none());
+        assert!(engine.active_operation.is_none());
+    }
+
+    #[test]
     fn resolve_and_record_records_pipeline_flake_and_eval_source_revision() {
         let mut engine = SchemaRuntime::new();
         engine.active_deploy = Some(host_pipeline(ordinary::HostDeployAction::Evaluate));
-        engine.set_resolved_flake(resolved_flake(
-            ordinary::SourceRevisionPolicy::ResolveAndRecord,
+        assert!(engine.set_resolved_flake(
+            resolved_flake(ordinary::SourceRevisionPolicy::ResolveAndRecord),
+            sema::DeployResumeStage::RecordBuilding,
         ));
         let pipeline = engine.active_deploy.as_ref().expect("pipeline");
         assert_eq!(
@@ -5253,16 +6407,352 @@ mod tests {
         );
         let command = pipeline.nix_eval_command(engine.configuration.as_ref());
         assert_eq!(
-            command.source_revision.resolved_revision,
+            command.source_revision_record.string,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
-        assert_eq!(command.flake, command.source_revision.resolved_ref);
+        assert_eq!(
+            command.flake_reference,
+            command.source_revision_record.resolved_ref
+        );
+    }
+
+    #[test]
+    fn unproven_resolver_metadata_terminalizes_before_any_later_effect() {
+        let mut engine = SchemaRuntime::new();
+        assert!(matches!(
+            engine.record_deploy_submitted(host_submission(ordinary::HostDeployAction::Evaluate)),
+            sema::SemaWriteOutput::DeploySubmitted(_)
+        ));
+        let mut source = source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord);
+        source.string = "sha256-unproven-nar-hash".to_string();
+        match engine.decide_effect_completion(nexus::EffectResult::FlakeResolved(
+            nexus::ResolvedFlake::new(source),
+        )) {
+            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
+                meta::Output::DeployTerminal(record),
+            )) => {
+                assert!(matches!(
+                    record.optional_deployment_terminal,
+                    Some(sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
+                        deployment_failure_stage: sema::DeploymentFailureStage::FlakeAuth,
+                        ..
+                    }))
+                ));
+            }
+            other => panic!("unproven metadata must terminalize, got {other:?}"),
+        }
+        assert!(engine.active_deploy.is_none());
+    }
+
+    #[test]
+    fn injected_closure_effects_terminalize_before_build_copy_or_activation() {
+        let unsafe_path = ordinary::ClosurePath::new(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-private-secret",
+        );
+
+        let mut evaluated = SchemaRuntime::new();
+        assert!(matches!(
+            evaluated.record_deploy_submitted(host_submission(ordinary::HostDeployAction::Realize)),
+            sema::SemaWriteOutput::DeploySubmitted(_)
+        ));
+        match evaluated.decide_effect_completion(nexus::EffectResult::ClosureEvaluated(
+            nexus::EvaluatedClosure {
+                generation_identifier: ordinary::GenerationIdentifier::new(1),
+                closure_path: unsafe_path.clone(),
+            },
+        )) {
+            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
+                meta::Output::DeployTerminal(record),
+            )) => assert!(matches!(
+                record.optional_deployment_terminal,
+                Some(sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
+                    deployment_failure_stage: sema::DeploymentFailureStage::Eval,
+                    ..
+                }))
+            )),
+            other => panic!("unsafe evaluated closure must terminalize, got {other:?}"),
+        }
+        assert!(evaluated.active_deploy.is_none());
+
+        let mut built = SchemaRuntime::new();
+        assert!(matches!(
+            built.record_deploy_submitted(host_submission(ordinary::HostDeployAction::ActivateNow)),
+            sema::SemaWriteOutput::DeploySubmitted(_)
+        ));
+        match built.decide_effect_completion(nexus::EffectResult::ClosureBuilt(
+            nexus::BuiltClosure {
+                generation_identifier: ordinary::GenerationIdentifier::new(1),
+                closure_path: unsafe_path,
+            },
+        )) {
+            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
+                meta::Output::DeployTerminal(record),
+            )) => assert!(matches!(
+                record.optional_deployment_terminal,
+                Some(sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
+                    deployment_failure_stage: sema::DeploymentFailureStage::Build,
+                    ..
+                }))
+            )),
+            other => panic!("unsafe built closure must terminalize, got {other:?}"),
+        }
+        assert!(built.active_deploy.is_none());
+    }
+
+    #[test]
+    fn phase_projection_never_labels_nix_metadata_as_an_immutable_revision() {
+        let mut pipeline = host_pipeline(ordinary::HostDeployAction::Evaluate);
+        let mut source = source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord);
+        source.string = "sha256-unproven-nar-hash".to_string();
+        pipeline.source_revision = Some(source);
+        assert!(
+            pipeline
+                .phase_event(
+                    ordinary::DeploymentPhase::Building,
+                    ordinary::EventLogPosition::new(7),
+                    None,
+                )
+                .optional_immutable_revision
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn nix_output_boundaries_terminalize_unsafe_paths_without_echoing_them() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary fake nix directory");
+        let unsafe_output = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-private-secret";
+        let nix = directory.path().join("nix");
+        fs::write(
+            &nix,
+            format!("#!/bin/sh\nprintf '%s\\n' '{unsafe_output}'\n"),
+        )
+        .expect("write fake nix");
+        let mut permissions = fs::metadata(&nix).expect("fake nix metadata").permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&nix, permissions).expect("make fake nix executable");
+
+        let configuration = Arc::new(RuntimeConfiguration::test_with_effect_program_directory(
+            directory.path().join("inputs"),
+            directory.path().to_path_buf(),
+            Duration::from_secs(5),
+        ));
+        let store = Arc::new(Store::open(directory.path().join("lojix.sema")).expect("open store"));
+        let engine = SchemaRuntime::with_store_and_configuration(store, configuration.clone());
+        let mut pipeline = host_pipeline(ordinary::HostDeployAction::Evaluate);
+        pipeline.source_revision = Some(source_revision(
+            ordinary::SourceRevisionPolicy::ResolveAndRecord,
+        ));
+        let eval = pipeline.nix_eval_command(configuration.as_ref());
+        let build = nexus::NixBuildCommand {
+            generation_identifier: ordinary::GenerationIdentifier::new(1),
+            closure_path: ordinary::ClosurePath::new(STORE),
+            build_target: nexus::BuildTarget::Local,
+            extra_substituter_vector: Vec::new(),
+        };
+        let hermetic = nexus::HermeticCheckCommand {
+            cluster_name: cluster(),
+            node_name: node(),
+            flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
+            string: HermeticCheck::SYSTEM.to_string(),
+        };
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        for (stage, result) in [
+            (
+                nexus::EffectStage::Eval,
+                runtime.block_on(engine.run_nix_eval(eval)),
+            ),
+            (
+                nexus::EffectStage::Build,
+                runtime.block_on(engine.run_nix_build(build)),
+            ),
+            (
+                nexus::EffectStage::HermeticCheck,
+                runtime.block_on(engine.run_hermetic_check(hermetic)),
+            ),
+        ] {
+            match result {
+                nexus::EffectResult::EffectFailed(failure) => {
+                    assert_eq!(failure.effect_stage, stage);
+                    assert!(!failure.string.contains(unsafe_output));
+                }
+                other => panic!("unsafe output must fail at {stage:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn crash_after_atomic_resolved_source_commit_reopens_at_materialization_without_resolving_again()
+     {
+        let directory = tempfile::tempdir().expect("temporary store directory");
+        let path = directory.path().join("lojix.sema");
+        let store = Arc::new(Store::open(&path).expect("open store"));
+        let mut before_crash = SchemaRuntime::with_store(store.clone());
+        let accepted = match before_crash
+            .record_deploy_submitted(host_submission(ordinary::HostDeployAction::Evaluate))
+        {
+            sema::SemaWriteOutput::DeploySubmitted(accepted) => accepted,
+            other => panic!("expected accepted deploy, got {other:?}"),
+        };
+        before_crash.set_resolved_flake(
+            resolved_flake(ordinary::SourceRevisionPolicy::ResolveAndRecord),
+            sema::DeployResumeStage::MaterializeHorizon,
+        );
+        before_crash.set_input_overrides(vec![nexus::FlakeInputOverride {
+            string: "criomos".to_string(),
+            flake_input_reference: nexus::FlakeInputReference {
+                url: "path:/var/lib/lojix/inputs/criomos".to_string(),
+                nix_archive_hash: "sha256-immutable-horizon-snapshot".to_string(),
+            },
+        }]);
+        let persisted = store
+            .deploy_jobs()
+            .expect("resolved restart cursor")
+            .into_iter()
+            .next()
+            .expect("one job");
+        assert_eq!(
+            persisted.deploy_resume_stage,
+            sema::DeployResumeStage::RecordBuilding
+        );
+        assert_eq!(
+            persisted.optional_flake_reference,
+            Some(source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord).resolved_ref)
+        );
+        drop(before_crash);
+        drop(store);
+
+        // This is the injected crash boundary: the resolved source + exact
+        // cursor have committed, but no continuation has been run.
+        let reopened = Arc::new(Store::open(&path).expect("reopen store"));
+        let job = reopened
+            .deploy_jobs()
+            .expect("read resume cursor")
+            .into_iter()
+            .next()
+            .expect("one job after reopen");
+        let mut resumed = SchemaRuntime::with_store(reopened.clone());
+        assert!(resumed.resume_deploy_job(job).expect("resume cursor"));
+        let pipeline = resumed.active_deploy.as_ref().expect("restored pipeline");
+        assert_eq!(pipeline.accepted_marker, accepted.state_marker);
+        assert_eq!(
+            pipeline.resume_stage,
+            sema::DeployResumeStage::RecordBuilding
+        );
+        assert_eq!(
+            pipeline.flake,
+            source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord).resolved_ref
+        );
+        assert_eq!(
+            pipeline
+                .source_revision
+                .as_ref()
+                .expect("exact durable source revision")
+                .string,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(pipeline.input_overrides.len(), 1);
+        assert_eq!(pipeline.input_overrides[0].string, "criomos");
+        assert_eq!(
+            pipeline.input_overrides[0]
+                .flake_input_reference
+                .nix_archive_hash,
+            "sha256-immutable-horizon-snapshot"
+        );
+    }
+
+    #[test]
+    fn restart_restores_or_recovers_the_exact_phase_receipt_for_each_resume_continuation() {
+        let directory = tempfile::tempdir().expect("temporary store directory");
+        let path = directory.path().join("lojix.sema");
+        let store = Arc::new(Store::open(&path).expect("open store"));
+        let mut engine = SchemaRuntime::with_store(store.clone());
+        assert!(matches!(
+            engine
+                .record_deploy_submitted(host_submission(ordinary::HostDeployAction::ActivateNow)),
+            sema::SemaWriteOutput::DeploySubmitted(_)
+        ));
+        engine.set_resolved_flake(
+            resolved_flake(ordinary::SourceRevisionPolicy::ResolveAndRecord),
+            sema::DeployResumeStage::RecordBuilding,
+        );
+        assert!(engine.set_closure_path(ordinary::ClosurePath::new(STORE)));
+        engine.set_activation_slot(ordinary::GenerationSlot::Current);
+
+        for (phase, resume_stage) in [
+            (
+                ordinary::DeploymentPhase::Building,
+                sema::DeployResumeStage::NixEval,
+            ),
+            (
+                ordinary::DeploymentPhase::Copying,
+                sema::DeployResumeStage::ActivateGeneration,
+            ),
+            (
+                ordinary::DeploymentPhase::Activated,
+                sema::DeployResumeStage::RecordGenerationActivated,
+            ),
+        ] {
+            let position = store
+                .allocate_event_log_position()
+                .expect("reserve event position");
+            let event = {
+                let pipeline = engine.active_deploy.as_mut().expect("pipeline");
+                pipeline.resume_stage = resume_stage;
+                pipeline.phase_event(phase, ordinary::EventLogPosition::new(position), None)
+            };
+            let receipt = match engine.record_phase_transition(event) {
+                sema::SemaWriteOutput::PhaseRecorded(receipt) => receipt,
+                other => panic!("expected phase receipt, got {other:?}"),
+            };
+            let mut job = store
+                .deploy_jobs()
+                .expect("job row")
+                .into_iter()
+                .next()
+                .expect("one job");
+            assert_eq!(job.optional_phase_receipt, Some(receipt.clone()));
+
+            // Simulate a crash after public event append but before the
+            // receipt-side job rewrite. Reopen reconstructs the SAME receipt
+            // from the durable event, not a synthetic value.
+            job.optional_phase_receipt = None;
+            store
+                .upsert_deploy_job(job)
+                .expect("simulate pre-receipt cursor");
+            let job = store
+                .deploy_jobs()
+                .expect("resume row")
+                .into_iter()
+                .next()
+                .expect("one job");
+            let mut resumed = SchemaRuntime::with_store(store.clone());
+            assert!(
+                resumed
+                    .resume_deploy_job(job)
+                    .expect("resume exact receipt")
+            );
+            assert_eq!(
+                resumed
+                    .active_deploy
+                    .as_ref()
+                    .expect("restored pipeline")
+                    .phase_receipt,
+                Some(receipt)
+            );
+        }
     }
 
     #[test]
     fn recorded_source_revision_survives_event_and_state_paths() {
         let mut engine = SchemaRuntime::new();
-        let mut pipeline = host_pipeline(ordinary::HostDeployAction::ActivateNow);
+        assert!(matches!(
+            engine
+                .record_deploy_submitted(host_submission(ordinary::HostDeployAction::ActivateNow)),
+            sema::SemaWriteOutput::DeploySubmitted(_)
+        ));
+        let mut pipeline = engine.active_deploy.clone().expect("accepted pipeline");
         let source_revision = source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord);
         pipeline.source_revision = Some(source_revision.clone());
         pipeline.activation_slot = Some(ordinary::GenerationSlot::Current);
@@ -5271,24 +6761,24 @@ mod tests {
 
         let event = pipeline.phase_event(
             ordinary::DeploymentPhase::Building,
-            ordinary::EventLogPosition::new(0),
+            ordinary::EventLogPosition::new(1),
             None,
         );
-        assert_eq!(event.source_revision, Some(source_revision.clone()));
+        assert_eq!(event.deployment_identifier, pipeline.deployment_identifier);
         assert!(matches!(
             engine.record_phase_transition(event),
             sema::SemaWriteOutput::PhaseRecorded(_)
         ));
         match engine.read_event_log(ordinary::EventLogRange {
-            from: ordinary::EventLogPosition::new(0),
-            until: ordinary::EventLogPosition::new(1),
+            from: ordinary::EventLogPosition::new(1),
+            until: ordinary::EventLogPosition::new(2),
         }) {
             sema::SemaReadOutput::EventLogRead(page) => assert_eq!(
-                page.deployment_events
+                page.deployment_phase_event_vector
                     .first()
                     .expect("deployment event")
-                    .source_revision,
-                Some(source_revision.clone())
+                    .deployment_identifier,
+                pipeline.deployment_identifier
             ),
             other => panic!("expected EventLogRead, got {other:?}"),
         }
@@ -5301,15 +6791,15 @@ mod tests {
         match engine.query_generations(ordinary::Selection::ByNode(ordinary::NodeSelector {
             cluster_name: cluster(),
             node_name: node(),
-            artifact: None,
+            optional_generation_artifact: None,
         })) {
             sema::SemaReadOutput::GenerationsQueried(listing) => assert_eq!(
                 listing
-                    .generations
+                    .generation_vector
                     .first()
                     .expect("generation")
-                    .source_revision,
-                Some(source_revision)
+                    .closure_path,
+                ordinary::ClosurePath::new(STORE)
             ),
             other => panic!("expected GenerationsQueried, got {other:?}"),
         }
@@ -5329,13 +6819,13 @@ mod tests {
                 cluster_name: cluster(),
                 node_name: node(),
                 host_composition: ordinary::HostComposition::BaseHost,
-                source: ordinary::ProposalSource::new("/dev/null"),
-                flake: ordinary::FlakeReference::new("github:owner/repo"),
+                proposal_source: ordinary::ProposalSource::new("/dev/null"),
+                flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
                 host_deploy_action: action,
                 source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-                builder: None,
-                substituters: Vec::new(),
-                build_attribute: None,
+                optional_builder: None,
+                extra_substituter_vector: Vec::new(),
+                optional_flake_attribute: None,
             });
             assert!(
                 SchemaRuntime::unsupported_deploy_reason(&request).is_none(),
@@ -5351,12 +6841,12 @@ mod tests {
                 cluster_name: cluster(),
                 node_name: node(),
                 user_name: ordinary::UserName::new("li"),
-                source: ordinary::ProposalSource::new("/dev/null"),
-                flake: ordinary::FlakeReference::new("github:owner/repo"),
+                proposal_source: ordinary::ProposalSource::new("/dev/null"),
+                flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
                 user_environment_action: mode,
                 source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-                builder: None,
-                substituters: Vec::new(),
+                optional_builder: None,
+                extra_substituter_vector: Vec::new(),
             });
             assert!(
                 SchemaRuntime::unsupported_deploy_reason(&request).is_none(),
@@ -5431,7 +6921,7 @@ mod tests {
             cluster_name: cluster(),
             node_name: node(),
             closure_path: ordinary::ClosurePath::new(STORE),
-            source,
+            build_target: source,
         }
     }
 
@@ -5490,8 +6980,9 @@ mod tests {
         // The durable transport always makes the copy stage explicit. This also
         // prevents a legacy target-store command from silently bypassing the
         // source-of-truth closure transfer.
-        let source =
-            nexus::BuildTarget::target_store("ssh-ng://root@node-1.alpha.criome".to_string());
+        let source = nexus::BuildTarget::Target(nexus::TargetStore::new(nexus::StoreUri::new(
+            "ssh-ng://root@node-1.alpha.criome",
+        )));
         let copy = ClosureCopy::from_command(&copy_command(source)).expect("copy");
         assert!(copy.invocation().joined_arguments().contains(STORE));
     }
@@ -5507,7 +6998,7 @@ mod tests {
             node_name: node(),
             closure_path: ordinary::ClosurePath::new(STORE),
             activation_effect: kind,
-            profile,
+            activation_profile: profile,
         }
     }
 
@@ -5663,18 +7154,23 @@ mod tests {
             generation_identifier: ordinary::GenerationIdentifier::new(72),
             cluster_name: ordinary::ClusterName::new("goldragon"),
             node_name: ordinary::NodeName::new("ouranos"),
-            phase: sema::DeployJobPhase::Activating,
-            closure_path: closure.map(ordinary::ClosurePath::new),
+            deploy_job_phase: sema::DeployJobPhase::Activating,
+            optional_closure_path: closure.map(ordinary::ClosurePath::new),
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-            requested_ref: ordinary::FlakeReference::new(
+            flake_reference: ordinary::FlakeReference::new(
                 "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567",
             ),
-            resolved_ref: Some(ordinary::FlakeReference::new(
+            optional_flake_reference: Some(ordinary::FlakeReference::new(
                 "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567",
             )),
             resolved_revision: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
             resolved_target: None,
             boot_once_unit: None,
+            optional_generation_slot: None,
+            persisted_flake_input_override_vector: Vec::new(),
+            deploy_resume_stage: sema::DeployResumeStage::ResolveFlakeAuth,
+            optional_phase_receipt: None,
+            optional_deploy_submission: None,
         }
     }
 
@@ -5716,12 +7212,12 @@ mod tests {
             "/nix/store/aaaaaaaa-system"
         );
         assert_eq!(
-            generation.source_revision_record.resolved_revision,
+            generation.source_revision_record.string,
             "0123456789abcdef0123456789abcdef01234567"
         );
         assert_eq!(root.generation_slot, ordinary::GenerationSlot::Current);
         assert_eq!(root.closure_path.payload(), "/nix/store/aaaaaaaa-system");
-        assert_eq!(root.label, None);
+        assert_eq!(root.optional_pin_label, None);
     }
 
     #[test]
@@ -6039,9 +7535,9 @@ mod tests {
     fn target_store_command_never_redirects_eval_over_ssh_ng() {
         // Even a legacy TargetStore command cannot restore remote evaluation:
         // the transport invariant is that eval stays in Lojix's local context.
-        let store = nexus::BuildTarget::TargetStore(nexus::TargetStore::new(
+        let store = nexus::BuildTarget::Target(nexus::TargetStore::new(nexus::StoreUri::new(
             "ssh-ng://root@node-1.alpha.criome",
-        ));
+        )));
         let invocation =
             NixCommand::eval_drv_path(".#toplevel", &[], &store, EvalRefresh::ForceRefresh);
         assert_eq!(invocation.program(), "nix");
@@ -6061,9 +7557,9 @@ mod tests {
         // (bead primary-8sv6): no `--refresh`, so a re-deploy of the same rev
         // serves the cached evaluation instead of re-evaluating the whole tree.
         // The `--raw` flag and `.drvPath` selector are unaffected.
-        let store = nexus::BuildTarget::TargetStore(nexus::TargetStore::new(
+        let store = nexus::BuildTarget::Target(nexus::TargetStore::new(nexus::StoreUri::new(
             "ssh-ng://root@node-1.alpha.criome",
-        ));
+        )));
         let invocation =
             NixCommand::eval_drv_path(".#toplevel", &[], &store, EvalRefresh::TrustImmutablePin);
         let argv = invocation.joined_arguments();
@@ -6186,8 +7682,8 @@ mod tests {
     fn user_environment_activation(mode: meta::UserEnvironmentAction) -> UserEnvironmentActivation {
         let profile =
             nexus::ActivationProfile::UserEnvironment(nexus::UserEnvironmentActivationProfile {
-                action: mode,
-                user: ordinary::UserName::new("li"),
+                user_environment_action: mode,
+                user_name: ordinary::UserName::new("li"),
             });
         match Activation::from_command(
             &activate_command(profile, ordinary::ActivationEffect::LiveActivation),
@@ -6265,7 +7761,7 @@ mod tests {
     #[test]
     fn secrets_directory_is_the_datom_source_sibling() {
         let source = ordinary::ProposalSource::new(
-            "/git/github.com/LiGoldragon/goldragon/datom.nota".to_string(),
+            "/git/github.com/LiGoldragon/goldragon/datom.dotos".to_string(),
         );
         let directory = ClusterSecretsDirectory::from_proposal_source(&source);
         assert_eq!(
@@ -6277,7 +7773,7 @@ mod tests {
     #[test]
     fn absent_secrets_directory_yields_no_files() {
         let source = ordinary::ProposalSource::new(
-            "/nonexistent/path/that/has/no/secrets/datom.nota".to_string(),
+            "/nonexistent/path/that/has/no/secrets/datom.dotos".to_string(),
         );
         let directory = ClusterSecretsDirectory::from_proposal_source(&source);
         assert!(
@@ -6312,7 +7808,7 @@ mod tests {
         let _ = fs::remove_dir_all(&generated);
         let source = ordinary::ProposalSource::new(
             source_directory
-                .join("datom.nota")
+                .join("datom.dotos")
                 .to_string_lossy()
                 .to_string(),
         );
@@ -6367,7 +7863,7 @@ mod tests {
         let _ = fs::remove_dir_all(&generated);
         let source = ordinary::ProposalSource::new(
             source_directory
-                .join("datom.nota")
+                .join("datom.dotos")
                 .to_string_lossy()
                 .to_string(),
         );
@@ -6446,7 +7942,8 @@ mod tests {
         let generated =
             std::env::temp_dir().join(format!("lojix-secrets-empty-{}", std::process::id()));
         let _ = fs::remove_dir_all(&generated);
-        let source = ordinary::ProposalSource::new("/nonexistent/bootstrap/datom.nota".to_string());
+        let source =
+            ordinary::ProposalSource::new("/nonexistent/bootstrap/datom.dotos".to_string());
         let cluster = ClusterSecretsDirectory::from_proposal_source(&source);
         GeneratedInputDirectory::new(generated.clone())
             .write_secrets(&cluster)

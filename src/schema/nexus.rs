@@ -10,13 +10,13 @@ pub type Boolean = bool;
 pub type Path = std::string::String;
 
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::Input as OrdinaryInput;
+pub use crate::schema::sema::OrdinaryIngress as OrdinaryIngress;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::Output as OrdinaryOutput;
+pub use crate::schema::sema::OrdinaryEgress as OrdinaryEgress;
 #[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::Input as MetaInput;
+pub use crate::schema::sema::MetaIngress as MetaIngress;
 #[rustfmt::skip]
-pub use meta_signal_lojix::schema::lib::Output as MetaOutput;
+pub use crate::schema::sema::MetaEgress as MetaEgress;
 #[rustfmt::skip]
 pub use crate::schema::sema::SemaReadInput as SemaReadInput;
 #[rustfmt::skip]
@@ -26,96 +26,104 @@ pub use crate::schema::sema::SemaWriteInput as SemaWriteInput;
 #[rustfmt::skip]
 pub use crate::schema::sema::SemaWriteOutput as SemaWriteOutput;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::ClusterName as ClusterName;
+pub use crate::schema::sema::ClusterName as ClusterName;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::NodeName as NodeName;
+pub use crate::schema::sema::NodeName as NodeName;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::ClosurePath as ClosurePath;
+pub use crate::schema::sema::ClosurePath as ClosurePath;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::FlakeReference as FlakeReference;
+pub use crate::schema::sema::FlakeReference as FlakeReference;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::ProposalSource as ProposalSource;
+pub use crate::schema::sema::ProposalSource as ProposalSource;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::SourceRevisionPolicy as SourceRevisionPolicy;
+pub use crate::schema::sema::UserName as UserName;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::SourceRevisionRecord as SourceRevisionRecord;
+pub use crate::schema::sema::GenerationIdentifier as GenerationIdentifier;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::UserName as UserName;
+pub use crate::schema::sema::DeploymentIdentifier as DeploymentIdentifier;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::GenerationIdentifier as GenerationIdentifier;
+pub use crate::schema::sema::GenerationSlot as GenerationSlot;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::DeploymentIdentifier as DeploymentIdentifier;
+pub use crate::schema::sema::ActivationEffect as ActivationEffect;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::GenerationSlot as GenerationSlot;
+pub use crate::schema::sema::HostDeployAction as HostDeployAction;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::ActivationEffect as ActivationEffect;
+pub use crate::schema::sema::HostComposition as HostComposition;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::HostDeployAction as HostDeployAction;
+pub use crate::schema::sema::GenerationArtifact as GenerationArtifact;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::HostComposition as HostComposition;
+pub use crate::schema::sema::UserEnvironmentAction as UserEnvironmentAction;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::GenerationArtifact as GenerationArtifact;
+pub use crate::schema::sema::SourceRevisionPolicy as SourceRevisionPolicy;
 #[rustfmt::skip]
-pub use signal_lojix::schema::lib::UserEnvironmentAction as UserEnvironmentAction;
+pub use crate::schema::sema::SourceRevisionRecord as SourceRevisionRecord;
 
 #[rustfmt::skip]
-#[cfg(feature = "nota-text")]
-pub use nota::{NotaDecodeError, NotaEncode, NotaSource};
+#[cfg(feature = "dotos-text")]
+pub use dotos::{DotosDecodeError, DotosEncode, DotosSource};
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum SignalInput {
-    OrdinaryInput(OrdinaryInput),
-    MetaInput(MetaInput),
+    OrdinaryInput(OrdinaryIngress),
+    MetaInput(MetaIngress),
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum SignalOutput {
-    OrdinaryOutput(OrdinaryOutput),
-    MetaOutput(MetaOutput),
+    OrdinaryOutput(OrdinaryEgress),
+    MetaOutput(MetaEgress),
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StoreUri(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct BuilderNode(NodeName);
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct TargetStore(String);
+pub struct TargetStore(StoreUri);
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum BuildTarget {
     Local,
     Remote(BuilderNode),
-    TargetStore(TargetStore),
+    Target(TargetStore),
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ExtraSubstituter {
@@ -125,36 +133,36 @@ pub struct ExtraSubstituter {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct FlakeAuthRequest {
-    pub source: ProposalSource,
-    pub flake: FlakeReference,
+    pub proposal_source: ProposalSource,
+    pub flake_reference: FlakeReference,
     pub source_revision_policy: SourceRevisionPolicy,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedFlake(SourceRevisionRecord);
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UserEnvironmentMaterialization(UserName);
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum MaterializationShape {
@@ -165,21 +173,21 @@ pub enum MaterializationShape {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct HorizonMaterializationCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub source: ProposalSource,
-    pub shape: MaterializationShape,
+    pub proposal_source: ProposalSource,
+    pub materialization_shape: MaterializationShape,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct FlakeInputReference {
@@ -189,57 +197,58 @@ pub struct FlakeInputReference {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct FlakeInputOverride {
-    pub name: String,
-    pub reference: FlakeInputReference,
+    pub string: String,
+    pub flake_input_reference: FlakeInputReference,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct MaterializedInputs(Vec<FlakeInputOverride>);
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct NixEvalCommand {
+    pub generation_identifier: GenerationIdentifier,
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub generation_artifact: GenerationArtifact,
-    pub flake: FlakeReference,
-    pub source_revision: SourceRevisionRecord,
-    pub attribute: String,
-    pub overrides: Vec<FlakeInputOverride>,
-    pub target: BuildTarget,
+    pub flake_reference: FlakeReference,
+    pub source_revision_record: SourceRevisionRecord,
+    pub string: String,
+    pub flake_input_override_vector: Vec<FlakeInputOverride>,
+    pub build_target: BuildTarget,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct NixBuildCommand {
     pub generation_identifier: GenerationIdentifier,
     pub closure_path: ClosurePath,
-    pub target: BuildTarget,
-    pub substituters: Vec<ExtraSubstituter>,
+    pub build_target: BuildTarget,
+    pub extra_substituter_vector: Vec<ExtraSubstituter>,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CopyClosureCommand {
@@ -247,24 +256,24 @@ pub struct CopyClosureCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub closure_path: ClosurePath,
-    pub source: BuildTarget,
+    pub build_target: BuildTarget,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct UserEnvironmentActivationProfile {
-    pub action: UserEnvironmentAction,
-    pub user: UserName,
+    pub user_environment_action: UserEnvironmentAction,
+    pub user_name: UserName,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum ActivationProfile {
@@ -274,8 +283,8 @@ pub enum ActivationProfile {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ActivateGenerationCommand {
@@ -285,13 +294,13 @@ pub struct ActivateGenerationCommand {
     pub node_name: NodeName,
     pub closure_path: ClosurePath,
     pub activation_effect: ActivationEffect,
-    pub profile: ActivationProfile,
+    pub activation_profile: ActivationProfile,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PathInfoGcCommand {
@@ -301,21 +310,21 @@ pub struct PathInfoGcCommand {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct HermeticCheckCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub flake: FlakeReference,
-    pub system: String,
+    pub flake_reference: FlakeReference,
+    pub string: String,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CheckBuilt {
@@ -326,58 +335,58 @@ pub struct CheckBuilt {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct BringUpTestVmCommand {
     pub cluster_name: ClusterName,
-    pub node_name: NodeName,
+    pub node: NodeName,
     pub host: NodeName,
-    pub runner: ClosurePath,
-    pub guest_ip: String,
+    pub closure_path: ClosurePath,
+    pub string: String,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TearDownTestVmCommand {
     pub cluster_name: ClusterName,
-    pub node_name: NodeName,
+    pub node: NodeName,
     pub host: NodeName,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TestVmBroughtUp {
     pub cluster_name: ClusterName,
-    pub node_name: NodeName,
+    pub node: NodeName,
     pub host: NodeName,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TestVmTornDown {
     pub cluster_name: ClusterName,
-    pub node_name: NodeName,
+    pub node: NodeName,
     pub host: NodeName,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum EffectCommand {
@@ -395,8 +404,8 @@ pub enum EffectCommand {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct EvaluatedClosure {
@@ -406,8 +415,8 @@ pub struct EvaluatedClosure {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct BuiltClosure {
@@ -417,8 +426,8 @@ pub struct BuiltClosure {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CopiedClosure {
@@ -429,8 +438,8 @@ pub struct CopiedClosure {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ActivatedGeneration {
@@ -441,31 +450,31 @@ pub struct ActivatedGeneration {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct GarbageCollected {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub reclaimed_paths: Integer,
+    pub integer: Integer,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct EffectFailure {
-    pub stage: EffectStage,
-    pub detail: String,
+    pub effect_stage: EffectStage,
+    pub string: String,
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -492,8 +501,8 @@ pub enum EffectStage {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum EffectResult {
@@ -505,15 +514,15 @@ pub enum EffectResult {
     GenerationActivated(ActivatedGeneration),
     PathsCollected(GarbageCollected),
     HermeticCheckBuilt(CheckBuilt),
-    TestVmBroughtUp(TestVmBroughtUp),
-    TestVmTornDown(TestVmTornDown),
+    TestVmStarted(TestVmBroughtUp),
+    TestVmStopped(TestVmTornDown),
     EffectFailed(EffectFailure),
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum NexusWork {
@@ -525,8 +534,8 @@ pub enum NexusWork {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum NexusAction {
@@ -539,22 +548,41 @@ pub enum NexusAction {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Input {
-    NexusWork(NexusWork),
+    Work(NexusWork),
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Output {
-    NexusAction(NexusAction),
+    Action(NexusAction),
+}
+
+#[rustfmt::skip]
+impl StoreUri {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for StoreUri {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
 }
 
 #[rustfmt::skip]
@@ -578,19 +606,19 @@ impl From<NodeName> for BuilderNode {
 
 #[rustfmt::skip]
 impl TargetStore {
-    pub fn new(payload: impl Into<String>) -> Self {
-        Self(payload.into())
+    pub fn new(payload: StoreUri) -> Self {
+        Self(payload)
     }
-    pub fn payload(&self) -> &String {
+    pub fn payload(&self) -> &StoreUri {
         &self.0
     }
-    pub fn into_payload(self) -> String {
+    pub fn into_payload(self) -> StoreUri {
         self.0
     }
 }
 #[rustfmt::skip]
-impl From<String> for TargetStore {
-    fn from(payload: String) -> Self {
+impl From<StoreUri> for TargetStore {
+    fn from(payload: StoreUri) -> Self {
         Self::new(payload)
     }
 }
@@ -654,20 +682,20 @@ impl From<Vec<FlakeInputOverride>> for MaterializedInputs {
 
 #[rustfmt::skip]
 impl SignalInput {
-    pub fn ordinary_input(payload: OrdinaryInput) -> Self {
+    pub fn ordinary_input(payload: OrdinaryIngress) -> Self {
         Self::OrdinaryInput(payload)
     }
-    pub fn meta_input(payload: MetaInput) -> Self {
+    pub fn meta_input(payload: MetaIngress) -> Self {
         Self::MetaInput(payload)
     }
 }
 
 #[rustfmt::skip]
 impl SignalOutput {
-    pub fn ordinary_output(payload: OrdinaryOutput) -> Self {
+    pub fn ordinary_output(payload: OrdinaryEgress) -> Self {
         Self::OrdinaryOutput(payload)
     }
-    pub fn meta_output(payload: MetaOutput) -> Self {
+    pub fn meta_output(payload: MetaEgress) -> Self {
         Self::MetaOutput(payload)
     }
 }
@@ -677,8 +705,8 @@ impl BuildTarget {
     pub fn remote(payload: NodeName) -> Self {
         Self::Remote(BuilderNode::new(payload))
     }
-    pub fn target_store(payload: String) -> Self {
-        Self::TargetStore(TargetStore::new(payload))
+    pub fn target(payload: StoreUri) -> Self {
+        Self::Target(TargetStore::new(payload))
     }
 }
 
@@ -759,11 +787,11 @@ impl EffectResult {
     pub fn hermetic_check_built(payload: CheckBuilt) -> Self {
         Self::HermeticCheckBuilt(payload)
     }
-    pub fn test_vm_brought_up(payload: TestVmBroughtUp) -> Self {
-        Self::TestVmBroughtUp(payload)
+    pub fn test_vm_started(payload: TestVmBroughtUp) -> Self {
+        Self::TestVmStarted(payload)
     }
-    pub fn test_vm_torn_down(payload: TestVmTornDown) -> Self {
-        Self::TestVmTornDown(payload)
+    pub fn test_vm_stopped(payload: TestVmTornDown) -> Self {
+        Self::TestVmStopped(payload)
     }
     pub fn effect_failed(payload: EffectFailure) -> Self {
         Self::EffectFailed(payload)
@@ -807,42 +835,42 @@ impl NexusAction {
 
 #[rustfmt::skip]
 impl Input {
-    pub fn nexus_work(payload: NexusWork) -> Self {
-        Self::NexusWork(payload)
+    pub fn work(payload: NexusWork) -> Self {
+        Self::Work(payload)
     }
 }
 
 #[rustfmt::skip]
 impl Output {
-    pub fn nexus_action(payload: NexusAction) -> Self {
-        Self::NexusAction(payload)
+    pub fn action(payload: NexusAction) -> Self {
+        Self::Action(payload)
     }
 }
 
 #[rustfmt::skip]
-impl From<OrdinaryInput> for SignalInput {
-    fn from(payload: OrdinaryInput) -> Self {
+impl From<OrdinaryIngress> for SignalInput {
+    fn from(payload: OrdinaryIngress) -> Self {
         Self::OrdinaryInput(payload)
     }
 }
 
 #[rustfmt::skip]
-impl From<MetaInput> for SignalInput {
-    fn from(payload: MetaInput) -> Self {
+impl From<MetaIngress> for SignalInput {
+    fn from(payload: MetaIngress) -> Self {
         Self::MetaInput(payload)
     }
 }
 
 #[rustfmt::skip]
-impl From<OrdinaryOutput> for SignalOutput {
-    fn from(payload: OrdinaryOutput) -> Self {
+impl From<OrdinaryEgress> for SignalOutput {
+    fn from(payload: OrdinaryEgress) -> Self {
         Self::OrdinaryOutput(payload)
     }
 }
 
 #[rustfmt::skip]
-impl From<MetaOutput> for SignalOutput {
-    fn from(payload: MetaOutput) -> Self {
+impl From<MetaEgress> for SignalOutput {
+    fn from(payload: MetaEgress) -> Self {
         Self::MetaOutput(payload)
     }
 }
@@ -857,7 +885,7 @@ impl From<BuilderNode> for BuildTarget {
 #[rustfmt::skip]
 impl From<TargetStore> for BuildTarget {
     fn from(payload: TargetStore) -> Self {
-        Self::TargetStore(payload)
+        Self::Target(payload)
     }
 }
 
@@ -1011,14 +1039,14 @@ impl From<CheckBuilt> for EffectResult {
 #[rustfmt::skip]
 impl From<TestVmBroughtUp> for EffectResult {
     fn from(payload: TestVmBroughtUp) -> Self {
-        Self::TestVmBroughtUp(payload)
+        Self::TestVmStarted(payload)
     }
 }
 
 #[rustfmt::skip]
 impl From<TestVmTornDown> for EffectResult {
     fn from(payload: TestVmTornDown) -> Self {
-        Self::TestVmTornDown(payload)
+        Self::TestVmStopped(payload)
     }
 }
 
@@ -1095,53 +1123,53 @@ impl From<NexusWork> for NexusAction {
 #[rustfmt::skip]
 impl From<NexusWork> for Input {
     fn from(payload: NexusWork) -> Self {
-        Self::NexusWork(payload)
+        Self::Work(payload)
     }
 }
 
 #[rustfmt::skip]
 impl From<NexusAction> for Output {
     fn from(payload: NexusAction) -> Self {
-        Self::NexusAction(payload)
+        Self::Action(payload)
     }
 }
 
 #[rustfmt::skip]
-#[cfg(feature = "nota-text")]
+#[cfg(feature = "dotos-text")]
 impl std::str::FromStr for Input {
-    type Err = NotaDecodeError;
+    type Err = DotosDecodeError;
     fn from_str(source: &str) -> Result<Self, Self::Err> {
-        NotaSource::new(source).parse::<Self>()
+        DotosSource::new(source).parse::<Self>()
     }
 }
 #[rustfmt::skip]
-#[cfg(feature = "nota-text")]
+#[cfg(feature = "dotos-text")]
 impl std::fmt::Display for Input {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&<Self as NotaEncode>::to_nota(self))
+        formatter.write_str(&<Self as DotosEncode>::to_dotos(self))
     }
 }
 
 #[rustfmt::skip]
-#[cfg(feature = "nota-text")]
+#[cfg(feature = "dotos-text")]
 impl std::str::FromStr for Output {
-    type Err = NotaDecodeError;
+    type Err = DotosDecodeError;
     fn from_str(source: &str) -> Result<Self, Self::Err> {
-        NotaSource::new(source).parse::<Self>()
+        DotosSource::new(source).parse::<Self>()
     }
 }
 #[rustfmt::skip]
-#[cfg(feature = "nota-text")]
+#[cfg(feature = "dotos-text")]
 impl std::fmt::Display for Output {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&<Self as NotaEncode>::to_nota(self))
+        formatter.write_str(&<Self as DotosEncode>::to_dotos(self))
     }
 }
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -1174,8 +1202,8 @@ impl NexusWork {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -1210,8 +1238,8 @@ impl NexusAction {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -1262,8 +1290,8 @@ impl NexusObjectName {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -1280,8 +1308,8 @@ pub enum ObjectName {
 }
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,
@@ -1317,8 +1345,8 @@ impl TraceEvent {
 
 #[rustfmt::skip]
 #[cfg_attr(
-    feature = "nota-text",
-    derive(nota::NotaDecode, nota::NotaDecodeTraced, nota::NotaEncode)
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(
     rkyv::Archive,

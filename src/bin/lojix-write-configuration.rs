@@ -1,15 +1,15 @@
 //! lojix-write-configuration — the bootstrap/deploy tool that encodes a typed
-//! NOTA configuration request into the binary rkyv startup file the daemon
+//! DOTOS configuration request into the binary rkyv startup file the daemon
 //! consumes. The daemon takes only a pre-generated rkyv argument and never
-//! parses NOTA, so this tool is the NOTA-to-binary boundary at deploy time.
+//! parses DOTOS, so this tool is the DOTOS-to-binary boundary at deploy time.
 //! Mirrors `spirit-write-configuration`. Per the daemon-binary-startup rule
 //! and Spirit `ur16` (bootstrap-config and runtime-config share one
 //! vocabulary; the meta `Configure` op carries the same shape at runtime).
 
 use std::path::PathBuf;
 
+use dotos::{DotosDecode, DotosDecodeError, DotosSource};
 use lojix::{DaemonConfiguration, TestDefaults, TestMode};
-use nota::{NotaDecode, NotaDecodeError, NotaSource};
 use thiserror::Error;
 use triad_runtime::{ArgumentError, ComponentArgument, ComponentCommand};
 
@@ -24,7 +24,7 @@ struct ConfigurationWriterCli {
     command: ComponentCommand,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
 struct ConfigurationWriteRequest {
     ordinary_socket_path: WriterPath,
     ordinary_socket_mode: WriterMode,
@@ -44,16 +44,16 @@ struct ConfigurationWriteRequest {
 /// fixtures are supplied only by test code, never baked per-node into a
 /// production module (the workspace deployment-independence discipline). A
 /// test/dev daemon carries `(TestDefaults …)` with the explicit fixture.
-#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
 enum WriterTestDefaultsChoice {
     NoTestDefaults,
     TestDefaults(WriterTestDefaults),
 }
 
-/// The test-op defaults authored as typed NOTA at deploy time and encoded into
-/// the daemon's binary startup — the NOTA-to-binary boundary for report 54's
+/// The test-op defaults authored as typed DOTOS at deploy time and encoded into
+/// the daemon's binary startup — the DOTOS-to-binary boundary for report 54's
 /// `TestDefaults` (never a flag, never a runtime `Configure`).
-#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
 struct WriterTestDefaults {
     cluster: WriterCluster,
     default_vm_host: WriterCluster,
@@ -62,27 +62,27 @@ struct WriterTestDefaults {
     proposal_source: WriterPath,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
 struct WriterCluster(String);
 
-#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
 enum WriterTestMode {
     Hermetic,
     Live,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
 enum ConfigurationWriterInput {
     ConfigurationWriteRequest(ConfigurationWriteRequest),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
 struct WriterPath(String);
 
-#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
 struct WriterMode(u32);
 
-#[derive(Debug, Clone, PartialEq, Eq, NotaDecode)]
+#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
 struct WriterSeconds(u64);
 
 impl ConfigurationWriterCli {
@@ -94,7 +94,7 @@ impl ConfigurationWriterCli {
 
     fn run(&self) -> Result<(), ConfigurationWriterError> {
         let text = self.source()?;
-        let request = NotaSource::new(&text)
+        let request = DotosSource::new(&text)
             .parse::<ConfigurationWriterInput>()?
             .into_request();
         let output_path = request.write()?;
@@ -103,12 +103,12 @@ impl ConfigurationWriterCli {
     }
 
     fn source(&self) -> Result<String, ConfigurationWriterError> {
-        match self.command.nota_argument()? {
-            ComponentArgument::InlineNota(argument) => Ok(argument.into_string()),
-            ComponentArgument::NotaFile(file) => {
+        match self.command.dotos_argument()? {
+            ComponentArgument::InlineDotos(argument) => Ok(argument.into_string()),
+            ComponentArgument::DotosFile(file) => {
                 let path = file.into_path();
                 std::fs::read_to_string(&path)
-                    .map_err(|source| ConfigurationWriterError::ReadNotaFile { path, source })
+                    .map_err(|source| ConfigurationWriterError::ReadDotosFile { path, source })
             }
             ComponentArgument::SignalFile(file) => {
                 Err(ConfigurationWriterError::UnsupportedSignalFile {
@@ -188,8 +188,8 @@ impl From<WriterTestMode> for TestMode {
 enum ConfigurationWriterError {
     #[error(transparent)]
     Argument(#[from] ArgumentError),
-    #[error("read NOTA file {}: {source}", path.display())]
-    ReadNotaFile {
+    #[error("read DOTOS file {}: {source}", path.display())]
+    ReadDotosFile {
         path: PathBuf,
         source: std::io::Error,
     },
@@ -198,7 +198,7 @@ enum ConfigurationWriterError {
     #[error("effect timeout must be at least one second")]
     ZeroEffectTimeout,
     #[error(transparent)]
-    Decode(#[from] NotaDecodeError),
+    Decode(#[from] DotosDecodeError),
     #[error("write configuration archive: {0}")]
     WriteConfiguration(lojix::Error),
 }
