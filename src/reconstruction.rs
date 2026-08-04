@@ -206,12 +206,24 @@ impl StoreMigrationCommand {
 /// Idempotent pre-v3 to schema-three store migrator.
 pub struct StoreMigrator {
     paths: MigrationPaths,
+    #[cfg(test)]
+    interrupt_after_atomic_replacement: bool,
 }
 
 impl StoreMigrator {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             paths: MigrationPaths::for_store(path),
+            #[cfg(test)]
+            interrupt_after_atomic_replacement: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_test_interruption_after_atomic_replacement(path: impl Into<PathBuf>) -> Self {
+        Self {
+            paths: MigrationPaths::for_store(path),
+            interrupt_after_atomic_replacement: true,
         }
     }
 
@@ -285,6 +297,9 @@ impl StoreMigrator {
         fs::rename(&self.paths.staging, &self.paths.canonical)?;
         sync_parent(&self.paths.canonical)?;
 
+        #[cfg(test)]
+        self.interrupt_after_atomic_replacement_for_test()?;
+
         let reopened = Store::open(&self.paths.canonical)?;
         let actual = reopened.migration_counts()?;
         if actual != counts {
@@ -299,6 +314,16 @@ impl StoreMigrator {
             backup: self.paths.backup.clone(),
             counts,
         })
+    }
+
+    #[cfg(test)]
+    fn interrupt_after_atomic_replacement_for_test(&self) -> Result<()> {
+        if self.interrupt_after_atomic_replacement {
+            return Err(migration_error(
+                "test-only interruption after atomic staging-to-canonical replacement",
+            ));
+        }
+        Ok(())
     }
 
     /// A schema-three canonical store normally retains only the permanent
@@ -360,7 +385,20 @@ impl StoreMigrator {
             )));
         }
 
-        remove_tool_scratch(&self.paths.staging_owner)
+        #[cfg(test)]
+        let canonical_before_cleanup = TestFileWitness::capture(&self.paths.canonical)?;
+        #[cfg(test)]
+        let backup_before_cleanup = TestFileWitness::capture(&self.paths.backup)?;
+
+        remove_tool_scratch(&self.paths.staging_owner)?;
+
+        #[cfg(test)]
+        {
+            canonical_before_cleanup.assert_unchanged(&self.paths.canonical, "canonical store")?;
+            backup_before_cleanup.assert_unchanged(&self.paths.backup, "schema-two backup")?;
+        }
+
+        Ok(())
     }
 
     fn ensure_backup(&self, snapshot: &LegacyV2Snapshot, source_version: u64) -> Result<()> {
@@ -1233,6 +1271,37 @@ fn regular_file_entry(path: &Path) -> Result<bool> {
     Ok(fs::symlink_metadata(path)?.file_type().is_file())
 }
 
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+struct TestFileWitness {
+    bytes: Vec<u8>,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+}
+
+#[cfg(test)]
+impl TestFileWitness {
+    fn capture(path: &Path) -> Result<Self> {
+        let metadata = fs::metadata(path)?;
+        Ok(Self {
+            bytes: fs::read(path)?,
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            mode: metadata.mode(),
+        })
+    }
+
+    fn assert_unchanged(&self, path: &Path, name: &str) -> Result<()> {
+        if self != &Self::capture(path)? {
+            return Err(migration_error(format!(
+                "test invariant: {name} changed while removing a verified post-replacement ownership marker"
+            )));
+        }
+        Ok(())
+    }
+}
+
 fn files_equal(left: &Path, right: &Path) -> Result<bool> {
     if fs::metadata(left)?.len() != fs::metadata(right)?.len() {
         return Ok(false);
@@ -1446,7 +1515,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_three_retry_reconciles_only_verified_post_replacement_owner_residue() {
+    fn schema_three_retry_recovers_an_interrupted_atomic_replacement() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("lojix.sema");
         seed_minimal_v2_store(&path);
@@ -1455,31 +1524,38 @@ mod tests {
         let source_bytes = fs::read(&path).expect("read source bytes");
         let source_metadata = metadata_fingerprint(&path);
 
-        let migrator = StoreMigrator::new(&path);
-        let outcome = migrator.migrate().expect("migrate v2 store");
-        let MigrationOutcome::Migrated { counts, .. } = outcome else {
-            panic!("expected migration outcome");
-        };
-        let paths = migrator.paths().clone();
+        let interrupted = StoreMigrator::with_test_interruption_after_atomic_replacement(&path);
+        let paths = interrupted.paths().clone();
+        let error = interrupted
+            .migrate()
+            .expect_err("test-only post-rename interruption");
+        assert!(
+            error
+                .to_string()
+                .contains("interruption after atomic staging-to-canonical replacement")
+        );
+
+        assert_eq!(
+            schema_version(&path).expect("read canonical schema"),
+            SCHEMA_THREE
+        );
+        assert!(!path_entry_exists(paths.staging()).expect("inspect staging"));
+        assert!(path_entry_exists(paths.staging_owner()).expect("inspect owner"));
+        assert!(same_file(paths.backup(), paths.staging_owner()).expect("compare owner inode"));
         assert_eq!(
             fs::read(paths.backup()).expect("read backup bytes"),
             source_bytes
         );
         assert_eq!(metadata_fingerprint(paths.backup()), source_metadata);
         assert_eq!(metadata_fingerprint(&path), source_metadata);
-
-        // This is the exact durable state after `rename(staging, canonical)`
-        // and its parent sync, but before removal of the hard-link owner.
-        fs::hard_link(paths.backup(), paths.staging_owner())
-            .expect("recreate post-replacement ownership marker");
-        assert!(same_file(paths.backup(), paths.staging_owner()).expect("compare owner inode"));
         let backup_bytes = fs::read(paths.backup()).expect("read backup bytes");
         let canonical_metadata = metadata_fingerprint(&path);
         let backup_metadata = metadata_fingerprint(paths.backup());
 
-        let retry = migrator
-            .migrate()
-            .expect("reconcile verified ownership residue");
+        let retry = StoreMigrationCommand::from_arguments([path.clone().into_os_string()])
+            .expect("construct public migration command")
+            .run()
+            .expect("reopen and reconcile verified ownership residue");
         let MigrationOutcome::AlreadyCurrent {
             counts: retry_counts,
             ..
@@ -1487,7 +1563,6 @@ mod tests {
         else {
             panic!("expected schema-three inspection");
         };
-        assert_eq!(retry_counts, counts);
         assert!(!path_entry_exists(paths.staging()).expect("inspect staging"));
         assert!(!path_entry_exists(paths.staging_owner()).expect("inspect owner"));
         assert_eq!(
@@ -1496,15 +1571,11 @@ mod tests {
         );
         assert_eq!(metadata_fingerprint(&path), canonical_metadata);
         assert_eq!(metadata_fingerprint(paths.backup()), backup_metadata);
-        assert_eq!(
-            Store::open(&path)
-                .expect("reopen canonical after retry")
-                .migration_counts()
-                .expect("count canonical rows after retry"),
-            counts
-        );
 
-        let second_retry = migrator.migrate().expect("idempotent retry");
+        let second_retry = StoreMigrationCommand::from_arguments([path.into_os_string()])
+            .expect("construct public migration command")
+            .run()
+            .expect("idempotent retry");
         let MigrationOutcome::AlreadyCurrent {
             counts: second_retry_counts,
             ..
@@ -1512,7 +1583,14 @@ mod tests {
         else {
             panic!("expected schema-three inspection");
         };
-        assert_eq!(second_retry_counts, counts);
+        assert_eq!(second_retry_counts, retry_counts);
+        assert!(!path_entry_exists(paths.staging()).expect("inspect staging"));
+        assert!(!path_entry_exists(paths.staging_owner()).expect("inspect owner"));
+        assert_eq!(
+            fs::read(paths.backup()).expect("read backup after idempotent retry"),
+            backup_bytes
+        );
+        assert_eq!(metadata_fingerprint(paths.backup()), backup_metadata);
     }
 
     #[test]
