@@ -59,6 +59,8 @@ struct WriterTestDefaults {
     default_vm_host: WriterCluster,
     default_mode: WriterTestMode,
     test_flake: WriterCluster,
+    test_nix_system: WriterCluster,
+    test_output_selector: WriterCluster,
     proposal_source: WriterPath,
 }
 
@@ -163,6 +165,8 @@ impl WriterTestDefaultsChoice {
                 default_vm_host: defaults.default_vm_host.0,
                 default_mode: defaults.default_mode.into(),
                 test_flake: defaults.test_flake.0,
+                test_nix_system: defaults.test_nix_system.0,
+                test_output_selector: defaults.test_output_selector.0,
                 proposal_source: defaults.proposal_source.0,
             }),
         }

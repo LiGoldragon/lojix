@@ -22,8 +22,6 @@ use crate::{Error, Result};
 
 const ORDINARY_SOCKET_ENV: &str = "LOJIX_ORDINARY_SOCKET";
 const OWNER_SOCKET_ENV: &str = "LOJIX_OWNER_SOCKET";
-const DEFAULT_ORDINARY_SOCKET: &str = "/run/lojix/ordinary.sock";
-const DEFAULT_OWNER_SOCKET: &str = "/run/lojix/owner.sock";
 
 fn exchange_identifier() -> ExchangeIdentifier {
     ExchangeIdentifier::new(
@@ -42,13 +40,18 @@ pub struct SocketExchange {
 }
 
 impl SocketExchange {
-    pub fn for_environment(environment_variable: &str, default_path: &str) -> Self {
-        let socket_path =
-            std::env::var(environment_variable).unwrap_or_else(|_| default_path.to_string());
-        Self {
+    pub fn for_environment(environment_variable: &str) -> Result<Self> {
+        let socket_path = std::env::var(environment_variable)
+            .map_err(|_| Error::MissingRuntimeConfiguration(environment_variable.to_string()))?;
+        if socket_path.is_empty() {
+            return Err(Error::MissingRuntimeConfiguration(
+                environment_variable.to_string(),
+            ));
+        }
+        Ok(Self {
             socket_path,
             codec: LengthPrefixedCodec::default(),
-        }
+        })
     }
 
     /// Exchange one request frame for one reply frame, returning the reply body
@@ -92,8 +95,7 @@ impl OrdinaryClient {
     }
 
     pub fn run(self) -> Result<signal_lojix::schema::lib::Output> {
-        let exchange =
-            SocketExchange::for_environment(ORDINARY_SOCKET_ENV, DEFAULT_ORDINARY_SOCKET);
+        let exchange = SocketExchange::for_environment(ORDINARY_SOCKET_ENV)?;
         let identifier = exchange_identifier();
         let reply = exchange.exchange(self.input.encode_request_frame(identifier)?)?;
         Self::decode_reply(&reply, identifier)
@@ -174,7 +176,7 @@ impl MetaClient {
     }
 
     pub fn run(self) -> Result<meta_signal_lojix::schema::lib::Output> {
-        let exchange = SocketExchange::for_environment(OWNER_SOCKET_ENV, DEFAULT_OWNER_SOCKET);
+        let exchange = SocketExchange::for_environment(OWNER_SOCKET_ENV)?;
         let identifier = exchange_identifier();
         let reply = exchange.exchange(self.input.encode_request_frame(identifier)?)?;
         Self::decode_reply(&reply, identifier)

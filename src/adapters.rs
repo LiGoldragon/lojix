@@ -222,7 +222,7 @@ fn test_request(value: meta::TestRequest) -> sema::TestRequest {
             cluster_name: cluster_name(run.cluster_name),
             node_selection: node_selection(run.node_selection),
             host_selection: host_selection(run.host_selection),
-            test_mode: test_mode(run.test_mode),
+            test_execution_profile: test_execution_profile(run.test_execution_profile),
         }),
         meta::TestRequest::Check(check) => sema::TestRequest::Check(sema::QuickCheck::new(
             check.into_payload().into_iter().map(node_name).collect(),
@@ -230,12 +230,50 @@ fn test_request(value: meta::TestRequest) -> sema::TestRequest {
     }
 }
 
-fn builder(value: meta::Builder) -> sema::Builder {
-    sema::Builder::new(node_name(value.into_payload()))
+fn deployment_transport(value: meta::DeploymentTransport) -> sema::DeploymentTransport {
+    sema::DeploymentTransport {
+        nix_store_uri: sema::NixStoreUri::new(value.nix_store_uri.into_payload()),
+        ssh_destination: sema::SshDestination::new(value.ssh_destination.into_payload()),
+    }
 }
 
-fn flake_attribute(value: meta::FlakeAttribute) -> sema::FlakeAttribute {
-    sema::FlakeAttribute::new(value.into_payload())
+fn deployment_input_mode(value: meta::DeploymentInputMode) -> sema::DeploymentInputMode {
+    match value {
+        meta::DeploymentInputMode::Direct => sema::DeploymentInputMode::Direct,
+        meta::DeploymentInputMode::Horizon => sema::DeploymentInputMode::Horizon,
+    }
+}
+
+fn deployment_output_selector(
+    value: meta::DeploymentOutputSelector,
+) -> sema::DeploymentOutputSelector {
+    sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new(
+        value.into_payload().into_payload(),
+    ))
+}
+
+fn activation_backend(value: meta::ActivationBackend) -> sema::ActivationBackend {
+    match value {
+        meta::ActivationBackend::NixosSystemdBootV1 => sema::ActivationBackend::NixosSystemdBootV1,
+        meta::ActivationBackend::HomeManagerNixProfileV1 => {
+            sema::ActivationBackend::HomeManagerNixProfileV1
+        }
+    }
+}
+
+fn nix_builder_spec(value: meta::NixBuilderSpec) -> sema::NixBuilderSpec {
+    sema::NixBuilderSpec::new(value.into_payload())
+}
+
+fn test_execution_profile(value: meta::TestExecutionProfile) -> sema::TestExecutionProfile {
+    sema::TestExecutionProfile {
+        test_mode: test_mode(value.test_mode),
+        nix_system: sema::NixSystem::new(value.nix_system.into_payload()),
+        deployment_output_selector: deployment_output_selector(value.deployment_output_selector),
+        optional_deployment_transport: value
+            .optional_deployment_transport
+            .map(deployment_transport),
+    }
 }
 
 fn extra_substituter(value: meta::ExtraSubstituter) -> sema::ExtraSubstituter {
@@ -254,15 +292,22 @@ fn deploy_request(value: meta::DeployRequest) -> sema::DeploySubmission {
                 host_composition: host_composition(deployment.host_composition),
                 proposal_source: proposal_source(deployment.proposal_source),
                 flake_reference: flake_reference(deployment.flake_reference),
+                deployment_transport: deployment_transport(deployment.deployment_transport),
+                deployment_input_mode: deployment_input_mode(deployment.deployment_input_mode),
+                deployment_output_selector: deployment_output_selector(
+                    deployment.deployment_output_selector,
+                ),
+                activation_backend: activation_backend(deployment.activation_backend),
                 host_deploy_action: host_deploy_action(deployment.host_deploy_action),
                 source_revision_policy: source_revision_policy(deployment.source_revision_policy),
-                optional_builder: deployment.optional_builder.map(builder),
+                optional_nix_builder_spec: deployment
+                    .optional_nix_builder_spec
+                    .map(nix_builder_spec),
                 extra_substituter_vector: deployment
                     .extra_substituter_vector
                     .into_iter()
                     .map(extra_substituter)
                     .collect(),
-                optional_flake_attribute: deployment.optional_flake_attribute.map(flake_attribute),
             })
         }
         meta::DeployRequest::UserEnvironment(deployment) => {
@@ -272,11 +317,19 @@ fn deploy_request(value: meta::DeployRequest) -> sema::DeploySubmission {
                 user_name: user_name(deployment.user_name),
                 proposal_source: proposal_source(deployment.proposal_source),
                 flake_reference: flake_reference(deployment.flake_reference),
+                deployment_transport: deployment_transport(deployment.deployment_transport),
+                deployment_input_mode: deployment_input_mode(deployment.deployment_input_mode),
+                deployment_output_selector: deployment_output_selector(
+                    deployment.deployment_output_selector,
+                ),
+                activation_backend: activation_backend(deployment.activation_backend),
                 user_environment_action: user_environment_action(
                     deployment.user_environment_action,
                 ),
                 source_revision_policy: source_revision_policy(deployment.source_revision_policy),
-                optional_builder: deployment.optional_builder.map(builder),
+                optional_nix_builder_spec: deployment
+                    .optional_nix_builder_spec
+                    .map(nix_builder_spec),
                 extra_substituter_vector: deployment
                     .extra_substituter_vector
                     .into_iter()
@@ -377,8 +430,8 @@ fn public_marker(value: sema::StateMarker) -> ordinary::DatabaseMarker {
 }
 
 /// Ordinary egress is a privacy boundary: only a canonical immutable Nix
-/// store-item root can leave it. Local persistence may retain other strings
-/// for diagnostics/migration, but they never become a public closure path.
+/// store-item root can leave it. Local persistence may retain other private
+/// strings, but they never become a public closure path.
 fn public_closure_path(value: sema::ClosurePath) -> Option<ordinary::ClosurePath> {
     canonical_nix_store_root(value.payload())
         .then(|| ordinary::ClosurePath::new(value.into_payload()))
@@ -429,9 +482,6 @@ fn public_generation_artifact(
         sema::GenerationArtifact::UserEnvironment => {
             Ok(ordinary::GenerationArtifact::UserEnvironment)
         }
-        sema::GenerationArtifact::LegacyUnknown => {
-            Ok(ordinary::GenerationArtifact::LegacyUnknownArtifact)
-        }
     }
 }
 
@@ -444,9 +494,6 @@ fn public_activation_effect(
         sema::ActivationEffect::TestActivation => Ok(ordinary::ActivationEffect::TestActivation),
         sema::ActivationEffect::BootOnceProfile => Ok(ordinary::ActivationEffect::BootOnceProfile),
         sema::ActivationEffect::ProfileOnly => Ok(ordinary::ActivationEffect::ProfileOnly),
-        sema::ActivationEffect::LegacyUnknown => {
-            Ok(ordinary::ActivationEffect::LegacyUnknownActivationEffect)
-        }
     }
 }
 
@@ -457,11 +504,6 @@ fn public_generation_slot(value: sema::GenerationSlot) -> crate::Result<ordinary
         sema::GenerationSlot::Rollback => Ok(ordinary::GenerationSlot::Rollback),
         sema::GenerationSlot::Pinned => Ok(ordinary::GenerationSlot::Pinned),
         sema::GenerationSlot::Recent => Ok(ordinary::GenerationSlot::Recent),
-        // Migration-only slots are deliberately projected as non-current
-        // history. They never grant a legacy row ownership of the live slot.
-        sema::GenerationSlot::LegacyUnknown | sema::GenerationSlot::LegacyAmbiguous => {
-            Ok(ordinary::GenerationSlot::Recent)
-        }
     }
 }
 
@@ -570,9 +612,6 @@ fn public_deployment_environment(
         sema::DeploymentEnvironment::UserEnvironment(user) => Ok(
             ordinary::DeploymentEnvironment::UserEnvironment(public_user_name(user)),
         ),
-        sema::DeploymentEnvironment::LegacyUnknownEnvironment => {
-            Ok(ordinary::DeploymentEnvironment::LegacyUnknownEnvironment)
-        }
     }
 }
 
@@ -605,9 +644,6 @@ fn public_requested_action(
         sema::RequestedDeploymentAction::UserEnvironment(action) => Ok(
             ordinary::RequestedDeploymentAction::UserEnvironment(public_user_action(action)),
         ),
-        sema::RequestedDeploymentAction::LegacyUnknownAction => {
-            Ok(ordinary::RequestedDeploymentAction::LegacyUnknownAction)
-        }
     }
 }
 
@@ -635,12 +671,6 @@ fn public_deployment_lifecycle(
         sema::DeploymentLifecycle::Completed => Ok(ordinary::DeploymentLifecycle::Completed),
         sema::DeploymentLifecycle::Rejected => Ok(ordinary::DeploymentLifecycle::Rejected),
         sema::DeploymentLifecycle::Failed => Ok(ordinary::DeploymentLifecycle::Failed),
-        sema::DeploymentLifecycle::LegacyUnknown => {
-            Ok(ordinary::DeploymentLifecycle::LegacyUnknown)
-        }
-        sema::DeploymentLifecycle::LegacyAmbiguous => {
-            Ok(ordinary::DeploymentLifecycle::LegacyAmbiguous)
-        }
     }
 }
 
@@ -659,6 +689,9 @@ fn public_terminal_reason(
         }
         sema::DeploymentTerminalReason::FlakeReferenceMalformed => {
             ordinary::DeploymentTerminalReason::FlakeReferenceMalformed
+        }
+        sema::DeploymentTerminalReason::InvalidDeploymentRouting => {
+            ordinary::DeploymentTerminalReason::InvalidDeploymentRouting
         }
         sema::DeploymentTerminalReason::BuilderUnreachable => {
             ordinary::DeploymentTerminalReason::BuilderUnreachable
@@ -714,7 +747,6 @@ fn public_terminal(value: sema::DeploymentTerminal) -> crate::Result<ordinary::D
                 ),
             },
         )),
-        sema::DeploymentTerminal::LegacyUnknown => Ok(ordinary::DeploymentTerminal::LegacyUnknown),
     }
 }
 
@@ -1152,8 +1184,12 @@ mod tests {
     }
 
     #[test]
-    fn public_outputs_are_typed_and_omit_raw_source_reference_error_and_path_text() {
-        let private_text = "proposal=/srv/private/cluster.dotos ref=github:owner/repo?token=raw-secret error=raw failure path=/tmp/private";
+    fn public_outputs_omit_private_source_failure_and_transport_text() {
+        let private_store_uri = "ssh-ng://private-copy.invalid:2244?compress=true";
+        let private_ssh_destination = "private-login@private-activation.invalid";
+        let private_text = format!(
+            "proposal=/srv/private/cluster.dotos ref=github:owner/repo?token=raw-secret error=raw failure path=/tmp/private store={private_store_uri} ssh={private_ssh_destination}"
+        );
         let private_path = "/srv/private/generated-input";
         let queried = ordinary_egress(sema::OrdinaryEgress::Queried(sema::GenerationListing {
             generation_vector: vec![sema::Generation {
@@ -1183,7 +1219,7 @@ mod tests {
         let checked = ordinary_egress(sema::OrdinaryEgress::KeyMaterialChecked(
             sema::KeyMaterialReport {
                 node_name: sema::NodeName::new("node-1"),
-                string_vector: vec![private_text.to_string()],
+                string_vector: vec![private_text.clone()],
                 state_marker: marker(),
             },
         ))
@@ -1197,8 +1233,10 @@ mod tests {
             .expect("project terminal output");
         let printed = format!("{queried:?}{checked:?}{terminal:?}");
         for forbidden in [
-            private_text,
+            private_text.as_str(),
             private_path,
+            private_store_uri,
+            private_ssh_destination,
             "proposal_source",
             "flake_reference",
             "source_revision_record",

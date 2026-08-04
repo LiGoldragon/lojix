@@ -57,6 +57,8 @@ pub use crate::schema::sema::UserEnvironmentAction as UserEnvironmentAction;
 pub use crate::schema::sema::SourceRevisionPolicy as SourceRevisionPolicy;
 #[rustfmt::skip]
 pub use crate::schema::sema::SourceRevisionRecord as SourceRevisionRecord;
+#[rustfmt::skip]
+pub use crate::schema::sema::TestMode as TestMode;
 
 #[rustfmt::skip]
 #[cfg(feature = "dotos-text")]
@@ -90,7 +92,7 @@ pub enum SignalOutput {
     derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct StoreUri(String);
+pub struct NixStoreUri(String);
 
 #[rustfmt::skip]
 #[cfg_attr(
@@ -98,7 +100,7 @@ pub struct StoreUri(String);
     derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct BuilderNode(NodeName);
+pub struct SshDestination(String);
 
 #[rustfmt::skip]
 #[cfg_attr(
@@ -106,7 +108,82 @@ pub struct BuilderNode(NodeName);
     derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct TargetStore(StoreUri);
+pub struct DeploymentTransport {
+    pub nix_store_uri: NixStoreUri,
+    pub ssh_destination: SshDestination,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum DeploymentInputMode {
+    Direct,
+    Horizon,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FlakeAttribute(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentOutputSelector(FlakeAttribute);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum ActivationBackend {
+    NixosSystemdBootV1,
+    HomeManagerNixProfileV1,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NixBuilderSpec(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NixSystem(String);
 
 #[rustfmt::skip]
 #[cfg_attr(
@@ -116,8 +193,7 @@ pub struct TargetStore(StoreUri);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum BuildTarget {
     Local,
-    Remote(BuilderNode),
-    Target(TargetStore),
+    Remote(NixBuilderSpec),
 }
 
 #[rustfmt::skip]
@@ -227,7 +303,7 @@ pub struct NixEvalCommand {
     pub generation_artifact: GenerationArtifact,
     pub flake_reference: FlakeReference,
     pub source_revision_record: SourceRevisionRecord,
-    pub string: String,
+    pub deployment_output_selector: DeploymentOutputSelector,
     pub flake_input_override_vector: Vec<FlakeInputOverride>,
     pub build_target: BuildTarget,
 }
@@ -253,10 +329,9 @@ pub struct NixBuildCommand {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CopyClosureCommand {
     pub generation_identifier: GenerationIdentifier,
-    pub cluster_name: ClusterName,
     pub node_name: NodeName,
+    pub deployment_transport: DeploymentTransport,
     pub closure_path: ClosurePath,
-    pub build_target: BuildTarget,
 }
 
 #[rustfmt::skip]
@@ -292,8 +367,10 @@ pub struct ActivateGenerationCommand {
     pub generation_identifier: GenerationIdentifier,
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
+    pub deployment_transport: DeploymentTransport,
     pub closure_path: ClosurePath,
     pub activation_effect: ActivationEffect,
+    pub activation_backend: ActivationBackend,
     pub activation_profile: ActivationProfile,
 }
 
@@ -314,11 +391,24 @@ pub struct PathInfoGcCommand {
     derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TestExecutionProfile {
+    pub test_mode: TestMode,
+    pub nix_system: NixSystem,
+    pub deployment_output_selector: DeploymentOutputSelector,
+    pub optional_deployment_transport: Option<DeploymentTransport>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct HermeticCheckCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub flake_reference: FlakeReference,
-    pub string: String,
+    pub test_execution_profile: TestExecutionProfile,
 }
 
 #[rustfmt::skip]
@@ -343,6 +433,7 @@ pub struct BringUpTestVmCommand {
     pub cluster_name: ClusterName,
     pub node: NodeName,
     pub host: NodeName,
+    pub deployment_transport: DeploymentTransport,
     pub closure_path: ClosurePath,
     pub string: String,
 }
@@ -357,6 +448,7 @@ pub struct TearDownTestVmCommand {
     pub cluster_name: ClusterName,
     pub node: NodeName,
     pub host: NodeName,
+    pub deployment_transport: DeploymentTransport,
 }
 
 #[rustfmt::skip]
@@ -567,7 +659,7 @@ pub enum Output {
 }
 
 #[rustfmt::skip]
-impl StoreUri {
+impl NixStoreUri {
     pub fn new(payload: impl Into<String>) -> Self {
         Self(payload.into())
     }
@@ -579,46 +671,103 @@ impl StoreUri {
     }
 }
 #[rustfmt::skip]
-impl From<String> for StoreUri {
+impl From<String> for NixStoreUri {
     fn from(payload: String) -> Self {
         Self::new(payload)
     }
 }
 
 #[rustfmt::skip]
-impl BuilderNode {
-    pub fn new(payload: NodeName) -> Self {
-        Self(payload)
+impl SshDestination {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
     }
-    pub fn payload(&self) -> &NodeName {
+    pub fn payload(&self) -> &String {
         &self.0
     }
-    pub fn into_payload(self) -> NodeName {
+    pub fn into_payload(self) -> String {
         self.0
     }
 }
 #[rustfmt::skip]
-impl From<NodeName> for BuilderNode {
-    fn from(payload: NodeName) -> Self {
+impl From<String> for SshDestination {
+    fn from(payload: String) -> Self {
         Self::new(payload)
     }
 }
 
 #[rustfmt::skip]
-impl TargetStore {
-    pub fn new(payload: StoreUri) -> Self {
-        Self(payload)
+impl FlakeAttribute {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
     }
-    pub fn payload(&self) -> &StoreUri {
+    pub fn payload(&self) -> &String {
         &self.0
     }
-    pub fn into_payload(self) -> StoreUri {
+    pub fn into_payload(self) -> String {
         self.0
     }
 }
 #[rustfmt::skip]
-impl From<StoreUri> for TargetStore {
-    fn from(payload: StoreUri) -> Self {
+impl From<String> for FlakeAttribute {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl DeploymentOutputSelector {
+    pub fn new(payload: FlakeAttribute) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &FlakeAttribute {
+        &self.0
+    }
+    pub fn into_payload(self) -> FlakeAttribute {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<FlakeAttribute> for DeploymentOutputSelector {
+    fn from(payload: FlakeAttribute) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl NixBuilderSpec {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for NixBuilderSpec {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl NixSystem {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for NixSystem {
+    fn from(payload: String) -> Self {
         Self::new(payload)
     }
 }
@@ -702,11 +851,8 @@ impl SignalOutput {
 
 #[rustfmt::skip]
 impl BuildTarget {
-    pub fn remote(payload: NodeName) -> Self {
-        Self::Remote(BuilderNode::new(payload))
-    }
-    pub fn target(payload: StoreUri) -> Self {
-        Self::Target(TargetStore::new(payload))
+    pub fn remote(payload: String) -> Self {
+        Self::Remote(NixBuilderSpec::new(payload))
     }
 }
 
@@ -876,16 +1022,9 @@ impl From<MetaEgress> for SignalOutput {
 }
 
 #[rustfmt::skip]
-impl From<BuilderNode> for BuildTarget {
-    fn from(payload: BuilderNode) -> Self {
+impl From<NixBuilderSpec> for BuildTarget {
+    fn from(payload: NixBuilderSpec) -> Self {
         Self::Remote(payload)
-    }
-}
-
-#[rustfmt::skip]
-impl From<TargetStore> for BuildTarget {
-    fn from(payload: TargetStore) -> Self {
-        Self::Target(payload)
     }
 }
 

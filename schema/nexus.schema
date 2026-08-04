@@ -22,18 +22,11 @@
 ;; effect catalog keeps the same discipline by modeling the local path as a
 ;; first-class BuildTarget variant rather than an error.
 ;;
-;; BUILD-ON-TARGET (Spirit ufjd / 0a9p / lc28, report 150): a node whose
-;; model-bearing closure must NEVER transit the daemon host realizes its
-;; toplevel directly in the TARGET node's own store. BuildTarget::TargetStore
-;; carries the target's `ssh-ng://root@<node>.<cluster>.criome` store URI; the
-;; build lowers to `nix build --eval-store auto --store <uri> <attr>^*`, so
-;; evaluation stays cheap and local while REALIZATION (and any model NAR pulls)
-;; happens on the target. The pipeline selects this variant whenever the
-;; deploy target node != the daemon host; when the target IS the daemon host
-;; (e.g. deploying ouranos from the ouranos-hosted daemon) it stays Local —
-;; the models are already there. With a target-store build the closure is
-;; already on the target, so the subsequent copy is a no-op and only the
-;; BootOnce activation runs on the target.
+;; ROUTING SNAPSHOT (v4): the owner request supplies a complete transport pair,
+;; exact output selector, materialization mode, activation backend, and optional
+;; builder spec. Nexus persists and threads those values verbatim; it never
+;; composes addresses, login names, domains, output attributes, or builder-file
+;; locations from cluster/node identity.
 ;;
 ;; ACTIVATE carries the DeploymentIdentifier so the BootOnce transient unit
 ;; name is the deterministic `lojix-boot-once-deploy-<deployment-identifier>`,
@@ -41,7 +34,7 @@
 ;; the BootOnce window can then reconcile by polling that unit (report 150).
 
 {
-  lojix.sema.[OrdinaryIngress OrdinaryEgress MetaIngress MetaEgress SemaReadInput SemaReadOutput SemaWriteInput SemaWriteOutput ClusterName NodeName ClosurePath FlakeReference ProposalSource UserName GenerationIdentifier DeploymentIdentifier GenerationSlot ActivationEffect HostDeployAction HostComposition GenerationArtifact UserEnvironmentAction SourceRevisionPolicy SourceRevisionRecord]
+  lojix.sema.[OrdinaryIngress OrdinaryEgress MetaIngress MetaEgress SemaReadInput SemaReadOutput SemaWriteInput SemaWriteOutput ClusterName NodeName ClosurePath FlakeReference ProposalSource UserName GenerationIdentifier DeploymentIdentifier GenerationSlot ActivationEffect HostDeployAction HostComposition GenerationArtifact UserEnvironmentAction SourceRevisionPolicy SourceRevisionRecord TestMode]
 }
 [Work.NexusWork]
 [Action.NexusAction]
@@ -51,11 +44,16 @@
 
   ;; All deploy nouns come from the local SEMA plane.  Nexus owns commands and
   ;; continuations, rather than a second shadow family of durable values.
-  StoreUri.String
-
-  BuilderNode.{ NodeName }
-  TargetStore.{ StoreUri }
-  BuildTarget.[Local (Remote BuilderNode) (Target TargetStore)]
+  NixStoreUri.String
+  SshDestination.String
+  DeploymentTransport.{ NixStoreUri SshDestination }
+  DeploymentInputMode.[Direct Horizon]
+  FlakeAttribute.String
+  DeploymentOutputSelector.{ FlakeAttribute }
+  ActivationBackend.[NixosSystemdBootV1 HomeManagerNixProfileV1]
+  NixBuilderSpec.String
+  NixSystem.String
+  BuildTarget.[Local (Remote NixBuilderSpec)]
   ExtraSubstituter.{ url.String public_key.String }
 
   FlakeAuthRequest.{ ProposalSource FlakeReference SourceRevisionPolicy }
@@ -66,24 +64,23 @@
   FlakeInputReference.{ url.String nix_archive_hash.String }
   FlakeInputOverride.{ String FlakeInputReference }
   MaterializedInputs.{ Vector.FlakeInputOverride }
-  NixEvalCommand.{ GenerationIdentifier ClusterName NodeName GenerationArtifact FlakeReference SourceRevisionRecord String Vector.FlakeInputOverride BuildTarget }
+  NixEvalCommand.{ GenerationIdentifier ClusterName NodeName GenerationArtifact FlakeReference SourceRevisionRecord DeploymentOutputSelector Vector.FlakeInputOverride BuildTarget }
   NixBuildCommand.{ GenerationIdentifier ClosurePath BuildTarget Vector.ExtraSubstituter }
-  CopyClosureCommand.{ GenerationIdentifier ClusterName NodeName ClosurePath BuildTarget }
+  CopyClosureCommand.{ GenerationIdentifier NodeName DeploymentTransport ClosurePath }
   UserEnvironmentActivationProfile.{ UserEnvironmentAction UserName }
   ActivationProfile.[(Host HostDeployAction) (UserEnvironment UserEnvironmentActivationProfile)]
-  ActivateGenerationCommand.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName ClosurePath ActivationEffect ActivationProfile }
+  ActivateGenerationCommand.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName DeploymentTransport ClosurePath ActivationEffect ActivationBackend ActivationProfile }
   PathInfoGcCommand.{ ClusterName NodeName }
 
-  ;; HERMETIC test dispatch (report 54 §5.2). Build the pre-declared
-  ;; auto-pickup nixos test `<flake>#checks.<system>.vm-<node>` (the
-  ;; runNixOSTest engine owns its own sandboxed VM — no SSH, no tap, no live
-  ;; host). Pass/fail IS the build exit status; the realised out-path is the
-  ;; check's closure. The daemon is a pure dispatcher selecting a check by
-  ;; name — no nix authoring at runtime.
-  HermeticCheckCommand.{ ClusterName NodeName FlakeReference String }
+  ;; HERMETIC test dispatch. Build the exact output selector supplied by the
+  ;; execution profile. The selected check owns its sandboxed VM — no SSH,
+  ;; tap, or live host. Pass/fail is the build exit status; the realised
+  ;; out-path is the check's closure. The daemon does not derive an attribute.
+  TestExecutionProfile.{ TestMode NixSystem DeploymentOutputSelector Optional.DeploymentTransport }
+  HermeticCheckCommand.{ ClusterName NodeName FlakeReference TestExecutionProfile }
   CheckBuilt.{ ClusterName NodeName ClosurePath }
 
-  ;; LIVE test dispatch (report 54 §5.2, report 47 v2 / report 51 §3). Two
+  ;; LIVE test dispatch. Two
   ;; daemon-owned effects bracket the existing deploy chain: BringUpTestVm
   ;; brings up the generated microVM + additive tap inside a user network
   ;; namespace on the resolved vmhost (the report-51 host-untouched
@@ -92,8 +89,8 @@
   ;; TearDownTestVm stops the user units so the tap + route vanish with the
   ;; namespace, host netns byte-identical. BUILT but NOT run live here (the
   ;; first Prometheus cycle is psyche-gated).
-  BringUpTestVmCommand.{ ClusterName node.NodeName host.NodeName ClosurePath String }
-  TearDownTestVmCommand.{ ClusterName node.NodeName host.NodeName }
+  BringUpTestVmCommand.{ ClusterName node.NodeName host.NodeName DeploymentTransport ClosurePath String }
+  TearDownTestVmCommand.{ ClusterName node.NodeName host.NodeName DeploymentTransport }
   TestVmBroughtUp.{ ClusterName node.NodeName host.NodeName }
   TestVmTornDown.{ ClusterName node.NodeName host.NodeName }
 

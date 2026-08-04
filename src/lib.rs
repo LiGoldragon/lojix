@@ -30,24 +30,24 @@ use sema_engine::{
 use crate::schema::sema::{
     AdmissionMarker, CommitSequence, ContainerLifecycleRecord, DeployJob, DeploymentLifecycle,
     DeploymentOutboxRecord, DeploymentRecord, DeploymentRequestIdentity, DeploymentTerminal,
-    EventLogEntry, GcRoot, IdentifierAllocation, ImmutableRevision,
-    LegacyDeploymentEventQuarantine, LiveGeneration, OutboxDeliveryState, OutboxRetryCount,
-    PendingTransitionIntent, StateDigest, StateMarker, StoredTestRun, TerminalMarker,
-    TransitionIntentState, TransitionMarker, TransitionOrdinal,
+    EventLogEntry, GcRoot, IdentifierAllocation, ImmutableRevision, LiveGeneration,
+    OutboxDeliveryState, OutboxRetryCount, PendingTransitionIntent, StateDigest, StateMarker,
+    StoredTestRun, TerminalMarker, TransitionIntentState, TransitionMarker, TransitionOrdinal,
 };
 
 pub mod adapters;
 pub mod client;
 pub mod daemon;
 pub mod inspection;
-mod legacy_v2;
 pub mod reconstruction;
 pub mod schema;
 pub mod schema_runtime;
 
-/// The lojix durable-store schema version. Schema 3 adds durable deployment
-/// correlation records and global identifier high-water marks.
-const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(3);
+/// The Lojix durable-store schema version. v4 records exact private deployment
+/// routing snapshots and deliberately does not decode or migrate earlier
+/// layouts. Use the path-scoped `lojix-reset-store` primitive while the daemon
+/// is stopped.
+const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(4);
 
 /// The ten durable table names. One row per element (a keyed record family),
 /// not one blob per table — the sema-engine model. `deploy-job` is the
@@ -64,8 +64,6 @@ const DEPLOYMENT_RECORD_TABLE: TableName = TableName::new("deployment-record");
 const IDENTIFIER_ALLOCATION_TABLE: TableName = TableName::new("identifier-allocation");
 const DEPLOYMENT_OUTBOX_TABLE: TableName = TableName::new("deployment-outbox");
 const PENDING_TRANSITION_INTENT_TABLE: TableName = TableName::new("pending-transition-intent");
-const LEGACY_DEPLOYMENT_EVENT_QUARANTINE_TABLE: TableName =
-    TableName::new("legacy-deployment-event-quarantine");
 
 /// The stable per-family schema identities. Each table is its own record
 /// family with a distinct, reopen-stable `FamilyName` + `SchemaHash`. The hash
@@ -82,7 +80,6 @@ const DEPLOYMENT_RECORD_FAMILY: &str = "DeploymentRecordFamily";
 const IDENTIFIER_ALLOCATION_FAMILY: &str = "IdentifierAllocationFamily";
 const DEPLOYMENT_OUTBOX_FAMILY: &str = "DeploymentOutboxFamily";
 const PENDING_TRANSITION_INTENT_FAMILY: &str = "PendingTransitionIntentFamily";
-const LEGACY_DEPLOYMENT_EVENT_QUARANTINE_FAMILY: &str = "LegacyDeploymentEventQuarantineFamily";
 const LIVE_SET_SCHEMA_HASH: [u8; 32] = [1; 32];
 const GC_ROOTS_SCHEMA_HASH: [u8; 32] = [2; 32];
 const EVENT_LOG_SCHEMA_HASH: [u8; 32] = [3; 32];
@@ -93,7 +90,6 @@ const DEPLOYMENT_RECORD_SCHEMA_HASH: [u8; 32] = [7; 32];
 const IDENTIFIER_ALLOCATION_SCHEMA_HASH: [u8; 32] = [8; 32];
 const DEPLOYMENT_OUTBOX_SCHEMA_HASH: [u8; 32] = [9; 32];
 const PENDING_TRANSITION_INTENT_SCHEMA_HASH: [u8; 32] = [11; 32];
-const LEGACY_DEPLOYMENT_EVENT_QUARANTINE_SCHEMA_HASH: [u8; 32] = [10; 32];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -120,6 +116,9 @@ pub enum Error {
 
     #[error("flag-style arguments are not part of component binaries: {0}")]
     FlagArgument(String),
+
+    #[error("required runtime configuration environment variable is unset: {0}")]
+    MissingRuntimeConfiguration(String),
 
     #[error("DOTOS request decoding requires the dotos-text feature")]
     DotosTextUnsupported,
@@ -165,8 +164,8 @@ pub enum Error {
     #[error("sema database engine error: {0}")]
     Database(#[from] sema_engine::Error),
 
-    #[error("store migration rejected: {0}")]
-    Migration(String),
+    #[error("store maintenance rejected: {0}")]
+    StoreMaintenance(String),
 
     #[error(
         "lojix store at {path:?} cannot be used by this daemon's startup schema/layout gate while {stage}; daemon startup stopped before serving requests; inspect the store with `lojix-inspect-store {path:?}`: {source}"
@@ -224,7 +223,7 @@ pub struct DaemonConfiguration {
     pub owner_socket_path: String,
     pub owner_socket_mode: u32,
     pub state_directory_path: String,
-    /// The node name of the host this daemon runs on (e.g. `ouranos`). It is
+    /// The node name of the host this daemon runs on. It is
     /// retained as deployment identity, while every immutable generation is
     /// evaluated and built locally, copied to its target, then activated there.
     /// Decoded from the same rkyv startup file — not a flag, not a runtime
@@ -254,21 +253,19 @@ pub struct DaemonConfiguration {
 /// shared signal type, so the wire op, the durable record, and this config
 /// default all name one type.
 ///
-/// `test_flake` is the cluster→flake resolution (report 54 §5.2, Unit 2b): the
-/// flake whose `#checks.<system>.vm-<node>` auto-pickup check the hermetic
-/// dispatch builds, and whose generated runner the live path brings up. For
-/// the CriomOS-test-cluster proof this is
-/// `github:LiGoldragon/CriomOS-test-cluster`. `proposal_source` is the cluster
-/// proposal DOTOS file the daemon projects to validate `(OnHost h)` against the
-/// node's declared host-set and to resolve `All` to the cluster's test-VM
-/// nodes — empty when host-set validation is not configured (the hermetic
-/// build never needs it; the sandboxed check owns its own VM).
+/// `test_flake`, `test_nix_system`, and `test_output_selector` make the
+/// shorthand's hermetic execution profile fully explicit in startup
+/// configuration. `proposal_source` is the cluster proposal DOTOS file the
+/// daemon projects to validate `(OnHost h)` and resolve `All`; it is empty when
+/// host-set validation is not configured.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TestDefaults {
     pub cluster: String,
     pub default_vm_host: String,
     pub default_mode: TestMode,
     pub test_flake: String,
+    pub test_nix_system: String,
+    pub test_output_selector: String,
     pub proposal_source: String,
 }
 
@@ -368,7 +365,6 @@ pub struct Store {
     identifier_allocation: TableReference<IdentifierAllocation>,
     deployment_outbox: TableReference<DeploymentOutboxRecord>,
     pending_transition_intents: TableReference<PendingTransitionIntent>,
-    legacy_deployment_event_quarantine: TableReference<LegacyDeploymentEventQuarantine>,
     path: PathBuf,
     write_gate: Mutex<()>,
     /// The ephemeral subscription-token counter. Subscriptions are connection
@@ -388,7 +384,6 @@ struct LojixDirectory {
     identifier_allocation: TableReference<IdentifierAllocation>,
     deployment_outbox: TableReference<DeploymentOutboxRecord>,
     pending_transition_intents: TableReference<PendingTransitionIntent>,
-    legacy_deployment_event_quarantine: TableReference<LegacyDeploymentEventQuarantine>,
 }
 
 impl FamilyDirectory for LojixDirectory {
@@ -404,9 +399,6 @@ impl FamilyDirectory for LojixDirectory {
             "identifier-allocation" => row.apply(self.identifier_allocation),
             "deployment-outbox" => row.apply(self.deployment_outbox),
             "pending-transition-intent" => row.apply(self.pending_transition_intents),
-            "legacy-deployment-event-quarantine" => {
-                row.apply(self.legacy_deployment_event_quarantine)
-            }
             table => Err(sema_engine::Error::TableNotRegistered {
                 table: table.to_owned(),
             }),
@@ -426,7 +418,7 @@ impl std::fmt::Debug for Store {
 fn next_identifier(value: u64) -> Result<u64> {
     value
         .checked_add(1)
-        .ok_or_else(|| Error::Migration("identifier space exhausted".to_string()))
+        .ok_or_else(|| Error::StoreMaintenance("identifier space exhausted".to_string()))
 }
 
 fn state_marker(commit_sequence: u64) -> StateMarker {
@@ -481,18 +473,8 @@ fn validate_fresh_deploy_job(job: &DeployJob) -> Result<()> {
     Ok(())
 }
 
-/// Schema-three jobs are resumable only when their persisted closure remains
-/// a canonical immutable store-item root. Schema-two migration rows are
-/// intentionally marked `LegacyNonResumable`, have no submission, and can
-/// therefore be retained for diagnosis without ever becoming effect input.
 fn validate_persisted_deploy_job(job: &DeployJob) -> Result<()> {
-    if !matches!(
-        job.deploy_job_phase,
-        crate::schema::sema::DeployJobPhase::LegacyNonResumable
-    ) {
-        validate_fresh_deploy_job(job)?;
-    }
-    Ok(())
+    validate_fresh_deploy_job(job)
 }
 
 fn validate_fresh_gc_root(root: &GcRoot) -> Result<()> {
@@ -645,17 +627,6 @@ impl Store {
                 stage: "registering pending-transition-intent table",
                 source: Box::new(source),
             })?;
-        let legacy_deployment_event_quarantine = database
-            .register_table(TableDescriptor::new(
-                LEGACY_DEPLOYMENT_EVENT_QUARANTINE_TABLE,
-                FamilyName::new(LEGACY_DEPLOYMENT_EVENT_QUARANTINE_FAMILY),
-                SchemaHash::new(LEGACY_DEPLOYMENT_EVENT_QUARANTINE_SCHEMA_HASH),
-            ))
-            .map_err(|source| Error::StoreStartupCompatibility {
-                path: path.clone(),
-                stage: "registering legacy-deployment-event-quarantine table",
-                source: Box::new(source),
-            })?;
         let store = Self {
             database,
             live_set,
@@ -668,7 +639,6 @@ impl Store {
             identifier_allocation,
             deployment_outbox,
             pending_transition_intents,
-            legacy_deployment_event_quarantine,
             path,
             write_gate: Mutex::new(()),
             subscription_sequence: AtomicU64::new(0),
@@ -729,14 +699,6 @@ impl Store {
             .map_err(|source| {
                 self.startup_compatibility_error(
                     "validating pending-transition-intent rows",
-                    source,
-                )
-            })?;
-        self.legacy_deployment_event_quarantines()
-            .map(|_| ())
-            .map_err(|source| {
-                self.startup_compatibility_error(
-                    "validating legacy-deployment-event-quarantine rows",
                     source,
                 )
             })?;
@@ -835,30 +797,21 @@ impl Store {
             .to_vec())
     }
 
-    fn legacy_deployment_event_quarantines(&self) -> Result<Vec<LegacyDeploymentEventQuarantine>> {
-        Ok(self
-            .database
-            .match_records(QueryPlan::all(self.legacy_deployment_event_quarantine))?
-            .records()
-            .to_vec())
-    }
-
     fn identifier_allocation(&self) -> Result<IdentifierAllocation> {
         let allocations = self.identifier_allocations()?;
         match allocations.as_slice() {
             [allocation] => Ok(allocation.clone()),
-            [] => Err(Error::Migration(
+            [] => Err(Error::StoreMaintenance(
                 "identifier allocation row is missing after store initialization".to_string(),
             )),
-            _ => Err(Error::Migration(
+            _ => Err(Error::StoreMaintenance(
                 "identifier allocation table contains more than one row".to_string(),
             )),
         }
     }
 
-    /// Initialize the one global high-water record once. Its floor includes
-    /// every v2 identifier-bearing row so a v3 migration cannot issue an
-    /// identity that was previously visible, even after compaction.
+    /// Initialize the one global high-water record once from the durable v4
+    /// records that can issue identities.
     fn ensure_identifier_allocation(&self) -> Result<()> {
         if !self.identifier_allocations()?.is_empty() {
             return self.identifier_allocation().map(|_| ());
@@ -894,11 +847,6 @@ impl Store {
             .event_log_entries()?
             .iter()
             .map(|entry| *entry.event_log_position.payload())
-            .chain(
-                self.legacy_deployment_event_quarantines()?
-                    .iter()
-                    .map(|entry| *entry.event_log_position.payload()),
-            )
             .max()
             .map(next_identifier)
             .transpose()?
@@ -945,14 +893,6 @@ impl Store {
     /// the same transition.
     pub fn deployment_outbox(&self) -> Result<Vec<DeploymentOutboxRecord>> {
         self.deployment_outbox_records()
-    }
-
-    /// Private migration-only receipt rows. They are deliberately not exposed
-    /// through any ordinary journal query.
-    pub fn legacy_deployment_event_quarantine(
-        &self,
-    ) -> Result<Vec<LegacyDeploymentEventQuarantine>> {
-        self.legacy_deployment_event_quarantines()
     }
 
     fn outbox_key(
@@ -1380,10 +1320,9 @@ impl Store {
         Ok(())
     }
 
-    /// Reconstruct delivery rows from already-durable deployment events. This
-    /// closes the crash window of older v3 binaries that committed a public
-    /// event before the outbox existed. Equal payloads deduplicate; any attempt
-    /// to reuse the same composite key for a different payload stops recovery.
+    /// Reconstruct delivery rows from already-durable deployment events. Equal
+    /// payloads deduplicate; any attempt to reuse a composite key for a
+    /// different payload stops recovery.
     pub fn reconcile_deployment_outbox(&self) -> Result<()> {
         let _write = self.lock_write()?;
         let existing = self.deployment_outbox_records()?;
@@ -1434,7 +1373,6 @@ impl Store {
             identifier_allocation: self.identifier_allocation,
             deployment_outbox: self.deployment_outbox,
             pending_transition_intents: self.pending_transition_intents,
-            legacy_deployment_event_quarantine: self.legacy_deployment_event_quarantine,
         })?;
         Ok(())
     }
@@ -1857,8 +1795,8 @@ impl Store {
     }
 
     /// Every admitted, rejected, or failed deployment is retained here for
-    /// correlation queries and migration inspection; in-flight job rows are a
-    /// separate resume convenience and may be retired at terminal state.
+    /// correlation queries; in-flight job rows are a separate resume
+    /// convenience and may be retired at terminal state.
     pub fn deployment_records(&self) -> Result<Vec<DeploymentRecord>> {
         self.deployment_records_unchecked()
     }
@@ -2244,155 +2182,6 @@ impl Store {
         Ok(())
     }
 
-    /// Seed a fully validated schema-two snapshot as one schema-three commit.
-    ///
-    /// This is crate-visible because only the read-only migration module may
-    /// construct it. The destination is a new staging store, never the
-    /// canonical schema-two path.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn seed_migration(
-        &self,
-        generations: Vec<LiveGeneration>,
-        roots: Vec<GcRoot>,
-        events: Vec<EventLogEntry>,
-        containers: Vec<ContainerLifecycleRecord>,
-        deploy_jobs: Vec<DeployJob>,
-        test_runs: Vec<StoredTestRun>,
-        deployment_records: Vec<DeploymentRecord>,
-        legacy_deployment_event_quarantines: Vec<LegacyDeploymentEventQuarantine>,
-    ) -> Result<u64> {
-        let _write = self.lock_write()?;
-        let mut seed = self.database.begin_atomic_commit();
-        let mut populated = false;
-        for generation in generations {
-            seed = seed.assert(self.live_set, generation);
-            populated = true;
-        }
-        for root in roots {
-            seed = seed.assert(self.gc_roots, root);
-            populated = true;
-        }
-        for container in containers {
-            seed = seed.assert(self.containers, container);
-            populated = true;
-        }
-        for event in events {
-            seed = seed.assert(self.event_log, event);
-            populated = true;
-        }
-        for job in deploy_jobs {
-            seed = seed.assert(self.deploy_jobs, job);
-            populated = true;
-        }
-        for run in test_runs {
-            seed = seed.assert(self.test_runs, run);
-            populated = true;
-        }
-        for record in deployment_records {
-            seed = seed.assert(self.deployment_records, record);
-            populated = true;
-        }
-        for quarantine in legacy_deployment_event_quarantines {
-            seed = seed.assert(self.legacy_deployment_event_quarantine, quarantine);
-            populated = true;
-        }
-        let seed_commit = if populated {
-            self.database.commit_atomic(seed)?.commit_sequence().value()
-        } else {
-            self.commit_sequence()?
-        };
-        self.rebase_identifier_allocation()?;
-        Ok(seed_commit)
-    }
-
-    pub(crate) fn migration_counts(&self) -> Result<crate::reconstruction::StoreCounts> {
-        Ok(crate::reconstruction::StoreCounts {
-            generations: self.live_generations()?.len(),
-            gc_roots: self.gc_root_records()?.len(),
-            event_log_entries: self.event_log_entries()?.len(),
-            container_lifecycle_records: self.container_lifecycle_records()?.len(),
-            deploy_jobs: self.deploy_jobs()?.len(),
-            test_runs: self.test_runs()?.len(),
-            deployment_records: self.deployment_records()?.len(),
-            quarantined_legacy_deployment_events: self.legacy_deployment_event_quarantines()?.len(),
-            legacy_non_resumable_deploy_jobs: self
-                .deploy_jobs()?
-                .iter()
-                .filter(|job| {
-                    matches!(
-                        job.deploy_job_phase,
-                        crate::schema::sema::DeployJobPhase::LegacyNonResumable
-                    )
-                })
-                .count(),
-        })
-    }
-
-    fn rebase_identifier_allocation(&self) -> Result<()> {
-        let current = self.identifier_allocation()?;
-        let next_deployment_identifier = self
-            .live_generations()?
-            .iter()
-            .map(|generation| *generation.deployment_identifier.payload())
-            .chain(
-                self.deploy_jobs()?
-                    .iter()
-                    .map(|job| *job.deployment_identifier.payload()),
-            )
-            .chain(
-                self.deployment_records()?
-                    .iter()
-                    .map(|record| *record.deployment_identifier.payload()),
-            )
-            .max()
-            .map(next_identifier)
-            .transpose()?
-            .unwrap_or(1)
-            .max(current.next_deployment_identifier);
-        let next_generation_identifier = self
-            .live_generations()?
-            .iter()
-            .map(|generation| *generation.generation_identifier.payload())
-            .chain(
-                self.deploy_jobs()?
-                    .iter()
-                    .map(|job| *job.generation_identifier.payload()),
-            )
-            .chain(
-                self.deployment_records()?
-                    .iter()
-                    .map(|record| *record.generation_identifier.payload()),
-            )
-            .max()
-            .map(next_identifier)
-            .transpose()?
-            .unwrap_or(1)
-            .max(current.next_generation_identifier);
-        let next_event_log_position = self
-            .event_log_entries()?
-            .iter()
-            .map(|entry| *entry.event_log_position.payload())
-            .chain(
-                self.legacy_deployment_event_quarantines()?
-                    .iter()
-                    .map(|entry| *entry.event_log_position.payload()),
-            )
-            .max()
-            .map(next_identifier)
-            .transpose()?
-            .unwrap_or(0)
-            .max(current.next_event_log_position);
-        self.database.mutate(Mutation::new(
-            self.identifier_allocation,
-            IdentifierAllocation {
-                next_deployment_identifier,
-                next_generation_identifier,
-                next_event_log_position,
-            },
-        ))?;
-        Ok(())
-    }
-
     /// Append one GC-root, keyed by its generation identifier (decision 4).
     pub fn append_gc_root(&self, root: GcRoot) -> Result<()> {
         validate_fresh_gc_root(&root)?;
@@ -2593,54 +2382,9 @@ impl EngineRecord for PendingTransitionIntent {
     }
 }
 
-impl EngineRecord for LegacyDeploymentEventQuarantine {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.event_log_position.payload().to_string())
-    }
-}
-
 impl EngineRecord for IdentifierAllocation {
     fn record_key(&self) -> RecordKey {
         RecordKey::new("global")
-    }
-}
-
-// These implementations exist solely to let migration tests materialize an
-// authentic v2 table through sema-engine. The types remain private and are not
-// part of the v3 store API.
-impl EngineRecord for legacy_v2::LiveGeneration {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.generation_identifier.payload().to_string())
-    }
-}
-
-impl EngineRecord for legacy_v2::GcRoot {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.generation_identifier.payload().to_string())
-    }
-}
-
-impl EngineRecord for legacy_v2::EventLogEntry {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.event_log_position.payload().to_string())
-    }
-}
-
-impl EngineRecord for legacy_v2::ContainerLifecycleRecord {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.event_log_position.payload().to_string())
-    }
-}
-
-impl EngineRecord for legacy_v2::DeployJob {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.deployment_identifier.payload().to_string())
-    }
-}
-
-impl EngineRecord for legacy_v2::StoredTestRun {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.test_run_identifier.payload().to_string())
     }
 }
 
@@ -2686,7 +2430,18 @@ mod transition_intent_tests {
             ),
             optional_flake_reference: None,
             resolved_revision: None,
-            resolved_target: None,
+            deployment_transport: ordinary::DeploymentTransport {
+                nix_store_uri: ordinary::NixStoreUri::new("ssh-ng://fixture-copy.invalid"),
+                ssh_destination: ordinary::SshDestination::new(
+                    "fixture-login@fixture-activate.invalid",
+                ),
+            },
+            deployment_input_mode: ordinary::DeploymentInputMode::Direct,
+            deployment_output_selector: ordinary::DeploymentOutputSelector::new(
+                ordinary::FlakeAttribute::new("checks.fixture-a"),
+            ),
+            activation_backend: ordinary::ActivationBackend::NixosSystemdBootV1,
+            optional_nix_builder_spec: None,
             boot_once_unit: None,
             optional_generation_slot: None,
             persisted_flake_input_override_vector: Vec::new(),

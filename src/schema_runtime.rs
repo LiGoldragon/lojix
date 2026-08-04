@@ -19,8 +19,7 @@ use std::time::Duration;
 
 use dotos::DotosSource;
 use horizon_lib::name::{
-    ClusterName as HorizonClusterName, CriomeDomainName, NodeName as HorizonNodeName,
-    UserName as HorizonUserName,
+    ClusterName as HorizonClusterName, NodeName as HorizonNodeName, UserName as HorizonUserName,
 };
 use horizon_lib::{ClusterProposal, Horizon, Viewpoint};
 use rustix::process::{Pid, Signal, kill_process_group};
@@ -66,8 +65,8 @@ fn credential_like(value: &str) -> bool {
     .any(|term| value.contains(term))
 }
 
-// The engine has no public-contract nouns.  These small local facades retain
-// the names used by the pre-v3 engine while lowering them to the new private
+// The engine has no public-contract nouns. These small local facades retain
+// local names while lowering them to the private
 // ingress/egress roots.  They are deliberately value-only shims: no wire type
 // can cross this module boundary.
 #[allow(clippy::new_ret_no_self)]
@@ -143,6 +142,7 @@ mod meta {
         NodeUnknown,
         ProposalSourceUnreachable,
         FlakeReferenceMalformed,
+        InvalidDeploymentRouting,
         BuilderUnreachable,
         DeploymentInFlight,
         UnsupportedDeployAction,
@@ -248,7 +248,7 @@ pub struct SchemaRuntime {
 #[derive(Debug, Clone)]
 pub struct RuntimeConfiguration {
     generated_inputs_directory: PathBuf,
-    /// The node this daemon runs on (e.g. `ouranos`). Activation uses this to
+    /// The node this daemon runs on. Activation uses this to
     /// recognize a self-targeting system switch and retain its detached-safe
     /// behavior. Deploy evaluation/build is local for every target and does
     /// not use this name to select a remote Nix store.
@@ -321,9 +321,12 @@ pub struct TestDefaults {
     default_vm_host: ordinary::NodeName,
     default_mode: ordinary::TestMode,
     /// The cluster→flake resolution (Unit 2b): the flake whose
-    /// `#checks.<system>.vm-<node>` auto-pickup check the hermetic dispatch
-    /// builds, and whose generated runner the live path brings up.
+    /// exact hermetic output selector the configured shorthand builds, and
+    /// whose generated runner the live path brings up.
     test_flake: ordinary::FlakeReference,
+    /// Exact hermetic system and output selector for a configured shorthand.
+    test_nix_system: sema::NixSystem,
+    test_output_selector: sema::DeploymentOutputSelector,
     /// The cluster proposal DOTOS file projected to validate `(OnHost h)`
     /// against the node's declared host-set and to resolve `All` to the
     /// cluster's test-VM nodes. Empty when host-set validation is not
@@ -351,14 +354,14 @@ impl TestDefaults {
     /// resolved run per node in the selection.
     fn lower_run(&self, run: meta::TestRun) -> Vec<ResolvedTestRun> {
         let host = self.resolve_host(run.host_selection);
-        let mode = run.test_mode;
+        let profile = run.test_execution_profile;
         self.nodes_of(run.node_selection)
             .into_iter()
             .map(|node| ResolvedTestRun {
                 cluster: run.cluster_name.clone(),
                 node,
                 host: host.clone(),
-                mode,
+                profile: profile.clone(),
                 flake: self.test_flake.clone(),
             })
             .collect()
@@ -374,7 +377,7 @@ impl TestDefaults {
                 cluster: self.cluster.clone(),
                 node,
                 host: self.default_vm_host.clone(),
-                mode: self.default_mode,
+                profile: self.default_profile(),
                 flake: self.test_flake.clone(),
             })
             .collect()
@@ -414,21 +417,28 @@ impl TestDefaults {
             .unwrap_or_default()
     }
 
-    /// The everyday test defaults the in-process tests use: cluster
-    /// `goldragon`, default host `prometheus`, mode `Hermetic`, and the
-    /// CriomOS-test-cluster flake the hermetic proof builds against. No
-    /// proposal source — the in-process tests do not exercise host-set
-    /// validation against a live projection (the daemon-integration proof
-    /// supplies one).
+    /// Synthetic defaults used only by in-process tests. Production startup
+    /// configuration supplies no test fixture.
     fn test_default() -> Self {
         Self {
-            cluster: ordinary::ClusterName::new("goldragon"),
-            default_vm_host: ordinary::NodeName::new("prometheus"),
+            cluster: ordinary::ClusterName::new("fixture-cluster"),
+            default_vm_host: ordinary::NodeName::new("fixture-vm-host"),
             default_mode: ordinary::TestMode::Hermetic,
-            test_flake: ordinary::FlakeReference::new(
-                "github:LiGoldragon/CriomOS-test-cluster/horizon-test-vm",
-            ),
+            test_flake: ordinary::FlakeReference::new("github:fixture-owner/fixture-test-flake"),
+            test_nix_system: sema::NixSystem::new("x86_64-linux"),
+            test_output_selector: sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new(
+                "checks.fixture-a",
+            )),
             proposal_source: ordinary::ProposalSource::new(""),
+        }
+    }
+
+    fn default_profile(&self) -> sema::TestExecutionProfile {
+        sema::TestExecutionProfile {
+            test_mode: self.default_mode,
+            nix_system: self.test_nix_system.clone(),
+            deployment_output_selector: self.test_output_selector.clone(),
+            optional_deployment_transport: None,
         }
     }
 
@@ -450,6 +460,10 @@ impl From<&crate::TestDefaults> for TestDefaults {
                 crate::TestMode::Live => ordinary::TestMode::Live,
             },
             test_flake: ordinary::FlakeReference::new(defaults.test_flake.clone()),
+            test_nix_system: sema::NixSystem::new(defaults.test_nix_system.clone()),
+            test_output_selector: sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new(
+                defaults.test_output_selector.clone(),
+            )),
             proposal_source: ordinary::ProposalSource::new(defaults.proposal_source.clone()),
         }
     }
@@ -519,8 +533,8 @@ struct ResolvedTestRun {
     cluster: ordinary::ClusterName,
     node: ordinary::NodeName,
     host: ordinary::NodeName,
-    mode: ordinary::TestMode,
-    /// The flake whose `#checks.<system>.vm-<node>` the hermetic dispatch
+    profile: sema::TestExecutionProfile,
+    /// The flake paired with the exact output selector the hermetic dispatch
     /// builds (and whose generated runner the live path brings up).
     flake: ordinary::FlakeReference,
 }
@@ -536,7 +550,7 @@ impl ResolvedTestRun {
             cluster_name: self.cluster.clone(),
             node: self.node.clone(),
             host: self.host.clone(),
-            test_mode: self.mode,
+            test_mode: self.profile.test_mode,
             test_run_phase: ordinary::TestRunPhase::Submitted,
             test_outcome: ordinary::TestOutcome::Pending,
             optional_closure_path: None,
@@ -544,16 +558,40 @@ impl ResolvedTestRun {
     }
 
     /// The hermetic-check effect command for this run: build
-    /// `<flake>#checks.<system>.vm-<node>`, the report-53 §1 auto-pickup check
-    /// keyed `vm-<node>`. The system is pinned `x86_64-linux` (the auto-pickup
-    /// suite's system), matching the Done-criteria `nix build
-    /// .#checks.x86_64-linux.vm-mercury`.
+    /// `<flake>#<request selector>`. The execution profile supplies the exact
+    /// selector and Nix system; the daemon does not infer a node-shaped output.
     fn hermetic_check_command(&self) -> nexus::HermeticCheckCommand {
         nexus::HermeticCheckCommand {
             cluster_name: self.cluster.clone(),
             node_name: self.node.clone(),
             flake_reference: self.flake.clone(),
-            string: HermeticCheck::SYSTEM.to_string(),
+            test_execution_profile: self.nexus_test_execution_profile(),
+        }
+    }
+
+    fn nexus_test_execution_profile(&self) -> nexus::TestExecutionProfile {
+        nexus::TestExecutionProfile {
+            test_mode: self.profile.test_mode,
+            nix_system: nexus::NixSystem::new(self.profile.nix_system.payload().clone()),
+            deployment_output_selector: nexus::DeploymentOutputSelector::new(
+                nexus::FlakeAttribute::new(
+                    self.profile
+                        .deployment_output_selector
+                        .payload()
+                        .payload()
+                        .clone(),
+                ),
+            ),
+            optional_deployment_transport: self.profile.optional_deployment_transport.as_ref().map(
+                |transport| nexus::DeploymentTransport {
+                    nix_store_uri: nexus::NixStoreUri::new(
+                        transport.nix_store_uri.payload().clone(),
+                    ),
+                    ssh_destination: nexus::SshDestination::new(
+                        transport.ssh_destination.payload().clone(),
+                    ),
+                },
+            ),
         }
     }
 
@@ -566,6 +604,10 @@ impl ResolvedTestRun {
             cluster_name: self.cluster.clone(),
             node: self.node.clone(),
             host: self.host.clone(),
+            deployment_transport: self
+                .nexus_test_execution_profile()
+                .optional_deployment_transport
+                .expect("live test transport is validated before dispatch"),
             closure_path: runner,
             string: String::new(),
         }
@@ -578,6 +620,10 @@ impl ResolvedTestRun {
             cluster_name: self.cluster.clone(),
             node: self.node.clone(),
             host: self.host.clone(),
+            deployment_transport: self
+                .nexus_test_execution_profile()
+                .optional_deployment_transport
+                .expect("live test transport is validated before dispatch"),
         }
     }
 }
@@ -640,7 +686,7 @@ impl TestPipeline {
             cluster_name: self.run.cluster.clone(),
             node: self.run.node.clone(),
             host: self.run.host.clone(),
-            test_mode: self.run.mode,
+            test_mode: self.run.profile.test_mode,
             test_run_phase: phase,
             test_outcome: outcome,
             optional_closure_path: closure_path,
@@ -732,8 +778,8 @@ impl ClusterProjection {
 
     /// Every Pod node hosted on a vmhost — a node whose declared host-set is
     /// non-empty (i.e. a `super_node` is set). The `All` selection sweeps these.
-    /// The hermetic check exists per declared node (report-53 auto-pickup), so a
-    /// hosted-Pod predicate is the right `All` set.
+    /// The configured test profile selects its exact output, so a hosted-Pod
+    /// predicate remains the right `All` expansion set.
     fn hosted_pod_nodes(&self) -> Vec<ordinary::NodeName> {
         self.proposal
             .nodes
@@ -744,33 +790,31 @@ impl ClusterProjection {
     }
 }
 
-/// One hermetic-check build — the real `nix build
-/// <flake>#checks.<system>.vm-<node> --print-out-paths` the daemon runs as the
-/// hermetic test effect. The `runNixOSTest` engine owns its own sandboxed VM,
-/// so this is a pure build: exit 0 + an out-path = Passed; a non-zero exit =
-/// Failed(HermeticCheck). No SSH, no tap, no live host.
+/// One hermetic-check build — the real `nix build <exact-selector>
+/// --print-out-paths` the daemon runs as the hermetic test effect. The selected
+/// check owns its sandboxed VM, so this is a pure build: exit 0 + an out-path
+/// = Passed; a non-zero exit = Failed(HermeticCheck). No SSH, tap, or live
+/// host is inferred by the daemon.
 #[derive(Debug, Clone)]
 struct HermeticCheck {
     command: nexus::HermeticCheckCommand,
 }
 
 impl HermeticCheck {
-    /// The auto-pickup suite's system (report 53 §1, `x86_64-linux`). The
-    /// checks are keyed `vm-<node>` under `checks.<system>`.
-    const SYSTEM: &'static str = "x86_64-linux";
-
     fn new(command: nexus::HermeticCheckCommand) -> Self {
         Self { command }
     }
 
-    /// The `<flake>#checks.<system>.vm-<node>` installable — the report-53
-    /// auto-pickup check keyed `vm-<node>`.
+    /// The exact `<flake>#<selector>` installable from the execution profile.
     fn installable(&self) -> String {
         format!(
-            "{}#checks.{}.vm-{}",
+            "{}#{}",
             self.command.flake_reference.payload(),
-            self.command.string,
-            self.command.node_name.payload()
+            self.command
+                .test_execution_profile
+                .deployment_output_selector
+                .payload()
+                .payload(),
         )
     }
 
@@ -791,7 +835,7 @@ impl HermeticCheck {
     }
 }
 
-/// The LIVE host-untouched VM lifecycle (report 51 §3 / report 47 v2, Unit 2b)
+/// The live host-untouched VM lifecycle.
 /// — the report-51 user-namespace bring-up/teardown of the generated microVM
 /// runner on the resolved vmhost. BUILT here, NOT run live (the first
 /// Prometheus cycle is psyche-gated): the invocation shapes are constructed so
@@ -812,34 +856,21 @@ struct LiveTestVm {
 }
 
 impl LiveTestVm {
-    fn from_bring_up(command: &nexus::BringUpTestVmCommand) -> Self {
-        Self {
-            target: Self::host_target(&command.cluster_name, &command.host),
+    fn from_bring_up(command: &nexus::BringUpTestVmCommand) -> std::result::Result<Self, String> {
+        Ok(Self {
+            target: SshTarget::from_transport(&command.deployment_transport)?,
             node: command.node.clone(),
             runner: command.closure_path.payload().clone(),
             guest_ip: command.string.clone(),
-        }
+        })
     }
 
-    fn from_tear_down(command: &nexus::TearDownTestVmCommand) -> Self {
-        Self {
-            target: Self::host_target(&command.cluster_name, &command.host),
+    fn from_tear_down(command: &nexus::TearDownTestVmCommand) -> std::result::Result<Self, String> {
+        Ok(Self {
+            target: SshTarget::from_transport(&command.deployment_transport)?,
             node: command.node.clone(),
             runner: String::new(),
             guest_ip: String::new(),
-        }
-    }
-
-    /// `root@<host>.<cluster>.criome` — the vmhost the user-level units run on.
-    /// Falls back to a bare host name if horizon validation fails (a resolved
-    /// host never does), so command construction is total.
-    fn host_target(cluster: &ordinary::ClusterName, host: &ordinary::NodeName) -> SshTarget {
-        SshTarget::root_at_node(cluster, host).unwrap_or_else(|_| SshTarget {
-            user: "root".to_string(),
-            domain: CriomeDomainName::for_node(
-                &HorizonNodeName::try_new("host").expect("static host name"),
-                &HorizonClusterName::try_new("cluster").expect("static cluster name"),
-            ),
         })
     }
 
@@ -956,20 +987,6 @@ impl RuntimeConfiguration {
         }
     }
 
-    /// The ordinary owner transport always evaluates and realizes the immutable
-    /// activation in the authenticated local Lojix context. It then copies that
-    /// exact closure to the target before target-side activation. In particular,
-    /// the deploy path never evaluates a flake through an `ssh-ng` store: that
-    /// transport can stall indefinitely while a remote Nix daemon waits on its
-    /// SSH session.
-    fn build_target_for(
-        &self,
-        _cluster_name: &ordinary::ClusterName,
-        _node_name: &ordinary::NodeName,
-    ) -> nexus::BuildTarget {
-        nexus::BuildTarget::Local
-    }
-
     fn effect_barrier(&self) -> Option<&EffectBarrier> {
         self.effect_barrier.as_ref()
     }
@@ -1041,17 +1058,20 @@ struct DeployPipeline {
     source: ordinary::ProposalSource,
     requested_flake: ordinary::FlakeReference,
     flake: ordinary::FlakeReference,
-    /// A direct flake output attribute to build (a self-contained fixture /
-    /// test closure), overriding the production `nixosConfigurations.target`
-    /// path. `None` for a production deploy that needs the horizon override.
-    build_attribute: Option<meta::FlakeAttribute>,
+    /// Exact, request-owned deployment routing. These values are persisted on
+    /// the job cursor and copied to every effect; cluster/node identity never
+    /// supplies an implicit route or output name.
+    deployment_transport: sema::DeploymentTransport,
+    deployment_input_mode: sema::DeploymentInputMode,
+    deployment_output_selector: sema::DeploymentOutputSelector,
+    activation_backend: sema::ActivationBackend,
     /// The deploy action (host action, or user-environment action + user). Owns the
     /// produces-closure / activates / target-attribute decisions so the
     /// pipeline asks the action rather than storing derived booleans.
     action: DeployAction,
     source_revision_policy: meta::SourceRevisionPolicy,
     source_revision: Option<ordinary::SourceRevisionRecord>,
-    builder: Option<ordinary::NodeName>,
+    builder: Option<sema::NixBuilderSpec>,
     substituters: Vec<nexus::ExtraSubstituter>,
     input_overrides: Vec<nexus::FlakeInputOverride>,
     closure_path: Option<ordinary::ClosurePath>,
@@ -1142,19 +1162,6 @@ impl DeployAction {
                     user_environment_action: *action,
                     user_name: user.clone(),
                 })
-            }
-        }
-    }
-
-    /// The production flake attribute for this action — used when no direct
-    /// `build_attribute` override is given. Host deploys build the node
-    /// toplevel (node identity injected by the horizon override);
-    /// user-environment deploys build the user's activation package.
-    fn target_attribute(&self) -> String {
-        match self {
-            Self::Host(_) => "nixosConfigurations.target.config.system.build.toplevel".to_string(),
-            Self::UserEnvironment { user, .. } => {
-                format!("homeConfigurations.{}.activationPackage", user.payload())
             }
         }
     }
@@ -1478,13 +1485,14 @@ impl DeployPipeline {
                 source: deployment.proposal_source,
                 requested_flake: deployment.flake_reference.clone(),
                 flake: deployment.flake_reference,
-                build_attribute: deployment.optional_flake_attribute,
+                deployment_transport: deployment.deployment_transport,
+                deployment_input_mode: deployment.deployment_input_mode,
+                deployment_output_selector: deployment.deployment_output_selector,
+                activation_backend: deployment.activation_backend,
                 action: DeployAction::Host(deployment.host_deploy_action),
                 source_revision_policy: deployment.source_revision_policy,
                 source_revision: None,
-                builder: deployment
-                    .optional_builder
-                    .map(|builder| builder.into_payload()),
+                builder: deployment.optional_nix_builder_spec,
                 substituters: Self::convert_substituters(deployment.extra_substituter_vector),
                 input_overrides: Vec::new(),
                 closure_path: None,
@@ -1507,16 +1515,17 @@ impl DeployPipeline {
                 source: deployment.proposal_source,
                 requested_flake: deployment.flake_reference.clone(),
                 flake: deployment.flake_reference,
-                build_attribute: None,
+                deployment_transport: deployment.deployment_transport,
+                deployment_input_mode: deployment.deployment_input_mode,
+                deployment_output_selector: deployment.deployment_output_selector,
+                activation_backend: deployment.activation_backend,
                 action: DeployAction::UserEnvironment {
                     action: deployment.user_environment_action,
                     user: deployment.user_name,
                 },
                 source_revision_policy: deployment.source_revision_policy,
                 source_revision: None,
-                builder: deployment
-                    .optional_builder
-                    .map(|builder| builder.into_payload()),
+                builder: deployment.optional_nix_builder_spec,
                 substituters: Self::convert_substituters(deployment.extra_substituter_vector),
                 input_overrides: Vec::new(),
                 closure_path: None,
@@ -1576,12 +1585,14 @@ impl DeployPipeline {
     }
 
     /// The build command runs through the local daemon Nix client. An explicit
-    /// builder override still selects a configured Nix builder, whose result is
-    /// imported locally before the transport copies the exact closure onward.
-    fn build_target(&self, configuration: &RuntimeConfiguration) -> nexus::BuildTarget {
+    /// builder specification is passed verbatim to Nix; its result is imported
+    /// locally before the explicit transport copies the exact closure onward.
+    fn build_target(&self) -> nexus::BuildTarget {
         match &self.builder {
-            Some(builder) => nexus::BuildTarget::Remote(nexus::BuilderNode::new(builder.clone())),
-            None => configuration.build_target_for(&self.cluster_name, &self.node_name),
+            Some(builder) => {
+                nexus::BuildTarget::Remote(nexus::NixBuilderSpec::new(builder.payload().clone()))
+            }
+            None => nexus::BuildTarget::Local,
         }
     }
 
@@ -1594,7 +1605,10 @@ impl DeployPipeline {
     }
 
     fn needs_horizon_materialization(&self) -> bool {
-        self.build_attribute.is_none()
+        matches!(
+            self.deployment_input_mode,
+            sema::DeploymentInputMode::Horizon
+        )
     }
 
     fn horizon_materialization_command(&self) -> nexus::HorizonMaterializationCommand {
@@ -1616,9 +1630,6 @@ impl DeployPipeline {
                 ordinary::GenerationArtifact::UserEnvironment => {
                     nexus::MaterializationShape::BaseHost
                 }
-                ordinary::GenerationArtifact::LegacyUnknown => {
-                    nexus::MaterializationShape::BaseHost
-                }
             },
             DeployAction::UserEnvironment { user, .. } => {
                 nexus::MaterializationShape::UserEnvironment(
@@ -1628,7 +1639,7 @@ impl DeployPipeline {
         }
     }
 
-    fn nix_eval_command(&self, configuration: &RuntimeConfiguration) -> nexus::NixEvalCommand {
+    fn nix_eval_command(&self) -> nexus::NixEvalCommand {
         nexus::NixEvalCommand {
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
@@ -1636,36 +1647,24 @@ impl DeployPipeline {
             generation_artifact: self.generation_artifact,
             flake_reference: self.flake.clone(),
             source_revision_record: self.source_revision_record(),
-            string: self.target_attribute(),
+            deployment_output_selector: nexus::DeploymentOutputSelector::new(
+                nexus::FlakeAttribute::new(
+                    self.deployment_output_selector.payload().payload().clone(),
+                ),
+            ),
             flake_input_override_vector: self.input_overrides.clone(),
             // The ordinary owner transport resolves and realizes locally, then
             // copies the exact closure to the target. This deliberately never
             // selects an ssh-ng evaluation store.
-            build_target: self.build_target(configuration),
+            build_target: self.build_target(),
         }
     }
 
-    fn target_attribute(&self) -> String {
-        // A1 fix: a direct `build_attribute` override names a self-contained
-        // flake output (the fixture path); otherwise the action supplies the
-        // production attribute (`nixosConfigurations.target...` /
-        // `homeConfigurations.<user>...`). The old `{cluster}.{node}` form
-        // resolved to no real flake attribute and every deploy failed at eval.
-        match &self.build_attribute {
-            Some(attribute) => attribute.payload().clone(),
-            None => self.action.target_attribute(),
-        }
-    }
-
-    fn nix_build_command(
-        &self,
-        closure_path: ordinary::ClosurePath,
-        configuration: &RuntimeConfiguration,
-    ) -> nexus::NixBuildCommand {
+    fn nix_build_command(&self, closure_path: ordinary::ClosurePath) -> nexus::NixBuildCommand {
         nexus::NixBuildCommand {
             generation_identifier: self.generation_identifier.clone(),
             closure_path,
-            build_target: self.build_target(configuration),
+            build_target: self.build_target(),
             extra_substituter_vector: self.substituters.clone(),
         }
     }
@@ -1673,14 +1672,19 @@ impl DeployPipeline {
     fn copy_closure_command(
         &self,
         closure_path: ordinary::ClosurePath,
-        configuration: &RuntimeConfiguration,
     ) -> nexus::CopyClosureCommand {
         nexus::CopyClosureCommand {
             generation_identifier: self.generation_identifier.clone(),
-            cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
+            deployment_transport: nexus::DeploymentTransport {
+                nix_store_uri: nexus::NixStoreUri::new(
+                    self.deployment_transport.nix_store_uri.payload().clone(),
+                ),
+                ssh_destination: nexus::SshDestination::new(
+                    self.deployment_transport.ssh_destination.payload().clone(),
+                ),
+            },
             closure_path,
-            build_target: self.build_target(configuration),
         }
     }
 
@@ -1693,8 +1697,24 @@ impl DeployPipeline {
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
+            deployment_transport: nexus::DeploymentTransport {
+                nix_store_uri: nexus::NixStoreUri::new(
+                    self.deployment_transport.nix_store_uri.payload().clone(),
+                ),
+                ssh_destination: nexus::SshDestination::new(
+                    self.deployment_transport.ssh_destination.payload().clone(),
+                ),
+            },
             closure_path,
             activation_effect: self.activation_effect,
+            activation_backend: match self.activation_backend {
+                sema::ActivationBackend::NixosSystemdBootV1 => {
+                    nexus::ActivationBackend::NixosSystemdBootV1
+                }
+                sema::ActivationBackend::HomeManagerNixProfileV1 => {
+                    nexus::ActivationBackend::HomeManagerNixProfileV1
+                }
+            },
             activation_profile: self.action.activation_profile(),
         }
     }
@@ -1751,16 +1771,6 @@ impl DeployPipeline {
         }
     }
 
-    /// The resolved `root@<node>.<cluster>.criome` SSH target this deploy
-    /// activates, captured on the durable job row so a resumed job knows where
-    /// to poll without re-deriving from a partially-applied cursor. `None` only
-    /// if the names fail horizon validation (a submitted deploy never does).
-    fn resolved_target(&self) -> Option<String> {
-        SshTarget::root_at_node(&self.cluster_name, &self.node_name)
-            .ok()
-            .map(|target| target.as_ssh_arg())
-    }
-
     fn deployment_environment(&self) -> sema::DeploymentEnvironment {
         match &self.action {
             DeployAction::Host(_) => sema::DeploymentEnvironment::HostEnvironment,
@@ -1787,8 +1797,9 @@ impl DeployPipeline {
 
     /// The durable in-flight job row at the given phase. Written on submit and
     /// rewritten at every phase transition (up9q): the persisted phase cursor,
-    /// closure path (once built), resolved target, and BootOnce unit name let a
-    /// restarted daemon read the row and reconcile the in-flight deploy.
+    /// closure path (once built), exact private routing snapshot, and BootOnce
+    /// unit name let a restarted daemon read the row without recomputing a
+    /// route or selector.
     fn deploy_job(&self, phase: sema::DeployJobPhase) -> sema::DeployJob {
         sema::DeployJob {
             deployment_identifier: self.deployment_identifier.clone(),
@@ -1807,7 +1818,11 @@ impl DeployPipeline {
                 .source_revision
                 .as_ref()
                 .map(|source_revision| source_revision.string.clone()),
-            resolved_target: self.resolved_target(),
+            deployment_transport: self.deployment_transport.clone(),
+            deployment_input_mode: self.deployment_input_mode,
+            deployment_output_selector: self.deployment_output_selector.clone(),
+            activation_backend: self.activation_backend,
+            optional_nix_builder_spec: self.builder.clone(),
             boot_once_unit: self.boot_once_unit(),
             optional_generation_slot: self.activation_slot,
             persisted_flake_input_override_vector: self
@@ -1839,10 +1854,6 @@ impl DeployPipeline {
 /// type is the read-on-start reconcile-decision scaffolding S4b lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeployJobResumption {
-    /// A v2 cursor retained for owner diagnostics. It lacks the private
-    /// submission snapshot required to reconstruct effects and must never be
-    /// retried, terminalized, or deleted automatically.
-    LegacyNonResumable,
     /// Phase reached `Activating`: the activate effect was in flight when the
     /// daemon stopped. Re-activating could double-switch, so poll the BootOnce
     /// transient unit (PID-1-owned, survives the daemon) via
@@ -1866,7 +1877,6 @@ impl sema::DeployJob {
     /// per resumed row and acts on the typed verdict (up9q resume scaffolding).
     pub fn resumption(&self) -> DeployJobResumption {
         match self.deploy_job_phase {
-            sema::DeployJobPhase::LegacyNonResumable => DeployJobResumption::LegacyNonResumable,
             sema::DeployJobPhase::Activating => DeployJobResumption::PollActivationUnit {
                 unit: self.boot_once_unit.clone(),
             },
@@ -2086,6 +2096,9 @@ impl SchemaRuntime {
         if let Some(reason) = Self::unsupported_deploy_reason(&request) {
             return DeploySubmissionOutcome::Rejected(self.reject_submission(request, reason));
         }
+        if let Some(reason) = Self::deployment_routing_rejection(&request) {
+            return DeploySubmissionOutcome::Rejected(self.reject_submission(request, reason));
+        }
         if let Some(reason) = Self::proposal_source_rejection(&request) {
             return DeploySubmissionOutcome::Rejected(self.reject_submission(request, reason));
         }
@@ -2170,6 +2183,26 @@ impl SchemaRuntime {
             admission.into_payload(),
             submission,
         );
+        if pipeline.deployment_transport != job.deployment_transport
+            || pipeline.deployment_input_mode != job.deployment_input_mode
+            || pipeline.deployment_output_selector != job.deployment_output_selector
+            || pipeline.activation_backend != job.activation_backend
+            || pipeline.builder != job.optional_nix_builder_spec
+        {
+            return Err(Error::Invariant(
+                "persisted deploy job routing snapshot disagrees with its submission".to_string(),
+            ));
+        }
+        // The private job snapshot is the durable resume authority. The
+        // equality check above makes any torn or inconsistent persistence a
+        // fail-closed invariant violation, and these assignments ensure a
+        // restart reuses the exact accepted values rather than recomputing a
+        // route, selector, backend, or builder.
+        pipeline.deployment_transport = job.deployment_transport.clone();
+        pipeline.deployment_input_mode = job.deployment_input_mode;
+        pipeline.deployment_output_selector = job.deployment_output_selector.clone();
+        pipeline.activation_backend = job.activation_backend;
+        pipeline.builder = job.optional_nix_builder_spec.clone();
         pipeline.closure_path = job.optional_closure_path.clone();
         pipeline.activation_slot = job.optional_generation_slot;
         pipeline.input_overrides = job
@@ -2444,7 +2477,7 @@ impl SchemaRuntime {
             ));
         };
         self.active_operation = Some(MetaOperation::Test);
-        let first_effect = match pipeline.run.mode {
+        let first_effect = match pipeline.run.profile.test_mode {
             ordinary::TestMode::Hermetic => {
                 nexus::EffectCommand::HermeticCheck(pipeline.run.hermetic_check_command())
             }
@@ -2587,6 +2620,11 @@ impl SchemaRuntime {
                         meta::DeployRejected::new(self.deploy_rejection(reason)),
                     ));
                 }
+                if let Some(reason) = Self::deployment_routing_rejection(&request) {
+                    return Self::reply_meta(meta::Output::DeployRejected(
+                        meta::DeployRejected::new(self.deploy_rejection(reason)),
+                    ));
+                }
                 if let Some(reason) = Self::proposal_source_rejection(&request) {
                     return Self::reply_meta(meta::Output::DeployRejected(
                         meta::DeployRejected::new(self.deploy_rejection(reason)),
@@ -2686,7 +2724,7 @@ impl SchemaRuntime {
         // precedent. The HERMETIC path is fully real and unaffected.
         if resolved
             .iter()
-            .any(|run| matches!(run.mode, ordinary::TestMode::Live))
+            .any(|run| matches!(run.profile.test_mode, ordinary::TestMode::Live))
         {
             return Err(meta::TestRejectionReason::LiveNotYetEnabled);
         }
@@ -2769,6 +2807,54 @@ impl SchemaRuntime {
                 .is_immutable())
             .then_some(meta::DeployRejectionReason::FlakeReferenceMalformed),
         }
+    }
+
+    /// Validate every request-owned deployment route before the private cursor
+    /// is admitted. Validation is intentionally separate from construction:
+    /// later effects may use the strings verbatim without a fallback or a
+    /// cluster/node-derived repair.
+    fn deployment_routing_rejection(
+        request: &meta::DeployRequest,
+    ) -> Option<meta::DeployRejectionReason> {
+        let (transport, selector, backend, action, builder) = match request {
+            meta::DeployRequest::Host(deployment) => (
+                &deployment.deployment_transport,
+                &deployment.deployment_output_selector,
+                deployment.activation_backend,
+                true,
+                deployment.optional_nix_builder_spec.as_ref(),
+            ),
+            meta::DeployRequest::UserEnvironment(deployment) => (
+                &deployment.deployment_transport,
+                &deployment.deployment_output_selector,
+                deployment.activation_backend,
+                false,
+                deployment.optional_nix_builder_spec.as_ref(),
+            ),
+        };
+        let valid_backend = matches!(
+            (action, backend),
+            (true, sema::ActivationBackend::NixosSystemdBootV1)
+                | (false, sema::ActivationBackend::HomeManagerNixProfileV1)
+        );
+        let valid_selector = !selector.payload().payload().is_empty()
+            && selector
+                .payload()
+                .payload()
+                .bytes()
+                .all(|byte| !byte.is_ascii_whitespace() && !byte.is_ascii_control());
+        let valid_builder = builder.is_none_or(|specification| {
+            !specification.payload().is_empty()
+                && specification
+                    .payload()
+                    .bytes()
+                    .all(|byte| !byte.is_ascii_control())
+        });
+        let valid_transport = SshTarget::validate_nix_store_uri(transport.nix_store_uri.payload())
+            .is_ok()
+            && SshTarget::validate_ssh_destination(transport.ssh_destination.payload()).is_ok();
+        (!valid_backend || !valid_selector || !valid_builder || !valid_transport)
+            .then_some(meta::DeployRejectionReason::InvalidDeploymentRouting)
     }
 
     /// Reject an unusable proposal source before admitting a deploy or firing
@@ -3025,7 +3111,7 @@ impl SchemaRuntime {
             DeployStage::Submitted => {
                 self.set_stage(DeployStage::BuildingRecorded);
                 nexus::NexusAction::CommandEffect(nexus::EffectCommand::NixEval(
-                    pipeline.nix_eval_command(self.configuration.as_ref()),
+                    pipeline.nix_eval_command(),
                 ))
             }
             DeployStage::BuildingRecorded => {
@@ -3222,6 +3308,9 @@ impl SchemaRuntime {
             meta::DeployRejectionReason::FlakeReferenceMalformed => {
                 sema::DeploymentTerminalReason::FlakeReferenceMalformed
             }
+            meta::DeployRejectionReason::InvalidDeploymentRouting => {
+                sema::DeploymentTerminalReason::InvalidDeploymentRouting
+            }
             meta::DeployRejectionReason::BuilderUnreachable => {
                 sema::DeploymentTerminalReason::BuilderUnreachable
             }
@@ -3368,8 +3457,7 @@ impl SchemaRuntime {
                         sema::DeployResumeStage::NixBuild,
                     );
                     nexus::NexusAction::CommandEffect(nexus::EffectCommand::NixBuild(
-                        pipeline
-                            .nix_build_command(evaluated.closure_path, self.configuration.as_ref()),
+                        pipeline.nix_build_command(evaluated.closure_path),
                     ))
                 } else {
                     // Host `Evaluate`: the derivation path is the result — finish
@@ -3394,8 +3482,7 @@ impl SchemaRuntime {
                         sema::DeployResumeStage::CopyClosure,
                     );
                     nexus::NexusAction::CommandEffect(nexus::EffectCommand::CopyClosure(
-                        pipeline
-                            .copy_closure_command(built.closure_path, self.configuration.as_ref()),
+                        pipeline.copy_closure_command(built.closure_path),
                     ))
                 } else {
                     // Non-activating action (`Build`): the closure is realised —
@@ -4205,7 +4292,11 @@ impl SchemaRuntime {
     }
 
     async fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> nexus::EffectResult {
-        let attribute = format!("{}#{}", command.flake_reference.payload(), command.string);
+        let attribute = format!(
+            "{}#{}",
+            command.flake_reference.payload(),
+            command.deployment_output_selector.payload().payload(),
+        );
         let refresh = EvalRefresh::for_source(
             command.source_revision_record.source_revision_policy,
             command.flake_reference.payload(),
@@ -4246,12 +4337,9 @@ impl SchemaRuntime {
                 command.closure_path.payload(),
                 &command.extra_substituter_vector,
             ),
-            nexus::BuildTarget::Remote(_) => NixCommand::build_closure_remote(
+            nexus::BuildTarget::Remote(builder_spec) => NixCommand::build_closure_remote(
                 command.closure_path.payload(),
-                &command.extra_substituter_vector,
-            ),
-            nexus::BuildTarget::Target(_) => NixCommand::build_closure(
-                command.closure_path.payload(),
+                builder_spec.payload(),
                 &command.extra_substituter_vector,
             ),
         };
@@ -4317,7 +4405,6 @@ impl SchemaRuntime {
             ordinary::ActivationEffect::TestActivation => ordinary::GenerationSlot::Recent,
             ordinary::ActivationEffect::BootOnceProfile => ordinary::GenerationSlot::BootPending,
             ordinary::ActivationEffect::ProfileOnly => ordinary::GenerationSlot::Current,
-            ordinary::ActivationEffect::LegacyUnknown => ordinary::GenerationSlot::LegacyUnknown,
         }
     }
 
@@ -4335,12 +4422,11 @@ impl SchemaRuntime {
         }
     }
 
-    /// The REAL hermetic check effect (Unit 2b): build
-    /// `<flake>#checks.<system>.vm-<node> --print-out-paths`. Exit 0 + an
-    /// out-path → `HermeticCheckBuilt` carrying the realised check closure;
-    /// a non-zero exit → `EffectFailed(HermeticCheck)`. The `runNixOSTest`
-    /// engine owns its own sandboxed VM, so this is a pure build with zero host
-    /// effect. NEVER fakes a pass — the outcome IS the nix-build result.
+    /// The real hermetic check effect builds the exact profile selector. Exit
+    /// 0 plus an out-path produces `HermeticCheckBuilt`; a non-zero exit
+    /// produces `EffectFailed(HermeticCheck)`. The selected check owns its
+    /// sandboxed VM, so this is a pure build with zero host effect. The outcome
+    /// is the actual Nix build result.
     async fn run_hermetic_check(
         &self,
         command: nexus::HermeticCheckCommand,
@@ -4360,7 +4446,7 @@ impl SchemaRuntime {
         }
     }
 
-    /// The LIVE bring-up effect (Unit 2b — report 47 v2 / report 51 §3). BUILT
+    /// The live bring-up effect. BUILT
     /// here, NOT run live (the first Prometheus cycle is psyche-gated): the
     /// host-untouched user-namespace bring-up command is constructed
     /// (`ssh <host-fqdn>` + `systemd-run --user` + `unshare -rn` + `nsenter`)
@@ -4372,7 +4458,10 @@ impl SchemaRuntime {
         &self,
         command: nexus::BringUpTestVmCommand,
     ) -> nexus::EffectResult {
-        let bring_up = LiveTestVm::from_bring_up(&command);
+        let bring_up = match LiveTestVm::from_bring_up(&command) {
+            Ok(bring_up) => bring_up,
+            Err(detail) => return Self::effect_failed(nexus::EffectStage::BringUpTestVm, detail),
+        };
         // The invocation is CONSTRUCTED (the host-untouched user-namespace
         // command) but not executed — a live run is gated. Constructing it
         // proves the command shape; `invocation()` is the on-host effect a live
@@ -4393,7 +4482,10 @@ impl SchemaRuntime {
         &self,
         command: nexus::TearDownTestVmCommand,
     ) -> nexus::EffectResult {
-        let tear_down = LiveTestVm::from_tear_down(&command);
+        let tear_down = match LiveTestVm::from_tear_down(&command) {
+            Ok(tear_down) => tear_down,
+            Err(detail) => return Self::effect_failed(nexus::EffectStage::TearDownTestVm, detail),
+        };
         let _invocation = tear_down.tear_down_invocation();
         nexus::EffectResult::TestVmStopped(nexus::TestVmTornDown {
             cluster_name: command.cluster_name,
@@ -4869,7 +4961,7 @@ impl ClusterSecretFile {
         &self.path
     }
 
-    /// The bare file name (`routerWifiSaePasswords.sops`) used both for the copy
+    /// The bare file name (`fixtureCamelCase.sops`) used both for the copy
     /// destination and the generated `./<file>.sops` Nix path. A non-UTF-8 file
     /// name is a real error (it cannot name a Nix path), not an empty string, so
     /// it returns a typed `Error::SecretFileNameNotUtf8` per the typed-error
@@ -4885,7 +4977,7 @@ impl ClusterSecretFile {
     /// The CriomOS `sopsFiles` attribute name: the `.sops` filename stem
     /// VERBATIM (only the `.sops` suffix stripped), with NO case transform. The
     /// coordinated design renames each cluster secret file to its exact
-    /// camelCase consumer name (`routerWifiSaePasswords.sops`), so the attribute
+    /// camelCase consumer name (`fixtureCamelCase.sops`), so the attribute
     /// name is the stem as written — no hidden, lossy kebab-to-camel coupling. A
     /// non-UTF-8 stem returns a typed `Error::SecretFileNameNotUtf8`.
     fn attribute_name(&self) -> Result<String> {
@@ -4950,50 +5042,61 @@ impl NarHash {
     }
 }
 
-/// SSH target — `<user>@<node>.<cluster>.criome` — the addressing used by
-/// `ssh`, `nix copy --to ssh-ng://…`, and `--from ssh-ng://…` (ported from
-/// target addressing model. Activate/copy address `root@<criome_domain>`,
-/// NEVER a bare `NodeName`; the domain is derived from the cluster + node on
-/// the deploy cursor via `CriomeDomainName::for_node` (resolving open question
-/// Q1: the address is computed from cursor fields already present —
-/// `<node>.<cluster>.criome` — not threaded as a new horizon-projection field).
+/// Exact request-supplied deployment transport. The two strings have distinct
+/// consumers: Nix receives `nix_store_uri` and SSH receives
+/// `ssh_destination`. They are validated as command arguments but never
+/// normalized, rewritten, or derived from cluster/node identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SshTarget {
-    user: String,
-    domain: CriomeDomainName,
+    nix_store_uri: String,
+    ssh_destination: String,
 }
 
 impl SshTarget {
-    /// Resolve `root@<node>.<cluster>.criome` from the ordinary cluster + node
-    /// names carried on the cursor. Errors only if the names fail horizon
-    /// validation (empty / quotation mark), which a submitted deploy never has.
-    fn root_at_node(
-        cluster_name: &ordinary::ClusterName,
-        node_name: &ordinary::NodeName,
-    ) -> std::result::Result<Self, String> {
+    fn from_transport(transport: &nexus::DeploymentTransport) -> std::result::Result<Self, String> {
+        let nix_store_uri = transport.nix_store_uri.payload().clone();
+        let ssh_destination = transport.ssh_destination.payload().clone();
+        Self::validate_nix_store_uri(&nix_store_uri)?;
+        Self::validate_ssh_destination(&ssh_destination)?;
         Ok(Self {
-            user: "root".to_string(),
-            domain: Self::criome_domain(cluster_name, node_name)?,
+            nix_store_uri,
+            ssh_destination,
         })
     }
 
-    fn criome_domain(
-        cluster_name: &ordinary::ClusterName,
-        node_name: &ordinary::NodeName,
-    ) -> std::result::Result<CriomeDomainName, String> {
-        let cluster = HorizonClusterName::try_new(cluster_name.payload().clone())
-            .map_err(|error| format!("invalid cluster name for ssh target: {error}"))?;
-        let node = HorizonNodeName::try_new(node_name.payload().clone())
-            .map_err(|error| format!("invalid node name for ssh target: {error}"))?;
-        Ok(CriomeDomainName::for_node(&node, &cluster))
+    fn validate_nix_store_uri(value: &str) -> std::result::Result<(), String> {
+        if !value.starts_with("ssh-ng://")
+            || value.len() == "ssh-ng://".len()
+            || value
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        {
+            return Err("deployment nix_store_uri must be a nonempty ssh-ng URI without whitespace or controls".to_string());
+        }
+        Ok(())
     }
 
-    fn ssh_uri(&self) -> String {
-        format!("ssh-ng://{}@{}", self.user, self.domain.as_str())
-    }
-
-    fn as_ssh_arg(&self) -> String {
-        format!("{}@{}", self.user, self.domain.as_str())
+    fn validate_ssh_destination(value: &str) -> std::result::Result<(), String> {
+        if value.is_empty()
+            || value.starts_with('-')
+            || value
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        {
+            return Err("deployment ssh_destination must be a nonempty SSH destination without whitespace or controls".to_string());
+        }
+        let Some((login, host)) = value.split_once('@') else {
+            return Err(
+                "deployment ssh_destination must contain an explicit login and host".to_string(),
+            );
+        };
+        if login.is_empty() || host.is_empty() || host.contains('@') {
+            return Err(
+                "deployment ssh_destination must contain exactly one nonempty login and host"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 
     /// `ssh -o BatchMode=yes <user>@<domain> <remote_command>`.
@@ -5003,7 +5106,7 @@ impl SshTarget {
             vec![
                 "-o".to_string(),
                 "BatchMode=yes".to_string(),
-                self.as_ssh_arg(),
+                self.ssh_destination.clone(),
                 remote_command.into_text(),
             ],
         )
@@ -5076,7 +5179,7 @@ struct ClosureCopy {
 
 impl ClosureCopy {
     fn from_command(command: &nexus::CopyClosureCommand) -> std::result::Result<Self, String> {
-        let target = SshTarget::root_at_node(&command.cluster_name, &command.node_name)?;
+        let target = SshTarget::from_transport(&command.deployment_transport)?;
         Ok(Self {
             store_path: command.closure_path.payload().clone(),
             target,
@@ -5090,7 +5193,7 @@ impl ClosureCopy {
             "copy".to_string(),
             "--substitute-on-destination".to_string(),
             "--to".to_string(),
-            self.target.ssh_uri(),
+            self.target.nix_store_uri.clone(),
             self.store_path.clone(),
         ];
         NixCommand::new("nix", arguments)
@@ -5118,10 +5221,13 @@ impl Activation {
         command: &nexus::ActivateGenerationCommand,
         daemon_host: Option<&ordinary::NodeName>,
     ) -> std::result::Result<Self, String> {
-        let target = SshTarget::root_at_node(&command.cluster_name, &command.node_name)?;
+        let target = SshTarget::from_transport(&command.deployment_transport)?;
         let store_path = command.closure_path.payload().clone();
-        match &command.activation_profile {
-            nexus::ActivationProfile::Host(action) => Ok(Self::Host(HostActivation {
+        match (&command.activation_backend, &command.activation_profile) {
+            (
+                nexus::ActivationBackend::NixosSystemdBootV1,
+                nexus::ActivationProfile::Host(action),
+            ) => Ok(Self::Host(HostActivation {
                 deployment_identifier: command.deployment_identifier.clone(),
                 target,
                 node_name: command.node_name.clone(),
@@ -5129,7 +5235,10 @@ impl Activation {
                 store_path,
                 action: *action,
             })),
-            nexus::ActivationProfile::UserEnvironment(profile) => {
+            (
+                nexus::ActivationBackend::HomeManagerNixProfileV1,
+                nexus::ActivationProfile::UserEnvironment(profile),
+            ) => {
                 let user = HorizonUserName::try_new(profile.user_name.payload().clone())
                     .map_err(|error| format!("invalid user name for home activation: {error}"))?;
                 Ok(Self::UserEnvironment(UserEnvironmentActivation {
@@ -5140,6 +5249,9 @@ impl Activation {
                     mode: profile.user_environment_action,
                 }))
             }
+            _ => Err(
+                "activation backend does not support the requested activation profile".to_string(),
+            ),
         }
     }
 
@@ -5688,12 +5800,10 @@ impl NixCommand {
     }
 
     /// `nix build <installable> --no-link --print-out-paths` for a hermetic
-    /// auto-pickup check (Unit 2b). The installable already names the
-    /// `#checks.<system>.vm-<node>` attribute (an `runNixOSTest` derivation
-    /// whose realised output IS the check result), so it is passed verbatim —
-    /// no `^*` output selector and no `.drvPath` indirection (unlike the deploy
-    /// build, which threads a `.drv` path). Exit status IS pass/fail; the
-    /// printed line is the realised check out-path.
+    /// check. The exact request/configuration-owned output selector is passed
+    /// verbatim — no derived attribute, `^*` output selector, or `.drvPath`
+    /// indirection. Exit status is pass/fail; the printed line is the realised
+    /// check out-path.
     fn build_check(installable: &str) -> Self {
         Self::new(
             "nix",
@@ -5706,7 +5816,11 @@ impl NixCommand {
         )
     }
 
-    fn build_closure_remote(closure_path: &str, substituters: &[nexus::ExtraSubstituter]) -> Self {
+    fn build_closure_remote(
+        closure_path: &str,
+        builder_spec: &str,
+        substituters: &[nexus::ExtraSubstituter],
+    ) -> Self {
         let mut arguments = vec![
             "build".to_string(),
             "--no-link".to_string(),
@@ -5715,7 +5829,7 @@ impl NixCommand {
             "max-jobs".to_string(),
             "0".to_string(),
             "--builders".to_string(),
-            "@/etc/nix/machines".to_string(),
+            builder_spec.to_string(),
             Self::output_installable(closure_path),
         ];
         arguments.extend(Self::substituter_options(substituters));
@@ -6027,11 +6141,14 @@ mod tests {
             host_composition: ordinary::HostComposition::BaseHost,
             proposal_source: ordinary::ProposalSource::new("/dev/null"),
             flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
+            deployment_transport: fixture_transport(),
+            deployment_input_mode: sema::DeploymentInputMode::Direct,
+            deployment_output_selector: fixture_output_selector(),
+            activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
             host_deploy_action: action,
             source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-            optional_builder: None,
+            optional_nix_builder_spec: None,
             extra_substituter_vector: Vec::new(),
-            optional_flake_attribute: None,
         })
     }
 
@@ -6065,6 +6182,28 @@ mod tests {
 
     fn node() -> ordinary::NodeName {
         ordinary::NodeName::new("node-1")
+    }
+
+    fn fixture_transport() -> sema::DeploymentTransport {
+        sema::DeploymentTransport {
+            nix_store_uri: sema::NixStoreUri::new("ssh-ng://fixture-copy.invalid"),
+            ssh_destination: sema::SshDestination::new("fixture-login@fixture-activate.invalid"),
+        }
+    }
+
+    fn fixture_output_selector() -> sema::DeploymentOutputSelector {
+        sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new("checks.fixture-a"))
+    }
+
+    fn fixture_test_profile() -> nexus::TestExecutionProfile {
+        nexus::TestExecutionProfile {
+            test_mode: ordinary::TestMode::Hermetic,
+            nix_system: nexus::NixSystem::new("x86_64-linux"),
+            deployment_output_selector: nexus::DeploymentOutputSelector::new(
+                nexus::FlakeAttribute::new("checks.fixture-a"),
+            ),
+            optional_deployment_transport: None,
+        }
     }
 
     // ---- Step 1: closure-threading onto the activate command ----
@@ -6181,11 +6320,14 @@ mod tests {
             host_composition: ordinary::HostComposition::BaseHost,
             proposal_source: ordinary::ProposalSource::new("/dev/null"),
             flake_reference: ordinary::FlakeReference::new(flake),
+            deployment_transport: fixture_transport(),
+            deployment_input_mode: sema::DeploymentInputMode::Direct,
+            deployment_output_selector: fixture_output_selector(),
+            activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
             host_deploy_action: ordinary::HostDeployAction::Evaluate,
             source_revision_policy: policy,
-            optional_builder: None,
+            optional_nix_builder_spec: None,
             extra_substituter_vector: Vec::new(),
-            optional_flake_attribute: None,
         })
     }
 
@@ -6237,6 +6379,39 @@ mod tests {
                 SchemaRuntime::source_revision_policy_rejection(&deployment_request(policy, flake));
             assert_eq!(rejected.is_none(), accepted, "{policy:?}: {flake}");
         }
+    }
+
+    #[test]
+    fn admission_rejects_invalid_request_owned_routing_before_snapshot_persistence() {
+        let mut request = deployment_request(
+            meta::SourceRevisionPolicy::ResolveAndRecord,
+            "github:owner/repo",
+        );
+        let meta::DeployRequest::Host(deployment) = &mut request else {
+            unreachable!("fixture is a host deploy")
+        };
+        deployment.deployment_transport.ssh_destination = sema::SshDestination::new("root");
+        assert_eq!(
+            SchemaRuntime::deployment_routing_rejection(&request),
+            Some(meta::DeployRejectionReason::InvalidDeploymentRouting)
+        );
+        let mut runtime = SchemaRuntime::new();
+        let outcome = runtime.submit_deploy(match request {
+            meta::DeployRequest::Host(deployment) => sema::DeploySubmission::Host(deployment),
+            meta::DeployRequest::UserEnvironment(deployment) => {
+                sema::DeploySubmission::UserEnvironment(deployment)
+            }
+        });
+        let DeploySubmissionOutcome::Rejected(rejected) = outcome else {
+            panic!("invalid routing must reject")
+        };
+        assert!(matches!(
+            rejected.into_payload().optional_deployment_terminal,
+            Some(sema::DeploymentTerminal::Rejected(
+                sema::DeploymentTerminalReason::InvalidDeploymentRouting
+            ))
+        ));
+        assert!(runtime.store().deploy_jobs().expect("job rows").is_empty());
     }
 
     #[test]
@@ -6405,7 +6580,7 @@ mod tests {
                 .requested_ref,
             ordinary::FlakeReference::new("github:owner/repo/main")
         );
-        let command = pipeline.nix_eval_command(engine.configuration.as_ref());
+        let command = pipeline.nix_eval_command();
         assert_eq!(
             command.source_revision_record.string,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -6544,7 +6719,7 @@ mod tests {
         pipeline.source_revision = Some(source_revision(
             ordinary::SourceRevisionPolicy::ResolveAndRecord,
         ));
-        let eval = pipeline.nix_eval_command(configuration.as_ref());
+        let eval = pipeline.nix_eval_command();
         let build = nexus::NixBuildCommand {
             generation_identifier: ordinary::GenerationIdentifier::new(1),
             closure_path: ordinary::ClosurePath::new(STORE),
@@ -6555,7 +6730,7 @@ mod tests {
             cluster_name: cluster(),
             node_name: node(),
             flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
-            string: HermeticCheck::SYSTEM.to_string(),
+            test_execution_profile: fixture_test_profile(),
         };
         let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
         for (stage, result) in [
@@ -6821,11 +6996,14 @@ mod tests {
                 host_composition: ordinary::HostComposition::BaseHost,
                 proposal_source: ordinary::ProposalSource::new("/dev/null"),
                 flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
+                deployment_transport: fixture_transport(),
+                deployment_input_mode: sema::DeploymentInputMode::Direct,
+                deployment_output_selector: fixture_output_selector(),
+                activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
                 host_deploy_action: action,
                 source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-                optional_builder: None,
+                optional_nix_builder_spec: None,
                 extra_substituter_vector: Vec::new(),
-                optional_flake_attribute: None,
             });
             assert!(
                 SchemaRuntime::unsupported_deploy_reason(&request).is_none(),
@@ -6843,9 +7021,13 @@ mod tests {
                 user_name: ordinary::UserName::new("li"),
                 proposal_source: ordinary::ProposalSource::new("/dev/null"),
                 flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
+                deployment_transport: fixture_transport(),
+                deployment_input_mode: sema::DeploymentInputMode::Direct,
+                deployment_output_selector: fixture_output_selector(),
+                activation_backend: sema::ActivationBackend::HomeManagerNixProfileV1,
                 user_environment_action: mode,
                 source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-                optional_builder: None,
+                optional_nix_builder_spec: None,
                 extra_substituter_vector: Vec::new(),
             });
             assert!(
@@ -6886,11 +7068,16 @@ mod tests {
     }
 
     #[test]
-    fn remote_build_uses_daemon_machine_file_and_disables_local_fallback() {
-        let invocation = NixCommand::build_closure_remote(DERIVATION, &[]);
+    fn remote_build_uses_the_exact_request_builder_spec_and_disables_local_fallback() {
+        let builder_spec = "ssh-ng://fixture-builder.invalid x86_64-linux - 4 2 k1";
+        let invocation = NixCommand::build_closure_remote(DERIVATION, builder_spec, &[]);
         assert_eq!(invocation.program(), "nix");
         let argv = invocation.joined_arguments();
-        assert!(argv.contains("--builders @/etc/nix/machines"), "{argv}");
+        assert!(
+            argv.contains(&format!("--builders {builder_spec}")),
+            "{argv}"
+        );
+        assert!(!argv.contains("/etc/nix/machines"), "{argv}");
         assert!(argv.contains("--option max-jobs 0"), "{argv}");
         assert!(argv.contains("--print-out-paths"), "{argv}");
         assert!(
@@ -6906,22 +7093,21 @@ mod tests {
         );
     }
 
-    // ---- Step 3: SSH addressing — root@<criome_domain>, never bare node ----
+    // ---- Step 3: exact request-supplied transport, never derived routing ----
 
-    #[test]
-    fn ssh_target_addresses_root_at_criome_domain() {
-        let target = SshTarget::root_at_node(&cluster(), &node()).expect("target");
-        assert_eq!(target.as_ssh_arg(), "root@node-1.alpha.criome");
-        assert_eq!(target.ssh_uri(), "ssh-ng://root@node-1.alpha.criome");
+    fn nexus_fixture_transport() -> nexus::DeploymentTransport {
+        nexus::DeploymentTransport {
+            nix_store_uri: nexus::NixStoreUri::new("ssh-ng://fixture-copy.invalid"),
+            ssh_destination: nexus::SshDestination::new("fixture-login@fixture-activate.invalid"),
+        }
     }
 
-    fn copy_command(source: nexus::BuildTarget) -> nexus::CopyClosureCommand {
+    fn copy_command() -> nexus::CopyClosureCommand {
         nexus::CopyClosureCommand {
             generation_identifier: ordinary::GenerationIdentifier::new(1),
-            cluster_name: cluster(),
             node_name: node(),
+            deployment_transport: nexus_fixture_transport(),
             closure_path: ordinary::ClosurePath::new(STORE),
-            build_target: source,
         }
     }
 
@@ -6929,14 +7115,14 @@ mod tests {
 
     #[test]
     fn copy_from_dispatcher_uses_to_only_with_substitute() {
-        let copy = ClosureCopy::from_command(&copy_command(nexus::BuildTarget::Local))
+        let copy = ClosureCopy::from_command(&copy_command())
             .expect("local build copies from the dispatcher store");
         let invocation = copy.invocation();
         assert_eq!(invocation.program(), "nix");
         let argv = invocation.joined_arguments();
         assert!(argv.contains("--substitute-on-destination"), "{argv}");
         assert!(
-            argv.contains("--to ssh-ng://root@node-1.alpha.criome"),
+            argv.contains("--to ssh-ng://fixture-copy.invalid"),
             "{argv}"
         );
         assert!(!argv.contains("--from"), "{argv}");
@@ -6944,47 +7130,19 @@ mod tests {
     }
 
     #[test]
-    fn copy_remote_builder_still_uses_dispatcher_to_target_copy() {
-        let builder = ordinary::NodeName::new("builder-node");
-        let source = nexus::BuildTarget::Remote(nexus::BuilderNode::new(builder));
-        let copy = ClosureCopy::from_command(&copy_command(source))
-            .expect("a remote builder copies its result from the dispatcher store");
+    fn copy_uses_exact_nix_store_uri_without_rewriting_it() {
+        let mut command = copy_command();
+        command.deployment_transport.nix_store_uri =
+            nexus::NixStoreUri::new("ssh-ng://other-copy.invalid:2222?compress=true");
+        let copy = ClosureCopy::from_command(&command).expect("copy transport");
         let invocation = copy.invocation();
         let argv = invocation.joined_arguments();
         assert!(argv.contains("--substitute-on-destination"), "{argv}");
         assert!(!argv.contains("--from"), "{argv}");
         assert!(
-            argv.contains("--to ssh-ng://root@node-1.alpha.criome"),
+            argv.contains("--to ssh-ng://other-copy.invalid:2222?compress=true"),
             "{argv}"
         );
-    }
-
-    #[test]
-    fn copy_builder_equals_target_still_runs_idempotent_target_copy() {
-        let source = nexus::BuildTarget::Remote(nexus::BuilderNode::new(node()));
-        let copy = ClosureCopy::from_command(&copy_command(source))
-            .expect("a remote builder copies its result from the dispatcher store");
-        let invocation = copy.invocation();
-        let argv = invocation.joined_arguments();
-        assert!(!argv.contains("--from"), "{argv}");
-        assert!(
-            argv.contains("--to ssh-ng://root@node-1.alpha.criome"),
-            "{argv}"
-        );
-    }
-
-    // ---- copy is always explicit, even for a legacy target-store command ----
-
-    #[test]
-    fn target_store_command_still_copies_the_exact_closure() {
-        // The durable transport always makes the copy stage explicit. This also
-        // prevents a legacy target-store command from silently bypassing the
-        // source-of-truth closure transfer.
-        let source = nexus::BuildTarget::Target(nexus::TargetStore::new(nexus::StoreUri::new(
-            "ssh-ng://root@node-1.alpha.criome",
-        )));
-        let copy = ClosureCopy::from_command(&copy_command(source)).expect("copy");
-        assert!(copy.invocation().joined_arguments().contains(STORE));
     }
 
     fn activate_command(
@@ -6996,8 +7154,15 @@ mod tests {
             generation_identifier: ordinary::GenerationIdentifier::new(1),
             cluster_name: cluster(),
             node_name: node(),
+            deployment_transport: nexus_fixture_transport(),
             closure_path: ordinary::ClosurePath::new(STORE),
             activation_effect: kind,
+            activation_backend: match &profile {
+                nexus::ActivationProfile::Host(_) => nexus::ActivationBackend::NixosSystemdBootV1,
+                nexus::ActivationProfile::UserEnvironment(_) => {
+                    nexus::ActivationBackend::HomeManagerNixProfileV1
+                }
+            },
             activation_profile: profile,
         }
     }
@@ -7035,7 +7200,10 @@ mod tests {
         let invocation = activation.ssh_invocation().expect("switch invocation");
         assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
-        assert!(argv.contains("root@node-1.alpha.criome"), "{argv}");
+        assert!(
+            argv.contains("fixture-login@fixture-activate.invalid"),
+            "{argv}"
+        );
         assert!(argv.contains(STORE), "{argv}");
         assert!(
             argv.contains(&format!("{STORE}/bin/switch-to-configuration switch")),
@@ -7152,8 +7320,8 @@ mod tests {
         sema::DeployJob {
             deployment_identifier: ordinary::DeploymentIdentifier::new(72),
             generation_identifier: ordinary::GenerationIdentifier::new(72),
-            cluster_name: ordinary::ClusterName::new("goldragon"),
-            node_name: ordinary::NodeName::new("ouranos"),
+            cluster_name: ordinary::ClusterName::new("fixture-cluster"),
+            node_name: ordinary::NodeName::new("fixture-daemon"),
             deploy_job_phase: sema::DeployJobPhase::Activating,
             optional_closure_path: closure.map(ordinary::ClosurePath::new),
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
@@ -7164,7 +7332,11 @@ mod tests {
                 "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567",
             )),
             resolved_revision: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
-            resolved_target: None,
+            deployment_transport: fixture_transport(),
+            deployment_input_mode: sema::DeploymentInputMode::Direct,
+            deployment_output_selector: fixture_output_selector(),
+            activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
+            optional_nix_builder_spec: None,
             boot_once_unit: None,
             optional_generation_slot: None,
             persisted_flake_input_override_vector: Vec::new(),
@@ -7290,7 +7462,10 @@ mod tests {
         let invocation = activation.systemd_run_invocation("lojix-boot-once-abc-def");
         assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
-        assert!(argv.contains("root@node-1.alpha.criome"), "{argv}");
+        assert!(
+            argv.contains("fixture-login@fixture-activate.invalid"),
+            "{argv}"
+        );
         assert!(argv.contains("systemd-run"), "{argv}");
         assert!(argv.contains("--unit=lojix-boot-once-abc-def"), "{argv}");
         assert!(argv.contains("--collect"), "{argv}");
@@ -7334,22 +7509,12 @@ mod tests {
 
     // ---- local owner transport: selection of the build context ----
 
-    fn configuration_on_host(host: &str) -> RuntimeConfiguration {
-        let mut configuration = RuntimeConfiguration::test_default();
-        configuration.daemon_host = ordinary::NodeName::new(host);
-        configuration
-    }
-
     #[test]
     fn build_on_a_different_target_stays_in_the_local_owner_context() {
         // Remote activation targets now evaluate/build locally and copy their
         // exact immutable output afterwards; no eval or build targets ssh-ng.
         let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
-        let configuration = configuration_on_host("ouranos");
-        assert!(matches!(
-            pipeline.build_target(&configuration),
-            nexus::BuildTarget::Local
-        ));
+        assert!(matches!(pipeline.build_target(), nexus::BuildTarget::Local));
     }
 
     #[test]
@@ -7357,11 +7522,7 @@ mod tests {
         // Deploying the daemon's own host also stays local. The same transport
         // invariant applies to every target, including the daemon host.
         let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
-        let configuration = configuration_on_host("node-1");
-        assert!(matches!(
-            pipeline.build_target(&configuration),
-            nexus::BuildTarget::Local
-        ));
+        assert!(matches!(pipeline.build_target(), nexus::BuildTarget::Local));
     }
 
     #[test]
@@ -7369,10 +7530,11 @@ mod tests {
         // An operator-named builder still dispatches to that Nix builder machine
         // through the local Nix client; only the default has no named builder.
         let mut pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
-        pipeline.builder = Some(ordinary::NodeName::new("big-builder"));
-        let configuration = configuration_on_host("ouranos");
+        pipeline.builder = Some(sema::NixBuilderSpec::new(
+            "ssh-ng://fixture-builder.invalid x86_64-linux - 4 2 k1",
+        ));
         assert!(matches!(
-            pipeline.build_target(&configuration),
+            pipeline.build_target(),
             nexus::BuildTarget::Remote(_)
         ));
     }
@@ -7532,12 +7694,8 @@ mod tests {
     }
 
     #[test]
-    fn target_store_command_never_redirects_eval_over_ssh_ng() {
-        // Even a legacy TargetStore command cannot restore remote evaluation:
-        // the transport invariant is that eval stays in Lojix's local context.
-        let store = nexus::BuildTarget::Target(nexus::TargetStore::new(nexus::StoreUri::new(
-            "ssh-ng://root@node-1.alpha.criome",
-        )));
+    fn local_eval_never_redirects_over_ssh_ng() {
+        let store = nexus::BuildTarget::Local;
         let invocation =
             NixCommand::eval_drv_path(".#toplevel", &[], &store, EvalRefresh::ForceRefresh);
         assert_eq!(invocation.program(), "nix");
@@ -7557,9 +7715,7 @@ mod tests {
         // (bead primary-8sv6): no `--refresh`, so a re-deploy of the same rev
         // serves the cached evaluation instead of re-evaluating the whole tree.
         // The `--raw` flag and `.drvPath` selector are unaffected.
-        let store = nexus::BuildTarget::Target(nexus::TargetStore::new(nexus::StoreUri::new(
-            "ssh-ng://root@node-1.alpha.criome",
-        )));
+        let store = nexus::BuildTarget::Local;
         let invocation =
             NixCommand::eval_drv_path(".#toplevel", &[], &store, EvalRefresh::TrustImmutablePin);
         let argv = invocation.joined_arguments();
@@ -7625,9 +7781,9 @@ mod tests {
         // machine; the eval stays host-local (the `.drv` is instantiated against
         // the daemon host's store, matching `build_closure_remote`). So a Remote
         // eval adds no `--store` / `--eval-store` flags at all.
-        let target = nexus::BuildTarget::Remote(nexus::BuilderNode::new(ordinary::NodeName::new(
-            "builder-1",
-        )));
+        let target = nexus::BuildTarget::Remote(nexus::NixBuilderSpec::new(
+            "ssh-ng://fixture-builder.invalid x86_64-linux - 4 2 k1",
+        ));
         let invocation =
             NixCommand::eval_drv_path(".#toplevel", &[], &target, EvalRefresh::ForceRefresh);
         let argv = invocation.joined_arguments();
@@ -7702,8 +7858,10 @@ mod tests {
         let invocation = activation.remote_profile_invocation();
         assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
-        assert!(argv.contains("root@node-1.alpha.criome"), "{argv}");
-        assert!(!argv.contains("li@node-1.alpha.criome"), "{argv}");
+        assert!(
+            argv.contains("fixture-login@fixture-activate.invalid"),
+            "{argv}"
+        );
         assert!(argv.contains("runuser --login --command"), "{argv}");
         assert!(argv.trim_end().ends_with("li"), "{argv}");
         assert!(
@@ -7718,8 +7876,10 @@ mod tests {
         let activation = user_environment_activation(meta::UserEnvironmentAction::ActivateNow);
         let invocation = activation.remote_activate_invocation();
         let argv = invocation.joined_arguments();
-        assert!(argv.contains("root@node-1.alpha.criome"), "{argv}");
-        assert!(!argv.contains("li@node-1.alpha.criome"), "{argv}");
+        assert!(
+            argv.contains("fixture-login@fixture-activate.invalid"),
+            "{argv}"
+        );
         assert!(argv.contains("runuser --login --command"), "{argv}");
         assert!(argv.trim_end().ends_with("li"), "{argv}");
         assert!(argv.contains(&format!("{STORE}/activate")), "{argv}");
@@ -7734,20 +7894,18 @@ mod tests {
     #[test]
     fn sops_attribute_name_is_the_filename_stem_verbatim() {
         // No case transform: the `.sops` filename stem becomes the attribute
-        // name exactly as written (the coordinated goldragon rename gives each
-        // file its exact camelCase consumer name). Only the `.sops` suffix is
-        // stripped.
+        // name exactly as written. Only the `.sops` suffix is stripped.
         assert_eq!(
-            secret_file("routerWifiSaePasswords.sops")
+            secret_file("fixtureCamelCase.sops")
                 .attribute_name()
                 .expect("utf8 stem"),
-            "routerWifiSaePasswords"
+            "fixtureCamelCase"
         );
         assert_eq!(
-            secret_file("localLlmApiToken.sops")
+            secret_file("fixtureSecondValue.sops")
                 .attribute_name()
                 .expect("utf8 stem"),
-            "localLlmApiToken"
+            "fixtureSecondValue"
         );
         // a single-token stem passes through unchanged
         assert_eq!(
@@ -7760,14 +7918,9 @@ mod tests {
 
     #[test]
     fn secrets_directory_is_the_datom_source_sibling() {
-        let source = ordinary::ProposalSource::new(
-            "/git/github.com/LiGoldragon/goldragon/datom.dotos".to_string(),
-        );
+        let source = ordinary::ProposalSource::new("/fixture/cluster/datom.dotos".to_string());
         let directory = ClusterSecretsDirectory::from_proposal_source(&source);
-        assert_eq!(
-            directory.path,
-            PathBuf::from("/git/github.com/LiGoldragon/goldragon/secrets")
-        );
+        assert_eq!(directory.path, PathBuf::from("/fixture/cluster/secrets"));
     }
 
     #[test]
@@ -7791,14 +7944,11 @@ mod tests {
         let secrets_directory = source_directory.join("secrets");
         fs::create_dir_all(&secrets_directory).expect("create source secrets dir");
         // opaque placeholder ciphertext — never read back by the daemon. Files
-        // are named with their exact camelCase consumer name (coordinated
-        // goldragon rename); the attribute is the stem verbatim.
-        fs::write(
-            secrets_directory.join("routerWifiSaePasswords.sops"),
-            b"opaque",
-        )
-        .expect("write sops file");
-        fs::write(secrets_directory.join("localLlmApiToken.sops"), b"opaque")
+        // are named with an exact camelCase consumer name; the attribute is the
+        // stem verbatim.
+        fs::write(secrets_directory.join("fixtureCamelCase.sops"), b"opaque")
+            .expect("write sops file");
+        fs::write(secrets_directory.join("fixtureSecondValue.sops"), b"opaque")
             .expect("write sops file");
         // a non-.sops file in the directory is ignored
         fs::write(secrets_directory.join("README.md"), b"ignore me").expect("write readme");
@@ -7820,11 +7970,11 @@ mod tests {
         let flake = fs::read_to_string(generated.join("flake.nix")).expect("read flake");
         assert!(flake.contains("sopsFiles = {"), "{flake}");
         assert!(
-            flake.contains("localLlmApiToken = ./localLlmApiToken.sops;"),
+            flake.contains("fixtureSecondValue = ./fixtureSecondValue.sops;"),
             "{flake}"
         );
         assert!(
-            flake.contains("routerWifiSaePasswords = ./routerWifiSaePasswords.sops;"),
+            flake.contains("fixtureCamelCase = ./fixtureCamelCase.sops;"),
             "{flake}"
         );
         assert!(
@@ -7832,11 +7982,11 @@ mod tests {
             "non-sops files excluded: {flake}"
         );
         assert!(
-            generated.join("routerWifiSaePasswords.sops").is_file(),
+            generated.join("fixtureCamelCase.sops").is_file(),
             "ciphertext copied into the generated input"
         );
         assert!(
-            generated.join("localLlmApiToken.sops").is_file(),
+            generated.join("fixtureSecondValue.sops").is_file(),
             "ciphertext copied into the generated input"
         );
 

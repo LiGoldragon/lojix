@@ -547,10 +547,6 @@ impl DeployJobs {
         for job in jobs {
             let deployment_identifier = *job.deployment_identifier.payload();
             match job.resumption() {
-                crate::schema_runtime::DeployJobResumption::LegacyNonResumable => {
-                    // Owner-visible durable quarantine: v2 did not contain the
-                    // exact private submission needed for a safe replay.
-                }
                 // A detached self-switch (bead primary-7u8p): a host `ActivateNow`
                 // targeting the daemon's OWN host restarts the daemon inside the
                 // switch, so the terminal activation write never committed. Only

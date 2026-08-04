@@ -393,7 +393,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lojix"
-version = "0.12.0"
+version = "0.14.0"
 dependencies = [
  "dotos",
  "horizon-lib",
@@ -421,8 +421,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-lojix"
-version = "0.4.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?rev=1b6d3b207991f00e2c2f8825fc4d5cfd62657f77#1b6d3b207991f00e2c2f8825fc4d5cfd62657f77"
+version = "0.7.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?rev=9403b9bd2eddac294d4dd5e16a98deecdf0c9f86#9403b9bd2eddac294d4dd5e16a98deecdf0c9f86"
 dependencies = [
  "dotos",
  "protos",
@@ -796,8 +796,8 @@ dependencies = [
 
 [[package]]
 name = "signal-lojix"
-version = "0.4.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix.git?rev=9cd59d691f0a119550a5175b43fcf96f81a1602b#9cd59d691f0a119550a5175b43fcf96f81a1602b"
+version = "0.7.0"
+source = "git+https://github.com/LiGoldragon/signal-lojix.git?rev=974217440b2d2a6b431150c37e7e5eaafb69c29a#974217440b2d2a6b431150c37e7e5eaafb69c29a"
 dependencies = [
  "dotos",
  "protos",

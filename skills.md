@@ -32,21 +32,20 @@ these):
 - `~/primary/skills/contract-repo.md` — how to consume
   `signal-lojix` and `meta-signal-lojix`.
 - `~/primary/skills/nix-discipline.md` — flake-input forms and
-  remote-build-safe Nix smoke testing. This repo does not yet have a
-  flake check surface.
+  remote-build-safe Nix smoke testing.
 - `~/primary/skills/testing.md` — Nix-backed pure / stateful / chained
   test surfaces.
 
 ## Storage and wire defaults
 
-- **Storage:** schema-derived SEMA table nouns over an in-memory
-  shared store today. Redb/sema-engine durability is the next storage
-  cutover.
+- **Storage:** schema-derived SEMA table nouns over a durable, configured
+  exact `lojix.sema` store. Schema v4 refuses older stores; the dedicated
+  reset primitive creates a fresh v4 store while the daemon is stopped.
 - **Wire:** `signal-frame` records from `signal-lojix` and
   `meta-signal-lojix`. Length-prefixed rkyv archives over two Unix
   sockets. Don't invent parallel framing or envelope mechanisms.
-- **Horizon materialization:** absent `build_attribute` means production
-  deploy shape. The daemon projects the request's cluster proposal
+- **Horizon materialization:** an explicit `DeploymentInputMode::Horizon`
+  selects proposal projection. The daemon projects the request's cluster proposal
   through `horizon-rs`, writes generated flake inputs under its state
   directory, hashes them with Nix, and passes typed override inputs to
   eval. This is a Nexus `MaterializeHorizon` effect, not inline
@@ -60,13 +59,13 @@ these):
 - `sema-engine` — typed database engine; depend on this rather than
   `sema` directly.
 - `horizon-rs` — cluster proposal projection; read-only per request.
-- `goldragon` — cluster proposal source (Dotos records read by
+- deployment-specific cluster proposal sources (DOTOS records read by
   horizon-rs).
 - `clavifaber` — per-host key material; separate component.
 - `meta-signal-lojix` — owner/meta deploy and retention mutation
   contract consumed by `meta-lojix` and `lojix-daemon`.
 
-## Status (2026-06-10)
+## Status (2026-08-04)
 
 - The actor-native daemon socket shell is implemented at the repo root.
 - The generated Nexus runner and handwritten effect hooks are async;
@@ -77,4 +76,4 @@ these):
   pipeline instead of being rejected as unsupported.
 - A live ignored smoke exercises local `nix flake metadata` + `nix eval`
   through generated Horizon inputs without building a closure.
-- There is no Nix flake check surface yet.
+- The flake provides build, test, format, clippy, and startup-boundary checks.

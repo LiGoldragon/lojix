@@ -17,7 +17,7 @@ use tempfile::TempDir;
 /// A live generation and its matching gc-root for one generation identifier.
 fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
     let generation = ordinary::GenerationIdentifier::new(generation_identifier);
-    let cluster = ordinary::ClusterName::new("goldragon");
+    let cluster = ordinary::ClusterName::new("fixture-cluster");
     let node = ordinary::NodeName::new("dune");
     let closure =
         ordinary::ClosurePath::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-resume-closure");

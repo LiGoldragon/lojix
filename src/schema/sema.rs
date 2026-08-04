@@ -67,6 +67,118 @@ pub struct FlakeReference(String);
     derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NixStoreUri(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SshDestination(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentTransport {
+    pub nix_store_uri: NixStoreUri,
+    pub ssh_destination: SshDestination,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum DeploymentInputMode {
+    Direct,
+    Horizon,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FlakeAttribute(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeploymentOutputSelector(FlakeAttribute);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+)]
+pub enum ActivationBackend {
+    NixosSystemdBootV1,
+    HomeManagerNixProfileV1,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NixBuilderSpec(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NixSystem(String);
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TestExecutionProfile {
+    pub test_mode: TestMode,
+    pub nix_system: NixSystem,
+    pub deployment_output_selector: DeploymentOutputSelector,
+    pub optional_deployment_transport: Option<DeploymentTransport>,
+}
+
+#[rustfmt::skip]
+#[cfg_attr(
+    feature = "dotos-text",
+    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
+)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ProposalSource(String);
 
 #[rustfmt::skip]
@@ -172,7 +284,6 @@ pub enum GenerationArtifact {
     CompleteHost,
     BaseHost,
     UserEnvironment,
-    LegacyUnknown,
 }
 
 #[rustfmt::skip]
@@ -196,7 +307,6 @@ pub enum ActivationEffect {
     TestActivation,
     BootOnceProfile,
     ProfileOnly,
-    LegacyUnknown,
 }
 
 #[rustfmt::skip]
@@ -220,8 +330,6 @@ pub enum GenerationSlot {
     Rollback,
     Pinned,
     Recent,
-    LegacyUnknown,
-    LegacyAmbiguous,
 }
 
 #[rustfmt::skip]
@@ -452,7 +560,6 @@ pub struct Generation {
 pub enum DeploymentEnvironment {
     HostEnvironment,
     UserEnvironment(UserName),
-    LegacyUnknownEnvironment,
 }
 
 #[rustfmt::skip]
@@ -464,7 +571,6 @@ pub enum DeploymentEnvironment {
 pub enum RequestedDeploymentAction {
     Host(HostDeployAction),
     UserEnvironment(UserEnvironmentAction),
-    LegacyUnknownAction,
 }
 
 #[rustfmt::skip]
@@ -492,8 +598,6 @@ pub enum DeploymentLifecycle {
     Completed,
     Rejected,
     Failed,
-    LegacyUnknown,
-    LegacyAmbiguous,
 }
 
 #[rustfmt::skip]
@@ -542,6 +646,7 @@ pub enum DeploymentTerminalReason {
     NodeUnknown,
     ProposalSourceUnreachable,
     FlakeReferenceMalformed,
+    InvalidDeploymentRouting,
     BuilderUnreachable,
     SubstituterUnreachable,
     DeploymentInFlight,
@@ -571,7 +676,6 @@ pub enum DeploymentTerminal {
     Succeeded,
     Rejected(DeploymentTerminalReason),
     Failed(DeploymentFailure),
-    LegacyUnknown,
 }
 
 #[rustfmt::skip]
@@ -798,26 +902,6 @@ pub enum TransitionIntentState {
     feature = "dotos-text",
     derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct LegacyEventArchive(String);
-
-#[rustfmt::skip]
-#[cfg_attr(
-    feature = "dotos-text",
-    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
-)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct LegacyDeploymentEventQuarantine {
-    pub event_log_position: EventLogPosition,
-    pub legacy_event_archive: LegacyEventArchive,
-    pub state_marker: StateMarker,
-}
-
-#[rustfmt::skip]
-#[cfg_attr(
-    feature = "dotos-text",
-    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
-)]
 #[derive(
     rkyv::Archive,
     rkyv::Serialize,
@@ -1029,7 +1113,7 @@ pub struct TestRun {
     pub cluster_name: ClusterName,
     pub node_selection: NodeSelection,
     pub host_selection: HostSelection,
-    pub test_mode: TestMode,
+    pub test_execution_profile: TestExecutionProfile,
 }
 
 #[rustfmt::skip]
@@ -1068,33 +1152,20 @@ pub struct ExtraSubstituter {
     derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct Builder(NodeName);
-
-#[rustfmt::skip]
-#[cfg_attr(
-    feature = "dotos-text",
-    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
-)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct FlakeAttribute(String);
-
-#[rustfmt::skip]
-#[cfg_attr(
-    feature = "dotos-text",
-    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
-)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct HostDeployment {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub host_composition: HostComposition,
     pub proposal_source: ProposalSource,
     pub flake_reference: FlakeReference,
+    pub deployment_transport: DeploymentTransport,
+    pub deployment_input_mode: DeploymentInputMode,
+    pub deployment_output_selector: DeploymentOutputSelector,
+    pub activation_backend: ActivationBackend,
     pub host_deploy_action: HostDeployAction,
     pub source_revision_policy: SourceRevisionPolicy,
-    pub optional_builder: Option<Builder>,
+    pub optional_nix_builder_spec: Option<NixBuilderSpec>,
     pub extra_substituter_vector: Vec<ExtraSubstituter>,
-    pub optional_flake_attribute: Option<FlakeAttribute>,
 }
 
 #[rustfmt::skip]
@@ -1109,9 +1180,13 @@ pub struct UserEnvironmentDeployment {
     pub user_name: UserName,
     pub proposal_source: ProposalSource,
     pub flake_reference: FlakeReference,
+    pub deployment_transport: DeploymentTransport,
+    pub deployment_input_mode: DeploymentInputMode,
+    pub deployment_output_selector: DeploymentOutputSelector,
+    pub activation_backend: ActivationBackend,
     pub user_environment_action: UserEnvironmentAction,
     pub source_revision_policy: SourceRevisionPolicy,
-    pub optional_builder: Option<Builder>,
+    pub optional_nix_builder_spec: Option<NixBuilderSpec>,
     pub extra_substituter_vector: Vec<ExtraSubstituter>,
 }
 
@@ -1817,14 +1892,6 @@ pub struct PendingTransitionIntentTable(Vec<PendingTransitionIntent>);
     derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
 )]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct LegacyDeploymentEventQuarantineTable(Vec<LegacyDeploymentEventQuarantine>);
-
-#[rustfmt::skip]
-#[cfg_attr(
-    feature = "dotos-text",
-    derive(dotos::DotosDecode, dotos::DotosDecodeTraced, dotos::DotosEncode)
-)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct LiveGeneration {
     pub deployment_identifier: DeploymentIdentifier,
     pub generation_identifier: GenerationIdentifier,
@@ -1988,7 +2055,11 @@ pub struct DeployJob {
     pub flake_reference: FlakeReference,
     pub optional_flake_reference: Option<FlakeReference>,
     pub resolved_revision: Option<String>,
-    pub resolved_target: Option<String>,
+    pub deployment_transport: DeploymentTransport,
+    pub deployment_input_mode: DeploymentInputMode,
+    pub deployment_output_selector: DeploymentOutputSelector,
+    pub activation_backend: ActivationBackend,
+    pub optional_nix_builder_spec: Option<NixBuilderSpec>,
     pub boot_once_unit: Option<String>,
     pub optional_generation_slot: Option<GenerationSlot>,
     pub persisted_flake_input_override_vector: Vec<PersistedFlakeInputOverride>,
@@ -2020,7 +2091,6 @@ pub enum DeployJobPhase {
     Activating,
     Activated,
     Failed,
-    LegacyNonResumable,
 }
 
 #[rustfmt::skip]
@@ -2179,6 +2249,120 @@ impl FlakeReference {
 }
 #[rustfmt::skip]
 impl From<String> for FlakeReference {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl NixStoreUri {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for NixStoreUri {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl SshDestination {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for SshDestination {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl FlakeAttribute {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for FlakeAttribute {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl DeploymentOutputSelector {
+    pub fn new(payload: FlakeAttribute) -> Self {
+        Self(payload)
+    }
+    pub fn payload(&self) -> &FlakeAttribute {
+        &self.0
+    }
+    pub fn into_payload(self) -> FlakeAttribute {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<FlakeAttribute> for DeploymentOutputSelector {
+    fn from(payload: FlakeAttribute) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl NixBuilderSpec {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for NixBuilderSpec {
+    fn from(payload: String) -> Self {
+        Self::new(payload)
+    }
+}
+
+#[rustfmt::skip]
+impl NixSystem {
+    pub fn new(payload: impl Into<String>) -> Self {
+        Self(payload.into())
+    }
+    pub fn payload(&self) -> &String {
+        &self.0
+    }
+    pub fn into_payload(self) -> String {
+        self.0
+    }
+}
+#[rustfmt::skip]
+impl From<String> for NixSystem {
     fn from(payload: String) -> Self {
         Self::new(payload)
     }
@@ -2508,25 +2692,6 @@ impl From<Integer> for TransitionOrdinal {
 }
 
 #[rustfmt::skip]
-impl LegacyEventArchive {
-    pub fn new(payload: impl Into<String>) -> Self {
-        Self(payload.into())
-    }
-    pub fn payload(&self) -> &String {
-        &self.0
-    }
-    pub fn into_payload(self) -> String {
-        self.0
-    }
-}
-#[rustfmt::skip]
-impl From<String> for LegacyEventArchive {
-    fn from(payload: String) -> Self {
-        Self::new(payload)
-    }
-}
-
-#[rustfmt::skip]
 impl SubscriptionClose {
     pub fn new(payload: SubscriptionToken) -> Self {
         Self(payload)
@@ -2579,44 +2744,6 @@ impl QuickCheck {
 #[rustfmt::skip]
 impl From<Vec<NodeName>> for QuickCheck {
     fn from(payload: Vec<NodeName>) -> Self {
-        Self::new(payload)
-    }
-}
-
-#[rustfmt::skip]
-impl Builder {
-    pub fn new(payload: NodeName) -> Self {
-        Self(payload)
-    }
-    pub fn payload(&self) -> &NodeName {
-        &self.0
-    }
-    pub fn into_payload(self) -> NodeName {
-        self.0
-    }
-}
-#[rustfmt::skip]
-impl From<NodeName> for Builder {
-    fn from(payload: NodeName) -> Self {
-        Self::new(payload)
-    }
-}
-
-#[rustfmt::skip]
-impl FlakeAttribute {
-    pub fn new(payload: impl Into<String>) -> Self {
-        Self(payload.into())
-    }
-    pub fn payload(&self) -> &String {
-        &self.0
-    }
-    pub fn into_payload(self) -> String {
-        self.0
-    }
-}
-#[rustfmt::skip]
-impl From<String> for FlakeAttribute {
-    fn from(payload: String) -> Self {
         Self::new(payload)
     }
 }
@@ -2769,26 +2896,6 @@ impl PendingTransitionIntentTable {
 #[rustfmt::skip]
 impl From<Vec<PendingTransitionIntent>> for PendingTransitionIntentTable {
     fn from(payload: Vec<PendingTransitionIntent>) -> Self {
-        Self::new(payload)
-    }
-}
-
-#[rustfmt::skip]
-impl LegacyDeploymentEventQuarantineTable {
-    pub fn new(payload: Vec<LegacyDeploymentEventQuarantine>) -> Self {
-        Self(payload)
-    }
-    pub fn payload(&self) -> &Vec<LegacyDeploymentEventQuarantine> {
-        &self.0
-    }
-    pub fn into_payload(self) -> Vec<LegacyDeploymentEventQuarantine> {
-        self.0
-    }
-}
-#[rustfmt::skip]
-impl From<Vec<LegacyDeploymentEventQuarantine>>
-for LegacyDeploymentEventQuarantineTable {
-    fn from(payload: Vec<LegacyDeploymentEventQuarantine>) -> Self {
         Self::new(payload)
     }
 }

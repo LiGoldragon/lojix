@@ -25,6 +25,16 @@
   PinLabel.String
   ClosurePath.String
   FlakeReference.String
+  NixStoreUri.String
+  SshDestination.String
+  DeploymentTransport.{ NixStoreUri SshDestination }
+  DeploymentInputMode.[Direct Horizon]
+  FlakeAttribute.String
+  DeploymentOutputSelector.{ FlakeAttribute }
+  ActivationBackend.[NixosSystemdBootV1 HomeManagerNixProfileV1]
+  NixBuilderSpec.String
+  NixSystem.String
+  TestExecutionProfile.{ TestMode NixSystem DeploymentOutputSelector Optional.DeploymentTransport }
   ProposalSource.String
   ImmutableRevision.String
   DeploymentIdentifier.Integer
@@ -35,9 +45,9 @@
   CommitSequence.Integer
   StateDigest.Integer
   SourceRevisionPolicy.[RequireImmutable ResolveAndRecord]
-  GenerationArtifact.[CompleteHost BaseHost UserEnvironment LegacyUnknown]
-  ActivationEffect.[LiveActivation BootProfile TestActivation BootOnceProfile ProfileOnly LegacyUnknown]
-  GenerationSlot.[Current BootPending Rollback Pinned Recent LegacyUnknown LegacyAmbiguous]
+  GenerationArtifact.[CompleteHost BaseHost UserEnvironment]
+  ActivationEffect.[LiveActivation BootProfile TestActivation BootOnceProfile ProfileOnly]
+  GenerationSlot.[Current BootPending Rollback Pinned Recent]
   TestMode.[Hermetic Live]
   TestRunPhase.[Submitted BringingUp Deploying Asserting TearingDown Completed Failed]
   FailureStage.[BringUp Deploy Assert TearDown HermeticCheck]
@@ -55,13 +65,13 @@
   Selection.[(ByNode NodeSelector) (ByGeneration GenerationLookup) (ByDeployment DeploymentLookup) (ByEventLog EventLogRange) (ByTestRun TestRunLookup)]
   SourceRevisionRecord.{ SourceRevisionPolicy requested_ref.FlakeReference resolved_ref.FlakeReference String }
   Generation.{ GenerationIdentifier DeploymentIdentifier ClusterName NodeName GenerationArtifact ActivationEffect GenerationSlot ClosurePath Optional.ImmutableRevision }
-  DeploymentEnvironment.[HostEnvironment (UserEnvironment UserName) LegacyUnknownEnvironment]
-  RequestedDeploymentAction.[(Host HostDeployAction) (UserEnvironment UserEnvironmentAction) LegacyUnknownAction]
-  DeploymentLifecycle.[Submitted Building Built Copying Activating Activated Completed Rejected Failed LegacyUnknown LegacyAmbiguous]
+  DeploymentEnvironment.[HostEnvironment (UserEnvironment UserName)]
+  RequestedDeploymentAction.[(Host HostDeployAction) (UserEnvironment UserEnvironmentAction)]
+  DeploymentLifecycle.[Submitted Building Built Copying Activating Activated Completed Rejected Failed]
   DeploymentFailureStage.[Admission FlakeAuth MaterializeHorizon Eval Build CopyClosure Activate Daemon]
-  DeploymentTerminalReason.[ClusterUnknown NodeUnknown ProposalSourceUnreachable FlakeReferenceMalformed BuilderUnreachable SubstituterUnreachable DeploymentInFlight UnsupportedDeployAction InternalError ActivationFailed]
+  DeploymentTerminalReason.[ClusterUnknown NodeUnknown ProposalSourceUnreachable FlakeReferenceMalformed InvalidDeploymentRouting BuilderUnreachable SubstituterUnreachable DeploymentInFlight UnsupportedDeployAction InternalError ActivationFailed]
   DeploymentFailure.{ DeploymentFailureStage DeploymentTerminalReason }
-  DeploymentTerminal.[Succeeded (Rejected DeploymentTerminalReason) (Failed DeploymentFailure) LegacyUnknown]
+  DeploymentTerminal.[Succeeded (Rejected DeploymentTerminalReason) (Failed DeploymentFailure)]
   DeploymentRequestIdentity.{ DeploymentEnvironment ClusterName NodeName GenerationArtifact RequestedDeploymentAction ActivationEffect SourceRevisionPolicy Optional.ImmutableRevision }
   DeploymentRecord.{ DeploymentIdentifier GenerationIdentifier DeploymentRequestIdentity Optional.AdmissionMarker DeploymentLifecycle Optional.TerminalMarker Optional.DeploymentTerminal }
   ;; One durable global high-water mark for every non-ephemeral identifier.
@@ -86,11 +96,6 @@
   ;; deployment so a same-phase replay cannot select an ambiguous receipt.
   PendingTransitionIntent.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName DeploymentPhase EventLogPosition Optional.ImmutableRevision Optional.DeploymentTerminal TransitionOrdinal Optional.TransitionMarker TransitionIntentState }
   TransitionIntentState.[Pending Bound Appended Acknowledged]
-  ;; v2 deployment events have no trustworthy v3 correlation marker and are
-  ;; never projected into the public journal.  Their private audit receipt is
-  ;; written during migration, together with a debug archive of the legacy row.
-  LegacyEventArchive.String
-  LegacyDeploymentEventQuarantine.{ EventLogPosition LegacyEventArchive StateMarker }
   CacheRetentionTransition.[Pinned Unpinned Promoted Demoted Retired Evicted]
   CacheRetentionTransitionEvent.{ GenerationIdentifier ClusterName NodeName CacheRetentionTransition GenerationSlot Optional.GenerationSlot Optional.PinLabel EventLogPosition }
   TestRunRecord.{ TestRunIdentifier ClusterName node.NodeName host.NodeName TestMode TestRunPhase TestOutcome Optional.ClosurePath }
@@ -105,14 +110,12 @@
   UserEnvironmentAction.[Realize SetProfile ActivateNow]
   HostSelection.[DefaultHost (OnHost NodeName)]
   NodeSelection.[(Nodes Vector.NodeName) All]
-  TestRun.{ ClusterName NodeSelection HostSelection TestMode }
+  TestRun.{ ClusterName NodeSelection HostSelection TestExecutionProfile }
   QuickCheck.Vector.NodeName
   TestRequest.[(Run TestRun) (Check QuickCheck)]
   ExtraSubstituter.{ url.String public_key.String }
-  Builder.{ NodeName }
-  FlakeAttribute.String
-  HostDeployment.{ ClusterName NodeName HostComposition ProposalSource FlakeReference HostDeployAction SourceRevisionPolicy Optional.Builder Vector.ExtraSubstituter Optional.FlakeAttribute }
-  UserEnvironmentDeployment.{ ClusterName NodeName UserName ProposalSource FlakeReference UserEnvironmentAction SourceRevisionPolicy Optional.Builder Vector.ExtraSubstituter }
+  HostDeployment.{ ClusterName NodeName HostComposition ProposalSource FlakeReference DeploymentTransport DeploymentInputMode DeploymentOutputSelector ActivationBackend HostDeployAction SourceRevisionPolicy Optional.NixBuilderSpec Vector.ExtraSubstituter }
+  UserEnvironmentDeployment.{ ClusterName NodeName UserName ProposalSource FlakeReference DeploymentTransport DeploymentInputMode DeploymentOutputSelector ActivationBackend UserEnvironmentAction SourceRevisionPolicy Optional.NixBuilderSpec Vector.ExtraSubstituter }
   PinRequest.{ ClusterName NodeName GenerationIdentifier PinLabel }
   UnpinRequest.{ ClusterName NodeName PinLabel }
   RetireRequest.{ ClusterName NodeName GenerationIdentifier }
@@ -175,7 +178,6 @@
   IdentifierAllocationTable.{ Vector.IdentifierAllocation }
   DeploymentOutboxTable.{ Vector.DeploymentOutboxRecord }
   PendingTransitionIntentTable.{ Vector.PendingTransitionIntent }
-  LegacyDeploymentEventQuarantineTable.{ Vector.LegacyDeploymentEventQuarantine }
   LiveGeneration.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName DeploymentEnvironment GenerationArtifact ActivationEffect GenerationSlot ClosurePath SourceRevisionRecord }
 
   GcRootsTable.{ Vector.GcRoot }
@@ -203,8 +205,8 @@
   PersistedFlakeInputReference.{ url.String nix_archive_hash.String }
   PersistedFlakeInputOverride.{ String PersistedFlakeInputReference }
   DeployResumeStage.[ResolveFlakeAuth MaterializeHorizon RecordBuilding NixEval NixBuild CopyClosure ActivateGeneration RecordGenerationActivated FinishDeployment]
-  DeployJob.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName DeployJobPhase Optional.ClosurePath SourceRevisionPolicy FlakeReference Optional.FlakeReference resolved_revision.Optional.String resolved_target.Optional.String boot_once_unit.Optional.String Optional.GenerationSlot Vector.PersistedFlakeInputOverride DeployResumeStage Optional.PhaseReceipt Optional.DeploySubmission }
-  DeployJobPhase.[Submitted Building Built Copying Activating Activated Failed LegacyNonResumable]
+  DeployJob.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName DeployJobPhase Optional.ClosurePath SourceRevisionPolicy FlakeReference Optional.FlakeReference resolved_revision.Optional.String DeploymentTransport DeploymentInputMode DeploymentOutputSelector ActivationBackend Optional.NixBuilderSpec boot_once_unit.Optional.String Optional.GenerationSlot Vector.PersistedFlakeInputOverride DeployResumeStage Optional.PhaseReceipt Optional.DeploySubmission }
+  DeployJobPhase.[Submitted Building Built Copying Activating Activated Failed]
 
   ;; The durable test-run table (report 54 §5.3), mirroring DeployJobTable. One
   ;; row per submitted test, keyed by TestRunIdentifier, written on accept at

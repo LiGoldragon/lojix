@@ -4,30 +4,26 @@
 deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 (`lojix`) that speaks the daemon over a Unix socket.
 
-> **Status (2026-06-10):** implemented Rust crate at the repo root.
+> **Status (2026-08-04):** implemented Rust crate at the repo root.
 > The daemon uses the actor-native `triad-runtime` multi-listener for
 > two authority-tiered sockets and awaits the generated async Nexus
 > runner directly; child-process effects use `tokio::process`. Production
-> host and user-environment build requests without `build_attribute` now enter a
-> Horizon materialization effect that projects the cluster proposal with
+> host and user-environment build requests select their materialization mode
+> explicitly. `Horizon` enters a materialization effect that projects the proposal with
 > `horizon-rs`, writes generated `horizon` / `system` / `deployment`
 > flake inputs under daemon state, and passes content-addressed
-> `--override-input` values into `nix eval`. Activating deploys still
-> reject until copy/activate is target-safe.
+> `--override-input` values into `nix eval`. Activating deploys use an
+> explicitly requested activation backend and request-owned transport.
 
-> **Daemon-local realization and transfer (2026-08-04).** Every activating
-> deploy evaluates and realizes its immutable closure in the daemon's
-> authenticated local Nix context. Lojix then invokes
-> `nix copy --to ssh-ng://root@<node>.<cluster>.criome <closure>` to transfer
-> that exact closure before the target-side profile/system operation. It does
-> not evaluate or realize through a target Nix store. An explicit operator
-> `builder` can use a configured Nix builder, but its result is imported into
-> the daemon-local store before that same exact-closure transfer. When the
-> target node IS the daemon host (for example, deploying ouranos from the
-> ouranos-hosted daemon), the implementation still invokes the same `ssh-ng`
-> copy addressed back to that host: it has no cross-host destination, but it
-> is not a skipped or no-op copy. The daemon's own host is named by
-> `DaemonConfiguration::daemon_host`.
+> **Request-owned deployment routing (v4).** Every request carries the exact
+> `nix_store_uri`, exact `ssh_destination`, output selector, input mode,
+> activation backend, and optional Nix builder specification. Lojix validates
+> and snapshots those private values before admission; it never forms a domain,
+> login, output attribute, builder-file location, or target route from cluster
+> and node names. Nix copy uses `nix_store_uri` verbatim; remote activation uses
+> `ssh_destination` verbatim, including an explicitly requested `root` login.
+> The daemon evaluates locally and a supplied builder specification is passed to
+> Nix verbatim through `--builders`; it does not use `/etc/nix/machines`.
 > The `BootOnce` transient-unit name is the deterministic
 > `lojix-boot-once-deploy-<deployment-identifier>` — the same string the
 > durable resume cursor persists — so a daemon crash inside the BootOnce
@@ -136,8 +132,8 @@ streams subscription events.
   the subscription-delivery primitive. `sema` (the storage kernel
   beneath it) owns redb/rkyv mechanics. This crate consumes both
   through `sema-engine`'s public surface.
-- **Cluster proposal source** — `goldragon` (read per request via
-  horizon-rs).
+- **Cluster proposal source** — a request-supplied, validated `.dotos` path
+  (read only for an explicitly selected Horizon materialization).
 - **Per-host key material** — `clavifaber` (this stack is
   cluster-side, not per-host).
 - **Cluster trust runtime** — separate component (today missing).
@@ -165,7 +161,7 @@ Each daemon actor is a Kameo actor per
 ## 4 · Storage and wire
 
 - **Storage:** schema-derived SEMA tables over a durable `sema-engine`
-  store — a `*.sema` file under `<state-directory>/lojix.sema`. The eleven
+  store — a configured exact `lojix.sema` file. The ten
   record families (live set, gc-roots, event log, container lifecycle,
   deploy job, test run, deployment record, identifier allocation, deployment
   outbox, pending transition intent, and legacy-event quarantine) are keyed
@@ -173,27 +169,20 @@ Each daemon actor is a Kameo actor per
   resumes the persisted catalog, commit sequence, and records on restart, so
   daemon state survives a process stop with no replay code. The identifier
   counters (generation, deployment, event-log position) derive from the
-  persisted rows, so they no longer reset to zero on restart. Storage schema 3
-  adds correlation records, a global high-water allocation row, and the
-  transition intent/outbox protocol. Each deploy admission, phase, and
+  persisted rows, so they no longer reset to zero on restart. Storage schema 4
+  adds the exact private deployment-routing snapshot and refuses every earlier
+  schema. Each deploy admission, phase, and
   terminal update atomically writes its durable record/job mutation plus an
   intent; its marker is bound from that exact versioned commit, then
   dispatch/journal/local acknowledgement proceeds in order. The runtime never
   advances to a later effect before acknowledgement. Retention can compact an
   acknowledged event and outbox together, while the acknowledged intent keeps
   restart from reconstructing or re-delivering that historical transition.
-  The idempotent `lojix-migrate-store` pre-start step accepts schema 2 only:
-  it validates every known row and relation read-only, retains a byte-identical
-  `.schema-pre-v3.backup`, reconstructs and reopens a schema-3 staging store,
-  then atomically replaces the canonical path. On a schema-3 retry, the
-  permanent backup alone is normal; `.schema-v3.pending` is always unresolved,
-  and `.schema-v3.pending.owner` is removed only when no staging file remains
-  and it is a regular schema-2 hard link with the same inode, bytes, and
-  metadata as that backup. All other sidecar states fail closed without
-  removal. Legacy deployment events remain
-  private quarantine evidence; legacy jobs are non-resumable and legacy
-  current-slot claims are historical, never a v3 live owner. Corrupt or
-  unknown input remains untouched and prevents daemon startup.
+  There is no migration or legacy resume path. With the daemon stopped, the
+  manually started `lojix-reset-store` accepts only an exact absolute path named
+  `lojix.sema`, removes that regular Lojix file and its three narrowly named
+  migration sidecars, then creates a fresh v4 store. It rejects directories,
+  unknown schemas, and every other filename; it never selects a Spirit store.
 - **Wire:** `signal-frame` records carrying `signal-lojix` on the
   ordinary socket and `meta-signal-lojix` on the owner/meta socket.
   Length-prefixed rkyv archives over Unix sockets.
@@ -218,12 +207,14 @@ Each daemon actor is a Kameo actor per
   "other" access and admits only same-uid/gid owner peers.
 - `lojix-write-configuration` is the launch-only DOTOS boundary: it writes
   the rkyv signal file from the ordered socket/mode, state-directory,
-  daemon-host, timeout, test-default, and output-path request. Production
+  daemon-host, timeout, test-default, and output-path request. Test defaults
+  include their exact Nix system and output selector. Production
   writes `NoTestDefaults`; the daemon receives only the resulting signal file.
-- A deploy proposal source is an existing, direct, regular absolute `.dotos`
+- A deploy proposal source, when `DeploymentInputMode::Horizon` requires one,
+  is an existing, direct, regular absolute `.dotos`
   file with no traversal, symlink, control, or credential-shaped path and a
   valid cluster-proposal parse. A closure is usable by an effect or a fresh
-  durable v3 row only as a canonical immutable Nix store-item root. Public
+  durable v4 row only as a canonical immutable Nix store-item root. Public
   adapters redact every other path and never project raw proposal sources,
   flake references, or daemon error text.
 - The startup configuration carries the test-op defaults as an OPTIONAL

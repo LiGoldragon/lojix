@@ -93,11 +93,19 @@ fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
         host_composition: sema::HostComposition::BaseHost,
         proposal_source: sema::ProposalSource::new(proposal_source.display().to_string()),
         flake_reference: sema::FlakeReference::new("github:example/fixture"),
+        deployment_transport: sema::DeploymentTransport {
+            nix_store_uri: sema::NixStoreUri::new("ssh-ng://fixture-copy.invalid"),
+            ssh_destination: sema::SshDestination::new("fixture-login@fixture-activate.invalid"),
+        },
+        deployment_input_mode: sema::DeploymentInputMode::Horizon,
+        deployment_output_selector: sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new(
+            "checks.fixture-a",
+        )),
+        activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
         host_deploy_action: sema::HostDeployAction::Realize,
         source_revision_policy: sema::SourceRevisionPolicy::ResolveAndRecord,
-        optional_builder: None,
+        optional_nix_builder_spec: None,
         extra_substituter_vector: Vec::new(),
-        optional_flake_attribute: None,
     })
 }
 

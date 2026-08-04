@@ -7,7 +7,7 @@ const RAW_LIVE_SET: TableDefinition<String, &[u8]> = TableDefinition::new("live-
 
 fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
     let generation = ordinary::GenerationIdentifier::new(generation_identifier);
-    let cluster = ordinary::ClusterName::new("goldragon");
+    let cluster = ordinary::ClusterName::new("fixture-cluster");
     let node = ordinary::NodeName::new("dune");
     let closure = ordinary::ClosurePath::new(
         "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-startup-gate-closure",

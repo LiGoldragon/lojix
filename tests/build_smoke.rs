@@ -6,8 +6,8 @@ use meta_signal_lojix::schema::lib as meta;
 use signal_frame::{ExchangeIdentifier, ExchangeLane, LaneSequence, SessionEpoch};
 use signal_lojix::schema::lib as ordinary;
 
-const FIXTURE_FLAKE: &str = "github:LiGoldragon/CriomOS-test-cluster";
-const FIXTURE_ATTRIBUTE: &str = "dune-nspawn-toplevel";
+const FIXTURE_FLAKE: &str = "github:fixture-owner/fixture-flake";
+const FIXTURE_ATTRIBUTE: &str = "checks.fixture-a";
 
 fn exchange() -> ExchangeIdentifier {
     ExchangeIdentifier::new(
@@ -19,16 +19,26 @@ fn exchange() -> ExchangeIdentifier {
 
 fn dune_host_deploy(action: ordinary::HostDeployAction) -> meta::Input {
     meta::Input::deploy(meta::DeployRequest::Host(meta::HostDeployment {
-        cluster_name: ordinary::ClusterName::new("goldragon"),
-        node_name: ordinary::NodeName::new("dune"),
+        cluster_name: ordinary::ClusterName::new("fixture-cluster"),
+        node_name: ordinary::NodeName::new("fixture-node"),
         host_composition: ordinary::HostComposition::BaseHost,
         proposal_source: ordinary::ProposalSource::new("/dev/null"),
         flake_reference: ordinary::FlakeReference::new(FIXTURE_FLAKE),
+        deployment_transport: meta::DeploymentTransport {
+            nix_store_uri: ordinary::NixStoreUri::new("ssh-ng://fixture-copy.invalid"),
+            ssh_destination: ordinary::SshDestination::new(
+                "fixture-login@fixture-activate.invalid",
+            ),
+        },
+        deployment_input_mode: ordinary::DeploymentInputMode::Direct,
+        deployment_output_selector: ordinary::DeploymentOutputSelector::new(
+            ordinary::FlakeAttribute::new(FIXTURE_ATTRIBUTE),
+        ),
+        activation_backend: ordinary::ActivationBackend::NixosSystemdBootV1,
         host_deploy_action: action,
         source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-        optional_builder: None,
+        optional_nix_builder_spec: None,
         extra_substituter_vector: Vec::new(),
-        optional_flake_attribute: Some(meta::FlakeAttribute::new(FIXTURE_ATTRIBUTE)),
     }))
 }
 

@@ -102,7 +102,7 @@
             in
             pkgs.runCommand "lojix-daemon-startup-rejects-dotos" { } ''
               set +e
-              ${package}/bin/lojix-daemon '(ConfigurationWriteRequest (/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix /run/lojix/startup.rkyv))' >stdout 2>stderr
+              ${package}/bin/lojix-daemon '(NotAStartupArchive)' >stdout 2>stderr
               status=$?
               set -e
               if [ "$status" -eq 0 ]; then

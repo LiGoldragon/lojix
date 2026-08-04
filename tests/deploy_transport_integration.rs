@@ -29,7 +29,8 @@ use lojix::schema::sema as meta;
 use lojix::schema_runtime::{RuntimeConfiguration, SchemaRuntime};
 
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
-const FLAKE: &str = "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567";
+const FLAKE: &str =
+    "github:fixture-owner/fixture-flake?rev=0123456789abcdef0123456789abcdef01234567";
 const OUTPUT: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-home-manager-generation";
 
 fn proposal_node(species: MachineSpecies, super_node: Option<&str>) -> NodeProposal {
@@ -140,18 +141,37 @@ fn fake_programs(directory: &Path, fail_copy: bool, fail_activation: bool) {
     );
 }
 
-fn user_environment_request(source: &Path) -> meta::DeploySubmission {
+fn user_environment_request(
+    source: &Path,
+    nix_store_uri: &str,
+    ssh_destination: &str,
+) -> meta::DeploySubmission {
     meta::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
         cluster_name: ordinary::ClusterName::new("alpha"),
         node_name: ordinary::NodeName::new("beacon"),
         user_name: ordinary::UserName::new("bird"),
         proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
         flake_reference: ordinary::FlakeReference::new(FLAKE),
+        deployment_transport: transport(nix_store_uri, ssh_destination),
+        deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
+        deployment_output_selector: selector("packages.x86_64-linux.fixture-home"),
+        activation_backend: ordinary::ActivationBackend::HomeManagerNixProfileV1,
         user_environment_action: meta::UserEnvironmentAction::ActivateNow,
         source_revision_policy: meta::SourceRevisionPolicy::RequireImmutable,
-        optional_builder: None,
+        optional_nix_builder_spec: None,
         extra_substituter_vector: Vec::new(),
     })
+}
+
+fn transport(nix_store_uri: &str, ssh_destination: &str) -> ordinary::DeploymentTransport {
+    ordinary::DeploymentTransport {
+        nix_store_uri: ordinary::NixStoreUri::new(nix_store_uri),
+        ssh_destination: ordinary::SshDestination::new(ssh_destination),
+    }
+}
+
+fn selector(value: &str) -> ordinary::DeploymentOutputSelector {
+    ordinary::DeploymentOutputSelector::new(ordinary::FlakeAttribute::new(value))
 }
 
 fn runtime(directory: &Path, programs: &Path, timeout: Duration) -> SchemaRuntime {
@@ -193,7 +213,15 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
     let mut engine = runtime(directory.path(), &programs, Duration::from_secs(2));
 
     assert!(matches!(
-        submit_and_drive(&mut engine, user_environment_request(&source)).await,
+        submit_and_drive(
+            &mut engine,
+            user_environment_request(
+                &source,
+                "ssh-ng://fixture-copy-a.invalid",
+                "fixture-a@fixture-activate-a.invalid",
+            ),
+        )
+        .await,
         meta::MetaEgress::DeployTerminal(record)
             if matches!(record.optional_deployment_terminal, Some(meta::DeploymentTerminal::Succeeded))
     ));
@@ -227,7 +255,9 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
     );
     assert!(commands[eval].contains("narHash="), "{}", commands[eval]);
     assert!(commands[copy].contains(OUTPUT), "{}", commands[copy]);
-    assert!(commands[copy].contains("ssh-ng://root@beacon.alpha.criome"));
+    assert!(commands[copy].contains("ssh-ng://fixture-copy-a.invalid"));
+    assert!(commands[profile].contains("fixture-a@fixture-activate-a.invalid"));
+    assert!(commands[activate].contains("fixture-a@fixture-activate-a.invalid"));
     assert!(commands[profile].contains("runuser --login --command"));
     assert!(commands[profile].contains(OUTPUT));
     assert!(commands[activate].contains("runuser --login --command"));
@@ -260,6 +290,44 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
 }
 
 #[tokio::test]
+async fn second_arbitrary_transport_flow_preserves_both_request_values() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let programs = directory.path().join("programs");
+    fake_programs(&programs, false, false);
+    let source = directory.path().join("datom.dotos");
+    write_fixture_proposal(&source);
+    let mut engine = runtime(directory.path(), &programs, Duration::from_secs(2));
+    let nix_store_uri = "ssh-ng://fixture-copy-b.invalid:2244?compress=true";
+    let ssh_destination = "fixture-b@fixture-activate-b.invalid";
+
+    assert!(matches!(
+        submit_and_drive(
+            &mut engine,
+            user_environment_request(&source, nix_store_uri, ssh_destination),
+        )
+        .await,
+        meta::MetaEgress::DeployTerminal(record)
+            if matches!(record.optional_deployment_terminal, Some(meta::DeploymentTerminal::Succeeded))
+    ));
+
+    let commands = command_lines(&programs);
+    let copy = commands
+        .iter()
+        .find(|line| line.starts_with("nix <copy>"))
+        .expect("closure copy");
+    let ssh: Vec<_> = commands
+        .iter()
+        .filter(|line| line.starts_with("ssh "))
+        .collect();
+    assert!(copy.contains(nix_store_uri), "{copy}");
+    assert_eq!(ssh.len(), 2, "{ssh:?}");
+    assert!(
+        ssh.iter().all(|line| line.contains(ssh_destination)),
+        "{ssh:?}"
+    );
+}
+
+#[tokio::test]
 async fn copy_and_activation_failures_are_terminal_rejections() {
     for (fail_copy, fail_activation) in [(true, false), (false, true)] {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -269,7 +337,16 @@ async fn copy_and_activation_failures_are_terminal_rejections() {
         write_fixture_proposal(&source);
         let mut engine = runtime(directory.path(), &programs, Duration::from_secs(2));
 
-        match submit_and_drive(&mut engine, user_environment_request(&source)).await {
+        match submit_and_drive(
+            &mut engine,
+            user_environment_request(
+                &source,
+                "ssh-ng://fixture-copy-a.invalid",
+                "fixture-a@fixture-activate-a.invalid",
+            ),
+        )
+        .await
+        {
             meta::MetaEgress::DeployTerminal(record) => {
                 assert_eq!(
                     record.deployment_lifecycle,
@@ -312,11 +389,17 @@ async fn timeout_kills_the_whole_session_group_reaps_and_rejects() {
         host_composition: ordinary::HostComposition::BaseHost,
         proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
         flake_reference: ordinary::FlakeReference::new(FLAKE),
+        deployment_transport: transport(
+            "ssh-ng://fixture-copy-b.invalid",
+            "fixture-b@fixture-activate-b.invalid",
+        ),
+        deployment_input_mode: ordinary::DeploymentInputMode::Direct,
+        deployment_output_selector: selector("checks.fixture-timeout"),
+        activation_backend: ordinary::ActivationBackend::NixosSystemdBootV1,
         host_deploy_action: ordinary::HostDeployAction::Evaluate,
         source_revision_policy: meta::SourceRevisionPolicy::RequireImmutable,
-        optional_builder: None,
+        optional_nix_builder_spec: None,
         extra_substituter_vector: Vec::new(),
-        optional_flake_attribute: Some(meta::FlakeAttribute::new("fixture")),
     });
 
     match submit_and_drive(&mut engine, request).await {

@@ -12,7 +12,7 @@ const RAW_EVENT_LOG: TableDefinition<String, &[u8]> = TableDefinition::new("even
 
 fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
     let generation = ordinary::GenerationIdentifier::new(generation_identifier);
-    let cluster = ordinary::ClusterName::new("goldragon");
+    let cluster = ordinary::ClusterName::new("fixture-cluster");
     let node = ordinary::NodeName::new("dune");
     let closure = ordinary::ClosurePath::new(
         "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-inspection-closure",
@@ -75,7 +75,7 @@ fn registered_tables_with_no_rows_report_empty() {
     assert!(matches!(inspection.database(), DatabaseInspection::Opened));
     assert_eq!(
         inspection.schema(),
-        &SchemaInspection::Matches { version: 3 }
+        &SchemaInspection::Matches { version: 4 }
     );
     assert_eq!(
         inspection

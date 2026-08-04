@@ -21,33 +21,36 @@ fn write_configuration_round_trips_through_rkyv() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "ConfigurationWriteRequest.{{/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos 60 TestDefaults.{{goldragon prometheus Hermetic github:LiGoldragon/CriomOS-test-cluster /var/lib/lojix/cluster.dotos}} {}}}",
+        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix fixture-daemon 60 TestDefaults.{{fixture-cluster fixture-vm-host Hermetic github:fixture-owner/fixture-test-flake x86_64-linux checks.fixture-a /var/lib/fixture-lojix/cluster.dotos}} {}}}",
         output.display()
     );
 
     let configuration = write_configuration(&request, &output);
     assert_eq!(
         configuration.ordinary_socket_path,
-        "/run/lojix/ordinary.sock"
+        "/run/fixture-lojix/ordinary.sock"
     );
     assert_eq!(configuration.ordinary_socket_mode, 0o660);
-    assert_eq!(configuration.owner_socket_path, "/run/lojix/owner.sock");
+    assert_eq!(
+        configuration.owner_socket_path,
+        "/run/fixture-lojix/owner.sock"
+    );
     assert_eq!(configuration.owner_socket_mode, 0o600);
-    assert_eq!(configuration.state_directory_path, "/var/lib/lojix");
-    assert_eq!(configuration.daemon_host, "ouranos");
+    assert_eq!(configuration.state_directory_path, "/var/lib/fixture-lojix");
+    assert_eq!(configuration.daemon_host, "fixture-daemon");
     assert_eq!(configuration.effect_timeout_seconds, 60);
     let test_defaults = configuration
         .test_defaults
         .expect("the (TestDefaults …) form lowers to a baked fixture");
-    assert_eq!(test_defaults.cluster, "goldragon");
-    assert_eq!(test_defaults.default_vm_host, "prometheus");
+    assert_eq!(test_defaults.cluster, "fixture-cluster");
+    assert_eq!(test_defaults.default_vm_host, "fixture-vm-host");
     assert_eq!(
         test_defaults.test_flake,
-        "github:LiGoldragon/CriomOS-test-cluster"
+        "github:fixture-owner/fixture-test-flake"
     );
     assert_eq!(
         test_defaults.proposal_source,
-        "/var/lib/lojix/cluster.dotos"
+        "/var/lib/fixture-lojix/cluster.dotos"
     );
 }
 
@@ -59,12 +62,12 @@ fn write_configuration_bakes_no_test_defaults_for_production() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "ConfigurationWriteRequest.{{/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos 60 NoTestDefaults {}}}",
+        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix fixture-daemon 60 NoTestDefaults {}}}",
         output.display()
     );
 
     let configuration = write_configuration(&request, &output);
-    assert_eq!(configuration.daemon_host, "ouranos");
+    assert_eq!(configuration.daemon_host, "fixture-daemon");
     assert_eq!(configuration.effect_timeout_seconds, 60);
     assert!(
         configuration.test_defaults.is_none(),
@@ -77,7 +80,7 @@ fn write_configuration_rejects_a_zero_effect_timeout() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "ConfigurationWriteRequest.{{/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix ouranos 0 NoTestDefaults {}}}",
+        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix fixture-daemon 0 NoTestDefaults {}}}",
         output.display()
     );
     let status = Command::new(env!("CARGO_BIN_EXE_lojix-write-configuration"))
