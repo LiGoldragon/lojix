@@ -119,13 +119,17 @@ streams subscription events.
   not a daemon client. It accepts exactly one inline private `BootstrapRun`
   DOTOS object. The request explicitly supplies input mode, builder, optional
   hermetic test, local-or-remote BootOnce backend, journal parent, GC-root
-  path, and terminal-evidence path. It creates a fresh private v4 journal and
-  configuration beneath that journal parent, performs materialize → optional
-  test → build → durable GC root → explicit copy/BootOnce, writes typed
-  terminal evidence atomically, then removes only that verified journal child.
-  `BuildOnly` has no activation or transport field and therefore cannot
-  activate. No daemon socket, daemon configuration, old journal/store, route,
-  host, user, or path default participates.
+  path, and terminal-evidence path. It creates a private v5 journal and
+  configuration beneath that journal parent. The journal binds a request hash,
+  immutable flake reference, closure, root receipt, and ordered intent/receipt/
+  outcome records; an interrupted invocation reconciles the exact next stage.
+  Remote BootOnce launches a deterministic target transient systemd unit with
+  no-block dispatch and polls that exact unit, so losing the initiating SSH
+  connection cannot interrupt profile or EFI work. Evidence is private and
+  atomic before cleanup, which removes only verified known files through the
+  owned child directory. `BuildOnly` has no activation or transport field and
+  therefore cannot activate. No daemon socket, daemon configuration, old
+  journal/store, route, host, user, or path default participates.
 
 ## 2 · Not owned
 
@@ -160,7 +164,7 @@ src/
   lib.rs                # shared state, configuration, error type
   daemon.rs             # actor-native two-socket daemon shell
   client.rs             # thin CLI socket exchange
-  bootstrap.rs          # daemon-free explicit v4 bootstrap pipeline
+  bootstrap.rs          # daemon-free explicit resumable v5 bootstrap pipeline
   schema_runtime.rs     # async hand-written engine over generated schema nouns
   schema/               # checked-in generated Nexus/SEMA artifacts
   bin/

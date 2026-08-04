@@ -75,7 +75,7 @@ argument.
 
 ## Maintained bootstrap app
 
-`lojix-bootstrap` is the v0.17 flake-owned, daemon-free bootstrap surface. It
+`lojix-bootstrap` is the v0.17.1 flake-owned, daemon-free bootstrap surface. It
 does not open a Lojix socket, read daemon configuration, reuse a Lojix store,
 or derive a target route. The package wrapper carries Nix and systemd tooling
 in its closure; the built system closure receives a caller-selected durable GC
@@ -95,14 +95,14 @@ The complete shape is positional and explicit:
 BootstrapRun.{
   <request-id>
   BuildOnly.{
-    Direct.{<flake-ref> <nix-system> <output-selector>}
-    | Horizon.{<proposal.dotos> <cluster> <node> <CompleteHost-or-BaseHost> <NoSecrets-or-SecretsDirectory.{<directory>}> <flake-ref> <nix-system> <output-selector>}
+    Direct.{<immutable-github-flake-ref> <nix-system> <output-selector>}
+    | Horizon.{<proposal.dotos> <cluster> <node> <CompleteHost-or-BaseHost> <NoSecrets-or-SecretsDirectory.{<directory>}> <immutable-github-flake-ref> <nix-system> <output-selector>}
     <NoBuilder-or-NixBuilder.{<builder-spec>}>
     <journal-parent> <new-gc-root-path> <new-terminal-evidence-path>
   }
   | BootOnce.{
     <same-input> <same-builder>
-    <NoTest-or-RunHermeticTest.{<flake-ref> <nix-system> <output-selector>}>
+    <NoTest-or-RunHermeticTest.{<immutable-github-flake-ref> <nix-system> <output-selector>}>
     <RemoteNixosSystemdBootV1.{<nix-store-uri> <ssh-destination> <system-profile-path> <boot-entries-directory>}
       | LocalBootstrapV1.{<system-profile-path> <boot-entries-directory>}>
     <journal-parent> <new-gc-root-path> <new-terminal-evidence-path>
@@ -110,14 +110,30 @@ BootstrapRun.{
 }
 ```
 
+An immutable flake reference is exactly
+`github:<owner>/<repo>/<40-lowercase-hex-revision>`; query, branch, tag, and
+other mutable forms are rejected. The Remote backend requires a matching,
+explicit pair: `ssh-ng://<user>@<lowercase-host>[:port]` and
+`<user>@<lowercase-host>[:port]`. Both user and host are canonical, no SSH
+options/config defaults or passwords can be embedded, and an explicit port is
+passed as an SSH argument rather than folded into a host name.
+
 `BuildOnly` is the exact no-activation variant: it materializes, builds, and
 creates the requested durable GC root, then writes terminal evidence. It has
 no transport or backend field. `RemoteNixosSystemdBootV1` requires and uses the
-exact store URI and SSH destination; `LocalBootstrapV1` is a separate audited
-systemd-boot path and never substitutes self-SSH or `nix copy`. Existing root
-or evidence targets, symlinks, unsafe paths, and collisions fail closed. On a
-pipeline failure the fresh journal remains until typed terminal evidence is
-atomically committed; only then is its own verified child removed.
+exact paired identity, dispatches a request-hash-derived no-block transient
+oneshot unit on the target, and reconciles that exact unit after interruption.
+`LocalBootstrapV1` is a separate audited systemd-boot path with an explicit
+backend PATH and never substitutes self-SSH or `nix copy`. Journal, GC-root,
+and evidence parents must be caller-owned `0700` directories; evidence is
+created `0600`. Roots and evidence use no-replace receipts, and the journal
+records intent, receipt, and outcome before moving to each next stage. On a
+crash, re-running the exact same inline request resumes from that receipt; it
+does not repeat a rooted closure, copied closure, or dispatched unit. Terminal
+evidence contains only a request hash, mode, status, and effect outcomes—never
+proposal text, flake reference, transport identity, raw paths, or command
+output—and is fsynced with its parent before the verified journal child is
+removed.
 
 ## Related
 

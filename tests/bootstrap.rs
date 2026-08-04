@@ -1,32 +1,58 @@
-//! Hermetic bootstrap witnesses.  The executor records command values but
-//! never starts a body, so these tests cannot build, copy, SSH, or activate.
+//! Hermetic bootstrap witnesses.  Every command body is suppressed; the only
+//! filesystem mutations are private temporary-directory receipts that model
+//! Nix's GC-root link and durable evidence file.
 
 use std::ffi::OsString;
 use std::fs;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
 
 use lojix::bootstrap::{
     BootstrapActivationBackend, BootstrapBootOnce, BootstrapBuildOnly, BootstrapBuilder,
-    BootstrapCliInput, BootstrapCommand, BootstrapDirectInput, BootstrapEffectStage,
-    BootstrapExecutor, BootstrapGcRootPath, BootstrapHermeticTest, BootstrapJournalParent,
-    BootstrapLocalBootstrapV1, BootstrapMode, BootstrapNixStoreUri, BootstrapNixSystem,
-    BootstrapOutputSelector, BootstrapRemoteNixosSystemdBootV1, BootstrapRequestId, BootstrapRun,
-    BootstrapSshDestination, BootstrapSystemProfilePath, BootstrapTerminalEvidence,
-    BootstrapTerminalEvidencePath, BootstrapTestPlan, ProcessBootstrapExecutor,
-    decode_single_inline, run_with_executor,
+    BootstrapCliInput, BootstrapCommand, BootstrapCrashInjector, BootstrapCrashPoint,
+    BootstrapDirectInput, BootstrapEffectStage, BootstrapExecutor, BootstrapGcRootPath,
+    BootstrapHermeticTest, BootstrapJournalParent, BootstrapLocalBootstrapV1, BootstrapMode,
+    BootstrapNixStoreUri, BootstrapNixSystem, BootstrapOutputSelector,
+    BootstrapRemoteNixosSystemdBootV1, BootstrapRequestId, BootstrapRun, BootstrapSshDestination,
+    BootstrapSystemProfilePath, BootstrapTerminalEvidencePath, BootstrapTestPlan,
+    decode_single_inline, run_with_executor, run_with_executor_and_crash,
 };
 
-const FLAKE: &str =
-    "github:fixture-owner/fixture-flake?rev=0123456789abcdef0123456789abcdef01234567";
+const FLAKE: &str = "github:fixture-owner/fixture-flake/0123456789abcdef0123456789abcdef01234567";
 const DERIVATION: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-fixture.drv";
 const CLOSURE: &str = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-fixture-system";
 
 #[derive(Default)]
 struct SuppressedExecutor {
     commands: Vec<BootstrapCommand>,
+    copied: bool,
+    dispatched: bool,
     fail_program: Option<&'static str>,
     fail_subcommand: Option<&'static str>,
+}
+
+impl SuppressedExecutor {
+    fn with_remote_receipts() -> Self {
+        Self {
+            copied: true,
+            dispatched: true,
+            ..Self::default()
+        }
+    }
+
+    fn count(&self, program: &str, first: &str) -> usize {
+        self.commands
+            .iter()
+            .filter(|command| {
+                command.program == program
+                    && command
+                        .arguments
+                        .first()
+                        .is_some_and(|value| value == first)
+            })
+            .count()
+    }
 }
 
 impl BootstrapExecutor for SuppressedExecutor {
@@ -38,7 +64,7 @@ impl BootstrapExecutor for SuppressedExecutor {
             && command
                 .arguments
                 .first()
-                .is_some_and(|argument| self.fail_subcommand == Some(argument.as_str()));
+                .is_some_and(|value| self.fail_subcommand == Some(value));
         self.commands.push(command.clone());
         if should_fail {
             return Err(lojix::bootstrap::BootstrapError::Effect(
@@ -51,9 +77,64 @@ impl BootstrapExecutor for SuppressedExecutor {
         ) {
             ("nix", Some("eval")) => Ok(format!("{DERIVATION}\n")),
             ("nix", Some("build")) => Ok(format!("{CLOSURE}\n")),
-            ("nix-store", Some("--add-root")) => Ok(format!("{CLOSURE}\n")),
-            ("nix", Some("copy")) | ("ssh", _) | ("systemd-run", _) => Ok(String::new()),
+            ("nix-store", Some("--add-root")) => {
+                let root = command.arguments.get(1).expect("root argument");
+                symlink(CLOSURE, root).expect("model Nix's root receipt");
+                Ok(format!("{CLOSURE}\n"))
+            }
+            ("nix", Some("copy")) => {
+                self.copied = true;
+                Ok(String::new())
+            }
+            ("ssh", _) => {
+                let body = command.arguments.last().expect("remote command");
+                if body.contains("nix-store --query") {
+                    Ok(if self.copied { "Present" } else { "Absent" }.to_string())
+                } else if body.contains("systemctl show") {
+                    Ok(if self.dispatched {
+                        "LoadState=loaded\nActiveState=active\nResult=success\n".to_string()
+                    } else {
+                        "LoadState=not-found\n".to_string()
+                    })
+                } else if body.contains("systemd-run") {
+                    self.dispatched = true;
+                    Ok(String::new())
+                } else {
+                    panic!("unexpected remote command {body}")
+                }
+            }
+            ("/bin/sh", Some("-eu")) => {
+                let body = command.arguments.last().expect("local query");
+                Ok(if body.contains("systemctl show") {
+                    if self.dispatched {
+                        "LoadState=loaded\nActiveState=active\nResult=success\n".to_string()
+                    } else {
+                        "LoadState=not-found\n".to_string()
+                    }
+                } else {
+                    panic!("unexpected local shell command {body}")
+                })
+            }
+            ("/run/current-system/sw/bin/systemd-run", _) => {
+                self.dispatched = true;
+                Ok(String::new())
+            }
             other => panic!("unexpected suppressed effect {other:?}"),
+        }
+    }
+}
+
+struct CrashOnce(BootstrapCrashPoint);
+
+impl BootstrapCrashInjector for CrashOnce {
+    fn after(
+        &mut self,
+        point: BootstrapCrashPoint,
+    ) -> Result<(), lojix::bootstrap::BootstrapError> {
+        if point == self.0 {
+            Err(lojix::bootstrap::BootstrapError::InjectedCrash)
+        } else {
+            Ok(())
         }
     }
 }
@@ -80,6 +161,11 @@ fn paths(
         BootstrapGcRootPath(directory.join("generation-root").display().to_string()),
         BootstrapTerminalEvidencePath(directory.join("terminal.rkyv").display().to_string()),
     )
+}
+
+fn private(directory: &Path) {
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+        .expect("private fixture parent");
 }
 
 fn build_only(directory: &Path) -> BootstrapRun {
@@ -137,8 +223,12 @@ fn remote_boot_once(directory: &Path) -> BootstrapRun {
             }),
             activation_backend: BootstrapActivationBackend::RemoteNixosSystemdBootV1(
                 BootstrapRemoteNixosSystemdBootV1 {
-                    nix_store_uri: BootstrapNixStoreUri("ssh-ng://copy.invalid".to_string()),
-                    ssh_destination: BootstrapSshDestination("root@activate.invalid".to_string()),
+                    nix_store_uri: BootstrapNixStoreUri(
+                        "ssh-ng://root@activate.invalid:2222".to_string(),
+                    ),
+                    ssh_destination: BootstrapSshDestination(
+                        "root@activate.invalid:2222".to_string(),
+                    ),
                     system_profile_path: BootstrapSystemProfilePath(
                         "/nix/var/nix/profiles/system".to_string(),
                     ),
@@ -154,226 +244,334 @@ fn remote_boot_once(directory: &Path) -> BootstrapRun {
     }
 }
 
-fn evidence(path: &Path) -> BootstrapTerminalEvidence {
-    rkyv::from_bytes::<BootstrapTerminalEvidence, rkyv::rancor::Error>(
-        &fs::read(path).expect("read terminal evidence"),
-    )
-    .expect("decode terminal evidence")
-}
-
 #[test]
-fn build_only_is_body_suppressed_and_cannot_activate() {
+fn build_only_has_no_transport_or_activation_body() {
     let directory = tempfile::tempdir().expect("tempdir");
+    private(directory.path());
     let mut executor = SuppressedExecutor::default();
-
-    let terminal = run_with_executor(build_only(directory.path()), &mut executor)
-        .expect("body-suppressed build-only pipeline");
-
+    let terminal =
+        run_with_executor(build_only(directory.path()), &mut executor).expect("build only");
     assert_eq!(terminal.status, "Succeeded");
-    assert_eq!(
-        executor
-            .commands
-            .iter()
-            .map(|command| (
-                command.program.as_str(),
-                command.arguments.first().map(String::as_str)
-            ))
-            .collect::<Vec<_>>(),
-        vec![
-            ("nix", Some("eval")),
-            ("nix", Some("build")),
-            ("nix-store", Some("--add-root")),
-        ]
-    );
+    assert_eq!(executor.count("nix-store", "--add-root"), 1);
     assert!(executor.commands.iter().all(|command| {
-        command.program != "ssh"
-            && command.program != "systemd-run"
-            && command
-                .arguments
-                .first()
-                .is_none_or(|argument| argument != "copy")
+        command.program != "ssh" && command.program != "/run/current-system/sw/bin/systemd-run"
     }));
-    let artifact = evidence(&directory.path().join("terminal.rkyv"));
     assert_eq!(
-        artifact.status,
-        lojix::bootstrap::BootstrapEvidenceStatus::Succeeded
-    );
-    assert!(
-        artifact
-            .effects
-            .iter()
-            .any(|effect| effect.stage == BootstrapEffectStage::GcRooted)
-    );
-    assert!(
-        fs::read_dir(directory.path())
-            .expect("read journal parent")
-            .all(|entry| !entry
-                .expect("entry")
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".lojix-bootstrap-v4-")),
-        "journal cleanup must remove only the child after evidence exists"
+        fs::symlink_metadata(directory.path().join("terminal.rkyv"))
+            .expect("evidence")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
     );
 }
 
 #[test]
-fn remote_effect_order_uses_every_request_owned_value() {
+fn remote_dispatch_is_no_block_and_identity_is_explicit() {
     let directory = tempfile::tempdir().expect("tempdir");
+    private(directory.path());
     let mut executor = SuppressedExecutor::default();
-    let terminal = run_with_executor(remote_boot_once(directory.path()), &mut executor)
-        .expect("body-suppressed remote pipeline");
-
-    assert_eq!(terminal.status, "Succeeded");
-    let labels = executor
+    run_with_executor(remote_boot_once(directory.path()), &mut executor).expect("remote pipeline");
+    let dispatch = executor
         .commands
         .iter()
-        .map(|command| format!("{}:{}", command.program, command.arguments[0]))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        labels,
-        vec![
-            "nix:build",
-            "nix:eval",
-            "nix:build",
-            "nix-store:--add-root",
-            "nix:copy",
-            "ssh:root@activate.invalid",
-        ]
-    );
-    let build = &executor.commands[2];
-    assert!(build.arguments.windows(2).any(|arguments| arguments
-        == [
-            "--builders",
-            "ssh-ng://builder.invalid x86_64-linux - 4 1 - - -"
-        ]));
-    let copy = &executor.commands[4];
+        .find(|command| {
+            command.program == "ssh"
+                && command
+                    .arguments
+                    .last()
+                    .is_some_and(|body| body.contains("systemd-run"))
+        })
+        .expect("remote dispatch");
     assert!(
-        copy.arguments
-            .contains(&"ssh-ng://copy.invalid".to_string())
+        dispatch
+            .arguments
+            .windows(3)
+            .any(|arguments| arguments == ["-p", "2222", "--"])
     );
-    assert_eq!(executor.commands[5].arguments[0], "root@activate.invalid");
-    let evidence_bytes = fs::read(directory.path().join("terminal.rkyv")).expect("evidence bytes");
     assert!(
-        !String::from_utf8_lossy(&evidence_bytes).contains("activate.invalid")
-            && !String::from_utf8_lossy(&evidence_bytes).contains("fixture-flake"),
-        "terminal evidence must not disclose request-owned routing or input values"
+        dispatch
+            .arguments
+            .windows(2)
+            .any(|arguments| arguments == ["-F", "/dev/null"])
     );
+    assert!(dispatch.arguments.last().is_some_and(|body| {
+        body.contains("--no-block")
+            && body.contains("RemainAfterExit=yes")
+            && body.contains("--unit=")
+    }));
+    assert!(executor.commands.iter().any(|command| {
+        command.program == "ssh"
+            && command
+                .arguments
+                .last()
+                .is_some_and(|body| body.contains("systemctl show"))
+    }));
+    let bytes = fs::read(directory.path().join("terminal.rkyv")).expect("evidence");
+    let evidence_text = String::from_utf8_lossy(&bytes);
+    assert!(!evidence_text.contains("activate.invalid"));
+    assert!(!evidence_text.contains("fixture-flake"));
+    assert!(!evidence_text.contains("fixture-remote"));
+    assert!(!evidence_text.contains(CLOSURE));
+    assert!(!evidence_text.contains("generation-root"));
 }
 
 #[test]
-fn local_bootstrap_is_explicit_and_never_elides_transport() {
+fn local_backend_has_explicit_systemd_and_path_environment() {
     let directory = tempfile::tempdir().expect("tempdir");
+    private(directory.path());
     let mut executor = SuppressedExecutor::default();
-    run_with_executor(local_boot_once(directory.path()), &mut executor)
-        .expect("body-suppressed local pipeline");
+    run_with_executor(local_boot_once(directory.path()), &mut executor).expect("local pipeline");
+    let dispatch = executor
+        .commands
+        .iter()
+        .find(|command| command.program == "/run/current-system/sw/bin/systemd-run")
+        .expect("local systemd dispatch");
+    assert!(
+        dispatch
+            .arguments
+            .iter()
+            .any(|argument| argument.starts_with("--setenv=PATH="))
+    );
     assert!(
         executor
             .commands
             .iter()
-            .any(|command| command.program == "systemd-run")
+            .all(|command| command.program != "ssh")
     );
-    assert!(executor.commands.iter().all(|command| {
-        command.program != "ssh"
-            && !(command.program == "nix" && command.arguments.first() == Some(&"copy".to_string()))
-    }));
 }
 
 #[test]
-fn failure_persists_terminal_evidence_before_journal_cleanup() {
+fn crash_receipts_resume_without_repeating_prior_effects() {
+    for point in [
+        BootstrapCrashPoint::AfterGcRoot,
+        BootstrapCrashPoint::AfterCopy,
+        BootstrapCrashPoint::AfterDispatch,
+        BootstrapCrashPoint::AfterActivation,
+        BootstrapCrashPoint::AfterEvidence,
+    ] {
+        let directory = tempfile::tempdir().expect("tempdir");
+        private(directory.path());
+        let request = remote_boot_once(directory.path());
+        let mut initial = SuppressedExecutor::default();
+        let mut crash = CrashOnce(point);
+        assert!(matches!(
+            run_with_executor_and_crash(request.clone(), &mut initial, &mut crash),
+            Err(lojix::bootstrap::BootstrapError::InjectedCrash)
+        ));
+
+        let initial_root = initial.count("nix-store", "--add-root");
+        let initial_copy = initial.count("nix", "copy");
+        let initial_dispatch = initial
+            .commands
+            .iter()
+            .filter(|command| {
+                command.program == "ssh"
+                    && command
+                        .arguments
+                        .last()
+                        .is_some_and(|body| body.contains("systemd-run"))
+            })
+            .count();
+        let mut resumed = SuppressedExecutor::with_remote_receipts();
+        run_with_executor(request, &mut resumed).expect("resumed journal");
+        assert_eq!(resumed.count("nix-store", "--add-root"), 0, "{point:?}");
+        if initial_copy > 0 {
+            assert_eq!(resumed.count("nix", "copy"), 0, "{point:?}");
+        }
+        if initial_dispatch > 0 {
+            assert_eq!(
+                resumed
+                    .commands
+                    .iter()
+                    .filter(|command| command.program == "ssh"
+                        && command
+                            .arguments
+                            .last()
+                            .is_some_and(|body| body.contains("systemd-run")))
+                    .count(),
+                0,
+                "{point:?}"
+            );
+        }
+        assert_eq!(initial_root, 1, "{point:?}");
+    }
+}
+
+#[test]
+fn mutable_flakes_and_ambiguous_transport_fail_before_effects() {
     let directory = tempfile::tempdir().expect("tempdir");
+    private(directory.path());
+    let mut mutable = build_only(directory.path());
+    let BootstrapMode::BuildOnly(build) = &mut mutable.mode else {
+        unreachable!()
+    };
+    let lojix::bootstrap::BootstrapInput::Direct(direct) = &mut build.input else {
+        unreachable!()
+    };
+    direct.flake_reference.0 =
+        "github:fixture-owner/fixture-flake?rev=0123456789abcdef0123456789abcdef01234567"
+            .to_string();
+    let mut executor = SuppressedExecutor::default();
+    assert!(run_with_executor(mutable, &mut executor).is_err());
+    assert!(executor.commands.is_empty());
+
+    let mut mismatched = remote_boot_once(directory.path());
+    let BootstrapMode::BootOnce(boot) = &mut mismatched.mode else {
+        unreachable!()
+    };
+    let BootstrapActivationBackend::RemoteNixosSystemdBootV1(remote) = &mut boot.activation_backend
+    else {
+        unreachable!()
+    };
+    remote.ssh_destination.0 = "root@other.invalid:2222".to_string();
+    let mut executor = SuppressedExecutor::default();
+    assert!(run_with_executor(mismatched, &mut executor).is_err());
+    assert!(executor.commands.is_empty());
+}
+
+#[test]
+fn transport_identity_rejection_table_never_reaches_a_body() {
+    for (store_uri, destination) in [
+        ("ssh://root@activate.invalid", "root@activate.invalid"),
+        (
+            "ssh-ng://root:password@activate.invalid",
+            "root@activate.invalid",
+        ),
+        ("ssh-ng://root@activate.invalid", "activate.invalid"),
+        ("ssh-ng://root@activate.invalid", "-oProxyCommand=x"),
+        (
+            "ssh-ng://root@activate.invalid:22",
+            "root@activate.invalid:23",
+        ),
+        ("ssh-ng://Root@activate.invalid", "Root@activate.invalid"),
+    ] {
+        let directory = tempfile::tempdir().expect("tempdir");
+        private(directory.path());
+        let mut request = remote_boot_once(directory.path());
+        let BootstrapMode::BootOnce(boot) = &mut request.mode else {
+            unreachable!()
+        };
+        let BootstrapActivationBackend::RemoteNixosSystemdBootV1(remote) =
+            &mut boot.activation_backend
+        else {
+            unreachable!()
+        };
+        remote.nix_store_uri.0 = store_uri.to_string();
+        remote.ssh_destination.0 = destination.to_string();
+        let mut executor = SuppressedExecutor::default();
+        assert!(
+            run_with_executor(request, &mut executor).is_err(),
+            "{store_uri} / {destination}"
+        );
+        assert!(executor.commands.is_empty(), "{store_uri} / {destination}");
+    }
+}
+
+#[test]
+fn private_output_parents_and_existing_collisions_fail_closed() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755))
+        .expect("make parent nonprivate");
+    let mut executor = SuppressedExecutor::default();
+    assert!(run_with_executor(build_only(directory.path()), &mut executor).is_err());
+    assert!(executor.commands.is_empty());
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+        .expect("restore parent");
+    fs::write(directory.path().join("terminal.rkyv"), "collision").expect("collision");
+    let mut executor = SuppressedExecutor::default();
+    assert!(run_with_executor(build_only(directory.path()), &mut executor).is_err());
+    assert!(executor.commands.is_empty());
+}
+
+#[test]
+fn failed_effect_writes_private_terminal_evidence_before_cleanup() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    private(directory.path());
     let mut executor = SuppressedExecutor {
         fail_program: Some("nix"),
         fail_subcommand: Some("build"),
         ..Default::default()
     };
     let terminal = run_with_executor(build_only(directory.path()), &mut executor)
-        .expect("terminal evidence should convert pipeline failure into a terminal result");
+        .expect("failure becomes durable terminal evidence");
     assert_eq!(terminal.status, "Failed");
-    let artifact = evidence(&directory.path().join("terminal.rkyv"));
-    assert_eq!(
-        artifact.status,
-        lojix::bootstrap::BootstrapEvidenceStatus::Failed
-    );
-    assert!(
-        artifact
-            .effects
-            .iter()
-            .any(|effect| effect.stage == BootstrapEffectStage::Built && !effect.succeeded)
-    );
+    let artifact = fs::symlink_metadata(directory.path().join("terminal.rkyv")).expect("evidence");
+    assert_eq!(artifact.permissions().mode() & 0o777, 0o600);
     assert!(
         fs::read_dir(directory.path())
-            .expect("read journal parent")
+            .expect("parent")
             .all(|entry| !entry
                 .expect("entry")
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".lojix-bootstrap-v4-"))
+                .starts_with(".lojix-bootstrap-v5-"))
     );
 }
 
 #[test]
-fn root_evidence_and_symlink_collisions_fail_before_any_effect() {
+fn substituted_journal_child_is_never_cleaned_recursively() {
     let directory = tempfile::tempdir().expect("tempdir");
-    let root = directory.path().join("generation-root");
-    fs::write(&root, "existing root").expect("existing root");
+    private(directory.path());
+    let request = build_only(directory.path());
     let mut executor = SuppressedExecutor::default();
-    assert!(run_with_executor(build_only(directory.path()), &mut executor).is_err());
-    assert!(executor.commands.is_empty());
+    let mut crash = CrashOnce(BootstrapCrashPoint::AfterGcRoot);
+    assert!(matches!(
+        run_with_executor_and_crash(request.clone(), &mut executor, &mut crash),
+        Err(lojix::bootstrap::BootstrapError::InjectedCrash)
+    ));
+    let child = fs::read_dir(directory.path())
+        .expect("journal parent")
+        .map(|entry| entry.expect("entry").path())
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".lojix-bootstrap-v5-"))
+        })
+        .expect("journal child");
+    let displaced = directory.path().join("displaced-journal");
+    fs::rename(&child, &displaced).expect("move original child");
+    fs::create_dir(&child).expect("substituted child");
+    private(&child);
+    fs::write(child.join("not-ours"), "retain").expect("replacement marker");
 
-    fs::remove_file(&root).expect("remove root fixture");
-    fs::write(directory.path().join("terminal.rkyv"), "existing evidence")
-        .expect("existing evidence");
-    let mut executor = SuppressedExecutor::default();
-    assert!(run_with_executor(build_only(directory.path()), &mut executor).is_err());
-    assert!(executor.commands.is_empty());
-
-    fs::remove_file(directory.path().join("terminal.rkyv")).expect("remove evidence fixture");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(directory.path().join("missing"), &root).expect("symlink root");
-    let mut executor = SuppressedExecutor::default();
-    assert!(run_with_executor(build_only(directory.path()), &mut executor).is_err());
-    assert!(executor.commands.is_empty());
+    let mut resumed = SuppressedExecutor::default();
+    assert!(run_with_executor(request, &mut resumed).is_err());
+    assert!(
+        child.join("not-ours").exists(),
+        "replacement survives fail-closed cleanup"
+    );
+    assert!(
+        displaced.exists(),
+        "original durable journal is retained for inspection"
+    );
 }
 
 #[test]
-fn cli_requires_exactly_one_inline_bootstrap_object() {
+fn cli_remains_exactly_one_inline_object() {
     let directory = tempfile::tempdir().expect("tempdir");
-    let request_file = directory.path().join("request.dotos");
-    fs::write(
-        &request_file,
-        "BootstrapRun.{fixture BuildOnly.{Direct.{x y z} NoBuilder /a /b /c}}",
-    )
-    .expect("request fixture");
+    private(directory.path());
     for arguments in [
         Vec::<OsString>::new(),
-        vec![request_file.into_os_string()],
         vec![OsString::from("--help")],
         vec![OsString::from("BootstrapRun.{}"), OsString::from("extra")],
     ] {
         assert!(decode_single_inline(arguments).is_err());
     }
-
-    let status = Command::new(env!("CARGO_BIN_EXE_lojix-bootstrap"))
-        .arg("--help")
-        .status()
-        .expect("bootstrap cli")
-        .success();
-    assert!(!status, "the binary rejects flags before any effect");
-
     let parsed = decode_single_inline([OsString::from(format!(
         "BootstrapRun.{{fixture BuildOnly.{{Direct.{{{FLAKE} x86_64-linux nixosConfigurations.target.config.system.build.toplevel}} NoBuilder {} {} {}}}}}",
         directory.path().display(),
         directory.path().join("root").display(),
         directory.path().join("evidence").display(),
-    ))])
-    .expect("one inline bootstrap object");
+    ))]).expect("one inline request");
     assert!(matches!(
         BootstrapCliInput::BootstrapRun(parsed),
         BootstrapCliInput::BootstrapRun(_)
     ));
-}
-
-#[test]
-fn production_executor_is_a_distinct_body_boundary() {
-    let _ = ProcessBootstrapExecutor;
+    assert!(
+        !Command::new(env!("CARGO_BIN_EXE_lojix-bootstrap"))
+            .arg("--help")
+            .status()
+            .expect("cli")
+            .success()
+    );
 }

@@ -3,33 +3,38 @@
 //! This is deliberately a separate ingress from the daemon wire contracts.
 //! A bootstrap invocation owns every route, input, builder, output path and
 //! activation backend; no socket, service configuration, old store, or
-//! hostname-derived default is read.  A fresh Lojix v4 store is created below
-//! the request's journal parent only to preserve the pipeline's durable-journal
-//! boundary.  It is deleted only after terminal evidence has been atomically
-//! committed to the caller-selected path.
+//! hostname-derived default is read.  A fresh private v5 journal store is
+//! created below the request's journal parent. It records write-ahead intent,
+//! receipt, and outcome records and is deleted only after terminal evidence
+//! has been atomically committed and directory-synced at the caller-selected
+//! path.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use dotos::{DotosDecode, DotosDecodeError, DotosSource};
 use horizon_lib::name::{ClusterName as HorizonClusterName, NodeName as HorizonNodeName};
 use horizon_lib::{ClusterProposal, Viewpoint};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::Store;
 
-const JOURNAL_SCHEMA_VERSION: u32 = 4;
-const JOURNAL_PREFIX: &str = ".lojix-bootstrap-v4-";
+const JOURNAL_SCHEMA_VERSION: u32 = 5;
+const JOURNAL_PREFIX: &str = ".lojix-bootstrap-v5-";
 const TEMPORARY_EVIDENCE_PREFIX: &str = ".lojix-bootstrap-evidence-";
 const BOOT_ENTRY_PREFIX: &str = "nixos-generation-";
+const JOURNAL_STATE_FILE: &str = "bootstrap-v5.rkyv";
+const JOURNAL_STORE_FILE: &str = "lojix-v5.sema";
+const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
+const PRIVATE_EVIDENCE_MODE: u32 = 0o600;
 
 static JOURNAL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -208,6 +213,7 @@ pub enum BootstrapEffectStage {
     GcRooted,
     Copied,
     BootOnceScheduled,
+    BootOnceActivated,
     TerminalEvidenceWritten,
 }
 
@@ -224,17 +230,17 @@ pub struct BootstrapEffectEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct BootstrapTerminalEvidence {
     pub journal_schema_version: u32,
-    pub request_id: String,
+    /// A one-way binding to the request.  The raw request id, paths, flake
+    /// reference, transport identity, and child output stay in the private
+    /// journal rather than this caller-retained artifact.
+    pub request_hash: Vec<u8>,
     pub mode: BootstrapEvidenceMode,
     pub status: BootstrapEvidenceStatus,
-    pub closure_path: Option<String>,
-    pub gc_root_path: String,
     pub effects: Vec<BootstrapEffectEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapTerminal {
-    pub request_id: String,
     pub status: &'static str,
 }
 
@@ -256,6 +262,10 @@ pub enum BootstrapError {
     Effect(BootstrapEffectStage),
     #[error("bootstrap terminal evidence could not be persisted: {0}")]
     Evidence(std::io::Error),
+    #[error("bootstrap crash witness interrupted execution")]
+    InjectedCrash,
+    #[error("bootstrap receipt is pending reconciliation")]
+    RecoveryPending,
 }
 
 impl BootstrapError {
@@ -275,6 +285,8 @@ impl BootstrapError {
                 _ => "BootstrapFailure",
             },
             Self::Evidence(_) => "EvidenceFailure",
+            Self::InjectedCrash => "Interrupted",
+            Self::RecoveryPending => "PendingRecovery",
         }
     }
 }
@@ -330,163 +342,175 @@ pub fn run_with_executor<E: BootstrapExecutor>(
     request: BootstrapRun,
     executor: &mut E,
 ) -> std::result::Result<BootstrapTerminal, BootstrapError> {
-    let mut validated = ValidatedBootstrapRun::try_from(request)?;
-    let journal = EphemeralJournal::create(&validated)?;
-    validated.journal_directory = journal.directory.clone();
-    let mut effects = vec![BootstrapEffectEvidence {
-        stage: BootstrapEffectStage::JournalCreated,
-        succeeded: true,
-    }];
+    let mut never_crash = NeverCrash;
+    run_with_executor_and_crash(request, executor, &mut never_crash)
+}
 
-    let execution = execute(&validated, executor, &mut effects);
-    let (status, closure_path) = match execution {
-        Ok(closure_path) => (BootstrapEvidenceStatus::Succeeded, Some(closure_path)),
-        Err(stage) => {
-            effects.push(BootstrapEffectEvidence {
-                stage,
-                succeeded: false,
-            });
-            (BootstrapEvidenceStatus::Failed, None)
+/// Crash injection is deliberately a test seam: it returns before terminal
+/// evidence or cleanup, exactly like an abrupt process loss at that boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapCrashPoint {
+    AfterGcRoot,
+    AfterCopy,
+    AfterDispatch,
+    AfterActivation,
+    AfterEvidence,
+}
+
+pub trait BootstrapCrashInjector {
+    fn after(&mut self, point: BootstrapCrashPoint) -> std::result::Result<(), BootstrapError>;
+}
+
+struct NeverCrash;
+
+impl BootstrapCrashInjector for NeverCrash {
+    fn after(&mut self, _: BootstrapCrashPoint) -> std::result::Result<(), BootstrapError> {
+        Ok(())
+    }
+}
+
+/// Hermetic tests use this to prove that each persisted receipt resumes at the
+/// next exact stage without issuing its preceding effect again.
+pub fn run_with_executor_and_crash<E: BootstrapExecutor, C: BootstrapCrashInjector>(
+    request: BootstrapRun,
+    executor: &mut E,
+    crash: &mut C,
+) -> std::result::Result<BootstrapTerminal, BootstrapError> {
+    let mut validated = ValidatedBootstrapRun::try_from(request)?;
+    let journal = EphemeralJournal::open_or_create(&validated)?;
+    validated.journal_directory = journal.directory.clone();
+    let status = if let Some(status) = journal.terminal_status()? {
+        status
+    } else {
+        match execute(&validated, &journal, executor, crash) {
+            Ok(()) => BootstrapEvidenceStatus::Succeeded,
+            Err(BootstrapError::InjectedCrash) => return Err(BootstrapError::InjectedCrash),
+            Err(BootstrapError::RecoveryPending) => return Err(BootstrapError::RecoveryPending),
+            Err(BootstrapError::Effect(stage)) => {
+                journal.outcome(JournalStage::from_effect(stage), false)?;
+                journal.set_terminal_status(BootstrapEvidenceStatus::Failed)?;
+                BootstrapEvidenceStatus::Failed
+            }
+            Err(error) => return Err(error),
         }
     };
 
-    let mut evidence = BootstrapTerminalEvidence {
-        journal_schema_version: JOURNAL_SCHEMA_VERSION,
-        request_id: validated.request_id.clone(),
-        mode: validated.mode.evidence_mode(),
-        status,
-        closure_path,
-        gc_root_path: validated.gc_root_path.display().to_string(),
-        effects,
-    };
-    // This stage is appended before serialization so the artifact itself
-    // proves the terminal write committed; the file is created atomically.
-    evidence.effects.push(BootstrapEffectEvidence {
-        stage: BootstrapEffectStage::TerminalEvidenceWritten,
-        succeeded: true,
-    });
-    write_evidence_new(&validated.terminal_evidence_path, &evidence)?;
-
-    // Retain a failed journal until durable terminal evidence exists.  After
-    // that point the guard may remove only the verified child it created.
+    if journal.terminal_status()?.is_none() {
+        journal.set_terminal_status(status)?;
+    }
+    write_terminal_evidence(&validated, &journal, status, crash)?;
     journal.cleanup()?;
 
     Ok(BootstrapTerminal {
-        request_id: validated.request_id,
         status: status.as_str(),
     })
 }
 
-fn execute<E: BootstrapExecutor>(
+fn execute<E: BootstrapExecutor, C: BootstrapCrashInjector>(
     request: &ValidatedBootstrapRun,
+    journal: &EphemeralJournal,
     executor: &mut E,
-    evidence: &mut Vec<BootstrapEffectEvidence>,
-) -> std::result::Result<String, BootstrapEffectStage> {
-    let overrides =
-        materialize(request, executor).map_err(|_| BootstrapEffectStage::Materialized)?;
-    evidence.push(BootstrapEffectEvidence {
-        stage: BootstrapEffectStage::Materialized,
-        succeeded: true,
-    });
+    crash: &mut C,
+) -> std::result::Result<(), BootstrapError> {
+    let overrides = if let Some(overrides) = journal.materialized_overrides()? {
+        overrides
+    } else {
+        journal.intent(JournalStage::Materialized)?;
+        let overrides = materialize(request, executor)
+            .map_err(|_| BootstrapError::Effect(BootstrapEffectStage::Materialized))?;
+        journal.set_materialized_overrides(&overrides)?;
+        journal.receipt(JournalStage::Materialized)?;
+        journal.outcome(JournalStage::Materialized, true)?;
+        overrides
+    };
 
     if let BootstrapModeValidated::BootOnce(boot_once) = &request.mode
         && let BootstrapTestPlanValidated::RunHermeticTest(test) = &boot_once.test_plan
+        && !journal.succeeded(JournalStage::Tested)?
     {
-        run_hermetic_test(test, executor).map_err(|_| BootstrapEffectStage::Tested)?;
-        evidence.push(BootstrapEffectEvidence {
-            stage: BootstrapEffectStage::Tested,
-            succeeded: true,
-        });
+        journal.intent(JournalStage::Tested)?;
+        run_hermetic_test(test, executor)
+            .map_err(|_| BootstrapError::Effect(BootstrapEffectStage::Tested))?;
+        journal.receipt(JournalStage::Tested)?;
+        journal.outcome(JournalStage::Tested, true)?;
     }
 
-    let closure = build(request, &overrides, executor).map_err(|_| BootstrapEffectStage::Built)?;
-    evidence.push(BootstrapEffectEvidence {
-        stage: BootstrapEffectStage::Built,
-        succeeded: true,
-    });
+    let closure = if let Some(closure) = journal.closure_path()? {
+        closure
+    } else {
+        journal.intent(JournalStage::Built)?;
+        let closure = build(request, &overrides, executor)?;
+        journal.set_closure_path(&closure)?;
+        journal.receipt(JournalStage::Built)?;
+        journal.outcome(JournalStage::Built, true)?;
+        closure
+    };
 
-    executor
-        .run(BootstrapCommand {
-            program: "nix-store".to_string(),
-            arguments: vec![
-                "--add-root".to_string(),
-                request.gc_root_path.display().to_string(),
-                "--realise".to_string(),
-                closure.clone(),
-            ],
-        })
-        .map_err(|_| BootstrapEffectStage::GcRooted)?;
-    evidence.push(BootstrapEffectEvidence {
-        stage: BootstrapEffectStage::GcRooted,
-        succeeded: true,
-    });
+    if !journal.succeeded(JournalStage::GcRooted)? {
+        journal.intent(JournalStage::GcRooted)?;
+        if !verify_root_receipt(&request.gc_root_path, &closure) {
+            let staging = journal.directory.join("gc-root-staging");
+            if staging.exists() {
+                return Err(BootstrapError::Validation("gc root staging already exists"));
+            }
+            executor
+                .run(BootstrapCommand {
+                    program: "nix-store".to_string(),
+                    arguments: vec![
+                        "--add-root".to_string(),
+                        staging.display().to_string(),
+                        "--realise".to_string(),
+                        closure.clone(),
+                    ],
+                })
+                .map_err(|_| BootstrapError::Effect(BootstrapEffectStage::GcRooted))?;
+            link_root_no_replace(&staging, &request.gc_root_path, &closure)?;
+        }
+        journal.set_root_receipt(&request.gc_root_path, &closure)?;
+        journal.receipt(JournalStage::GcRooted)?;
+        journal.outcome(JournalStage::GcRooted, true)?;
+        crash.after(BootstrapCrashPoint::AfterGcRoot)?;
+    } else if !journal.verify_root_receipt(&request.gc_root_path, &closure)? {
+        return Err(BootstrapError::Validation(
+            "gc root receipt identity changed",
+        ));
+    }
 
     // The exact BuildOnly variant has no activation representation, rather
     // than a boolean that a future refactor could accidentally ignore.
     let BootstrapModeValidated::BootOnce(boot_once) = &request.mode else {
-        return Ok(closure);
+        return Ok(());
     };
 
     match &boot_once.activation_backend {
         BootstrapActivationBackendValidated::Remote(remote) => {
-            executor
-                .run(BootstrapCommand {
-                    program: "nix".to_string(),
-                    arguments: vec![
-                        "copy".to_string(),
-                        "--substitute-on-destination".to_string(),
-                        "--to".to_string(),
-                        remote.nix_store_uri.clone(),
-                        closure.clone(),
-                    ],
-                })
-                .map_err(|_| BootstrapEffectStage::Copied)?;
-            evidence.push(BootstrapEffectEvidence {
-                stage: BootstrapEffectStage::Copied,
-                succeeded: true,
-            });
-            executor
-                .run(BootstrapCommand {
-                    program: "ssh".to_string(),
-                    arguments: vec![
-                        remote.ssh_destination.clone(),
-                        boot_once_script(
-                            &request.request_id,
-                            &closure,
-                            &remote.system_profile_path,
-                            &remote.boot_entries_directory,
-                        ),
-                    ],
-                })
-                .map_err(|_| BootstrapEffectStage::BootOnceScheduled)?;
+            if !journal.succeeded(JournalStage::Copied)? {
+                journal.intent(JournalStage::Copied)?;
+                if !remote_has_closure(remote, &closure, executor)? {
+                    executor
+                        .run(BootstrapCommand {
+                            program: "nix".to_string(),
+                            arguments: vec![
+                                "copy".to_string(),
+                                "--substitute-on-destination".to_string(),
+                                "--to".to_string(),
+                                remote.nix_store_uri.clone(),
+                                closure.clone(),
+                            ],
+                        })
+                        .map_err(|_| BootstrapError::Effect(BootstrapEffectStage::Copied))?;
+                }
+                journal.receipt(JournalStage::Copied)?;
+                journal.outcome(JournalStage::Copied, true)?;
+                crash.after(BootstrapCrashPoint::AfterCopy)?;
+            }
+            dispatch_and_reconcile_remote(request, journal, remote, &closure, executor, crash)?;
         }
         BootstrapActivationBackendValidated::Local(local) => {
-            executor
-                .run(BootstrapCommand {
-                    program: "systemd-run".to_string(),
-                    arguments: vec![
-                        format!("--unit={}", boot_once_unit_name(&request.request_id)),
-                        "--collect".to_string(),
-                        "--wait".to_string(),
-                        "--service-type=oneshot".to_string(),
-                        "/bin/sh".to_string(),
-                        "-c".to_string(),
-                        boot_once_script(
-                            &request.request_id,
-                            &closure,
-                            &local.system_profile_path,
-                            &local.boot_entries_directory,
-                        ),
-                    ],
-                })
-                .map_err(|_| BootstrapEffectStage::BootOnceScheduled)?;
+            dispatch_and_reconcile_local(request, journal, local, &closure, executor, crash)?;
         }
     }
-    evidence.push(BootstrapEffectEvidence {
-        stage: BootstrapEffectStage::BootOnceScheduled,
-        succeeded: true,
-    });
-    Ok(closure)
+    Ok(())
 }
 
 fn run_hermetic_test<E: BootstrapExecutor>(
@@ -562,7 +586,7 @@ fn build<E: BootstrapExecutor>(
 
 #[derive(Debug, Clone)]
 struct FlakeOverride {
-    name: &'static str,
+    name: String,
     reference: String,
 }
 
@@ -571,7 +595,7 @@ fn flatten_overrides(overrides: &[FlakeOverride]) -> Vec<String> {
     for override_input in overrides {
         arguments.extend([
             "--override-input".to_string(),
-            override_input.name.to_string(),
+            override_input.name.clone(),
             override_input.reference.clone(),
         ]);
     }
@@ -607,6 +631,11 @@ fn materialize<E: BootstrapExecutor>(
 
     let generated = request.journal_directory.join("generated-inputs");
     fs::create_dir(&generated).map_err(BootstrapError::Journal)?;
+    fs::set_permissions(
+        &generated,
+        fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE),
+    )
+    .map_err(BootstrapError::Journal)?;
     let mut directories = BTreeMap::new();
 
     let horizon_directory = generated.join("horizon");
@@ -667,7 +696,7 @@ fn materialize<E: BootstrapExecutor>(
             return Err(BootstrapError::Materialization);
         }
         overrides.push(FlakeOverride {
-            name,
+            name: name.to_string(),
             reference: format!(
                 "path:{}?narHash={}",
                 directory.display(),
@@ -769,8 +798,9 @@ fn percent_encode_nar_hash(value: &str) -> String {
         .collect()
 }
 
-fn boot_once_unit_name(request_id: &str) -> String {
-    format!("lojix-bootstrap-boot-once-{request_id}")
+fn boot_once_unit_name(request_hash: &[u8]) -> String {
+    let encoded = hex_lower(request_hash);
+    format!("lojix-bootstrap-boot-once-{}", &encoded[..24])
 }
 
 fn shell_quote(value: &str) -> String {
@@ -778,7 +808,7 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn boot_once_script(
-    request_id: &str,
+    request_hash: &[u8],
     closure: &str,
     system_profile_path: &Path,
     boot_entries_directory: &Path,
@@ -786,9 +816,11 @@ fn boot_once_script(
     let profile = shell_quote(&system_profile_path.display().to_string());
     let entries = shell_quote(&boot_entries_directory.display().to_string());
     let closure = shell_quote(closure);
-    let unit = shell_quote(&boot_once_unit_name(request_id));
+    let unit = shell_quote(&boot_once_unit_name(request_hash));
     format!(
         "set -eu\n\
+         PATH=/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin:/usr/bin:/bin\n\
+         export PATH\n\
          CLOSURE={closure}\n\
          PROFILE={profile}\n\
          ENTRIES={entries}\n\
@@ -808,74 +840,751 @@ fn boot_once_script(
     )
 }
 
-#[derive(Debug)]
-struct EphemeralJournal {
-    directory: PathBuf,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnitState {
+    NotFound,
+    Ready,
+    Waiting,
+    Failed,
+}
+
+fn unit_state(output: &str) -> UnitState {
+    let load_not_found = output
+        .lines()
+        .any(|line| line.trim() == "LoadState=not-found");
+    let failed = output
+        .lines()
+        .any(|line| line.trim() == "ActiveState=failed" || line.trim() == "Result=failed");
+    let ready = output
+        .lines()
+        .any(|line| line.trim() == "ActiveState=active")
+        && output.lines().any(|line| line.trim() == "Result=success");
+    if load_not_found {
+        UnitState::NotFound
+    } else if failed {
+        UnitState::Failed
+    } else if ready {
+        UnitState::Ready
+    } else {
+        UnitState::Waiting
+    }
+}
+
+fn remote_has_closure<E: BootstrapExecutor>(
+    remote: &BootstrapRemoteBackendValidated,
+    closure: &str,
+    executor: &mut E,
+) -> std::result::Result<bool, BootstrapError> {
+    let command = format!(
+        "PATH=/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin:/usr/bin:/bin; export PATH; if nix-store --query --references {} >/dev/null 2>&1; then printf Present; else printf Absent; fi",
+        shell_quote(closure)
+    );
+    let output = executor
+        .run(BootstrapCommand {
+            program: "ssh".to_string(),
+            arguments: remote.ssh_identity.ssh_arguments(command),
+        })
+        .map_err(|_| BootstrapError::RecoveryPending)?;
+    Ok(output.trim() == "Present")
+}
+
+fn remote_unit_state<E: BootstrapExecutor>(
+    remote: &BootstrapRemoteBackendValidated,
+    unit: &str,
+    executor: &mut E,
+) -> std::result::Result<UnitState, BootstrapError> {
+    let command = format!(
+        "PATH=/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin:/usr/bin:/bin; export PATH; systemctl show --property=LoadState --property=ActiveState --property=Result {} 2>/dev/null || printf 'LoadState=not-found\\n'",
+        shell_quote(unit)
+    );
+    let output = executor
+        .run(BootstrapCommand {
+            program: "ssh".to_string(),
+            arguments: remote.ssh_identity.ssh_arguments(command),
+        })
+        .map_err(|_| BootstrapError::RecoveryPending)?;
+    Ok(unit_state(&output))
+}
+
+fn local_unit_state<E: BootstrapExecutor>(
+    unit: &str,
+    executor: &mut E,
+) -> std::result::Result<UnitState, BootstrapError> {
+    let command = format!(
+        "PATH=/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin:/usr/bin:/bin; export PATH; systemctl show --property=LoadState --property=ActiveState --property=Result {} 2>/dev/null || printf 'LoadState=not-found\\n'",
+        shell_quote(unit)
+    );
+    let output = executor
+        .run(BootstrapCommand {
+            program: "/bin/sh".to_string(),
+            arguments: vec!["-eu".to_string(), "-c".to_string(), command],
+        })
+        .map_err(|_| BootstrapError::RecoveryPending)?;
+    Ok(unit_state(&output))
+}
+
+fn remote_dispatch_command(
+    unit: &str,
+    request_hash: &[u8],
+    closure: &str,
+    profile: &Path,
+    entries: &Path,
+) -> String {
+    let script = boot_once_script(request_hash, closure, profile, entries);
+    format!(
+        "exec /run/current-system/sw/bin/systemd-run --unit={} --no-block --service-type=oneshot --property=RemainAfterExit=yes --setenv=PATH=/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin:/usr/bin:/bin /bin/sh -eu -c {}",
+        shell_quote(unit),
+        shell_quote(&script)
+    )
+}
+
+fn dispatch_and_reconcile_remote<E: BootstrapExecutor, C: BootstrapCrashInjector>(
+    request: &ValidatedBootstrapRun,
+    journal: &EphemeralJournal,
+    remote: &BootstrapRemoteBackendValidated,
+    closure: &str,
+    executor: &mut E,
+    crash: &mut C,
+) -> std::result::Result<(), BootstrapError> {
+    let unit = boot_once_unit_name(&request.request_hash);
+    if !journal.succeeded(JournalStage::BootOnceScheduled)? {
+        journal.intent(JournalStage::BootOnceScheduled)?;
+        if remote_unit_state(remote, &unit, executor)? == UnitState::NotFound {
+            executor
+                .run(BootstrapCommand {
+                    program: "ssh".to_string(),
+                    arguments: remote.ssh_identity.ssh_arguments(remote_dispatch_command(
+                        &unit,
+                        &request.request_hash,
+                        closure,
+                        &remote.system_profile_path,
+                        &remote.boot_entries_directory,
+                    )),
+                })
+                .map_err(|_| BootstrapError::RecoveryPending)?;
+        }
+        journal.receipt(JournalStage::BootOnceScheduled)?;
+        journal.outcome(JournalStage::BootOnceScheduled, true)?;
+        crash.after(BootstrapCrashPoint::AfterDispatch)?;
+    }
+    reconcile_remote_activation(journal, remote, &unit, executor, crash)
+}
+
+fn reconcile_remote_activation<E: BootstrapExecutor, C: BootstrapCrashInjector>(
+    journal: &EphemeralJournal,
+    remote: &BootstrapRemoteBackendValidated,
+    unit: &str,
+    executor: &mut E,
+    crash: &mut C,
+) -> std::result::Result<(), BootstrapError> {
+    if journal.succeeded(JournalStage::BootOnceActivated)? {
+        return Ok(());
+    }
+    journal.intent(JournalStage::BootOnceActivated)?;
+    for _ in 0..30 {
+        match remote_unit_state(remote, unit, executor)? {
+            UnitState::Ready => {
+                journal.receipt(JournalStage::BootOnceActivated)?;
+                journal.outcome(JournalStage::BootOnceActivated, true)?;
+                crash.after(BootstrapCrashPoint::AfterActivation)?;
+                return Ok(());
+            }
+            UnitState::Failed => {
+                return Err(BootstrapError::Effect(
+                    BootstrapEffectStage::BootOnceActivated,
+                ));
+            }
+            UnitState::NotFound => return Err(BootstrapError::RecoveryPending),
+            UnitState::Waiting => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+    Err(BootstrapError::RecoveryPending)
+}
+
+fn dispatch_and_reconcile_local<E: BootstrapExecutor, C: BootstrapCrashInjector>(
+    request: &ValidatedBootstrapRun,
+    journal: &EphemeralJournal,
+    local: &BootstrapLocalBackendValidated,
+    closure: &str,
+    executor: &mut E,
+    crash: &mut C,
+) -> std::result::Result<(), BootstrapError> {
+    let unit = boot_once_unit_name(&request.request_hash);
+    if !journal.succeeded(JournalStage::BootOnceScheduled)? {
+        journal.intent(JournalStage::BootOnceScheduled)?;
+        if local_unit_state(&unit, executor)? == UnitState::NotFound {
+            executor
+                .run(BootstrapCommand {
+                    program: "/run/current-system/sw/bin/systemd-run".to_string(),
+                    arguments: vec![
+                        format!("--unit={unit}"),
+                        "--no-block".to_string(),
+                        "--service-type=oneshot".to_string(),
+                        "--property=RemainAfterExit=yes".to_string(),
+                        "--setenv=PATH=/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin:/usr/bin:/bin".to_string(),
+                        "/bin/sh".to_string(),
+                        "-eu".to_string(),
+                        "-c".to_string(),
+                        boot_once_script(&request.request_hash, closure, &local.system_profile_path, &local.boot_entries_directory),
+                    ],
+                })
+                .map_err(|_| BootstrapError::RecoveryPending)?;
+        }
+        journal.receipt(JournalStage::BootOnceScheduled)?;
+        journal.outcome(JournalStage::BootOnceScheduled, true)?;
+        crash.after(BootstrapCrashPoint::AfterDispatch)?;
+    }
+    if journal.succeeded(JournalStage::BootOnceActivated)? {
+        return Ok(());
+    }
+    journal.intent(JournalStage::BootOnceActivated)?;
+    for _ in 0..30 {
+        match local_unit_state(&unit, executor)? {
+            UnitState::Ready => {
+                journal.receipt(JournalStage::BootOnceActivated)?;
+                journal.outcome(JournalStage::BootOnceActivated, true)?;
+                crash.after(BootstrapCrashPoint::AfterActivation)?;
+                return Ok(());
+            }
+            UnitState::Failed => {
+                return Err(BootstrapError::Effect(
+                    BootstrapEffectStage::BootOnceActivated,
+                ));
+            }
+            UnitState::NotFound => return Err(BootstrapError::RecoveryPending),
+            UnitState::Waiting => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+    Err(BootstrapError::RecoveryPending)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+enum JournalStage {
+    JournalCreated,
+    Materialized,
+    Tested,
+    Built,
+    GcRooted,
+    Copied,
+    BootOnceScheduled,
+    BootOnceActivated,
+    TerminalEvidenceWritten,
+}
+
+impl JournalStage {
+    fn from_effect(stage: BootstrapEffectStage) -> Self {
+        match stage {
+            BootstrapEffectStage::JournalCreated => Self::JournalCreated,
+            BootstrapEffectStage::Materialized => Self::Materialized,
+            BootstrapEffectStage::Tested => Self::Tested,
+            BootstrapEffectStage::Built => Self::Built,
+            BootstrapEffectStage::GcRooted => Self::GcRooted,
+            BootstrapEffectStage::Copied => Self::Copied,
+            BootstrapEffectStage::BootOnceScheduled => Self::BootOnceScheduled,
+            BootstrapEffectStage::BootOnceActivated => Self::BootOnceActivated,
+            BootstrapEffectStage::TerminalEvidenceWritten => Self::TerminalEvidenceWritten,
+        }
+    }
+
+    fn effect(self) -> BootstrapEffectStage {
+        match self {
+            Self::JournalCreated => BootstrapEffectStage::JournalCreated,
+            Self::Materialized => BootstrapEffectStage::Materialized,
+            Self::Tested => BootstrapEffectStage::Tested,
+            Self::Built => BootstrapEffectStage::Built,
+            Self::GcRooted => BootstrapEffectStage::GcRooted,
+            Self::Copied => BootstrapEffectStage::Copied,
+            Self::BootOnceScheduled => BootstrapEffectStage::BootOnceScheduled,
+            Self::BootOnceActivated => BootstrapEffectStage::BootOnceActivated,
+            Self::TerminalEvidenceWritten => BootstrapEffectStage::TerminalEvidenceWritten,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+enum JournalEventKind {
+    Intent,
+    Receipt,
+    Outcome,
+}
+
+#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+struct JournalEvent {
+    stage: JournalStage,
+    kind: JournalEventKind,
+    succeeded: bool,
+}
+
+#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+struct JournalFlakeOverride {
+    name: String,
+    reference: String,
 }
 
 #[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
 struct BootstrapJournalConfiguration {
     schema_version: u32,
-    request_id: String,
+    request_hash: Vec<u8>,
     mode: BootstrapEvidenceMode,
+    journal_device: u64,
+    journal_inode: u64,
+    resolved_flake_reference: String,
+    closure_path: Option<String>,
+    gc_root_target: Option<String>,
+    gc_root_device: Option<u64>,
+    gc_root_inode: Option<u64>,
+    materialized_overrides: Option<Vec<JournalFlakeOverride>>,
+    terminal_status: Option<BootstrapEvidenceStatus>,
+    events: Vec<JournalEvent>,
+}
+
+#[derive(Debug)]
+struct EphemeralJournal {
+    directory: PathBuf,
+    parent: PathBuf,
 }
 
 impl EphemeralJournal {
-    fn create(request: &ValidatedBootstrapRun) -> std::result::Result<Self, BootstrapError> {
-        let directory = create_ephemeral_child(&request.journal_parent)?;
-        let configuration = BootstrapJournalConfiguration {
-            schema_version: JOURNAL_SCHEMA_VERSION,
-            request_id: request.request_id.clone(),
-            mode: request.mode.evidence_mode(),
-        };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&configuration)
+    fn open_or_create(
+        request: &ValidatedBootstrapRun,
+    ) -> std::result::Result<Self, BootstrapError> {
+        let directory = request.journal_parent.join(format!(
+            "{JOURNAL_PREFIX}{}",
+            hex_lower(&request.request_hash)
+        ));
+        match fs::create_dir(&directory) {
+            Ok(()) => {
+                if request.gc_root_exists || request.terminal_evidence_exists {
+                    let _ = fs::remove_dir(&directory);
+                    return Err(BootstrapError::Validation(
+                        "fresh request output already exists",
+                    ));
+                }
+                fs::set_permissions(
+                    &directory,
+                    fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE),
+                )
+                .map_err(BootstrapError::Journal)?;
+                let metadata = private_directory_metadata(&directory)?;
+                let state = BootstrapJournalConfiguration {
+                    schema_version: JOURNAL_SCHEMA_VERSION,
+                    request_hash: request.request_hash.clone(),
+                    mode: request.mode.evidence_mode(),
+                    journal_device: metadata.dev(),
+                    journal_inode: metadata.ino(),
+                    resolved_flake_reference: request.mode.input().flake_reference().to_string(),
+                    closure_path: None,
+                    gc_root_target: None,
+                    gc_root_device: None,
+                    gc_root_inode: None,
+                    materialized_overrides: None,
+                    terminal_status: None,
+                    events: vec![JournalEvent {
+                        stage: JournalStage::JournalCreated,
+                        kind: JournalEventKind::Outcome,
+                        succeeded: true,
+                    }],
+                };
+                let journal = Self {
+                    directory,
+                    parent: request.journal_parent.clone(),
+                };
+                journal.write_state(&state)?;
+                // This new isolated v5 journal always opens a separate Lojix
+                // store.  It has no daemon configuration, socket, or legacy
+                // store route.
+                Store::open(journal.directory.join(JOURNAL_STORE_FILE))
+                    .map_err(BootstrapError::JournalStore)?;
+                Ok(journal)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let journal = Self {
+                    directory,
+                    parent: request.journal_parent.clone(),
+                };
+                let state = journal.read_state()?;
+                if state.schema_version != JOURNAL_SCHEMA_VERSION
+                    || state.request_hash != request.request_hash
+                    || state.mode != request.mode.evidence_mode()
+                {
+                    return Err(BootstrapError::Validation(
+                        "journal does not bind this request",
+                    ));
+                }
+                journal.verify_identity(&state)?;
+                Ok(journal)
+            }
+            Err(error) => Err(BootstrapError::Journal(error)),
+        }
+    }
+
+    fn read_state(&self) -> std::result::Result<BootstrapJournalConfiguration, BootstrapError> {
+        let bytes =
+            fs::read(self.directory.join(JOURNAL_STATE_FILE)).map_err(BootstrapError::Journal)?;
+        rkyv::from_bytes::<BootstrapJournalConfiguration, rkyv::rancor::Error>(&bytes)
+            .map_err(|error| BootstrapError::Journal(std::io::Error::other(error.to_string())))
+    }
+
+    fn write_state(
+        &self,
+        state: &BootstrapJournalConfiguration,
+    ) -> std::result::Result<(), BootstrapError> {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(state)
             .map_err(|error| BootstrapError::Journal(std::io::Error::other(error.to_string())))?;
-        fs::write(directory.join("bootstrap-v4.rkyv"), bytes).map_err(BootstrapError::Journal)?;
-        // This is a new, isolated Lojix v4 store.  It has no daemon sockets or
-        // route configuration and cannot read an existing daemon journal.
-        Store::open(directory.join("lojix-v4.sema")).map_err(BootstrapError::JournalStore)?;
-        Ok(Self { directory })
+        self.verify_identity(state)?;
+        let temporary = self.directory.join(format!(
+            ".{JOURNAL_STATE_FILE}.tmp-{}",
+            JOURNAL_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(BootstrapError::Journal)?;
+        file.write_all(&bytes).map_err(BootstrapError::Journal)?;
+        file.sync_all().map_err(BootstrapError::Journal)?;
+        fs::rename(&temporary, self.directory.join(JOURNAL_STATE_FILE))
+            .map_err(BootstrapError::Journal)?;
+        sync_directory(&self.directory)?;
+        Ok(())
+    }
+
+    fn verify_identity(
+        &self,
+        state: &BootstrapJournalConfiguration,
+    ) -> std::result::Result<(), BootstrapError> {
+        private_directory_metadata(&self.parent)?;
+        let metadata = private_directory_metadata(&self.directory)?;
+        if metadata.dev() != state.journal_device || metadata.ino() != state.journal_inode {
+            return Err(BootstrapError::Validation("journal child identity changed"));
+        }
+        Ok(())
+    }
+
+    fn mutate(
+        &self,
+        mutate: impl FnOnce(&mut BootstrapJournalConfiguration),
+    ) -> std::result::Result<(), BootstrapError> {
+        let mut state = self.read_state()?;
+        self.verify_identity(&state)?;
+        mutate(&mut state);
+        self.write_state(&state)
+    }
+
+    fn events(&self) -> std::result::Result<Vec<JournalEvent>, BootstrapError> {
+        Ok(self.read_state()?.events)
+    }
+
+    fn succeeded(&self, stage: JournalStage) -> std::result::Result<bool, BootstrapError> {
+        Ok(self.events()?.iter().any(|event| {
+            event.stage == stage && event.kind == JournalEventKind::Outcome && event.succeeded
+        }))
+    }
+
+    fn intent(&self, stage: JournalStage) -> std::result::Result<(), BootstrapError> {
+        self.event(stage, JournalEventKind::Intent, true)
+    }
+
+    fn receipt(&self, stage: JournalStage) -> std::result::Result<(), BootstrapError> {
+        self.event(stage, JournalEventKind::Receipt, true)
+    }
+
+    fn outcome(
+        &self,
+        stage: JournalStage,
+        succeeded: bool,
+    ) -> std::result::Result<(), BootstrapError> {
+        self.event(stage, JournalEventKind::Outcome, succeeded)
+    }
+
+    fn event(
+        &self,
+        stage: JournalStage,
+        kind: JournalEventKind,
+        succeeded: bool,
+    ) -> std::result::Result<(), BootstrapError> {
+        self.mutate(|state| {
+            state.events.push(JournalEvent {
+                stage,
+                kind,
+                succeeded,
+            })
+        })
+    }
+
+    fn terminal_status(
+        &self,
+    ) -> std::result::Result<Option<BootstrapEvidenceStatus>, BootstrapError> {
+        Ok(self.read_state()?.terminal_status)
+    }
+
+    fn set_terminal_status(
+        &self,
+        status: BootstrapEvidenceStatus,
+    ) -> std::result::Result<(), BootstrapError> {
+        self.mutate(|state| state.terminal_status = Some(status))
+    }
+
+    fn closure_path(&self) -> std::result::Result<Option<String>, BootstrapError> {
+        Ok(self.read_state()?.closure_path)
+    }
+
+    fn set_closure_path(&self, closure: &str) -> std::result::Result<(), BootstrapError> {
+        let closure = closure.to_string();
+        self.mutate(|state| state.closure_path = Some(closure))
+    }
+
+    fn materialized_overrides(
+        &self,
+    ) -> std::result::Result<Option<Vec<FlakeOverride>>, BootstrapError> {
+        Ok(self.read_state()?.materialized_overrides.map(|overrides| {
+            overrides
+                .into_iter()
+                .map(|entry| FlakeOverride {
+                    name: entry.name,
+                    reference: entry.reference,
+                })
+                .collect()
+        }))
+    }
+
+    fn set_materialized_overrides(
+        &self,
+        overrides: &[FlakeOverride],
+    ) -> std::result::Result<(), BootstrapError> {
+        let overrides = overrides
+            .iter()
+            .map(|entry| JournalFlakeOverride {
+                name: entry.name.to_string(),
+                reference: entry.reference.clone(),
+            })
+            .collect();
+        self.mutate(|state| state.materialized_overrides = Some(overrides))
+    }
+
+    fn set_root_receipt(
+        &self,
+        root: &Path,
+        closure: &str,
+    ) -> std::result::Result<(), BootstrapError> {
+        let metadata = fs::symlink_metadata(root).map_err(BootstrapError::Journal)?;
+        let closure = closure.to_string();
+        self.mutate(|state| {
+            state.gc_root_target = Some(closure);
+            state.gc_root_device = Some(metadata.dev());
+            state.gc_root_inode = Some(metadata.ino());
+        })
+    }
+
+    fn verify_root_receipt(
+        &self,
+        root: &Path,
+        closure: &str,
+    ) -> std::result::Result<bool, BootstrapError> {
+        let state = self.read_state()?;
+        let metadata = match fs::symlink_metadata(root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(BootstrapError::Journal(error)),
+        };
+        Ok(verify_root_receipt(root, closure)
+            && state.gc_root_target.as_deref() == Some(closure)
+            && state.gc_root_device == Some(metadata.dev())
+            && state.gc_root_inode == Some(metadata.ino()))
+    }
+
+    fn evidence(
+        &self,
+        status: BootstrapEvidenceStatus,
+    ) -> std::result::Result<BootstrapTerminalEvidence, BootstrapError> {
+        let state = self.read_state()?;
+        let mut effects = Vec::new();
+        for event in state.events {
+            if event.kind == JournalEventKind::Outcome {
+                effects.push(BootstrapEffectEvidence {
+                    stage: event.stage.effect(),
+                    succeeded: event.succeeded,
+                });
+            }
+        }
+        Ok(BootstrapTerminalEvidence {
+            journal_schema_version: JOURNAL_SCHEMA_VERSION,
+            request_hash: state.request_hash,
+            mode: state.mode,
+            status,
+            effects,
+        })
     }
 
     fn cleanup(self) -> std::result::Result<(), BootstrapError> {
-        let metadata = fs::symlink_metadata(&self.directory).map_err(BootstrapError::Journal)?;
-        if !metadata.file_type().is_dir()
-            || metadata.file_type().is_symlink()
-            || !self
-                .directory
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(JOURNAL_PREFIX))
-        {
+        let state = self.read_state()?;
+        self.verify_identity(&state)?;
+        if !self.succeeded(JournalStage::TerminalEvidenceWritten)? {
             return Err(BootstrapError::Validation(
-                "journal child changed before cleanup",
+                "terminal evidence receipt is absent",
             ));
         }
-        fs::remove_dir_all(self.directory).map_err(BootstrapError::Journal)
+        if self.directory.join("generated-inputs").exists() {
+            remove_known_generated_inputs(&self.directory.join("generated-inputs"))?;
+        }
+        remove_known_file(&self.directory, JOURNAL_STORE_FILE)?;
+        remove_known_file(&self.directory, JOURNAL_STATE_FILE)?;
+        let mut entries = fs::read_dir(&self.directory).map_err(BootstrapError::Journal)?;
+        if entries.next().is_some() {
+            return Err(BootstrapError::Validation(
+                "journal contains an unowned entry",
+            ));
+        }
+        fs::remove_dir(&self.directory).map_err(BootstrapError::Journal)?;
+        sync_directory(&self.parent)?;
+        Ok(())
     }
 }
 
-fn create_ephemeral_child(parent: &Path) -> std::result::Result<PathBuf, BootstrapError> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| BootstrapError::Validation("clock before unix epoch"))?
-        .as_nanos();
-    for _ in 0..32 {
-        let sequence = JOURNAL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let name = format!("{JOURNAL_PREFIX}{}-{nanos}-{sequence}", std::process::id());
-        let directory = parent.join(name);
-        match fs::create_dir(&directory) {
-            Ok(()) => {
-                fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-                    .map_err(BootstrapError::Journal)?;
-                return Ok(directory);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(BootstrapError::Journal(error)),
-        }
+fn write_terminal_evidence<C: BootstrapCrashInjector>(
+    request: &ValidatedBootstrapRun,
+    journal: &EphemeralJournal,
+    status: BootstrapEvidenceStatus,
+    crash: &mut C,
+) -> std::result::Result<(), BootstrapError> {
+    if journal.succeeded(JournalStage::TerminalEvidenceWritten)? {
+        return Ok(());
     }
-    Err(BootstrapError::Validation(
-        "could not allocate fresh journal child",
-    ))
+    journal.intent(JournalStage::TerminalEvidenceWritten)?;
+    if request.terminal_evidence_exists {
+        let existing = read_evidence(&request.terminal_evidence_path)?;
+        if existing.journal_schema_version != JOURNAL_SCHEMA_VERSION
+            || existing.request_hash != request.request_hash
+            || existing.status != status
+        {
+            return Err(BootstrapError::Validation(
+                "existing evidence does not bind this request",
+            ));
+        }
+    } else {
+        let evidence = journal.evidence(status)?;
+        write_evidence_new(&request.terminal_evidence_path, &evidence)?;
+    }
+    crash.after(BootstrapCrashPoint::AfterEvidence)?;
+    journal.receipt(JournalStage::TerminalEvidenceWritten)?;
+    journal.outcome(JournalStage::TerminalEvidenceWritten, true)
+}
+
+fn read_evidence(path: &Path) -> std::result::Result<BootstrapTerminalEvidence, BootstrapError> {
+    let metadata = fs::symlink_metadata(path).map_err(BootstrapError::Evidence)?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.mode() & 0o777 != PRIVATE_EVIDENCE_MODE
+    {
+        return Err(BootstrapError::Validation(
+            "terminal evidence identity changed",
+        ));
+    }
+    let bytes = fs::read(path).map_err(BootstrapError::Evidence)?;
+    rkyv::from_bytes::<BootstrapTerminalEvidence, rkyv::rancor::Error>(&bytes)
+        .map_err(|error| BootstrapError::Evidence(std::io::Error::other(error.to_string())))
+}
+
+fn private_directory_metadata(path: &Path) -> std::result::Result<fs::Metadata, BootstrapError> {
+    let metadata = fs::symlink_metadata(path).map_err(BootstrapError::Journal)?;
+    if !metadata.file_type().is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.mode() & 0o777 != PRIVATE_DIRECTORY_MODE
+    {
+        return Err(BootstrapError::Validation(
+            "directory is not private and caller-owned",
+        ));
+    }
+    Ok(metadata)
+}
+
+fn sync_directory(path: &Path) -> std::result::Result<(), BootstrapError> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(BootstrapError::Journal)
+}
+
+fn verify_root_receipt(root: &Path, closure: &str) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(root) else {
+        return false;
+    };
+    metadata.file_type().is_symlink()
+        && fs::read_link(root)
+            .ok()
+            .is_some_and(|target| target == Path::new(closure))
+}
+
+fn link_root_no_replace(
+    staging: &Path,
+    root: &Path,
+    closure: &str,
+) -> std::result::Result<(), BootstrapError> {
+    if !verify_root_receipt(staging, closure) {
+        return Err(BootstrapError::Validation(
+            "gc root staging did not bind the built closure",
+        ));
+    }
+    let parent = root
+        .parent()
+        .ok_or(BootstrapError::Validation("gc root has no parent"))?;
+    private_directory_metadata(parent)?;
+    fs::hard_link(staging, root).map_err(BootstrapError::Journal)?;
+    if !verify_root_receipt(root, closure) {
+        return Err(BootstrapError::Validation(
+            "gc root receipt did not bind the built closure",
+        ));
+    }
+    sync_directory(parent)?;
+    fs::remove_file(staging).map_err(BootstrapError::Journal)?;
+    sync_directory(
+        staging
+            .parent()
+            .ok_or(BootstrapError::Validation("gc root staging has no parent"))?,
+    )?;
+    Ok(())
+}
+
+fn remove_known_file(parent: &Path, name: &str) -> std::result::Result<(), BootstrapError> {
+    let path = parent.join(name);
+    let metadata = fs::symlink_metadata(&path).map_err(BootstrapError::Journal)?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(BootstrapError::Validation(
+            "journal known file identity changed",
+        ));
+    }
+    fs::remove_file(path).map_err(BootstrapError::Journal)
+}
+
+fn remove_known_generated_inputs(generated: &Path) -> std::result::Result<(), BootstrapError> {
+    private_directory_metadata(generated)?;
+    for name in ["horizon", "system", "deployment", "secrets"] {
+        let directory = generated.join(name);
+        private_directory_metadata(&directory)?;
+        for entry in fs::read_dir(&directory).map_err(BootstrapError::Journal)? {
+            let entry = entry.map_err(BootstrapError::Journal)?;
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            let metadata = fs::symlink_metadata(entry.path()).map_err(BootstrapError::Journal)?;
+            let permitted = name == "flake.nix"
+                || (directory.ends_with("horizon") && name == "horizon.json")
+                || (directory.ends_with("secrets")
+                    && name.ends_with(".sops")
+                    && name
+                        .trim_end_matches(".sops")
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
+            if !permitted || !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                return Err(BootstrapError::Validation(
+                    "journal generated entry changed",
+                ));
+            }
+            fs::remove_file(entry.path()).map_err(BootstrapError::Journal)?;
+        }
+        fs::remove_dir(&directory).map_err(BootstrapError::Journal)?;
+    }
+    fs::remove_dir(generated).map_err(BootstrapError::Journal)
 }
 
 fn write_evidence_new(
@@ -887,6 +1596,7 @@ fn write_evidence_new(
     let parent = path
         .parent()
         .ok_or(BootstrapError::Validation("evidence path has no parent"))?;
+    private_directory_metadata(parent)?;
     for attempt in 0..32u64 {
         let temporary = parent.join(format!(
             "{TEMPORARY_EVIDENCE_PREFIX}{}-{}-{attempt}",
@@ -899,13 +1609,20 @@ fn write_evidence_new(
             .open(&temporary)
         {
             Ok(mut file) => {
+                file.set_permissions(fs::Permissions::from_mode(PRIVATE_EVIDENCE_MODE))
+                    .map_err(BootstrapError::Evidence)?;
                 file.write_all(&bytes).map_err(BootstrapError::Evidence)?;
                 file.sync_all().map_err(BootstrapError::Evidence)?;
                 // `rename` would overwrite a racing destination.  A hard link
                 // creates the final name only if it remains absent; the parent
                 // was prevalidated and both files are necessarily on it.
                 fs::hard_link(&temporary, path).map_err(BootstrapError::Evidence)?;
+                fs::File::open(path)
+                    .and_then(|file| file.sync_all())
+                    .map_err(BootstrapError::Evidence)?;
+                sync_directory(parent)?;
                 fs::remove_file(&temporary).map_err(BootstrapError::Evidence)?;
+                sync_directory(parent)?;
                 return Ok(());
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -919,12 +1636,14 @@ fn write_evidence_new(
 
 #[derive(Debug)]
 struct ValidatedBootstrapRun {
-    request_id: String,
+    request_hash: Vec<u8>,
     mode: BootstrapModeValidated,
     journal_parent: PathBuf,
     journal_directory: PathBuf,
     gc_root_path: PathBuf,
+    gc_root_exists: bool,
     terminal_evidence_path: PathBuf,
+    terminal_evidence_exists: bool,
 }
 
 #[derive(Debug)]
@@ -997,9 +1716,45 @@ enum BootstrapActivationBackendValidated {
 #[derive(Debug)]
 struct BootstrapRemoteBackendValidated {
     nix_store_uri: String,
-    ssh_destination: String,
+    ssh_identity: SshIdentity,
     system_profile_path: PathBuf,
     boot_entries_directory: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SshIdentity {
+    user: String,
+    host: String,
+    port: Option<u16>,
+}
+
+impl SshIdentity {
+    fn destination(&self) -> String {
+        format!("{}@{}", self.user, self.host)
+    }
+
+    fn ssh_arguments(&self, command: String) -> Vec<String> {
+        // Disable user-configured host aliases, ProxyCommand/ProxyJump, and
+        // multiplexed control paths: this backend's route is only the exact
+        // request-owned identity that was validated above.
+        let mut arguments = vec![
+            "-F".to_string(),
+            "/dev/null".to_string(),
+            "-o".to_string(),
+            "ProxyCommand=none".to_string(),
+            "-o".to_string(),
+            "ProxyJump=none".to_string(),
+            "-o".to_string(),
+            "ControlMaster=no".to_string(),
+            "-o".to_string(),
+            "ControlPath=none".to_string(),
+        ];
+        if let Some(port) = self.port {
+            arguments.extend(["-p".to_string(), port.to_string()]);
+        }
+        arguments.extend(["--".to_string(), self.destination(), command]);
+        arguments
+    }
 }
 
 #[derive(Debug)]
@@ -1012,16 +1767,22 @@ impl TryFrom<BootstrapRun> for ValidatedBootstrapRun {
     type Error = BootstrapError;
 
     fn try_from(request: BootstrapRun) -> std::result::Result<Self, Self::Error> {
-        let request_id = validate_request_id(&request.request_id.0)?;
-        let (mode, journal_parent, gc_root_path, terminal_evidence_path) = match request.mode {
+        validate_request_id(&request.request_id.0)?;
+        let request_hash = request_fingerprint(&request);
+        let (
+            mode,
+            journal_parent,
+            (gc_root_path, gc_root_exists),
+            (terminal_evidence_path, terminal_evidence_exists),
+        ) = match request.mode {
             BootstrapMode::BuildOnly(build_only) => (
                 BootstrapModeValidated::BuildOnly {
                     input: validate_input(build_only.input)?,
                     builder: validate_builder(build_only.builder)?,
                 },
-                safe_existing_directory(&build_only.journal_parent.0)?,
-                safe_new_path(&build_only.gc_root_path.0)?,
-                safe_new_path(&build_only.terminal_evidence_path.0)?,
+                safe_private_existing_directory(&build_only.journal_parent.0)?,
+                private_output_path(&build_only.gc_root_path.0)?,
+                private_output_path(&build_only.terminal_evidence_path.0)?,
             ),
             BootstrapMode::BootOnce(boot_once) => (
                 BootstrapModeValidated::BootOnce(BootstrapBootOnceValidated {
@@ -1030,9 +1791,9 @@ impl TryFrom<BootstrapRun> for ValidatedBootstrapRun {
                     test_plan: validate_test_plan(boot_once.test_plan)?,
                     activation_backend: validate_activation_backend(boot_once.activation_backend)?,
                 }),
-                safe_existing_directory(&boot_once.journal_parent.0)?,
-                safe_new_path(&boot_once.gc_root_path.0)?,
-                safe_new_path(&boot_once.terminal_evidence_path.0)?,
+                safe_private_existing_directory(&boot_once.journal_parent.0)?,
+                private_output_path(&boot_once.gc_root_path.0)?,
+                private_output_path(&boot_once.terminal_evidence_path.0)?,
             ),
         };
         if gc_root_path == terminal_evidence_path {
@@ -1041,14 +1802,16 @@ impl TryFrom<BootstrapRun> for ValidatedBootstrapRun {
             ));
         }
         Ok(Self {
-            request_id,
+            request_hash,
             mode,
             journal_parent,
             // Filled after journal creation: keeping this value a child of the
             // validated parent prevents output authority from escaping it.
             journal_directory: PathBuf::new(),
             gc_root_path,
+            gc_root_exists,
             terminal_evidence_path,
+            terminal_evidence_exists,
         })
     }
 }
@@ -1109,6 +1872,18 @@ fn validate_request_id(value: &str) -> std::result::Result<String, BootstrapErro
         return Err(BootstrapError::Validation("request id is unsafe"));
     }
     Ok(value.to_string())
+}
+
+fn request_fingerprint(request: &BootstrapRun) -> Vec<u8> {
+    // `BootstrapRun` is entirely structured and its derived Debug form has a
+    // stable field/variant order within this versioned ingress.  The digest is
+    // used only as the private journal/evidence binding and unit derivation;
+    // raw request material never leaves the private journal directory.
+    Sha256::digest(format!("{request:?}").as_bytes()).to_vec()
+}
+
+fn hex_lower(value: &[u8]) -> String {
+    value.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn validate_input(
@@ -1183,14 +1958,21 @@ fn validate_activation_backend(
     backend: BootstrapActivationBackend,
 ) -> std::result::Result<BootstrapActivationBackendValidated, BootstrapError> {
     match backend {
-        BootstrapActivationBackend::RemoteNixosSystemdBootV1(remote) => Ok(
+        BootstrapActivationBackend::RemoteNixosSystemdBootV1(remote) => Ok({
+            let (nix_store_uri, store_identity) = validate_nix_store_uri(&remote.nix_store_uri.0)?;
+            let ssh_identity = validate_ssh_destination(&remote.ssh_destination.0)?;
+            if store_identity != ssh_identity {
+                return Err(BootstrapError::Validation(
+                    "remote store and ssh identities differ",
+                ));
+            }
             BootstrapActivationBackendValidated::Remote(BootstrapRemoteBackendValidated {
-                nix_store_uri: validate_nix_store_uri(&remote.nix_store_uri.0)?,
-                ssh_destination: validate_ssh_destination(&remote.ssh_destination.0)?,
+                nix_store_uri,
+                ssh_identity,
                 system_profile_path: absolute_normal_path(&remote.system_profile_path.0)?,
                 boot_entries_directory: absolute_normal_path(&remote.boot_entries_directory.0)?,
-            }),
-        ),
+            })
+        }),
         BootstrapActivationBackend::LocalBootstrapV1(local) => Ok(
             BootstrapActivationBackendValidated::Local(BootstrapLocalBackendValidated {
                 system_profile_path: safe_existing_path_parent(&local.system_profile_path.0)?,
@@ -1201,15 +1983,25 @@ fn validate_activation_backend(
 }
 
 fn validate_flake_reference(value: &str) -> std::result::Result<String, BootstrapError> {
-    if value.is_empty()
-        || value.chars().any(char::is_control)
-        || value.contains(char::is_whitespace)
-        || !value.starts_with("github:")
-        || value.contains("token")
-        || value.contains("password")
-        || value.contains("@")
-    {
+    let Some(rest) = value.strip_prefix("github:") else {
         return Err(BootstrapError::Validation("flake reference is unsafe"));
+    };
+    let parts = rest.split('/').collect::<Vec<_>>();
+    if parts.len() != 3
+        || parts.iter().take(2).any(|part| {
+            part.is_empty()
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
+        || parts[2].len() != 40
+        || !parts[2]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(BootstrapError::Validation(
+            "flake reference must be github owner/repo/40-hex-revision",
+        ));
     }
     Ok(value.to_string())
 }
@@ -1247,31 +2039,82 @@ fn validate_name(value: &str) -> std::result::Result<String, BootstrapError> {
     Ok(value.to_string())
 }
 
-fn validate_nix_store_uri(value: &str) -> std::result::Result<String, BootstrapError> {
-    if value.is_empty()
-        || value.chars().any(char::is_control)
-        || value.contains(char::is_whitespace)
-        || !value.contains("://")
-        || value.contains('@')
-        || value.contains("token")
-        || value.contains("password")
-    {
-        return Err(BootstrapError::Validation("nix store uri is unsafe"));
+fn validate_nix_store_uri(
+    value: &str,
+) -> std::result::Result<(String, SshIdentity), BootstrapError> {
+    let Some(authority) = value.strip_prefix("ssh-ng://") else {
+        return Err(BootstrapError::Validation("nix store URI must use ssh-ng"));
+    };
+    if authority.contains(['/', '?', '#']) || authority.matches('@').count() != 1 {
+        return Err(BootstrapError::Validation(
+            "nix store URI is not a canonical ssh-ng identity",
+        ));
     }
-    Ok(value.to_string())
+    let (user, host_port) = authority.split_once('@').ok_or(BootstrapError::Validation(
+        "nix store URI lacks user identity",
+    ))?;
+    let identity = parse_ssh_identity(user, host_port)?;
+    Ok((value.to_string(), identity))
 }
 
-fn validate_ssh_destination(value: &str) -> std::result::Result<String, BootstrapError> {
-    if value.is_empty()
-        || value.chars().any(char::is_control)
-        || value.contains(char::is_whitespace)
-        || value.contains('/')
-        || value.contains("token")
-        || value.contains("password")
+fn validate_ssh_destination(value: &str) -> std::result::Result<SshIdentity, BootstrapError> {
+    if value.starts_with('-')
+        || value.matches('@').count() != 1
+        || value.contains(['/', '?', '#', '[', ']'])
     {
-        return Err(BootstrapError::Validation("ssh destination is unsafe"));
+        return Err(BootstrapError::Validation(
+            "ssh destination is not a canonical identity",
+        ));
     }
-    Ok(value.to_string())
+    let (user, host_port) = value.split_once('@').ok_or(BootstrapError::Validation(
+        "ssh destination lacks user identity",
+    ))?;
+    parse_ssh_identity(user, host_port)
+}
+
+fn parse_ssh_identity(
+    user: &str,
+    host_port: &str,
+) -> std::result::Result<SshIdentity, BootstrapError> {
+    if user.is_empty()
+        || !user.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+        || user.starts_with('-')
+        || host_port.is_empty()
+    {
+        return Err(BootstrapError::Validation("ssh user identity is unsafe"));
+    }
+    let (host, port) = match host_port.split_once(':') {
+        Some((host, port)) if !port.contains(':') => {
+            let port = port
+                .parse::<u16>()
+                .map_err(|_| BootstrapError::Validation("ssh port is unsafe"))?;
+            if port == 0 {
+                return Err(BootstrapError::Validation("ssh port is unsafe"));
+            }
+            (host, Some(port))
+        }
+        Some(_) => return Err(BootstrapError::Validation("ssh host is unsafe")),
+        None => (host_port, None),
+    };
+    if host.is_empty()
+        || host.starts_with('-')
+        || host.ends_with('-')
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.contains("..")
+        || !host.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+        })
+    {
+        return Err(BootstrapError::Validation("ssh host identity is unsafe"));
+    }
+    Ok(SshIdentity {
+        user: user.to_string(),
+        host: host.to_string(),
+        port,
+    })
 }
 
 fn safe_existing_regular_file(
@@ -1303,29 +2146,34 @@ fn safe_existing_directory(value: &str) -> std::result::Result<PathBuf, Bootstra
     Ok(path)
 }
 
+fn safe_private_existing_directory(value: &str) -> std::result::Result<PathBuf, BootstrapError> {
+    let path = safe_existing_directory(value)?;
+    private_directory_metadata(&path)?;
+    Ok(path)
+}
+
+fn private_output_path(value: &str) -> std::result::Result<(PathBuf, bool), BootstrapError> {
+    let path = absolute_normal_path(value)?;
+    let parent = path
+        .parent()
+        .ok_or(BootstrapError::Validation("output path has no parent"))?;
+    safe_private_existing_directory(
+        parent
+            .to_str()
+            .ok_or(BootstrapError::Validation("path is not utf8"))?,
+    )?;
+    match fs::symlink_metadata(&path) {
+        Ok(_) => Ok((path, true)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((path, false)),
+        Err(error) => Err(BootstrapError::Journal(error)),
+    }
+}
+
 fn safe_existing_path_parent(value: &str) -> std::result::Result<PathBuf, BootstrapError> {
     let path = absolute_normal_path(value)?;
     let parent = path
         .parent()
         .ok_or(BootstrapError::Validation("path has no parent"))?;
-    safe_existing_directory(
-        parent
-            .to_str()
-            .ok_or(BootstrapError::Validation("path is not utf8"))?,
-    )?;
-    Ok(path)
-}
-
-fn safe_new_path(value: &str) -> std::result::Result<PathBuf, BootstrapError> {
-    let path = absolute_normal_path(value)?;
-    match fs::symlink_metadata(&path) {
-        Ok(_) => return Err(BootstrapError::Validation("output target already exists")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(BootstrapError::Journal(error)),
-    }
-    let parent = path
-        .parent()
-        .ok_or(BootstrapError::Validation("output path has no parent"))?;
     safe_existing_directory(
         parent
             .to_str()
