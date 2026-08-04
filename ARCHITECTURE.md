@@ -33,7 +33,7 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 > substrate — Rust on Linux, `signal-core` over a Unix socket,
 > `sema-engine` for durable state, direct nix invocations. It is a
 > realization step toward the Sema-on-Sema future per
-> `~/primary/ARCHITECTURE.md` §"Workspace vision and intent".
+> the workspace architecture's "Workspace vision and intent" section.
 
 ## 0.6 · Direction
 
@@ -45,8 +45,8 @@ This stack sits on today's substrate as a realization step toward the Sema-on-Se
 
 ## 0 · Crate shape
 
-One crate, two binaries (per `~/primary/AGENTS.md` §"Binary naming —
-`-daemon` suffix"):
+One crate, two binaries (per the workspace agent instructions' "Binary naming
+— `-daemon` suffix" rule):
 
 ```
 Cargo.toml:
@@ -157,7 +157,7 @@ src/
 ```
 
 Each daemon actor is a Kameo actor per
-`~/primary/skills/actor-systems.md`. No zero-state holders.
+the workspace actor-systems doctrine. No zero-state holders.
 
 ## 4 · Storage and wire
 
@@ -181,12 +181,13 @@ Each daemon actor is a Kameo actor per
   acknowledged event and outbox together, while the acknowledged intent keeps
   restart from reconstructing or re-delivering that historical transition.
   There is no migration or legacy resume path. With the daemon stopped, the
-  manually started `lojix-reset-store` accepts only an inline
-  `StoreResetRequest.{<configured-path>}` object. An existing primary file must
-  be absolute, regular, non-symlinked, and prove its recognised Lojix catalog
-  family plus supported schema before the reset removes it. Protocol sidecars
-  are derived only from that proven primary; the reset never selects a Spirit
-  store.
+  manually started `lojix-reset-store` accepts only inline `(ResetStore)`. Its
+  service-owned `LOJIX_CONFIGURATION` archive supplies the exact store path;
+  an existing archive and primary must be absolute, regular, and non-symlinked.
+  A recognised v2/v3 Lojix catalog is removed and recreated as v4, while a v4
+  catalog returns `AlreadyCurrent` without any data deletion. Protocol
+  sidecars are derived only from a proven pre-v4 primary; the reset never
+  selects a Spirit store.
 - **Wire:** `signal-frame` records carrying `signal-lojix` on the
   ordinary socket and `meta-signal-lojix` on the owner/meta socket.
   Length-prefixed rkyv archives over Unix sockets.
@@ -209,8 +210,9 @@ Each daemon actor is a Kameo actor per
   are rejected at daemon startup; launch tooling must encode
   configuration before exec. The owner/meta socket refuses any mode with
   "other" access and admits only same-uid/gid owner peers.
-- `lojix-write-configuration` is the launch-only DOTOS boundary: it writes
-  the rkyv signal file from the ordered socket/mode, state-directory,
+- `lojix-write-configuration` is the launch-only DOTOS boundary: it accepts
+  exactly one inline `ConfigurationWriteRequest` object (never a file, raw
+  path, or flag) and writes the rkyv signal file from the ordered socket/mode, state-directory,
   daemon-host, timeout, test-default, and output-path request. Test defaults
   include their exact Nix system and output selector. Production
   writes `NoTestDefaults`; the daemon receives only the resulting signal file.
@@ -231,6 +233,9 @@ Each daemon actor is a Kameo actor per
 - Each public CLI sends one inline DOTOS/NOTA object for its own contract per
   invocation, never reads a caller-selected request file, and prints one
   DOTOS-encoded reply (or streams events until the subscription closes).
+- `lojix-inspect-store` is read-only and accepts exactly one inline
+  `(InspectStore <path>)` object. It rejects raw paths, request files, flags,
+  and extra arguments.
 - Every external operation is a typed `signal-lojix` variant;
   there is no untyped escape hatch on the wire.
 - The daemon never initiates deploys on its own — every deploy
@@ -260,7 +265,7 @@ Each daemon actor is a Kameo actor per
 
 - Push, never poll. Subscribers register; the daemon pushes
   `DeploymentObservation` and `CacheRetentionObservation` events as
-  they occur. See `~/primary/skills/push-not-pull.md`.
+  they occur. See the workspace push-not-pull doctrine.
 - The daemon is cluster-operator-owned, not per-host. A single
   instance per operator workstation (or per shared deploy host);
   not running on every cluster node.
@@ -313,7 +318,7 @@ Each daemon actor is a Kameo actor per
 
 ## 8 · Cross-cutting context
 
-- Workspace `~/primary/ARCHITECTURE.md` §"Workspace vision and intent" is upstream of every rule.
+- The workspace architecture's "Workspace vision and intent" section is upstream of every rule.
 - `signal-lojix` at `github:LiGoldragon/signal-lojix` is the wire
   vocabulary; the daemon's external boundary is exactly that
   channel.

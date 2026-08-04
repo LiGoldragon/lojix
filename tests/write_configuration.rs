@@ -100,3 +100,36 @@ fn write_configuration_rejects_a_zero_effect_timeout() {
         "writer must not emit invalid startup config"
     );
 }
+
+#[test]
+fn write_configuration_requires_one_inline_object_and_never_reads_a_request_file() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let output = directory.path().join("startup.rkyv");
+    let request = format!(
+        "(ConfigurationWriteRequest (/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon 60 NoTestDefaults {}))",
+        output.display()
+    );
+    let request_file = directory.path().join("request.dotos");
+    std::fs::write(&request_file, &request).expect("write request-file witness");
+
+    for arguments in [
+        Vec::new(),
+        vec![request_file.as_os_str().to_os_string()],
+        vec!["--help".into()],
+        vec!["--pretty".into()],
+        vec![request.clone().into(), "extra".into()],
+    ] {
+        let status = Command::new(env!("CARGO_BIN_EXE_lojix-write-configuration"))
+            .args(arguments)
+            .status()
+            .expect("run writer");
+        assert!(
+            !status.success(),
+            "writer must reject every non-single-inline invocation"
+        );
+    }
+    assert!(
+        !output.exists(),
+        "the request file was not decoded or written as configuration"
+    );
+}

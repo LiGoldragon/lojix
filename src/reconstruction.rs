@@ -1,29 +1,35 @@
-//! Explicit, path-scoped reset support for the v4 Lojix store.
+//! Explicit, configuration-scoped reset support for the v4 Lojix store.
 //!
 //! v4 intentionally has no decoder or migration path for older layouts. A
-//! caller that has stopped the daemon may discard its explicitly configured
+//! caller that has stopped the daemon may reconstruct a recognised pre-v4
 //! Lojix store with [`StoreResetCommand`]. The reset takes one inline DOTOS
-//! request, validates the exact supplied path and the durable Lojix
-//! family/schema identity before unlinking it, and derives only its protocol
-//! sidecars from that validated path.
+//! request with no path. It derives the path only from the generated startup
+//! archive named by the service-owned `LOJIX_CONFIGURATION` environment
+//! variable, then validates the durable Lojix family/schema identity before
+//! unlinking it and derives only its protocol sidecars from that validated
+//! primary.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use dotos::{DotosDecode, DotosSource};
+use dotos::{Delimiter, DotosBlock, DotosSource};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use rkyv::rancor;
 use sema_engine::TableRegistration;
 
-use crate::{Error, Result, Store};
+use crate::{DaemonConfiguration, Error, Result, Store, single_inline_dotos_argument};
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");
 const SCHEMA_VERSION_KEY: &str = "schema_version";
 const CURRENT_SCHEMA: u64 = 4;
-const RESETTABLE_SCHEMAS: &[u64] = &[2, 3, CURRENT_SCHEMA];
+const RECOGNISED_SCHEMAS: &[u64] = &[2, 3, CURRENT_SCHEMA];
+const RESETTABLE_SCHEMAS: &[u64] = &[2, 3];
+/// The reset service receives this from the NixOS module. It is deliberately
+/// not inferred from a state directory or accepted as a CLI path.
+pub const CONFIGURATION_ENV: &str = "LOJIX_CONFIGURATION";
 /// These are protocol-owned suffixes from the retired v2/v3 migration path.
 /// They are only derived after the primary store has proved itself to be a
 /// recognised Lojix database.
@@ -33,55 +39,51 @@ const SIDECAR_SUFFIXES: &[&str] = &[
     ".schema-v3.pending.owner",
 ];
 
-/// Result of an idempotent reset. The store is freshly initialised at v4 on
-/// every successful invocation, including when it was already empty/current.
+/// Result of a guarded reset. A current v4 store is observed but never
+/// rewritten: callers receive [`Self::AlreadyCurrent`] without deleting any
+/// data. Only a recognised v2/v3 store is removed and recreated as v4.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoreResetOutcome {
-    pub path: PathBuf,
-    pub removed_store: bool,
-    pub removed_sidecars: Vec<PathBuf>,
+pub enum StoreResetOutcome {
+    Recreated {
+        path: PathBuf,
+        removed_sidecars: Vec<PathBuf>,
+    },
+    AlreadyCurrent {
+        path: PathBuf,
+    },
 }
 
 impl std::fmt::Display for StoreResetOutcome {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "(LojixStoreReset path={} schema=4 removed_store={} removed_sidecars={})",
-            self.path.display(),
-            self.removed_store,
-            self.removed_sidecars.len(),
-        )
-    }
-}
-
-/// The one inline reset request accepted by `lojix-reset-store`.
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
-struct StoreResetRequest {
-    // The surrounding reset object, not a raw CLI operand, carries this path.
-    // Path ownership and filesystem safety are checked after decode.
-    store_path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
-enum StoreResetInput {
-    StoreResetRequest(StoreResetRequest),
-}
-
-impl StoreResetInput {
-    fn into_request(self) -> StoreResetRequest {
         match self {
-            Self::StoreResetRequest(request) => request,
+            Self::Recreated {
+                path,
+                removed_sidecars,
+            } => write!(
+                formatter,
+                "(LojixStoreReset path={} schema=4 removed_sidecars={})",
+                path.display(),
+                removed_sidecars.len(),
+            ),
+            Self::AlreadyCurrent { path } => {
+                write!(
+                    formatter,
+                    "(LojixStoreAlreadyCurrent path={} schema=4)",
+                    path.display()
+                )
+            }
         }
     }
 }
 
-/// One exact, version-aware Lojix store reset. It accepts only an inline
-/// `StoreResetRequest.{<configured-absolute-path>}`, never a raw path,
-/// directory, glob, traversal, or symlinked primary store. An existing primary
-/// file must also carry a recognised Lojix family catalog and supported schema
-/// before removal, so a sibling Spirit database is never selected by name.
+/// One exact, version-aware Lojix store reset. It accepts only inline
+/// `(ResetStore)`, never a raw path, configuration path, directory, glob, or
+/// request file. The archive supplied by the service environment owns the
+/// store selection. That configured primary must be an existing regular,
+/// non-symlink file with a recognised Lojix catalog; a sibling Spirit database
+/// is never selected by name.
 pub struct StoreResetCommand {
-    path: PathBuf,
+    configuration_path: PathBuf,
 }
 
 impl StoreResetCommand {
@@ -90,93 +92,127 @@ impl StoreResetCommand {
     }
 
     pub fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
-        let text = inline_dotos_text(arguments)?;
-        let request = DotosSource::new(&text)
-            .parse::<StoreResetInput>()
-            .map_err(|error| Error::DotosRequestText(error.to_string()))?
-            .into_request();
+        let configuration_path = std::env::var_os(CONFIGURATION_ENV)
+            .ok_or_else(|| Error::MissingRuntimeConfiguration(CONFIGURATION_ENV.to_string()))?;
+        Self::from_arguments_with_configuration(arguments, configuration_path)
+    }
+
+    /// Construct the command with an explicit generated archive. This exists
+    /// for in-process tests; the executable reaches it exclusively through
+    /// [`CONFIGURATION_ENV`].
+    pub fn from_arguments_with_configuration(
+        arguments: impl IntoIterator<Item = OsString>,
+        configuration_path: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let text = single_inline_dotos_argument(arguments)?;
+        parse_reset_request(&text)?;
         Ok(Self {
-            path: PathBuf::from(request.store_path),
+            configuration_path: configuration_path.into(),
         })
     }
 
     pub fn run(&self) -> Result<StoreResetOutcome> {
-        let path = canonical_store_path(&self.path)?;
-        let removed_store = remove_owned_regular_file(&path)?;
-        let mut removed_sidecars = Vec::new();
-        // A missing primary has no durable family identity to prove ownership.
-        // Opening a fresh store below is safe and idempotent; leaving suffixes
-        // alone avoids deleting a similarly named non-Lojix sibling.
-        if removed_store {
-            for sidecar in sidecars_for(&path) {
-                if remove_owned_sidecar(&sidecar)? {
-                    removed_sidecars.push(sidecar);
-                }
-            }
+        let configuration_path = canonical_regular_file(&self.configuration_path, "configuration")?;
+        let configuration = DaemonConfiguration::from_rkyv_file(&configuration_path)?;
+        let path = canonical_regular_file(Path::new(&configuration.store_path), "store")?;
+        let schema = recognised_lojix_schema(&path)?;
+        if schema == CURRENT_SCHEMA {
+            return Ok(StoreResetOutcome::AlreadyCurrent { path });
+        }
+        debug_assert!(RESETTABLE_SCHEMAS.contains(&schema));
+
+        let sidecars = validated_sidecars(&path)?;
+        fs::remove_file(&path).map_err(|error| {
+            Error::StoreMaintenance(format!("remove reset store {}: {error}", path.display()))
+        })?;
+        for sidecar in &sidecars {
+            fs::remove_file(sidecar).map_err(|error| {
+                Error::StoreMaintenance(format!(
+                    "remove Lojix reset sidecar {}: {error}",
+                    sidecar.display()
+                ))
+            })?;
         }
         // Store::open is the sole initializer. It stamps a new v4 schema and
         // proves that the replacement is usable before this command succeeds.
         drop(Store::open(&path)?);
-        Ok(StoreResetOutcome {
+        Ok(StoreResetOutcome::Recreated {
             path,
-            removed_store,
-            removed_sidecars,
+            removed_sidecars: sidecars,
         })
     }
 }
 
-fn inline_dotos_text(arguments: impl IntoIterator<Item = OsString>) -> Result<String> {
-    let mut arguments = arguments.into_iter();
-    let Some(argument) = arguments.next() else {
-        return Err(Error::ExpectedSingleArgument);
-    };
-    if arguments.next().is_some() {
-        return Err(Error::ExpectedSingleArgument);
+/// `(ResetStore)` is a one-field parenthesised DOTOS object. It is deliberately
+/// parsed structurally rather than treated as a magic string so extra fields,
+/// another delimiter, and a malformed document are all rejected at the same
+/// boundary.
+fn parse_reset_request(text: &str) -> Result<()> {
+    let root = DotosSource::new(text)
+        .parse_root()
+        .map_err(|error| Error::DotosRequestText(error.to_string()))?;
+    let fields = DotosBlock::new(&root)
+        .expect_children(Delimiter::Parenthesis, "ResetStore", 1)
+        .map_err(|error| Error::DotosRequestText(error.to_string()))?;
+    let request = DotosBlock::new(&fields[0])
+        .parse_string()
+        .map_err(|error| Error::DotosRequestText(error.to_string()))?;
+    if request != "ResetStore" {
+        return Err(Error::DotosRequestText(
+            "expected the exact inline (ResetStore) object".to_string(),
+        ));
     }
-    let argument = argument
-        .into_string()
-        .map_err(|_| Error::InlineDotosRequired)?;
-    if argument.starts_with('-') {
-        return Err(Error::FlagArgument(argument));
-    }
-    Ok(argument)
+    Ok(())
 }
 
-fn canonical_store_path(candidate: &Path) -> Result<PathBuf> {
+fn canonical_regular_file(candidate: &Path, subject: &str) -> Result<PathBuf> {
     if !candidate.is_absolute()
         || candidate.file_name().is_none()
         || candidate
             .components()
-            .any(|component| matches!(component, Component::ParentDir))
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
     {
-        return Err(Error::StoreMaintenance(
-            "reset requires the exact configured absolute, traversal-free store path".to_string(),
-        ));
+        return Err(Error::StoreMaintenance(format!(
+            "reset {subject} must be an exact absolute, traversal-free file path"
+        )));
     }
     let file_name = candidate.file_name().expect("checked above");
     let parent = candidate.parent().ok_or_else(|| {
-        Error::StoreMaintenance(
-            "reset path must have an existing canonical parent directory".to_string(),
-        )
+        Error::StoreMaintenance(format!(
+            "reset {subject} path must have an existing canonical parent directory"
+        ))
     })?;
     let parent = fs::canonicalize(parent).map_err(|error| {
         Error::StoreMaintenance(format!(
-            "reset parent {} must exist and be canonicalizable: {error}",
+            "reset {subject} parent {} must exist and be canonicalizable: {error}",
             parent.display(),
         ))
     })?;
     let metadata = fs::metadata(&parent).map_err(|error| {
         Error::StoreMaintenance(format!(
-            "reset parent {} is unreadable: {error}",
+            "reset {subject} parent {} is unreadable: {error}",
             parent.display()
         ))
     })?;
     if !metadata.is_dir() {
-        return Err(Error::StoreMaintenance(
-            "reset parent is not a directory".to_string(),
-        ));
+        return Err(Error::StoreMaintenance(format!(
+            "reset {subject} parent is not a directory"
+        )));
     }
-    Ok(parent.join(file_name))
+    let path = parent.join(file_name);
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        Error::StoreMaintenance(format!(
+            "reset {subject} {} must exist and be readable: {error}",
+            path.display(),
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(Error::StoreMaintenance(format!(
+            "reset {subject} {} must be a regular non-symlink file",
+            path.display(),
+        )));
+    }
+    Ok(path)
 }
 
 fn sidecars_for(path: &Path) -> Vec<PathBuf> {
@@ -186,56 +222,28 @@ fn sidecars_for(path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn remove_owned_regular_file(path: &Path) -> Result<bool> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
+fn validated_sidecars(path: &Path) -> Result<Vec<PathBuf>> {
+    let mut sidecars = Vec::new();
+    for sidecar in sidecars_for(path) {
+        let metadata = match fs::symlink_metadata(&sidecar) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(Error::StoreMaintenance(format!(
+                    "inspect Lojix reset sidecar {}: {error}",
+                    sidecar.display(),
+                )));
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(Error::StoreMaintenance(format!(
-                "inspect reset store {}: {error}",
-                path.display(),
+                "Lojix reset sidecar {} must be a regular non-symlink file",
+                sidecar.display(),
             )));
         }
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(Error::StoreMaintenance(format!(
-            "reset store {} must be a regular non-symlink file",
-            path.display(),
-        )));
+        sidecars.push(sidecar);
     }
-    recognised_lojix_schema(path)?;
-    fs::remove_file(path).map_err(|error| {
-        Error::StoreMaintenance(format!("remove reset store {}: {error}", path.display()))
-    })?;
-    Ok(true)
-}
-
-fn remove_owned_sidecar(path: &Path) -> Result<bool> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(Error::StoreMaintenance(format!(
-                "inspect Lojix reset sidecar {}: {error}",
-                path.display(),
-            )));
-        }
-    };
-    if metadata.is_dir() {
-        return Err(Error::StoreMaintenance(format!(
-            "Lojix reset sidecar {} is a directory; refusing broad deletion",
-            path.display(),
-        )));
-    }
-    // remove_file unlinks a symlink itself, never its referent. This is safe
-    // for a stale sidecar and avoids following it into any unrelated store.
-    fs::remove_file(path).map_err(|error| {
-        Error::StoreMaintenance(format!(
-            "remove Lojix reset sidecar {}: {error}",
-            path.display()
-        ))
-    })?;
-    Ok(true)
+    Ok(sidecars)
 }
 
 fn recognised_lojix_schema(path: &Path) -> Result<u64> {
@@ -246,7 +254,7 @@ fn recognised_lojix_schema(path: &Path) -> Result<u64> {
         ))
     })?;
     let version = schema_version_from_database(&database)?;
-    if !RESETTABLE_SCHEMAS.contains(&version) {
+    if !RECOGNISED_SCHEMAS.contains(&version) {
         return Err(Error::StoreMaintenance(format!(
             "reset store {} has unsupported schema {version}; refusing to remove an unrecognised file",
             path.display(),
@@ -407,77 +415,119 @@ fn lojix_identities<const COUNT: usize>(
 mod tests {
     use super::*;
 
-    fn reset_request(path: &Path) -> OsString {
-        OsString::from(format!("StoreResetRequest.{{{}}}", path.display()))
+    fn startup_archive(directory: &Path, store_path: &Path) -> PathBuf {
+        let archive = directory.join("lojix-startup.rkyv");
+        DaemonConfiguration {
+            ordinary_socket_path: directory.join("ordinary.sock").display().to_string(),
+            ordinary_socket_mode: 0o660,
+            owner_socket_path: directory.join("owner.sock").display().to_string(),
+            owner_socket_mode: 0o600,
+            state_directory_path: directory.display().to_string(),
+            store_path: store_path.display().to_string(),
+            daemon_host: "fixture-daemon".to_string(),
+            effect_timeout_seconds: 60,
+            test_defaults: None,
+        }
+        .write_rkyv_file(&archive)
+        .expect("write generated startup archive");
+        archive
+    }
+
+    fn reset_command(archive: &Path) -> StoreResetCommand {
+        StoreResetCommand::from_arguments_with_configuration(
+            [OsString::from("(ResetStore)")],
+            archive.to_path_buf(),
+        )
+        .expect("exact reset command")
+    }
+
+    fn mark_pre_v4(path: &Path) {
+        let database = redb::Database::open(path).expect("open recognised Lojix store");
+        let write = database
+            .begin_write()
+            .expect("begin schema downgrade fixture");
+        {
+            let mut metadata = write.open_table(META_TABLE).expect("metadata table");
+            metadata
+                .insert(SCHEMA_VERSION_KEY, 3)
+                .expect("pre-v4 schema marker");
+        }
+        write.commit().expect("commit schema downgrade fixture");
     }
 
     #[test]
-    fn reset_cli_requires_one_inline_object_and_rejects_raw_paths_and_flags() {
-        assert!(StoreResetCommand::from_arguments(Vec::new()).is_err());
-        assert!(StoreResetCommand::from_arguments([OsString::from("--help")]).is_err());
-        assert!(StoreResetCommand::from_arguments([OsString::from("--pretty")]).is_err());
-        assert!(
-            StoreResetCommand::from_arguments([OsString::from("/tmp/lojix-store.sema")]).is_err()
-        );
-        assert!(
-            StoreResetCommand::from_arguments([
-                reset_request(Path::new("/tmp/lojix-store.sema")),
-                OsString::from("extra"),
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn reset_rejects_non_absolute_traversing_and_directory_targets() {
-        for path in [
-            "relative/lojix-store.sema",
-            "/tmp",
-            "/tmp/../tmp/lojix-store.sema",
+    fn reset_cli_requires_exactly_one_inline_pathless_object() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let archive = startup_archive(directory.path(), &directory.path().join("store.sema"));
+        for arguments in [
+            Vec::new(),
+            vec![OsString::from("--help")],
+            vec![OsString::from("--pretty")],
+            vec![OsString::from("/tmp/lojix-store.sema")],
+            vec![OsString::from("StoreResetRequest.{/tmp/lojix-store.sema}")],
+            vec![OsString::from("(ResetStore)"), OsString::from("extra")],
         ] {
-            let error = StoreResetCommand::from_arguments([reset_request(Path::new(path))])
-                .and_then(|command| command.run())
-                .expect_err("unsafe reset path must be rejected");
             assert!(
-                error.to_string().contains("reset")
-                    || error.to_string().contains("dot-application")
+                StoreResetCommand::from_arguments_with_configuration(arguments, archive.clone())
+                    .is_err(),
+                "reset must accept only one inline (ResetStore) object"
             );
         }
     }
 
     #[test]
-    fn reset_is_idempotent_and_creates_a_fresh_v4_store() {
+    fn reset_requires_an_existing_generated_configuration_and_store() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        // The reset honours this configured name; it is not coupled to a
-        // basename such as `lojix.sema`.
-        let path = directory.path().join("configured-lojix-store.db");
-        let command =
-            StoreResetCommand::from_arguments([reset_request(&path)]).expect("reset command");
-        let first = command.run().expect("first reset");
-        assert!(!first.removed_store);
-        assert_eq!(schema_version(&path).expect("v4 schema"), CURRENT_SCHEMA);
-        let second = command.run().expect("idempotent reset");
-        assert!(second.removed_store);
-        assert_eq!(
-            schema_version(&path).expect("fresh v4 schema"),
-            CURRENT_SCHEMA
-        );
+        let missing_archive = directory.path().join("missing.rkyv");
+        assert!(reset_command(&missing_archive).run().is_err());
+
+        let missing_store = directory.path().join("configured-lojix-store.db");
+        let archive = startup_archive(directory.path(), &missing_store);
+        let error = reset_command(&archive)
+            .run()
+            .expect_err("an absent configured store must not be created by reset");
+        assert!(error.to_string().contains("store"));
     }
 
     #[test]
-    fn reset_only_unlinks_its_named_sidecars() {
+    fn reset_returns_already_current_without_touching_v4_data_or_sidecars() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("configured-lojix-store.db");
+        drop(Store::open(&path).expect("create v4 store"));
+        let sidecar = sidecars_for(&path)
+            .into_iter()
+            .next()
+            .expect("sidecar path");
+        fs::write(&sidecar, "must survive with v4 primary").expect("sidecar witness");
+        let before = fs::read(&path).expect("read v4 store before reset");
+        let archive = startup_archive(directory.path(), &path);
+
+        assert_eq!(
+            reset_command(&archive).run().expect("current-store result"),
+            StoreResetOutcome::AlreadyCurrent { path: path.clone() }
+        );
+        assert_eq!(fs::read(&path).expect("read v4 store after reset"), before);
+        assert!(sidecar.exists(), "v4 sidecars are untouched too");
+    }
+
+    #[test]
+    fn reset_recreates_only_a_recognised_pre_v4_lojix_store_and_its_sidecars() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("configured-lojix-store.db");
         drop(Store::open(&path).expect("create recognised Lojix source"));
+        mark_pre_v4(&path);
         for sidecar in sidecars_for(&path) {
             fs::write(sidecar, "stale Lojix sidecar").expect("write sidecar");
         }
         let spirit = directory.path().join("spirit.sema");
         fs::write(&spirit, "must survive").expect("write Spirit witness");
-        StoreResetCommand::from_arguments([reset_request(&path)])
-            .expect("reset command")
-            .run()
-            .expect("reset");
+        let archive = startup_archive(directory.path(), &path);
+        let outcome = reset_command(&archive).run().expect("reset pre-v4 source");
+        assert!(matches!(outcome, StoreResetOutcome::Recreated { .. }));
+        assert_eq!(
+            schema_version(&path).expect("fresh v4 schema"),
+            CURRENT_SCHEMA
+        );
         assert_eq!(
             fs::read_to_string(spirit).expect("Spirit witness"),
             "must survive"
@@ -506,8 +556,8 @@ mod tests {
         drop(database);
         let before = fs::read(&spirit).expect("read Spirit witness before reset");
 
-        let error = StoreResetCommand::from_arguments([reset_request(&spirit)])
-            .expect("inline request")
+        let archive = startup_archive(directory.path(), &spirit);
+        let error = reset_command(&archive)
             .run()
             .expect_err("unrecognised Spirit database must not be reset");
         assert!(error.to_string().contains("catalog"));
@@ -519,5 +569,29 @@ mod tests {
             lojix.exists(),
             "sibling Lojix database is not the requested path"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_rejects_symlinked_configuration_and_store_before_deletion() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("configured-lojix-store.db");
+        drop(Store::open(&path).expect("create v4 store"));
+        let archive = startup_archive(directory.path(), &path);
+        let archive_link = directory.path().join("configuration-link.rkyv");
+        symlink(&archive, &archive_link).expect("configuration symlink");
+        assert!(reset_command(&archive_link).run().is_err());
+        assert!(
+            path.exists(),
+            "symlinked configuration cannot select a store"
+        );
+
+        let store_link = directory.path().join("store-link.db");
+        symlink(&path, &store_link).expect("store symlink");
+        let linked_archive = startup_archive(directory.path(), &store_link);
+        assert!(reset_command(&linked_archive).run().is_err());
+        assert!(path.exists(), "symlinked store referent is untouched");
     }
 }

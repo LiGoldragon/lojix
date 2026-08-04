@@ -9,9 +9,8 @@
 use std::path::PathBuf;
 
 use dotos::{DotosDecode, DotosDecodeError, DotosSource};
-use lojix::{DaemonConfiguration, TestDefaults, TestMode};
+use lojix::{DaemonConfiguration, Error as LojixError, TestDefaults, TestMode};
 use thiserror::Error;
-use triad_runtime::{ArgumentError, ComponentArgument, ComponentCommand};
 
 fn main() {
     if let Err(error) = ConfigurationWriterCli::from_environment().run() {
@@ -20,9 +19,7 @@ fn main() {
     }
 }
 
-struct ConfigurationWriterCli {
-    command: ComponentCommand,
-}
+struct ConfigurationWriterCli;
 
 #[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
 struct ConfigurationWriteRequest {
@@ -90,9 +87,7 @@ struct WriterSeconds(u64);
 
 impl ConfigurationWriterCli {
     fn from_environment() -> Self {
-        Self {
-            command: ComponentCommand::from_environment(),
-        }
+        Self
     }
 
     fn run(&self) -> Result<(), ConfigurationWriterError> {
@@ -106,19 +101,8 @@ impl ConfigurationWriterCli {
     }
 
     fn source(&self) -> Result<String, ConfigurationWriterError> {
-        match self.command.dotos_argument()? {
-            ComponentArgument::InlineDotos(argument) => Ok(argument.into_string()),
-            ComponentArgument::DotosFile(file) => {
-                let path = file.into_path();
-                std::fs::read_to_string(&path)
-                    .map_err(|source| ConfigurationWriterError::ReadDotosFile { path, source })
-            }
-            ComponentArgument::SignalFile(file) => {
-                Err(ConfigurationWriterError::UnsupportedSignalFile {
-                    path: file.into_path(),
-                })
-            }
-        }
+        lojix::single_inline_dotos_argument(std::env::args_os().skip(1))
+            .map_err(ConfigurationWriterError::Request)
     }
 }
 
@@ -192,15 +176,8 @@ impl From<WriterTestMode> for TestMode {
 
 #[derive(Debug, Error)]
 enum ConfigurationWriterError {
-    #[error(transparent)]
-    Argument(#[from] ArgumentError),
-    #[error("read DOTOS file {}: {source}", path.display())]
-    ReadDotosFile {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("signal-encoded configuration requests are not supported: {}", path.display())]
-    UnsupportedSignalFile { path: PathBuf },
+    #[error("configuration request must be one inline DOTOS object: {0}")]
+    Request(LojixError),
     #[error("effect timeout must be at least one second")]
     ZeroEffectTimeout,
     #[error(transparent)]

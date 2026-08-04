@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use dotos::{Delimiter, DotosBlock, DotosSource};
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use rkyv::api::high::HighDeserializer;
 use rkyv::bytecheck::CheckBytes;
@@ -24,7 +25,7 @@ use crate::schema::sema::{
     ContainerLifecycleRecord, DeployJob, DeploymentRecord, EventLogEntry, GcRoot,
     IdentifierAllocation, LiveGeneration, StoredTestRun,
 };
-use crate::{Error, Result};
+use crate::{Error, Result, single_inline_dotos_argument};
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");
@@ -56,16 +57,8 @@ impl StoreInspectionCommand {
     }
 
     pub fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
-        let mut arguments = arguments.into_iter();
-        let Some(path) = arguments.next() else {
-            return Err(Error::ExpectedSingleArgument);
-        };
-        if arguments.next().is_some() {
-            return Err(Error::ExpectedSingleArgument);
-        }
-        if path.to_string_lossy().starts_with('-') {
-            return Err(Error::FlagArgument(path.to_string_lossy().into_owned()));
-        }
+        let text = single_inline_dotos_argument(arguments)?;
+        let path = parse_inspect_store_request(&text)?;
         Ok(Self {
             path: PathBuf::from(path),
         })
@@ -74,6 +67,29 @@ impl StoreInspectionCommand {
     pub fn run(&self) -> StoreInspection {
         StoreInspector::new(self.path.clone()).inspect()
     }
+}
+
+/// Decode one parenthesised `(InspectStore <path>)` DOTOS object. The CLI
+/// never hands its operand to a file-classifying component parser, so an
+/// existing `.dotos` path remains plain rejected text rather than an input.
+fn parse_inspect_store_request(text: &str) -> Result<String> {
+    let root = DotosSource::new(text)
+        .parse_root()
+        .map_err(|error| Error::DotosRequestText(error.to_string()))?;
+    let fields = DotosBlock::new(&root)
+        .expect_children(Delimiter::Parenthesis, "InspectStore", 2)
+        .map_err(|error| Error::DotosRequestText(error.to_string()))?;
+    let operation = DotosBlock::new(&fields[0])
+        .parse_string()
+        .map_err(|error| Error::DotosRequestText(error.to_string()))?;
+    if operation != "InspectStore" {
+        return Err(Error::DotosRequestText(
+            "expected an inline (InspectStore <path>) object".to_string(),
+        ));
+    }
+    DotosBlock::new(&fields[1])
+        .parse_string()
+        .map_err(|error| Error::DotosRequestText(error.to_string()))
 }
 
 pub struct StoreInspector {

@@ -15,6 +15,7 @@
 //! back, so the daemon recovers without replay code (Spirit oh9l durable-first,
 //! fosp sema-engine-exclusive, ur16 self-resume).
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -171,7 +172,7 @@ pub enum Error {
     StoreMaintenance(String),
 
     #[error(
-        "lojix store at {path:?} cannot be used by this daemon's startup schema/layout gate while {stage}; daemon startup stopped before serving requests; inspect the store with `lojix-inspect-store {path:?}`: {source}"
+        "lojix store at {path:?} cannot be used by this daemon's startup schema/layout gate while {stage}; daemon startup stopped before serving requests; inspect it with an inline `lojix-inspect-store '(InspectStore <path>)'` request: {source}"
     )]
     StoreStartupCompatibility {
         path: PathBuf,
@@ -215,6 +216,29 @@ impl From<meta_signal_lojix::schema::lib::SignalFrameError> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Select one inline DOTOS/NOTA operand without classifying filesystem paths.
+/// Component operator surfaces use this instead of `ComponentCommand`: that
+/// helper intentionally recognises request files, whereas these bounded CLIs
+/// must never read a caller-selected path.
+pub fn single_inline_dotos_argument(
+    arguments: impl IntoIterator<Item = OsString>,
+) -> Result<String> {
+    let mut arguments = arguments.into_iter();
+    let Some(argument) = arguments.next() else {
+        return Err(Error::ExpectedSingleArgument);
+    };
+    if arguments.next().is_some() {
+        return Err(Error::ExpectedSingleArgument);
+    }
+    let argument = argument
+        .into_string()
+        .map_err(|_| Error::InlineDotosRequired)?;
+    if argument.starts_with('-') {
+        return Err(Error::FlagArgument(argument));
+    }
+    Ok(argument)
+}
 
 /// Daemon configuration: the two authority-tiered socket paths and their unix
 /// permission modes. Decoded only from the single rkyv startup file the daemon

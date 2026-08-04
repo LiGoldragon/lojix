@@ -19,7 +19,7 @@ use std::os::unix::net::UnixStream;
 use signal_frame::{ExchangeIdentifier, ExchangeLane, LaneSequence, Reply, SessionEpoch, SubReply};
 use triad_runtime::{ComponentArgument, FrameBody, LengthPrefixedCodec};
 
-use crate::{Error, Result};
+use crate::{Error, Result, single_inline_dotos_argument};
 
 const ORDINARY_SOCKET_ENV: &str = "LOJIX_ORDINARY_SOCKET";
 const OWNER_SOCKET_ENV: &str = "LOJIX_OWNER_SOCKET";
@@ -84,7 +84,8 @@ impl OrdinaryClient {
     /// treats an existing filesystem path as a Dotos file and ignores
     /// `--pretty`, while public Lojix clients accept neither.
     pub fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
-        Self::decode_dotos_text(&inline_dotos_text(arguments)?).map(|input| Self { input })
+        Self::decode_dotos_text(&single_inline_dotos_argument(arguments)?)
+            .map(|input| Self { input })
     }
 
     pub fn from_argument(argument: ComponentArgument) -> Result<Self> {
@@ -163,7 +164,8 @@ impl MetaClient {
     /// Decode exactly one inline DOTOS/NOTA request without accepting either
     /// file form or presentation flags.
     pub fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
-        Self::decode_dotos_text(&inline_dotos_text(arguments)?).map(|input| Self { input })
+        Self::decode_dotos_text(&single_inline_dotos_argument(arguments)?)
+            .map(|input| Self { input })
     }
 
     pub fn from_argument(argument: ComponentArgument) -> Result<Self> {
@@ -224,24 +226,4 @@ impl MetaClient {
     fn decode_dotos_text(_text: &str) -> Result<meta_signal_lojix::schema::lib::Input> {
         Err(Error::DotosTextUnsupported)
     }
-}
-
-/// Select exactly one text operand without ever treating an existing path as a
-/// request file. `--pretty` is a rejected flag here, not a presentation mode:
-/// public Lojix clients are single-object command surfaces.
-fn inline_dotos_text(arguments: impl IntoIterator<Item = OsString>) -> Result<String> {
-    let mut arguments = arguments.into_iter();
-    let Some(argument) = arguments.next() else {
-        return Err(Error::ExpectedSingleArgument);
-    };
-    if arguments.next().is_some() {
-        return Err(Error::ExpectedSingleArgument);
-    }
-    let argument = argument
-        .into_string()
-        .map_err(|_| Error::InlineDotosRequired)?;
-    if argument.starts_with('-') {
-        return Err(Error::FlagArgument(argument));
-    }
-    Ok(argument)
 }

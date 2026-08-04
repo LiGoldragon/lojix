@@ -171,9 +171,22 @@ fn unreadable_generation_and_event_rows_report_decode_failures() {
 }
 
 #[test]
-fn command_rejects_flags_and_accepts_one_path() {
-    assert!(StoreInspectionCommand::from_arguments([std::ffi::OsString::from("--state")]).is_err());
+fn command_requires_one_inline_inspect_store_object() {
+    use std::ffi::OsString;
+
+    assert!(StoreInspectionCommand::from_arguments(Vec::new()).is_err());
+    assert!(StoreInspectionCommand::from_arguments([OsString::from("--state")]).is_err());
+    assert!(StoreInspectionCommand::from_arguments([OsString::from("--pretty")]).is_err());
+    assert!(StoreInspectionCommand::from_arguments([OsString::from("lojix.sema")]).is_err());
     assert!(
-        StoreInspectionCommand::from_arguments([std::ffi::OsString::from("lojix.sema")]).is_ok()
+        StoreInspectionCommand::from_arguments([
+            OsString::from("(InspectStore /tmp/lojix.sema)"),
+            OsString::from("extra"),
+        ])
+        .is_err()
+    );
+    assert!(
+        StoreInspectionCommand::from_arguments([OsString::from("(InspectStore /tmp/lojix.sema)",)])
+            .is_ok()
     );
 }

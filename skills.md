@@ -40,9 +40,10 @@ these):
 
 - **Storage:** schema-derived SEMA table nouns over one durable, configured
   exact store path. The startup archive carries that path to the daemon and
-  reset service; no component derives `lojix.sema`. Schema v4 refuses older
-  stores; the dedicated inline reset primitive creates a fresh v4 store while
-  the daemon is stopped only after verifying the Lojix family/schema.
+  reset service; no component derives `lojix.sema`. The reset service supplies
+  its archive through `LOJIX_CONFIGURATION` and calls only pathless inline
+  `(ResetStore)`: it recreates recognised pre-v4 Lojix stores, reports v4 as
+  `AlreadyCurrent`, and never selects a caller-named file.
 - **Wire:** `signal-frame` records from `signal-lojix` and
   `meta-signal-lojix`. Length-prefixed rkyv archives over two Unix
   sockets. Don't invent parallel framing or envelope mechanisms.

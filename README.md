@@ -36,27 +36,30 @@ error text, or noncanonical path.
 ## Store reset
 
 Lojix v4 deliberately refuses older Lojix schemas. There is no row migration
-or legacy resume path. After stopping `lojix-daemon`, CriomOS may run the
-dedicated reset primitive on its configured, exact store file:
+or legacy resume path. After stopping `lojix-daemon`, CriomOS may manually
+start its dedicated reset unit:
 
 ```sh
-lojix-reset-store 'StoreResetRequest.{/var/lib/lojix/configured-lojix-store.db}'
+systemctl start lojix-reset-store.service
 ```
 
-The command accepts exactly one inline `StoreResetRequest.{<configured-path>}`
-object: no raw path, file, or flag form is accepted. The supplied path must be
-absolute and traversal-free; an existing file must be regular, non-symlinked,
-and prove the recognised Lojix family catalog plus a supported schema before it
-is removed. Only then are its three protocol sidecars
+The unit supplies its generated startup archive through
+`LOJIX_CONFIGURATION`; the binary accepts exactly one pathless inline
+`(ResetStore)` object and never accepts a store path, file, or flag form. The
+archive must be a regular non-symlink file and its configured store must be an
+existing, absolute, traversal-free regular non-symlink file. A recognised v2
+or v3 Lojix catalog is removed and recreated as v4; an already-current v4
+store returns `AlreadyCurrent` without deleting any data. Only then are the
+pre-v4 protocol sidecars
 (`.schema-pre-v3.backup`, `.schema-v3.pending`, and
-`.schema-v3.pending.owner`) derived and removed. It never selects or follows a
-Spirit database. Repeating it is safe and produces a new, empty v4 store each
-time.
+`.schema-v3.pending.owner`) mechanically derived and removed. It never
+selects, follows, or modifies a Spirit database.
 
 ## Daemon startup configuration
 
 `lojix-write-configuration` is the only DOTOS-to-startup boundary. It accepts
-one `ConfigurationWriteRequest` (inline or `.dotos` file) containing, in
+exactly one inline `ConfigurationWriteRequest` object—never a `.dotos` file,
+raw path, or flag—containing, in
 order, ordinary socket and mode, owner socket and mode, state directory, exact
 store path, daemon host, effect timeout, `NoTestDefaults` or `TestDefaults`,
 and output path; it writes the rkyv startup archive. Production uses
@@ -65,6 +68,10 @@ and output path; it writes the rkyv startup archive. Production uses
 DOTOS or a `.dotos` startup argument. Service activation invokes the writer
 and passes its output path to the daemon; reset is a separate, manually
 started service that must not run while the daemon is active.
+
+`lojix-inspect-store` is read-only and likewise accepts exactly one inline
+`(InspectStore <path>)` object, never a raw path, file, flag, or extra
+argument.
 
 ## Related
 

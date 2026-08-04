@@ -44,13 +44,14 @@ a test attribute from a host or node name.
 Schema v4 refuses older Lojix data. There is no migration or legacy-resume
 path. With `lojix-daemon` stopped, a privileged operator may manually start
 the dedicated `lojix-reset-store` unit. It invokes `lojix-reset-store` only
-with the configured absolute store path inside a typed inline
-`StoreResetRequest.{<path>}` object and conflicts with the daemon.
+with inline `(ResetStore)` and supplies its generated startup archive as the
+service-owned `LOJIX_CONFIGURATION` environment value; it conflicts with the
+daemon.
 
-The reset binary accepts exactly one inline request object, never a raw path or
-flag. Its configured absolute target must be traversal-free, regular,
-non-symlinked, and recognised as a Lojix catalog family with a supported schema
-before removal; only then are the three protocol sidecars mechanically
-derived. It does not select, follow, or modify a Spirit database. The reset is
-idempotent for an existing v4 store. Do not run it as part of ordinary daemon
+The reset binary accepts exactly one pathless inline request object, never a
+raw path, file, or flag. Its archive and configured store must be regular,
+non-symlinked, absolute, and traversal-free. Only recognised pre-v4 Lojix
+schemas are removed; v4 returns `AlreadyCurrent` without touching data. Only
+then are the three protocol sidecars mechanically derived. It does not select,
+follow, or modify a Spirit database. Do not run it as part of ordinary daemon
 startup.
