@@ -4,8 +4,10 @@
   Rust crate is at the repo root and ships `lojix-daemon` plus the
   thin `lojix` CLI. Production host and user-environment build requests without
   `build_attribute` materialize Horizon-derived flake inputs before
-  `nix eval`; activating deploys enter the copy/activate pipeline. There is no repo flake yet; use the root cargo suite
-  until a Nix check surface lands.
+  `nix eval`; activating deploys enter the copy/activate pipeline. The
+  maintained flake exposes the root cargo suite plus the daemon-free
+  `lojix-bootstrap` package/app for an explicitly authorized one-shot v4
+  bootstrap.
 
 - **Future infrastructure.** Per
   the active-repositories protocol §"Replacement Stack

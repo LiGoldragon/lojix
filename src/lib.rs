@@ -37,6 +37,7 @@ use crate::schema::sema::{
 };
 
 pub mod adapters;
+pub mod bootstrap;
 pub mod client;
 pub mod daemon;
 pub mod inspection;

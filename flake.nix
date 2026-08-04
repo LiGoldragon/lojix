@@ -63,6 +63,27 @@
           }
         );
         daemonCargoArtifacts = craneLib.buildDepsOnly commonArguments;
+        bootstrapBinary = craneLib.buildPackage (
+          commonArguments
+          // {
+            inherit cargoArtifacts;
+            cargoExtraArgs = "--bin lojix-bootstrap --features dotos-text";
+          }
+        );
+        bootstrapPackage = pkgs.symlinkJoin {
+          name = "lojix-bootstrap";
+          paths = [ bootstrapBinary ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          postBuild = ''
+            wrapProgram "$out/bin/lojix-bootstrap" \
+              --prefix PATH : ${
+                pkgs.lib.makeBinPath [
+                  pkgs.nix
+                  pkgs.systemd
+                ]
+              }
+          '';
+        };
       in
       {
         packages = {
@@ -81,6 +102,16 @@
               cargoExtraArgs = "--bin lojix-daemon";
             }
           );
+
+          # A maintained flake-owned bootstrap program.  The wrapper keeps the
+          # exact Nix/systemd executables in the app closure; it never depends
+          # on an installed Lojix daemon, old socket, or ambient Lojix store.
+          lojix-bootstrap = bootstrapPackage;
+        };
+
+        apps.lojix-bootstrap = {
+          type = "app";
+          program = "${self.packages.${system}.lojix-bootstrap}/bin/lojix-bootstrap";
         };
 
         checks = {
@@ -115,6 +146,27 @@
                 exit 1
               fi
               printf 'lojix daemon rejects DOTOS startup\n' > "$out"
+            '';
+
+          bootstrap-rejects-flags =
+            let
+              package = self.packages.${system}.lojix-bootstrap;
+            in
+            pkgs.runCommand "lojix-bootstrap-rejects-flags" { } ''
+              set +e
+              ${package}/bin/lojix-bootstrap --help >stdout 2>stderr
+              status=$?
+              set -e
+              if [ "$status" -eq 0 ]; then
+                echo 'lojix-bootstrap accepted a flag' >&2
+                exit 1
+              fi
+              if ! grep -q 'BootstrapRejected' stderr; then
+                echo 'lojix-bootstrap did not report its strict inline boundary' >&2
+                cat stderr >&2
+                exit 1
+              fi
+              printf 'lojix bootstrap rejects flags before effects\n' > "$out"
             '';
 
           fmt = craneLib.cargoFmt {

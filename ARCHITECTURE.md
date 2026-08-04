@@ -45,7 +45,7 @@ This stack sits on today's substrate as a realization step toward the Sema-on-Se
 
 ## 0 · Crate shape
 
-One crate, two binaries (per the workspace agent instructions' "Binary naming
+One crate, daemon/client binaries, and one maintained flake bootstrap app (per the workspace agent instructions' "Binary naming
 — `-daemon` suffix" rule):
 
 ```
@@ -53,11 +53,12 @@ Cargo.toml:
   [lib] name = "lojix"
   [[bin]] name = "lojix-daemon"   # long-lived orchestrator
   [[bin]] name = "lojix"          # thin CLI client
+  [[bin]] name = "lojix-bootstrap" # daemon-free, explicit bootstrap
 ```
 
 The library half (`lojix`) holds the shared types, the daemon's
 actor implementations, and the CLI's request/reply plumbing. The
-two binaries are thin entry points: `lojix-daemon` brings up the
+daemon/client binaries are thin entry points: `lojix-daemon` brings up the
 actor supervisor and binds the socket; `lojix` opens the socket,
 sends one `signal-lojix` request, and prints one reply or
 streams subscription events.
@@ -76,9 +77,8 @@ streams subscription events.
   while `Query`, the `WatchDeployments`/`WatchCacheRetention`
   subscriptions, and `Unwatch` are peer-callable on the ordinary
   `signal-lojix`. The policy contract is born `meta-signal-lojix`, never
-  `owner-signal-lojix` (Spirit `vudl`). Until cutover the meta contract is
-  carried as a local path-dependency package inside the `lojix` tree
-  (mirroring the cloud stopgap); the standalone repo is created at cutover.
+  `owner-signal-lojix` (Spirit `vudl`). `meta-signal-lojix` is the maintained
+  standalone dependency; Lojix does not carry a local compatibility contract.
 - **Live generation set** — `BTreeMap<(ClusterName, NodeName, Kind),
   Generation>` persisted via `sema-engine`. Source of truth for
   "what's running on every node right now."
@@ -115,6 +115,17 @@ streams subscription events.
   raw paths, DOTOS files, signal files, and flags. Each forwards its object as a
   `signal-lojix` frame to the daemon, and prints the reply or
   streams events.
+- **Maintained bootstrap app** — `lojix-bootstrap` is a flake package/app,
+  not a daemon client. It accepts exactly one inline private `BootstrapRun`
+  DOTOS object. The request explicitly supplies input mode, builder, optional
+  hermetic test, local-or-remote BootOnce backend, journal parent, GC-root
+  path, and terminal-evidence path. It creates a fresh private v4 journal and
+  configuration beneath that journal parent, performs materialize → optional
+  test → build → durable GC root → explicit copy/BootOnce, writes typed
+  terminal evidence atomically, then removes only that verified journal child.
+  `BuildOnly` has no activation or transport field and therefore cannot
+  activate. No daemon socket, daemon configuration, old journal/store, route,
+  host, user, or path default participates.
 
 ## 2 · Not owned
 
@@ -149,11 +160,13 @@ src/
   lib.rs                # shared state, configuration, error type
   daemon.rs             # actor-native two-socket daemon shell
   client.rs             # thin CLI socket exchange
+  bootstrap.rs          # daemon-free explicit v4 bootstrap pipeline
   schema_runtime.rs     # async hand-written engine over generated schema nouns
   schema/               # checked-in generated Nexus/SEMA artifacts
   bin/
     lojix-daemon.rs     # daemon entry
     lojix.rs            # CLI entry
+    lojix-bootstrap.rs  # maintained flake bootstrap entry
 ```
 
 Each daemon actor is a Kameo actor per

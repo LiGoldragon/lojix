@@ -1,6 +1,6 @@
 [package]
 name         = "lojix"
-version      = "0.16.0"
+version      = "0.17.0"
 edition      = "2024"
 rust-version = "1.89"
 license      = "MIT OR Apache-2.0"
@@ -34,6 +34,11 @@ path = "src/bin/lojix-inspect-store.rs"
 [[bin]]
 name = "lojix-reset-store"
 path = "src/bin/lojix-reset-store.rs"
+
+[[bin]]
+name = "lojix-bootstrap"
+path = "src/bin/lojix-bootstrap.rs"
+required-features = ["dotos-text"]
 
 [features]
 default   = []

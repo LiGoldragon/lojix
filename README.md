@@ -73,6 +73,52 @@ started service that must not run while the daemon is active.
 `(InspectStore <path>)` object, never a raw path, file, flag, or extra
 argument.
 
+## Maintained bootstrap app
+
+`lojix-bootstrap` is the v0.17 flake-owned, daemon-free bootstrap surface. It
+does not open a Lojix socket, read daemon configuration, reuse a Lojix store,
+or derive a target route. The package wrapper carries Nix and systemd tooling
+in its closure; the built system closure receives a caller-selected durable GC
+root before any activation.
+
+Run it through the maintained Lojix app, or the exact re-export in the
+maintained CriomOS/Home flakes, with exactly one inline DOTOS object and no
+flags or request files:
+
+```text
+nix run github:LiGoldragon/lojix/<rev>#lojix-bootstrap -- 'BootstrapRun.{<request-id> <mode>}'
+```
+
+The complete shape is positional and explicit:
+
+```text
+BootstrapRun.{
+  <request-id>
+  BuildOnly.{
+    Direct.{<flake-ref> <nix-system> <output-selector>}
+    | Horizon.{<proposal.dotos> <cluster> <node> <CompleteHost-or-BaseHost> <NoSecrets-or-SecretsDirectory.{<directory>}> <flake-ref> <nix-system> <output-selector>}
+    <NoBuilder-or-NixBuilder.{<builder-spec>}>
+    <journal-parent> <new-gc-root-path> <new-terminal-evidence-path>
+  }
+  | BootOnce.{
+    <same-input> <same-builder>
+    <NoTest-or-RunHermeticTest.{<flake-ref> <nix-system> <output-selector>}>
+    <RemoteNixosSystemdBootV1.{<nix-store-uri> <ssh-destination> <system-profile-path> <boot-entries-directory>}
+      | LocalBootstrapV1.{<system-profile-path> <boot-entries-directory>}>
+    <journal-parent> <new-gc-root-path> <new-terminal-evidence-path>
+  }
+}
+```
+
+`BuildOnly` is the exact no-activation variant: it materializes, builds, and
+creates the requested durable GC root, then writes terminal evidence. It has
+no transport or backend field. `RemoteNixosSystemdBootV1` requires and uses the
+exact store URI and SSH destination; `LocalBootstrapV1` is a separate audited
+systemd-boot path and never substitutes self-SSH or `nix copy`. Existing root
+or evidence targets, symlinks, unsafe paths, and collisions fail closed. On a
+pipeline failure the fresh journal remains until typed terminal evidence is
+atomically committed; only then is its own verified child removed.
+
 ## Related
 
 - `signal-lojix` — ordinary peer-callable wire contract.
