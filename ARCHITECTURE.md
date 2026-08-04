@@ -184,7 +184,12 @@ Each daemon actor is a Kameo actor per
   The idempotent `lojix-migrate-store` pre-start step accepts schema 2 only:
   it validates every known row and relation read-only, retains a byte-identical
   `.schema-pre-v3.backup`, reconstructs and reopens a schema-3 staging store,
-  then atomically replaces the canonical path. Legacy deployment events remain
+  then atomically replaces the canonical path. On a schema-3 retry, the
+  permanent backup alone is normal; `.schema-v3.pending` is always unresolved,
+  and `.schema-v3.pending.owner` is removed only when no staging file remains
+  and it is a regular schema-2 hard link with the same inode, bytes, and
+  metadata as that backup. All other sidecar states fail closed without
+  removal. Legacy deployment events remain
   private quarantine evidence; legacy jobs are non-resumable and legacy
   current-slot claims are historical, never a v3 live owner. Corrupt or
   unknown input remains untouched and prevents daemon startup.

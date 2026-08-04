@@ -47,7 +47,11 @@ opens the source read-only with the frozen v2 vocabulary, preserves a unique
 byte-identical `.schema-pre-v3.backup`, reconstructs and reopens a schema-3
 staging store, and atomically replaces the canonical path only after
 validation. The transient staging sidecars are `.schema-v3.pending` and
-`.schema-v3.pending.owner`; a conflicting residue stops rather than guesses.
+`.schema-v3.pending.owner`. A schema-3 retry accepts the permanent backup by
+itself, but never ignores either sidecar: it removes only an owner marker left
+after replacement when there is no staging file and that marker is a regular
+schema-2 hard link with the same inode, bytes, and metadata as the permanent
+backup. Every other sidecar combination remains untouched and stops startup.
 Legacy deployment events are private quarantined evidence, legacy deploy jobs
 are non-resumable, legacy `Current` claims are demoted to history, and only a
 canonical legacy closure is projected publicly. Schema 1 is

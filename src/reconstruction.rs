@@ -220,10 +220,10 @@ impl StoreMigrator {
     }
 
     pub fn migrate(&self) -> Result<MigrationOutcome> {
-        if !self.paths.canonical.exists() {
-            if self.paths.backup.exists()
-                || self.paths.staging.exists()
-                || self.paths.staging_owner.exists()
+        if !path_entry_exists(&self.paths.canonical)? {
+            if path_entry_exists(&self.paths.backup)?
+                || path_entry_exists(&self.paths.staging)?
+                || path_entry_exists(&self.paths.staging_owner)?
             {
                 return Err(migration_error(format!(
                     "canonical store {} is missing while migration artifacts remain",
@@ -238,6 +238,7 @@ impl StoreMigrator {
         match schema_version(&self.paths.canonical)? {
             SCHEMA_THREE => {
                 let counts = Store::open(&self.paths.canonical)?.migration_counts()?;
+                self.reconcile_current_sidecars()?;
                 Ok(MigrationOutcome::AlreadyCurrent {
                     path: self.paths.canonical.clone(),
                     counts,
@@ -300,8 +301,70 @@ impl StoreMigrator {
         })
     }
 
+    /// A schema-three canonical store normally retains only the permanent
+    /// schema-two backup. The sole recoverable transient state is the narrow
+    /// crash window after the atomic replacement and before the ownership
+    /// marker is removed: no staging file, plus a regular schema-two owner
+    /// hard-link that is exactly the permanent backup. Everything else is
+    /// evidence we cannot attribute safely, so it remains untouched.
+    fn reconcile_current_sidecars(&self) -> Result<()> {
+        if path_entry_exists(&self.paths.staging)? {
+            return Err(migration_error(format!(
+                "schema-three canonical store {} has unresolved staging residue {}; refusing to guess its owner",
+                self.paths.canonical.display(),
+                self.paths.staging.display()
+            )));
+        }
+        if !path_entry_exists(&self.paths.staging_owner)? {
+            return Ok(());
+        }
+        if !path_entry_exists(&self.paths.backup)? {
+            return Err(migration_error(format!(
+                "schema-three canonical store {} has an unpaired staging ownership marker {} without its schema-two backup",
+                self.paths.canonical.display(),
+                self.paths.staging_owner.display()
+            )));
+        }
+        if !regular_file_entry(&self.paths.backup)?
+            || !regular_file_entry(&self.paths.staging_owner)?
+        {
+            return Err(migration_error(format!(
+                "schema-three canonical store {} has a non-regular migration backup or ownership marker",
+                self.paths.canonical.display()
+            )));
+        }
+        if schema_version(&self.paths.backup)? != SCHEMA_TWO {
+            return Err(migration_error(format!(
+                "schema-three canonical store {} has an ownership marker whose backup is not schema two",
+                self.paths.canonical.display()
+            )));
+        }
+        if !same_file(&self.paths.backup, &self.paths.staging_owner)? {
+            return Err(migration_error(format!(
+                "schema-three canonical store {} has an ownership marker that does not share the schema-two backup inode",
+                self.paths.canonical.display()
+            )));
+        }
+        if !files_equal(&self.paths.backup, &self.paths.staging_owner)?
+            || !metadata_equal(&self.paths.backup, &self.paths.staging_owner)?
+        {
+            return Err(migration_error(format!(
+                "schema-three canonical store {} has an ownership marker that does not preserve the schema-two backup bytes and metadata",
+                self.paths.canonical.display()
+            )));
+        }
+        if same_file(&self.paths.canonical, &self.paths.staging_owner)? {
+            return Err(migration_error(format!(
+                "schema-three canonical store {} unexpectedly shares its inode with the schema-two ownership marker",
+                self.paths.canonical.display()
+            )));
+        }
+
+        remove_tool_scratch(&self.paths.staging_owner)
+    }
+
     fn ensure_backup(&self, snapshot: &LegacyV2Snapshot, source_version: u64) -> Result<()> {
-        if self.paths.backup.exists() {
+        if path_entry_exists(&self.paths.backup)? {
             if !files_equal(&self.paths.canonical, &self.paths.backup)? {
                 return Err(migration_error(format!(
                     "existing backup {} is not byte-identical to canonical schema-two store",
@@ -341,7 +404,7 @@ impl StoreMigrator {
     }
 
     fn prepare_staging(&self) -> Result<()> {
-        if self.paths.staging_owner.exists() {
+        if path_entry_exists(&self.paths.staging_owner)? {
             if !same_file(&self.paths.backup, &self.paths.staging_owner)? {
                 return Err(migration_error(format!(
                     "staging ownership marker {} conflicts with the schema-two backup",
@@ -351,7 +414,7 @@ impl StoreMigrator {
             remove_tool_scratch(&self.paths.staging)?;
             return Ok(());
         }
-        if self.paths.staging.exists() {
+        if path_entry_exists(&self.paths.staging)? {
             return Err(migration_error(format!(
                 "unowned staging path {} already exists",
                 self.paths.staging.display()
@@ -1156,6 +1219,20 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
+/// `Path::exists` treats a dangling symlink as absent. Migration sidecars are
+/// evidence, so a directory entry must be noticed even when it is malformed.
+fn path_entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn regular_file_entry(path: &Path) -> Result<bool> {
+    Ok(fs::symlink_metadata(path)?.file_type().is_file())
+}
+
 fn files_equal(left: &Path, right: &Path) -> Result<bool> {
     if fs::metadata(left)?.len() != fs::metadata(right)?.len() {
         return Ok(false);
@@ -1235,6 +1312,7 @@ mod tests {
     use sema_engine::{
         Engine as SemaDatabase, EngineOpen, FamilyName, SchemaHash, SchemaVersion, TableDescriptor,
     };
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn legacy_immutable_revision_projection_requires_a_full_commit() {
@@ -1304,6 +1382,195 @@ mod tests {
             ))
             .expect("register legacy test runs");
         (live_set, roots, events, containers, jobs, test_runs)
+    }
+
+    fn seed_minimal_v2_store(path: &Path) {
+        let mut database = SemaDatabase::open(EngineOpen::new(path, SchemaVersion::new(2)))
+            .expect("open v2 store");
+        let (live_set, roots, _events, _containers, _jobs, _test_runs) =
+            register_legacy_tables(&mut database);
+        let source_revision = legacy::SourceRevisionRecord {
+            source_revision_policy: legacy::SourceRevisionPolicy::RequireImmutable,
+            requested_ref: legacy::FlakeReference("github:example/fixture".to_string()),
+            resolved_ref: legacy::FlakeReference(
+                "github:example/fixture?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            ),
+            string: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        };
+        let generation = legacy::LiveGeneration {
+            deployment_identifier: legacy::DeploymentIdentifier(1),
+            generation_identifier: legacy::GenerationIdentifier(1),
+            cluster_name: legacy::ClusterName("alpha".to_string()),
+            node_name: legacy::NodeName("node-1".to_string()),
+            generation_artifact: legacy::GenerationArtifact::BaseHost,
+            activation_effect: legacy::ActivationEffect::BootProfile,
+            generation_slot: legacy::GenerationSlot::Current,
+            closure_path: legacy::ClosurePath(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-fixture".to_string(),
+            ),
+            source_revision_record: source_revision,
+        };
+        let root = legacy::GcRoot {
+            generation_identifier: legacy::GenerationIdentifier(1),
+            cluster_name: legacy::ClusterName("alpha".to_string()),
+            node_name: legacy::NodeName("node-1".to_string()),
+            generation_slot: legacy::GenerationSlot::Current,
+            closure_path: legacy::ClosurePath(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-fixture".to_string(),
+            ),
+            label: None,
+        };
+        database
+            .commit_atomic(
+                database
+                    .begin_atomic_commit()
+                    .assert(live_set, generation)
+                    .assert(roots, root),
+            )
+            .expect("seed minimal v2 rows");
+    }
+
+    fn migrate_minimal_v2_store(path: &Path) -> (StoreMigrator, StoreCounts) {
+        seed_minimal_v2_store(path);
+        let migrator = StoreMigrator::new(path);
+        let outcome = migrator.migrate().expect("migrate v2 store");
+        let MigrationOutcome::Migrated { counts, .. } = outcome else {
+            panic!("expected migration outcome");
+        };
+        (migrator, counts)
+    }
+
+    fn metadata_fingerprint(path: &Path) -> (u32, u32, u32) {
+        let metadata = fs::metadata(path).expect("read metadata");
+        (metadata.uid(), metadata.gid(), metadata.mode())
+    }
+
+    #[test]
+    fn schema_three_retry_reconciles_only_verified_post_replacement_owner_residue() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("lojix.sema");
+        seed_minimal_v2_store(&path);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640))
+            .expect("set source permissions");
+        let source_bytes = fs::read(&path).expect("read source bytes");
+        let source_metadata = metadata_fingerprint(&path);
+
+        let migrator = StoreMigrator::new(&path);
+        let outcome = migrator.migrate().expect("migrate v2 store");
+        let MigrationOutcome::Migrated { counts, .. } = outcome else {
+            panic!("expected migration outcome");
+        };
+        let paths = migrator.paths().clone();
+        assert_eq!(
+            fs::read(paths.backup()).expect("read backup bytes"),
+            source_bytes
+        );
+        assert_eq!(metadata_fingerprint(paths.backup()), source_metadata);
+        assert_eq!(metadata_fingerprint(&path), source_metadata);
+
+        // This is the exact durable state after `rename(staging, canonical)`
+        // and its parent sync, but before removal of the hard-link owner.
+        fs::hard_link(paths.backup(), paths.staging_owner())
+            .expect("recreate post-replacement ownership marker");
+        assert!(same_file(paths.backup(), paths.staging_owner()).expect("compare owner inode"));
+        let backup_bytes = fs::read(paths.backup()).expect("read backup bytes");
+        let canonical_metadata = metadata_fingerprint(&path);
+        let backup_metadata = metadata_fingerprint(paths.backup());
+
+        let retry = migrator
+            .migrate()
+            .expect("reconcile verified ownership residue");
+        let MigrationOutcome::AlreadyCurrent {
+            counts: retry_counts,
+            ..
+        } = retry
+        else {
+            panic!("expected schema-three inspection");
+        };
+        assert_eq!(retry_counts, counts);
+        assert!(!path_entry_exists(paths.staging()).expect("inspect staging"));
+        assert!(!path_entry_exists(paths.staging_owner()).expect("inspect owner"));
+        assert_eq!(
+            fs::read(paths.backup()).expect("read backup after retry"),
+            backup_bytes
+        );
+        assert_eq!(metadata_fingerprint(&path), canonical_metadata);
+        assert_eq!(metadata_fingerprint(paths.backup()), backup_metadata);
+        assert_eq!(
+            Store::open(&path)
+                .expect("reopen canonical after retry")
+                .migration_counts()
+                .expect("count canonical rows after retry"),
+            counts
+        );
+
+        let second_retry = migrator.migrate().expect("idempotent retry");
+        let MigrationOutcome::AlreadyCurrent {
+            counts: second_retry_counts,
+            ..
+        } = second_retry
+        else {
+            panic!("expected schema-three inspection");
+        };
+        assert_eq!(second_retry_counts, counts);
+    }
+
+    #[test]
+    fn schema_three_retry_refuses_stale_unowned_staging() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("lojix.sema");
+        let migrator = StoreMigrator::new(&path);
+        let store = Store::open(&path).expect("create schema-three store");
+        drop(store);
+        fs::write(migrator.paths().staging(), b"unowned stale staging")
+            .expect("write stale staging");
+
+        let error = migrator
+            .migrate()
+            .expect_err("stale staging must fail closed");
+        assert!(error.to_string().contains("unresolved staging residue"));
+        assert!(path_entry_exists(migrator.paths().staging()).expect("staging remains"));
+    }
+
+    #[test]
+    fn schema_three_retry_refuses_stale_unpaired_owner() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("lojix.sema");
+        let migrator = StoreMigrator::new(&path);
+        let store = Store::open(&path).expect("create schema-three store");
+        drop(store);
+        fs::write(migrator.paths().staging_owner(), b"unowned stale owner")
+            .expect("write stale owner");
+
+        let error = migrator
+            .migrate()
+            .expect_err("unpaired ownership marker must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("unpaired staging ownership marker")
+        );
+        assert!(path_entry_exists(migrator.paths().staging_owner()).expect("owner remains"));
+    }
+
+    #[test]
+    fn schema_three_retry_refuses_conflicting_backup_and_owner() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("lojix.sema");
+        let (migrator, _counts) = migrate_minimal_v2_store(&path);
+        let paths = migrator.paths().clone();
+        fs::copy(paths.backup(), paths.staging_owner()).expect("copy conflicting owner");
+        assert!(!same_file(paths.backup(), paths.staging_owner()).expect("compare owner inode"));
+
+        let error = migrator
+            .migrate()
+            .expect_err("copied owner must not be attributed to this migrator");
+        assert!(
+            error
+                .to_string()
+                .contains("does not share the schema-two backup inode")
+        );
+        assert!(path_entry_exists(paths.staging_owner()).expect("conflicting owner remains"));
     }
 
     #[test]
