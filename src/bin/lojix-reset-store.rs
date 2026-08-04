@@ -1,4 +1,4 @@
-//! Explicit, path-scoped Lojix v4 store reset CLI.
+//! Explicit, inline-DOTOS, path-scoped Lojix v4 store reset CLI.
 
 use lojix::reconstruction::StoreResetCommand;
 

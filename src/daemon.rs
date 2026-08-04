@@ -91,13 +91,13 @@ impl Daemon {
             AsyncListenerSocket::new(ListenerRole::Owner, configuration.owner_socket_path.clone())
                 .with_socket_mode(SocketMode::new(configuration.owner_socket_mode)),
         ];
-        // Open the durable sema-engine store under the state directory,
-        // parallel to the `generated-inputs` subdir. Opening doubles as the
-        // self-resume: an existing `lojix.sema` resumes its persisted catalog,
-        // commit sequence, and records (ur16). Construction is fallible and its
-        // Result propagates through `run`'s existing Result.
-        let state_database_path =
-            std::path::PathBuf::from(&configuration.state_directory_path).join("lojix.sema");
+        // Open the exact configured durable sema-engine store. The state
+        // directory still owns generated inputs, but it does not derive a
+        // store basename. Opening doubles as the self-resume: the configured
+        // store resumes its persisted catalog, commit sequence, and records
+        // (ur16). Construction is fallible and its Result propagates through
+        // `run`'s existing Result.
+        let state_database_path = std::path::PathBuf::from(&configuration.store_path);
         let runtime = LojixRuntime::new(
             RuntimeConfiguration::from_daemon_configuration(&configuration),
             state_database_path,
@@ -547,17 +547,19 @@ impl DeployJobs {
         for job in jobs {
             let deployment_identifier = *job.deployment_identifier.payload();
             match job.resumption() {
-                // A detached self-switch (bead primary-7u8p): a host `ActivateNow`
-                // targeting the daemon's OWN host restarts the daemon inside the
-                // switch, so the terminal activation write never committed. Only
-                // a COMPLETED host self-switch has set the live system profile to
-                // this job's closure, so that exact match — not merely "an
-                // Activating row on the daemon host" — is the witness that gates
-                // recording (see `self_switch_activation_record`); a racy
-                // unrelated restart during some other self-host activation fails
-                // the match and falls through to the S5 arm below. Recording the
-                // generation the interrupted pipeline could not also advances the
-                // live-set-scanned id allocator, ending the id reuse.
+                // A detached self-switch (bead primary-7u8p): a persisted host
+                // `ActivateNow` through `NixosSystemdBootV1` targeting the
+                // daemon's OWN host restarts the daemon inside the switch, so
+                // the terminal activation write never committed. Only that exact
+                // persisted submission can take this repair, and only a
+                // COMPLETED self-switch has set the live system profile to this
+                // job's closure. `self_switch_activation_record` requires both
+                // predicates before it considers that exact profile match; a
+                // racy unrelated restart during SetBootProfile, boot-once, test,
+                // or user-environment activation therefore falls through to the
+                // S5 arm. Recording the generation the interrupted pipeline
+                // could not also advances the live-set-scanned id allocator,
+                // ending the id reuse.
                 crate::schema_runtime::DeployJobResumption::PollActivationUnit { unit: None }
                     if job.node_name == *daemon_host =>
                 {

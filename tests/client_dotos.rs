@@ -1,9 +1,11 @@
 //! Thin-client Dotos edge tests.
 //!
-//! Each CLI accepts one Dotos request and lowers it to exactly one public
-//! contract input.  Ordinary and owner traffic remain structurally separate.
+//! Each public CLI accepts one inline DOTOS/NOTA request and lowers it to
+//! exactly one public contract input. Ordinary and owner traffic remain
+//! structurally separate, and neither client reads a caller-selected file.
 
-#[cfg(not(feature = "dotos-text"))]
+use std::ffi::OsString;
+
 use lojix::Error;
 use lojix::client::{MetaClient, OrdinaryClient};
 use meta_signal_lojix::schema::lib as meta;
@@ -43,10 +45,57 @@ fn inline_dotos_requires_text_feature() {
 }
 
 #[test]
+fn public_clients_reject_file_argument_variants() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let dotos_path = directory.path().join("request.dotos");
+    let signal_path = directory.path().join("request.sema");
+    std::fs::write(&dotos_path, "not read").expect("write dotos witness");
+    std::fs::write(&signal_path, "not read").expect("write signal witness");
+
+    let dotos_file = dotos_argument(dotos_path.display().to_string());
+    let signal_file = ComponentCommand::from_arguments([signal_path.display().to_string()])
+        .signal_file_argument()
+        .expect("signal file argument");
+
+    assert!(matches!(
+        OrdinaryClient::from_argument(dotos_file),
+        Err(Error::InlineDotosRequired)
+    ));
+    assert!(matches!(
+        MetaClient::from_argument(signal_file),
+        Err(Error::InlineDotosRequired)
+    ));
+}
+
+#[test]
+fn public_clients_reject_zero_extra_flags_and_raw_paths() {
+    let inline = ordinary_query().to_string();
+    let cases = [
+        Vec::new(),
+        vec![OsString::from("--help")],
+        vec![OsString::from("--pretty")],
+        vec![OsString::from("/tmp/not-an-inline-request.dotos")],
+        vec![OsString::from(inline), OsString::from("extra")],
+    ];
+    for arguments in cases {
+        assert!(
+            OrdinaryClient::from_arguments(arguments).is_err(),
+            "ordinary CLI must reject every non-single-inline shape"
+        );
+    }
+
+    assert!(MetaClient::from_arguments(Vec::new()).is_err());
+    assert!(
+        MetaClient::from_arguments([OsString::from("--pretty")]).is_err(),
+        "owner CLI must reject presentation flags"
+    );
+}
+
+#[test]
 #[cfg(feature = "dotos-text")]
 fn ordinary_client_decodes_inline_dotos() {
     let input = ordinary_query();
-    let client = OrdinaryClient::from_argument(dotos_argument(input.to_string()))
+    let client = OrdinaryClient::from_arguments([OsString::from(input.to_string())])
         .expect("decode ordinary Dotos");
     assert_eq!(client.input(), &input);
 }
@@ -55,20 +104,7 @@ fn ordinary_client_decodes_inline_dotos() {
 #[cfg(feature = "dotos-text")]
 fn meta_client_decodes_inline_dotos() {
     let input = owner_pin();
-    let client =
-        MetaClient::from_argument(dotos_argument(input.to_string())).expect("decode owner Dotos");
-    assert_eq!(client.input(), &input);
-}
-
-#[test]
-#[cfg(feature = "dotos-text")]
-fn ordinary_client_decodes_dotos_file() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let path = directory.path().join("query.dotos");
-    let input = ordinary_query();
-    std::fs::write(&path, input.to_string()).expect("write Dotos request");
-
-    let client = OrdinaryClient::from_argument(dotos_argument(path.display().to_string()))
-        .expect("decode ordinary Dotos file");
+    let client = MetaClient::from_arguments([OsString::from(input.to_string())])
+        .expect("decode owner Dotos");
     assert_eq!(client.input(), &input);
 }

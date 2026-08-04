@@ -1898,6 +1898,13 @@ impl sema::DeployJob {
     /// commits: the generation is lost, and because `next_deployment_identifier`
     /// scans only the live set, its id is reused on the next deploy.
     ///
+    /// This repair is available only to the exact persisted submission that
+    /// can cause it: `Host(ActivateNow)` through `NixosSystemdBootV1`. The
+    /// persisted job snapshot must agree on that backend too. In particular,
+    /// a `SetBootProfile`, boot-once, test, or user-environment row never
+    /// becomes a recovered self-switch merely because a profile happens to
+    /// match its closure.
+    ///
     /// `daemon_host_system_closure` is the store path the daemon host's live
     /// system profile (`/nix/var/nix/profiles/system`) currently resolves to.
     /// A COMPLETED host self-switch is the only activation that set that profile
@@ -1915,6 +1922,9 @@ impl sema::DeployJob {
         &self,
         daemon_host_system_closure: Option<&str>,
     ) -> Option<(sema::LiveGeneration, sema::GcRoot)> {
+        if !self.is_persisted_host_activate_now() {
+            return None;
+        }
         let closure_path = self.optional_closure_path.clone()?;
         if daemon_host_system_closure != Some(closure_path.payload().as_str()) {
             return None;
@@ -1952,6 +1962,16 @@ impl sema::DeployJob {
             optional_pin_label: None,
         };
         Some((generation, root))
+    }
+
+    fn is_persisted_host_activate_now(&self) -> bool {
+        self.activation_backend == sema::ActivationBackend::NixosSystemdBootV1
+            && matches!(
+                self.optional_deploy_submission.as_ref(),
+                Some(sema::DeploySubmission::Host(host))
+                    if host.host_deploy_action == ordinary::HostDeployAction::ActivateNow
+                        && host.activation_backend == sema::ActivationBackend::NixosSystemdBootV1
+            )
     }
 }
 
@@ -6161,6 +6181,24 @@ mod tests {
         )
     }
 
+    fn user_submission() -> sema::DeploySubmission {
+        sema::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
+            cluster_name: ordinary::ClusterName::new("fixture-cluster"),
+            node_name: ordinary::NodeName::new("fixture-daemon"),
+            user_name: ordinary::UserName::new("fixture-user"),
+            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
+            deployment_transport: fixture_transport(),
+            deployment_input_mode: sema::DeploymentInputMode::Direct,
+            deployment_output_selector: fixture_output_selector(),
+            activation_backend: sema::ActivationBackend::HomeManagerNixProfileV1,
+            user_environment_action: meta::UserEnvironmentAction::ActivateNow,
+            source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
+            optional_nix_builder_spec: None,
+            extra_substituter_vector: Vec::new(),
+        })
+    }
+
     fn source_revision(policy: ordinary::SourceRevisionPolicy) -> ordinary::SourceRevisionRecord {
         ordinary::SourceRevisionRecord {
             source_revision_policy: policy,
@@ -7342,7 +7380,9 @@ mod tests {
             persisted_flake_input_override_vector: Vec::new(),
             deploy_resume_stage: sema::DeployResumeStage::ResolveFlakeAuth,
             optional_phase_receipt: None,
-            optional_deploy_submission: None,
+            optional_deploy_submission: Some(host_submission(
+                ordinary::HostDeployAction::ActivateNow,
+            )),
         }
     }
 
@@ -7417,6 +7457,43 @@ mod tests {
         );
         // A daemon that cannot read its system profile also declines to record.
         assert!(job.self_switch_activation_record(None).is_none());
+    }
+
+    #[test]
+    fn matching_profile_set_boot_profile_is_not_recovered_as_a_self_switch() {
+        // The profile match is deliberately insufficient. SetBootProfile can
+        // leave an Activating row behind if the daemon restarts for another
+        // reason, but it never runs the detached self-switch protocol.
+        let mut job = interrupted_self_switch_job(Some("/nix/store/aaaaaaaa-system"));
+        job.optional_deploy_submission =
+            Some(host_submission(ordinary::HostDeployAction::SetBootProfile));
+        assert!(
+            job.self_switch_activation_record(Some("/nix/store/aaaaaaaa-system"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn matching_profile_user_activation_is_not_recovered_as_a_self_switch() {
+        // A user activation can share the daemon host's node name and a
+        // coincidental closure string, but no user submission owns the host
+        // system profile. It must remain for normal S5 reconciliation.
+        let mut job = interrupted_self_switch_job(Some("/nix/store/aaaaaaaa-system"));
+        job.optional_deploy_submission = Some(user_submission());
+        assert!(
+            job.self_switch_activation_record(Some("/nix/store/aaaaaaaa-system"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn matching_profile_without_the_systemd_boot_backend_is_not_recovered() {
+        let mut job = interrupted_self_switch_job(Some("/nix/store/aaaaaaaa-system"));
+        job.activation_backend = sema::ActivationBackend::HomeManagerNixProfileV1;
+        assert!(
+            job.self_switch_activation_record(Some("/nix/store/aaaaaaaa-system"))
+                .is_none()
+        );
     }
 
     #[test]

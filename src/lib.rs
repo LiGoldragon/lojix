@@ -117,6 +117,9 @@ pub enum Error {
     #[error("flag-style arguments are not part of component binaries: {0}")]
     FlagArgument(String),
 
+    #[error("this CLI accepts exactly one inline DOTOS/NOTA object")]
+    InlineDotosRequired,
+
     #[error("required runtime configuration environment variable is unset: {0}")]
     MissingRuntimeConfiguration(String),
 
@@ -223,6 +226,10 @@ pub struct DaemonConfiguration {
     pub owner_socket_path: String,
     pub owner_socket_mode: u32,
     pub state_directory_path: String,
+    /// Exact configured durable Lojix store path. This is intentionally
+    /// independent from the state directory so the daemon and reset primitive
+    /// share one explicit target rather than deriving a `lojix.sema` basename.
+    pub store_path: String,
     /// The node name of the host this daemon runs on. It is
     /// retained as deployment identity, while every immutable generation is
     /// evaluated and built locally, copied to its target, then activated there.

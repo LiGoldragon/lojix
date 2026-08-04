@@ -21,7 +21,7 @@ fn write_configuration_round_trips_through_rkyv() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix fixture-daemon 60 TestDefaults.{{fixture-cluster fixture-vm-host Hermetic github:fixture-owner/fixture-test-flake x86_64-linux checks.fixture-a /var/lib/fixture-lojix/cluster.dotos}} {}}}",
+        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon 60 TestDefaults.{{fixture-cluster fixture-vm-host Hermetic github:fixture-owner/fixture-test-flake x86_64-linux checks.fixture-a /var/lib/fixture-lojix/cluster.dotos}} {}}}",
         output.display()
     );
 
@@ -37,6 +37,10 @@ fn write_configuration_round_trips_through_rkyv() {
     );
     assert_eq!(configuration.owner_socket_mode, 0o600);
     assert_eq!(configuration.state_directory_path, "/var/lib/fixture-lojix");
+    assert_eq!(
+        configuration.store_path,
+        "/var/lib/fixture-lojix/configured-lojix-store.db"
+    );
     assert_eq!(configuration.daemon_host, "fixture-daemon");
     assert_eq!(configuration.effect_timeout_seconds, 60);
     let test_defaults = configuration
@@ -62,7 +66,7 @@ fn write_configuration_bakes_no_test_defaults_for_production() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix fixture-daemon 60 NoTestDefaults {}}}",
+        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon 60 NoTestDefaults {}}}",
         output.display()
     );
 
@@ -80,7 +84,7 @@ fn write_configuration_rejects_a_zero_effect_timeout() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix fixture-daemon 0 NoTestDefaults {}}}",
+        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon 0 NoTestDefaults {}}}",
         output.display()
     );
     let status = Command::new(env!("CARGO_BIN_EXE_lojix-write-configuration"))

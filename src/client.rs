@@ -1,22 +1,23 @@
 //! The lojix CLI clients — text-to-Signal adapters for the daemon, one per
 //! authority-tiered socket.
 //!
-//! Each client takes the single `ComponentArgument` (per the no-flags /
-//! DOTOS-only rule), decodes it into exactly one contract `Input` (a
-//! signal-encoded file decoded directly; inline / DOTOS-file text via the
-//! optional `dotos-text` feature), connects to its socket, and exchanges one
-//! length-prefixed frame. Because each client parses only its own contract
+//! Each client takes exactly one inline DOTOS/NOTA object (per the no-flags /
+//! DOTOS-only rule), decodes it into exactly one contract `Input` via the
+//! optional `dotos-text` feature, connects to its socket, and exchanges one
+//! length-prefixed frame. File arguments are deliberately not an input surface:
+//! the public clients never inspect caller-selected files. Because each client
+//! parses only its own contract
 //! there is no cross-tier classification step — the prior unified client's
 //! audit-R7 short-header collision (meta `Deploy` == ordinary `Query` == 0x0)
 //! is avoided structurally rather than disambiguated by rkyv layout. Socket
 //! paths come from the environment (`LOJIX_ORDINARY_SOCKET` /
 //! `LOJIX_OWNER_SOCKET`) — env vars are a DOTOS host, not flags.
 
+use std::ffi::OsString;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
 
 use signal_frame::{ExchangeIdentifier, ExchangeLane, LaneSequence, Reply, SessionEpoch, SubReply};
-use triad_runtime::{ComponentArgument, ComponentCommand, FrameBody, LengthPrefixedCodec};
+use triad_runtime::{ComponentArgument, FrameBody, LengthPrefixedCodec};
 
 use crate::{Error, Result};
 
@@ -75,15 +76,21 @@ pub struct OrdinaryClient {
 
 impl OrdinaryClient {
     pub fn run_from_environment() -> Result<signal_lojix::schema::lib::Output> {
-        let argument = ComponentCommand::from_environment().dotos_argument()?;
-        Self::from_argument(argument)?.run()
+        Self::from_arguments(std::env::args_os().skip(1))?.run()
+    }
+
+    /// Decode exactly one inline DOTOS/NOTA request. This path deliberately
+    /// does not ask `ComponentCommand` to classify the operand: that helper
+    /// treats an existing filesystem path as a Dotos file and ignores
+    /// `--pretty`, while public Lojix clients accept neither.
+    pub fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
+        Self::decode_dotos_text(&inline_dotos_text(arguments)?).map(|input| Self { input })
     }
 
     pub fn from_argument(argument: ComponentArgument) -> Result<Self> {
         let input = match argument {
-            ComponentArgument::SignalFile(file) => Self::decode_signal_file(file.as_path())?,
-            ComponentArgument::DotosFile(file) => {
-                Self::decode_dotos_text(&std::fs::read_to_string(file.as_path())?)?
+            ComponentArgument::DotosFile(_) | ComponentArgument::SignalFile(_) => {
+                return Err(Error::InlineDotosRequired);
             }
             ComponentArgument::InlineDotos(inline) => Self::decode_dotos_text(inline.as_str())?,
         };
@@ -99,12 +106,6 @@ impl OrdinaryClient {
         let identifier = exchange_identifier();
         let reply = exchange.exchange(self.input.encode_request_frame(identifier)?)?;
         Self::decode_reply(&reply, identifier)
-    }
-
-    fn decode_signal_file(path: &Path) -> Result<signal_lojix::schema::lib::Input> {
-        let bytes = std::fs::read(path)?;
-        let (_, input) = signal_lojix::schema::lib::ContractMarker::decode_single_request(&bytes)?;
-        Ok(input)
     }
 
     fn decode_reply(
@@ -156,15 +157,19 @@ pub struct MetaClient {
 
 impl MetaClient {
     pub fn run_from_environment() -> Result<meta_signal_lojix::schema::lib::Output> {
-        let argument = ComponentCommand::from_environment().dotos_argument()?;
-        Self::from_argument(argument)?.run()
+        Self::from_arguments(std::env::args_os().skip(1))?.run()
+    }
+
+    /// Decode exactly one inline DOTOS/NOTA request without accepting either
+    /// file form or presentation flags.
+    pub fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
+        Self::decode_dotos_text(&inline_dotos_text(arguments)?).map(|input| Self { input })
     }
 
     pub fn from_argument(argument: ComponentArgument) -> Result<Self> {
         let input = match argument {
-            ComponentArgument::SignalFile(file) => Self::decode_signal_file(file.as_path())?,
-            ComponentArgument::DotosFile(file) => {
-                Self::decode_dotos_text(&std::fs::read_to_string(file.as_path())?)?
+            ComponentArgument::DotosFile(_) | ComponentArgument::SignalFile(_) => {
+                return Err(Error::InlineDotosRequired);
             }
             ComponentArgument::InlineDotos(inline) => Self::decode_dotos_text(inline.as_str())?,
         };
@@ -180,13 +185,6 @@ impl MetaClient {
         let identifier = exchange_identifier();
         let reply = exchange.exchange(self.input.encode_request_frame(identifier)?)?;
         Self::decode_reply(&reply, identifier)
-    }
-
-    fn decode_signal_file(path: &Path) -> Result<meta_signal_lojix::schema::lib::Input> {
-        let bytes = std::fs::read(path)?;
-        let (_, input) =
-            meta_signal_lojix::schema::lib::ContractMarker::decode_single_request(&bytes)?;
-        Ok(input)
     }
 
     fn decode_reply(
@@ -226,4 +224,24 @@ impl MetaClient {
     fn decode_dotos_text(_text: &str) -> Result<meta_signal_lojix::schema::lib::Input> {
         Err(Error::DotosTextUnsupported)
     }
+}
+
+/// Select exactly one text operand without ever treating an existing path as a
+/// request file. `--pretty` is a rejected flag here, not a presentation mode:
+/// public Lojix clients are single-object command surfaces.
+fn inline_dotos_text(arguments: impl IntoIterator<Item = OsString>) -> Result<String> {
+    let mut arguments = arguments.into_iter();
+    let Some(argument) = arguments.next() else {
+        return Err(Error::ExpectedSingleArgument);
+    };
+    if arguments.next().is_some() {
+        return Err(Error::ExpectedSingleArgument);
+    }
+    let argument = argument
+        .into_string()
+        .map_err(|_| Error::InlineDotosRequired)?;
+    if argument.starts_with('-') {
+        return Err(Error::FlagArgument(argument));
+    }
+    Ok(argument)
 }

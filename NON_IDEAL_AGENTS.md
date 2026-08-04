@@ -30,7 +30,7 @@ The daemon has no default socket locations. Clients must receive both
 `LOJIX_ORDINARY_SOCKET` and `LOJIX_OWNER_SOCKET` from their environment or
 launch configuration. CriomOS configures those paths explicitly through
 `services.lojix`; it also supplies the service account, socket modes, state
-directory, exact `lojix.sema` path, startup archive path, daemon host, and
+directory, exact store path, startup archive path, daemon host, and
 effect timeout. Enabling the service without those values is rejected at Nix
 evaluation time.
 
@@ -43,12 +43,14 @@ a test attribute from a host or node name.
 
 Schema v4 refuses older Lojix data. There is no migration or legacy-resume
 path. With `lojix-daemon` stopped, a privileged operator may manually start
-the dedicated `lojix-reset-store` unit. It invokes `lojix-reset-store` only on
-the configured absolute `lojix.sema` path and conflicts with the daemon.
+the dedicated `lojix-reset-store` unit. It invokes `lojix-reset-store` only
+with the configured absolute store path inside a typed inline
+`StoreResetRequest.{<path>}` object and conflicts with the daemon.
 
-The reset binary accepts exactly one absolute, traversal-free regular file
-whose basename is `lojix.sema`; it removes only that Lojix file and the three
-narrowly named Lojix schema sidecars, then creates a fresh empty v4 store. It
-rejects every other path, directory, symlinked store, and unknown schema. It
-does not select, follow, or modify a Spirit database. The reset is idempotent
-for an existing v4 store. Do not run it as part of ordinary daemon startup.
+The reset binary accepts exactly one inline request object, never a raw path or
+flag. Its configured absolute target must be traversal-free, regular,
+non-symlinked, and recognised as a Lojix catalog family with a supported schema
+before removal; only then are the three protocol sidecars mechanically
+derived. It does not select, follow, or modify a Spirit database. The reset is
+idempotent for an existing v4 store. Do not run it as part of ordinary daemon
+startup.

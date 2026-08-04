@@ -15,6 +15,11 @@ fn daemon_configuration_round_trips_through_rkyv_file() {
         owner_socket_path: directory.path().join("owner.sock").display().to_string(),
         owner_socket_mode: 0o660,
         state_directory_path: directory.path().join("state").display().to_string(),
+        store_path: directory
+            .path()
+            .join("configured-lojix-store.db")
+            .display()
+            .to_string(),
         daemon_host: "fixture-daemon".to_string(),
         effect_timeout_seconds: 60,
         test_defaults: Some(lojix::TestDefaults {

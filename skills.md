@@ -38,9 +38,11 @@ these):
 
 ## Storage and wire defaults
 
-- **Storage:** schema-derived SEMA table nouns over a durable, configured
-  exact `lojix.sema` store. Schema v4 refuses older stores; the dedicated
-  reset primitive creates a fresh v4 store while the daemon is stopped.
+- **Storage:** schema-derived SEMA table nouns over one durable, configured
+  exact store path. The startup archive carries that path to the daemon and
+  reset service; no component derives `lojix.sema`. Schema v4 refuses older
+  stores; the dedicated inline reset primitive creates a fresh v4 store while
+  the daemon is stopped only after verifying the Lojix family/schema.
 - **Wire:** `signal-frame` records from `signal-lojix` and
   `meta-signal-lojix`. Length-prefixed rkyv archives over two Unix
   sockets. Don't invent parallel framing or envelope mechanisms.

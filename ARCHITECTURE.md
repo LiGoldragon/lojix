@@ -110,8 +110,9 @@ streams subscription events.
 - **Container lifecycle observation** — systemd dbus subscriptions
   for `containers.<name>.service` transitions; mirrors into the
   event log.
-- **Thin CLI** — `lojix` binary reads a single DOTOS request per the
-  one-record operator-surface discipline, forwards it as a
+- **Thin CLIs** — `lojix` and `meta-lojix` each read exactly one inline
+  DOTOS/NOTA object per the one-record operator-surface discipline; they reject
+  raw paths, DOTOS files, signal files, and flags. Each forwards its object as a
   `signal-lojix` frame to the daemon, and prints the reply or
   streams events.
 
@@ -161,7 +162,8 @@ Each daemon actor is a Kameo actor per
 ## 4 · Storage and wire
 
 - **Storage:** schema-derived SEMA tables over a durable `sema-engine`
-  store — a configured exact `lojix.sema` file. The ten
+  store — one exact configured absolute file shared by daemon startup and the
+  reset service. The ten
   record families (live set, gc-roots, event log, container lifecycle,
   deploy job, test run, deployment record, identifier allocation, deployment
   outbox, pending transition intent, and legacy-event quarantine) are keyed
@@ -179,10 +181,12 @@ Each daemon actor is a Kameo actor per
   acknowledged event and outbox together, while the acknowledged intent keeps
   restart from reconstructing or re-delivering that historical transition.
   There is no migration or legacy resume path. With the daemon stopped, the
-  manually started `lojix-reset-store` accepts only an exact absolute path named
-  `lojix.sema`, removes that regular Lojix file and its three narrowly named
-  migration sidecars, then creates a fresh v4 store. It rejects directories,
-  unknown schemas, and every other filename; it never selects a Spirit store.
+  manually started `lojix-reset-store` accepts only an inline
+  `StoreResetRequest.{<configured-path>}` object. An existing primary file must
+  be absolute, regular, non-symlinked, and prove its recognised Lojix catalog
+  family plus supported schema before the reset removes it. Protocol sidecars
+  are derived only from that proven primary; the reset never selects a Spirit
+  store.
 - **Wire:** `signal-frame` records carrying `signal-lojix` on the
   ordinary socket and `meta-signal-lojix` on the owner/meta socket.
   Length-prefixed rkyv archives over Unix sockets.
@@ -219,14 +223,14 @@ Each daemon actor is a Kameo actor per
   flake references, or daemon error text.
 - The startup configuration carries the test-op defaults as an OPTIONAL
   fixture: `DaemonConfiguration.test_defaults` is `Option<TestDefaults>` and the
-  writer's field-7 `WriterTestDefaultsChoice` is `NoTestDefaults` (production)
+  writer's `WriterTestDefaultsChoice` is `NoTestDefaults` (production)
   or `(TestDefaults …)` (test/dev). A production node bakes `NoTestDefaults` →
   `None`, so a bare `(Check …)`/`(Run …)` is rejected with `NoTestDefaults`
   rather than resolving against a per-node baked test cluster. Test fixtures are
   supplied only by test code (the workspace deployment-independence discipline).
-- The CLI sends one DOTOS-encoded `signal-lojix` request per
-  invocation and prints one DOTOS-encoded reply (or streams events
-  until the subscription closes).
+- Each public CLI sends one inline DOTOS/NOTA object for its own contract per
+  invocation, never reads a caller-selected request file, and prints one
+  DOTOS-encoded reply (or streams events until the subscription closes).
 - Every external operation is a typed `signal-lojix` variant;
   there is no untyped escape hatch on the wire.
 - The daemon never initiates deploys on its own — every deploy

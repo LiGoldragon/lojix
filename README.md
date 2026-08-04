@@ -40,24 +40,27 @@ or legacy resume path. After stopping `lojix-daemon`, CriomOS may run the
 dedicated reset primitive on its configured, exact store file:
 
 ```sh
-lojix-reset-store /var/lib/lojix/lojix.sema
+lojix-reset-store 'StoreResetRequest.{/var/lib/lojix/configured-lojix-store.db}'
 ```
 
-The command accepts only one absolute, traversal-free path whose basename is
-`lojix.sema`. It rejects directories, unknown schema versions, and a nonregular
-store file. It removes only that file plus the three narrowly named Lojix
-schema sidecars (`.schema-pre-v3.backup`, `.schema-v3.pending`, and
-`.schema-v3.pending.owner`), then creates a fresh schema-4 store. It never
-selects or follows a Spirit database. Repeating it is safe and produces a new,
-empty v4 store each time.
+The command accepts exactly one inline `StoreResetRequest.{<configured-path>}`
+object: no raw path, file, or flag form is accepted. The supplied path must be
+absolute and traversal-free; an existing file must be regular, non-symlinked,
+and prove the recognised Lojix family catalog plus a supported schema before it
+is removed. Only then are its three protocol sidecars
+(`.schema-pre-v3.backup`, `.schema-v3.pending`, and
+`.schema-v3.pending.owner`) derived and removed. It never selects or follows a
+Spirit database. Repeating it is safe and produces a new, empty v4 store each
+time.
 
 ## Daemon startup configuration
 
 `lojix-write-configuration` is the only DOTOS-to-startup boundary. It accepts
 one `ConfigurationWriteRequest` (inline or `.dotos` file) containing, in
-order, ordinary socket and mode, owner socket and mode, state directory,
-daemon host, effect timeout, `NoTestDefaults` or `TestDefaults`, and output
-path; it writes the rkyv startup archive. Production uses `NoTestDefaults`.
+order, ordinary socket and mode, owner socket and mode, state directory, exact
+store path, daemon host, effect timeout, `NoTestDefaults` or `TestDefaults`,
+and output path; it writes the rkyv startup archive. Production uses
+`NoTestDefaults`.
 `lojix-daemon` accepts only that generated signal/rkyv file, never inline
 DOTOS or a `.dotos` startup argument. Service activation invokes the writer
 and passes its output path to the daemon; reset is a separate, manually
