@@ -15,8 +15,9 @@ use lojix::bootstrap::{
     BootstrapHermeticTest, BootstrapJournalParent, BootstrapLocalBootstrapV1, BootstrapMode,
     BootstrapNixStoreUri, BootstrapNixSystem, BootstrapOutputSelector,
     BootstrapRemoteNixosSystemdBootV1, BootstrapRequestId, BootstrapRun, BootstrapSshDestination,
-    BootstrapSystemProfilePath, BootstrapTerminalEvidencePath, BootstrapTestPlan,
-    decode_single_inline, run_with_executor, run_with_executor_and_crash,
+    BootstrapSshIdentityFile, BootstrapSshKnownHostsFile, BootstrapSshPolicy,
+    BootstrapStrictHostKeyMode, BootstrapSystemProfilePath, BootstrapTerminalEvidencePath,
+    BootstrapTestPlan, decode_single_inline, run_with_executor, run_with_executor_and_crash,
 };
 
 const FLAKE: &str = "github:fixture-owner/fixture-flake/0123456789abcdef0123456789abcdef01234567";
@@ -86,7 +87,7 @@ impl BootstrapExecutor for SuppressedExecutor {
                 self.copied = true;
                 Ok(String::new())
             }
-            ("ssh", _) => {
+            (program, _) if program.ends_with("/ssh") => {
                 let body = command.arguments.last().expect("remote command");
                 if body.contains("nix-store --query") {
                     Ok(if self.copied { "Present" } else { "Absent" }.to_string())
@@ -209,6 +210,13 @@ fn local_boot_once(directory: &Path) -> BootstrapRun {
 
 fn remote_boot_once(directory: &Path) -> BootstrapRun {
     let (journal_parent, gc_root_path, terminal_evidence_path) = paths(directory);
+    let identity_file = directory.join("ssh-identity");
+    let known_hosts_file = directory.join("known-hosts");
+    fs::write(&identity_file, "fixture private key").expect("identity fixture");
+    fs::write(&known_hosts_file, "activate.invalid fixture-key").expect("known-hosts fixture");
+    fs::set_permissions(&identity_file, fs::Permissions::from_mode(0o600)).expect("identity mode");
+    fs::set_permissions(&known_hosts_file, fs::Permissions::from_mode(0o600))
+        .expect("known-hosts mode");
     BootstrapRun {
         request_id: BootstrapRequestId("fixture-remote".to_string()),
         mode: BootstrapMode::BootOnce(BootstrapBootOnce {
@@ -229,6 +237,15 @@ fn remote_boot_once(directory: &Path) -> BootstrapRun {
                     ssh_destination: BootstrapSshDestination(
                         "root@activate.invalid:2222".to_string(),
                     ),
+                    ssh_policy: BootstrapSshPolicy {
+                        identity_file: BootstrapSshIdentityFile(
+                            identity_file.display().to_string(),
+                        ),
+                        known_hosts_file: BootstrapSshKnownHostsFile(
+                            known_hosts_file.display().to_string(),
+                        ),
+                        strict_host_key_mode: BootstrapStrictHostKeyMode::RequireKnownHost,
+                    },
                     system_profile_path: BootstrapSystemProfilePath(
                         "/nix/var/nix/profiles/system".to_string(),
                     ),
@@ -254,7 +271,8 @@ fn build_only_has_no_transport_or_activation_body() {
     assert_eq!(terminal.status, "Succeeded");
     assert_eq!(executor.count("nix-store", "--add-root"), 1);
     assert!(executor.commands.iter().all(|command| {
-        command.program != "ssh" && command.program != "/run/current-system/sw/bin/systemd-run"
+        !command.program.ends_with("/ssh")
+            && command.program != "/run/current-system/sw/bin/systemd-run"
     }));
     assert_eq!(
         fs::symlink_metadata(directory.path().join("terminal.rkyv"))
@@ -276,7 +294,7 @@ fn remote_dispatch_is_no_block_and_identity_is_explicit() {
         .commands
         .iter()
         .find(|command| {
-            command.program == "ssh"
+            command.program.ends_with("/ssh")
                 && command
                     .arguments
                     .last()
@@ -293,7 +311,7 @@ fn remote_dispatch_is_no_block_and_identity_is_explicit() {
         dispatch
             .arguments
             .windows(2)
-            .any(|arguments| arguments == ["-F", "/dev/null"])
+            .any(|arguments| arguments[0] == "-F" && arguments[1].ends_with("/ssh-config"))
     );
     assert!(dispatch.arguments.last().is_some_and(|body| {
         body.contains("--no-block")
@@ -301,12 +319,36 @@ fn remote_dispatch_is_no_block_and_identity_is_explicit() {
             && body.contains("--unit=")
     }));
     assert!(executor.commands.iter().any(|command| {
-        command.program == "ssh"
+        command.program.ends_with("/ssh")
             && command
                 .arguments
                 .last()
                 .is_some_and(|body| body.contains("systemctl show"))
     }));
+    let copy = executor
+        .commands
+        .iter()
+        .find(|command| {
+            command.program == "nix" && command.arguments.first() == Some(&"copy".to_string())
+        })
+        .expect("copy");
+    assert!(copy.environment.iter().any(|(key, value)| {
+        key == "NIX_SSHOPTS"
+            && value.contains("ssh-config")
+            && value.contains("IdentitiesOnly=yes")
+            && value.contains("ProxyCommand=none")
+    }));
+    let ssh_config = fs::read_dir(directory.path())
+        .expect("journal parent")
+        .map(|entry| entry.expect("entry").path().join("ssh-config"))
+        .find(|path| path.exists())
+        .expect("private generated SSH config");
+    let config = fs::read_to_string(ssh_config).expect("read config");
+    assert!(config.contains("StrictHostKeyChecking yes"));
+    assert!(config.contains("IdentitiesOnly yes"));
+    assert!(config.contains("IdentityAgent none"));
+    assert!(config.contains("ProxyCommand none"));
+    assert!(config.contains("ControlMaster no"));
     let bytes = fs::read(directory.path().join("terminal.rkyv")).expect("evidence");
     let evidence_text = String::from_utf8_lossy(&bytes);
     assert!(!evidence_text.contains("activate.invalid"));
@@ -337,7 +379,7 @@ fn local_backend_has_explicit_systemd_and_path_environment() {
         executor
             .commands
             .iter()
-            .all(|command| command.program != "ssh")
+            .all(|command| !command.program.ends_with("/ssh"))
     );
 }
 
@@ -366,7 +408,7 @@ fn crash_receipts_resume_without_repeating_prior_effects() {
             .commands
             .iter()
             .filter(|command| {
-                command.program == "ssh"
+                command.program.ends_with("/ssh")
                     && command
                         .arguments
                         .last()
@@ -384,7 +426,7 @@ fn crash_receipts_resume_without_repeating_prior_effects() {
                 resumed
                     .commands
                     .iter()
-                    .filter(|command| command.program == "ssh"
+                    .filter(|command| command.program.ends_with("/ssh")
                         && command
                             .arguments
                             .last()
@@ -396,6 +438,92 @@ fn crash_receipts_resume_without_repeating_prior_effects() {
         }
         assert_eq!(initial_root, 1, "{point:?}");
     }
+}
+
+#[test]
+fn root_command_crash_reconciles_private_staging_for_every_mode() {
+    for mode in ["build", "local", "remote"] {
+        let directory = tempfile::tempdir().expect("tempdir");
+        private(directory.path());
+        let request = match mode {
+            "build" => build_only(directory.path()),
+            "local" => local_boot_once(directory.path()),
+            "remote" => remote_boot_once(directory.path()),
+            _ => unreachable!(),
+        };
+        let mut initial = SuppressedExecutor::default();
+        let mut crash = CrashOnce(BootstrapCrashPoint::AfterGcRootCommand);
+        assert!(matches!(
+            run_with_executor_and_crash(request.clone(), &mut initial, &mut crash),
+            Err(lojix::bootstrap::BootstrapError::InjectedCrash)
+        ));
+        let staging = fs::read_dir(directory.path())
+            .expect("journal parent")
+            .map(|entry| entry.expect("entry").path().join("gc-root-staging"))
+            .find(|path| fs::symlink_metadata(path).is_ok())
+            .expect("staging root survives crash");
+        assert_eq!(
+            fs::read_link(&staging).expect("staging target"),
+            Path::new(CLOSURE)
+        );
+
+        let mut resumed = SuppressedExecutor::default();
+        run_with_executor(request, &mut resumed).expect("reconcile root staging");
+        assert_eq!(resumed.count("nix-store", "--add-root"), 0, "{mode}");
+        assert_eq!(
+            fs::read_link(directory.path().join("generation-root")).expect("final root"),
+            Path::new(CLOSURE)
+        );
+        assert!(fs::symlink_metadata(&staging).is_err(), "{mode}");
+    }
+}
+
+#[test]
+fn wrong_root_staging_after_crash_fails_without_deleting_it() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    private(directory.path());
+    let request = build_only(directory.path());
+    let mut initial = SuppressedExecutor::default();
+    let mut crash = CrashOnce(BootstrapCrashPoint::AfterGcRootCommand);
+    assert!(run_with_executor_and_crash(request.clone(), &mut initial, &mut crash).is_err());
+    let staging = fs::read_dir(directory.path())
+        .expect("journal parent")
+        .map(|entry| entry.expect("entry").path().join("gc-root-staging"))
+        .find(|path| fs::symlink_metadata(path).is_ok())
+        .expect("staging root");
+    fs::remove_file(&staging).expect("replace fixture link");
+    symlink(
+        "/nix/store/cccccccccccccccccccccccccccccccc-wrong",
+        &staging,
+    )
+    .expect("wrong link");
+    let mut resumed = SuppressedExecutor::default();
+    assert!(run_with_executor(request, &mut resumed).is_err());
+    assert_eq!(
+        fs::read_link(staging).expect("wrong staging remains"),
+        Path::new("/nix/store/cccccccccccccccccccccccccccccccc-wrong")
+    );
+}
+
+#[test]
+fn nonprivate_ssh_policy_files_are_rejected_before_any_effect() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    private(directory.path());
+    let mut request = remote_boot_once(directory.path());
+    let BootstrapMode::BootOnce(boot) = &mut request.mode else {
+        unreachable!()
+    };
+    let BootstrapActivationBackend::RemoteNixosSystemdBootV1(remote) = &mut boot.activation_backend
+    else {
+        unreachable!()
+    };
+    let bad_identity = directory.path().join("bad-identity");
+    fs::write(&bad_identity, "bad").expect("identity");
+    fs::set_permissions(&bad_identity, fs::Permissions::from_mode(0o644)).expect("mode");
+    remote.ssh_policy.identity_file = BootstrapSshIdentityFile(bad_identity.display().to_string());
+    let mut executor = SuppressedExecutor::default();
+    assert!(run_with_executor(request, &mut executor).is_err());
+    assert!(executor.commands.is_empty());
 }
 
 #[test]
@@ -501,11 +629,12 @@ fn failed_effect_writes_private_terminal_evidence_before_cleanup() {
     assert!(
         fs::read_dir(directory.path())
             .expect("parent")
-            .all(|entry| !entry
+            .any(|entry| entry
                 .expect("entry")
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".lojix-bootstrap-v5-"))
+                .starts_with(".lojix-bootstrap-v5-")),
+        "finalized private journal is retained safely"
     );
 }
 

@@ -54,6 +54,7 @@ pub struct BootstrapRun {
 pub struct BootstrapRequestId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[allow(clippy::large_enum_variant)]
 pub enum BootstrapMode {
     BuildOnly(BootstrapBuildOnly),
     BootOnce(BootstrapBootOnce),
@@ -150,8 +151,23 @@ pub enum BootstrapActivationBackend {
 pub struct BootstrapRemoteNixosSystemdBootV1 {
     pub nix_store_uri: BootstrapNixStoreUri,
     pub ssh_destination: BootstrapSshDestination,
+    pub ssh_policy: BootstrapSshPolicy,
     pub system_profile_path: BootstrapSystemProfilePath,
     pub boot_entries_directory: BootstrapBootEntriesDirectory,
+}
+
+/// Request-owned SSH authority. The bootstrapper accepts no ambient agent,
+/// config, user/host, proxy, multiplexing, or trust-store default.
+#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+pub struct BootstrapSshPolicy {
+    pub identity_file: BootstrapSshIdentityFile,
+    pub known_hosts_file: BootstrapSshKnownHostsFile,
+    pub strict_host_key_mode: BootstrapStrictHostKeyMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, DotosDecode)]
+pub enum BootstrapStrictHostKeyMode {
+    RequireKnownHost,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
@@ -180,6 +196,8 @@ text_field!(BootstrapGcRootPath);
 text_field!(BootstrapTerminalEvidencePath);
 text_field!(BootstrapNixStoreUri);
 text_field!(BootstrapSshDestination);
+text_field!(BootstrapSshIdentityFile);
+text_field!(BootstrapSshKnownHostsFile);
 text_field!(BootstrapSystemProfilePath);
 text_field!(BootstrapBootEntriesDirectory);
 
@@ -295,6 +313,7 @@ impl BootstrapError {
 pub struct BootstrapCommand {
     pub program: String,
     pub arguments: Vec<String>,
+    pub environment: Vec<(String, String)>,
 }
 
 /// The body boundary for every bootstrap effect.  Tests supply an executor
@@ -311,6 +330,7 @@ impl BootstrapExecutor for ProcessBootstrapExecutor {
     fn run(&mut self, command: BootstrapCommand) -> std::result::Result<String, BootstrapError> {
         let output = Command::new(&command.program)
             .args(&command.arguments)
+            .envs(command.environment.iter().map(|(key, value)| (key, value)))
             .output()
             .map_err(|_| BootstrapError::Effect(BootstrapEffectStage::Built))?;
         if !output.status.success() {
@@ -350,6 +370,8 @@ pub fn run_with_executor<E: BootstrapExecutor>(
 /// evidence or cleanup, exactly like an abrupt process loss at that boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootstrapCrashPoint {
+    /// The root command returned, before the staging receipt is handed off.
+    AfterGcRootCommand,
     AfterGcRoot,
     AfterCopy,
     AfterDispatch,
@@ -448,11 +470,24 @@ fn execute<E: BootstrapExecutor, C: BootstrapCrashInjector>(
 
     if !journal.succeeded(JournalStage::GcRooted)? {
         journal.intent(JournalStage::GcRooted)?;
-        if !verify_root_receipt(&request.gc_root_path, &closure) {
-            let staging = journal.directory.join("gc-root-staging");
-            if staging.exists() {
-                return Err(BootstrapError::Validation("gc root staging already exists"));
+        let staging = journal.directory.join("gc-root-staging");
+        let staging_exists = path_entry_exists(&staging)?;
+        let root_exists = path_entry_exists(&request.gc_root_path)?;
+        if staging_exists && root_exists {
+            return Err(BootstrapError::Validation("gc root handoff collision"));
+        }
+        if staging_exists {
+            if !verify_root_receipt(&staging, &closure) {
+                return Err(BootstrapError::Validation(
+                    "gc root staging receipt changed",
+                ));
             }
+            link_root_no_replace(&staging, &request.gc_root_path, &closure)?;
+        } else if root_exists {
+            if !verify_root_receipt(&request.gc_root_path, &closure) {
+                return Err(BootstrapError::Validation("gc root receipt changed"));
+            }
+        } else {
             executor
                 .run(BootstrapCommand {
                     program: "nix-store".to_string(),
@@ -462,8 +497,10 @@ fn execute<E: BootstrapExecutor, C: BootstrapCrashInjector>(
                         "--realise".to_string(),
                         closure.clone(),
                     ],
+                    environment: Vec::new(),
                 })
                 .map_err(|_| BootstrapError::Effect(BootstrapEffectStage::GcRooted))?;
+            crash.after(BootstrapCrashPoint::AfterGcRootCommand)?;
             link_root_no_replace(&staging, &request.gc_root_path, &closure)?;
         }
         journal.set_root_receipt(&request.gc_root_path, &closure)?;
@@ -484,9 +521,10 @@ fn execute<E: BootstrapExecutor, C: BootstrapCrashInjector>(
 
     match &boot_once.activation_backend {
         BootstrapActivationBackendValidated::Remote(remote) => {
+            let ssh_config = remote.ssh_policy.write_private_config(journal)?;
             if !journal.succeeded(JournalStage::Copied)? {
                 journal.intent(JournalStage::Copied)?;
-                if !remote_has_closure(remote, &closure, executor)? {
+                if !remote_has_closure(remote, &ssh_config, &closure, executor)? {
                     executor
                         .run(BootstrapCommand {
                             program: "nix".to_string(),
@@ -497,6 +535,10 @@ fn execute<E: BootstrapExecutor, C: BootstrapCrashInjector>(
                                 remote.nix_store_uri.clone(),
                                 closure.clone(),
                             ],
+                            environment: vec![(
+                                "NIX_SSHOPTS".to_string(),
+                                remote.ssh_policy.nix_ssh_options(&ssh_config),
+                            )],
                         })
                         .map_err(|_| BootstrapError::Effect(BootstrapEffectStage::Copied))?;
                 }
@@ -504,7 +546,15 @@ fn execute<E: BootstrapExecutor, C: BootstrapCrashInjector>(
                 journal.outcome(JournalStage::Copied, true)?;
                 crash.after(BootstrapCrashPoint::AfterCopy)?;
             }
-            dispatch_and_reconcile_remote(request, journal, remote, &closure, executor, crash)?;
+            dispatch_and_reconcile_remote(
+                request,
+                journal,
+                remote,
+                &ssh_config,
+                &closure,
+                executor,
+                crash,
+            )?;
         }
         BootstrapActivationBackendValidated::Local(local) => {
             dispatch_and_reconcile_local(request, journal, local, &closure, executor, crash)?;
@@ -527,6 +577,7 @@ fn run_hermetic_test<E: BootstrapExecutor>(
             test.nix_system.clone(),
             format!("{}#{}", test.flake_reference, test.output_selector),
         ],
+        environment: Vec::new(),
     })?;
     Ok(())
 }
@@ -552,6 +603,7 @@ fn build<E: BootstrapExecutor>(
     let derivation = first_line(executor.run(BootstrapCommand {
         program: "nix".to_string(),
         arguments: evaluation_arguments,
+        environment: Vec::new(),
     })?)?;
     if !is_canonical_nix_store_item(&derivation) || !derivation.ends_with(".drv") {
         return Err(BootstrapError::Effect(BootstrapEffectStage::Built));
@@ -577,6 +629,7 @@ fn build<E: BootstrapExecutor>(
     let closure = first_line(executor.run(BootstrapCommand {
         program: "nix".to_string(),
         arguments: build_arguments,
+        environment: Vec::new(),
     })?)?;
     if !is_canonical_nix_store_item(&closure) || closure.ends_with(".drv") {
         return Err(BootstrapError::Effect(BootstrapEffectStage::Built));
@@ -691,6 +744,7 @@ fn materialize<E: BootstrapExecutor>(
                 "--sri".to_string(),
                 directory.display().to_string(),
             ],
+            environment: Vec::new(),
         })?)?;
         if !hash.starts_with("sha256-") || hash.chars().any(char::is_control) {
             return Err(BootstrapError::Materialization);
@@ -872,6 +926,7 @@ fn unit_state(output: &str) -> UnitState {
 
 fn remote_has_closure<E: BootstrapExecutor>(
     remote: &BootstrapRemoteBackendValidated,
+    ssh_config: &Path,
     closure: &str,
     executor: &mut E,
 ) -> std::result::Result<bool, BootstrapError> {
@@ -881,8 +936,9 @@ fn remote_has_closure<E: BootstrapExecutor>(
     );
     let output = executor
         .run(BootstrapCommand {
-            program: "ssh".to_string(),
-            arguments: remote.ssh_identity.ssh_arguments(command),
+            program: ssh_executable(),
+            arguments: remote.ssh_identity.ssh_arguments(ssh_config, command),
+            environment: Vec::new(),
         })
         .map_err(|_| BootstrapError::RecoveryPending)?;
     Ok(output.trim() == "Present")
@@ -890,6 +946,7 @@ fn remote_has_closure<E: BootstrapExecutor>(
 
 fn remote_unit_state<E: BootstrapExecutor>(
     remote: &BootstrapRemoteBackendValidated,
+    ssh_config: &Path,
     unit: &str,
     executor: &mut E,
 ) -> std::result::Result<UnitState, BootstrapError> {
@@ -899,8 +956,9 @@ fn remote_unit_state<E: BootstrapExecutor>(
     );
     let output = executor
         .run(BootstrapCommand {
-            program: "ssh".to_string(),
-            arguments: remote.ssh_identity.ssh_arguments(command),
+            program: ssh_executable(),
+            arguments: remote.ssh_identity.ssh_arguments(ssh_config, command),
+            environment: Vec::new(),
         })
         .map_err(|_| BootstrapError::RecoveryPending)?;
     Ok(unit_state(&output))
@@ -918,6 +976,7 @@ fn local_unit_state<E: BootstrapExecutor>(
         .run(BootstrapCommand {
             program: "/bin/sh".to_string(),
             arguments: vec!["-eu".to_string(), "-c".to_string(), command],
+            environment: Vec::new(),
         })
         .map_err(|_| BootstrapError::RecoveryPending)?;
     Ok(unit_state(&output))
@@ -942,6 +1001,7 @@ fn dispatch_and_reconcile_remote<E: BootstrapExecutor, C: BootstrapCrashInjector
     request: &ValidatedBootstrapRun,
     journal: &EphemeralJournal,
     remote: &BootstrapRemoteBackendValidated,
+    ssh_config: &Path,
     closure: &str,
     executor: &mut E,
     crash: &mut C,
@@ -949,17 +1009,21 @@ fn dispatch_and_reconcile_remote<E: BootstrapExecutor, C: BootstrapCrashInjector
     let unit = boot_once_unit_name(&request.request_hash);
     if !journal.succeeded(JournalStage::BootOnceScheduled)? {
         journal.intent(JournalStage::BootOnceScheduled)?;
-        if remote_unit_state(remote, &unit, executor)? == UnitState::NotFound {
+        if remote_unit_state(remote, ssh_config, &unit, executor)? == UnitState::NotFound {
             executor
                 .run(BootstrapCommand {
-                    program: "ssh".to_string(),
-                    arguments: remote.ssh_identity.ssh_arguments(remote_dispatch_command(
-                        &unit,
-                        &request.request_hash,
-                        closure,
-                        &remote.system_profile_path,
-                        &remote.boot_entries_directory,
-                    )),
+                    program: ssh_executable(),
+                    arguments: remote.ssh_identity.ssh_arguments(
+                        ssh_config,
+                        remote_dispatch_command(
+                            &unit,
+                            &request.request_hash,
+                            closure,
+                            &remote.system_profile_path,
+                            &remote.boot_entries_directory,
+                        ),
+                    ),
+                    environment: Vec::new(),
                 })
                 .map_err(|_| BootstrapError::RecoveryPending)?;
         }
@@ -967,12 +1031,13 @@ fn dispatch_and_reconcile_remote<E: BootstrapExecutor, C: BootstrapCrashInjector
         journal.outcome(JournalStage::BootOnceScheduled, true)?;
         crash.after(BootstrapCrashPoint::AfterDispatch)?;
     }
-    reconcile_remote_activation(journal, remote, &unit, executor, crash)
+    reconcile_remote_activation(journal, remote, ssh_config, &unit, executor, crash)
 }
 
 fn reconcile_remote_activation<E: BootstrapExecutor, C: BootstrapCrashInjector>(
     journal: &EphemeralJournal,
     remote: &BootstrapRemoteBackendValidated,
+    ssh_config: &Path,
     unit: &str,
     executor: &mut E,
     crash: &mut C,
@@ -982,7 +1047,7 @@ fn reconcile_remote_activation<E: BootstrapExecutor, C: BootstrapCrashInjector>(
     }
     journal.intent(JournalStage::BootOnceActivated)?;
     for _ in 0..30 {
-        match remote_unit_state(remote, unit, executor)? {
+        match remote_unit_state(remote, ssh_config, unit, executor)? {
             UnitState::Ready => {
                 journal.receipt(JournalStage::BootOnceActivated)?;
                 journal.outcome(JournalStage::BootOnceActivated, true)?;
@@ -1027,6 +1092,7 @@ fn dispatch_and_reconcile_local<E: BootstrapExecutor, C: BootstrapCrashInjector>
                         "-c".to_string(),
                         boot_once_script(&request.request_hash, closure, &local.system_profile_path, &local.boot_entries_directory),
                     ],
+                    environment: Vec::new(),
                 })
                 .map_err(|_| BootstrapError::RecoveryPending)?;
         }
@@ -1165,6 +1231,7 @@ impl EphemeralJournal {
                     fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE),
                 )
                 .map_err(BootstrapError::Journal)?;
+                sync_directory(&request.journal_parent)?;
                 let metadata = private_directory_metadata(&directory)?;
                 let state = BootstrapJournalConfiguration {
                     schema_version: JOURNAL_SCHEMA_VERSION,
@@ -1190,6 +1257,7 @@ impl EphemeralJournal {
                     parent: request.journal_parent.clone(),
                 };
                 journal.write_state(&state)?;
+                sync_directory(&request.journal_parent)?;
                 // This new isolated v5 journal always opens a separate Lojix
                 // store.  It has no daemon configuration, socket, or legacy
                 // store route.
@@ -1424,18 +1492,12 @@ impl EphemeralJournal {
                 "terminal evidence receipt is absent",
             ));
         }
-        if self.directory.join("generated-inputs").exists() {
-            remove_known_generated_inputs(&self.directory.join("generated-inputs"))?;
-        }
-        remove_known_file(&self.directory, JOURNAL_STORE_FILE)?;
-        remove_known_file(&self.directory, JOURNAL_STATE_FILE)?;
-        let mut entries = fs::read_dir(&self.directory).map_err(BootstrapError::Journal)?;
-        if entries.next().is_some() {
-            return Err(BootstrapError::Validation(
-                "journal contains an unowned entry",
-            ));
-        }
-        fs::remove_dir(&self.directory).map_err(BootstrapError::Journal)?;
+        // Path-based tree deletion after an identity check has a same-UID
+        // rename race.  Retain finalized private journals until every cleanup
+        // operation can be expressed through inode-bound directory handles.
+        // The evidence is terminal and the retained journal is the durable
+        // audit record, so safety takes precedence over ephemerality.
+        sync_directory(&self.directory)?;
         sync_directory(&self.parent)?;
         Ok(())
     }
@@ -1516,6 +1578,14 @@ fn verify_root_receipt(root: &Path, closure: &str) -> bool {
             .is_some_and(|target| target == Path::new(closure))
 }
 
+fn path_entry_exists(path: &Path) -> std::result::Result<bool, BootstrapError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(BootstrapError::Journal(error)),
+    }
+}
+
 fn link_root_no_replace(
     staging: &Path,
     root: &Path,
@@ -1544,47 +1614,6 @@ fn link_root_no_replace(
             .ok_or(BootstrapError::Validation("gc root staging has no parent"))?,
     )?;
     Ok(())
-}
-
-fn remove_known_file(parent: &Path, name: &str) -> std::result::Result<(), BootstrapError> {
-    let path = parent.join(name);
-    let metadata = fs::symlink_metadata(&path).map_err(BootstrapError::Journal)?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        return Err(BootstrapError::Validation(
-            "journal known file identity changed",
-        ));
-    }
-    fs::remove_file(path).map_err(BootstrapError::Journal)
-}
-
-fn remove_known_generated_inputs(generated: &Path) -> std::result::Result<(), BootstrapError> {
-    private_directory_metadata(generated)?;
-    for name in ["horizon", "system", "deployment", "secrets"] {
-        let directory = generated.join(name);
-        private_directory_metadata(&directory)?;
-        for entry in fs::read_dir(&directory).map_err(BootstrapError::Journal)? {
-            let entry = entry.map_err(BootstrapError::Journal)?;
-            let file_name = entry.file_name();
-            let name = file_name.to_string_lossy();
-            let metadata = fs::symlink_metadata(entry.path()).map_err(BootstrapError::Journal)?;
-            let permitted = name == "flake.nix"
-                || (directory.ends_with("horizon") && name == "horizon.json")
-                || (directory.ends_with("secrets")
-                    && name.ends_with(".sops")
-                    && name
-                        .trim_end_matches(".sops")
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
-            if !permitted || !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-                return Err(BootstrapError::Validation(
-                    "journal generated entry changed",
-                ));
-            }
-            fs::remove_file(entry.path()).map_err(BootstrapError::Journal)?;
-        }
-        fs::remove_dir(&directory).map_err(BootstrapError::Journal)?;
-    }
-    fs::remove_dir(generated).map_err(BootstrapError::Journal)
 }
 
 fn write_evidence_new(
@@ -1647,6 +1676,7 @@ struct ValidatedBootstrapRun {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum BootstrapModeValidated {
     BuildOnly {
         input: BootstrapInputValidated,
@@ -1717,8 +1747,16 @@ enum BootstrapActivationBackendValidated {
 struct BootstrapRemoteBackendValidated {
     nix_store_uri: String,
     ssh_identity: SshIdentity,
+    ssh_policy: BootstrapSshPolicyValidated,
     system_profile_path: PathBuf,
     boot_entries_directory: PathBuf,
+}
+
+#[derive(Debug)]
+struct BootstrapSshPolicyValidated {
+    identity_file: PathBuf,
+    known_hosts_file: PathBuf,
+    strict_host_key_mode: BootstrapStrictHostKeyMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1733,13 +1771,10 @@ impl SshIdentity {
         format!("{}@{}", self.user, self.host)
     }
 
-    fn ssh_arguments(&self, command: String) -> Vec<String> {
-        // Disable user-configured host aliases, ProxyCommand/ProxyJump, and
-        // multiplexed control paths: this backend's route is only the exact
-        // request-owned identity that was validated above.
+    fn ssh_arguments(&self, config: &Path, command: String) -> Vec<String> {
         let mut arguments = vec![
             "-F".to_string(),
-            "/dev/null".to_string(),
+            config.display().to_string(),
             "-o".to_string(),
             "ProxyCommand=none".to_string(),
             "-o".to_string(),
@@ -1755,6 +1790,67 @@ impl SshIdentity {
         arguments.extend(["--".to_string(), self.destination(), command]);
         arguments
     }
+}
+
+impl BootstrapSshPolicyValidated {
+    fn write_private_config(
+        &self,
+        journal: &EphemeralJournal,
+    ) -> std::result::Result<PathBuf, BootstrapError> {
+        let path = journal.directory.join("ssh-config");
+        if path.exists() {
+            let metadata = fs::symlink_metadata(&path).map_err(BootstrapError::Journal)?;
+            if !metadata.file_type().is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.uid() != rustix::process::getuid().as_raw()
+                || metadata.mode() & 0o777 != PRIVATE_EVIDENCE_MODE
+            {
+                return Err(BootstrapError::Validation(
+                    "private SSH config identity changed",
+                ));
+            }
+            return Ok(path);
+        }
+        let strict = match self.strict_host_key_mode {
+            BootstrapStrictHostKeyMode::RequireKnownHost => "yes",
+        };
+        let contents = format!(
+            "Host *\n  IdentityFile {}\n  UserKnownHostsFile {}\n  GlobalKnownHostsFile /dev/null\n  StrictHostKeyChecking {strict}\n  IdentitiesOnly yes\n  IdentityAgent none\n  ProxyCommand none\n  ProxyJump none\n  ControlMaster no\n  ControlPath none\n",
+            ssh_config_quote(&self.identity_file.display().to_string()),
+            ssh_config_quote(&self.known_hosts_file.display().to_string()),
+        );
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(BootstrapError::Journal)?;
+        file.set_permissions(fs::Permissions::from_mode(PRIVATE_EVIDENCE_MODE))
+            .map_err(BootstrapError::Journal)?;
+        file.write_all(contents.as_bytes())
+            .map_err(BootstrapError::Journal)?;
+        file.sync_all().map_err(BootstrapError::Journal)?;
+        sync_directory(&journal.directory)?;
+        Ok(path)
+    }
+
+    fn nix_ssh_options(&self, config: &Path) -> String {
+        format!(
+            "-F {} -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o ProxyCommand=none -o ProxyJump=none -o ControlMaster=no -o ControlPath=none",
+            shell_quote(&config.display().to_string())
+        )
+    }
+}
+
+fn ssh_config_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn ssh_executable() -> String {
+    // The flake wrapper sets this to its openssh closure path. An unwrapped
+    // developer invocation gets a deterministic non-existent absolute path
+    // instead of silently consulting an ambient PATH executable.
+    std::env::var("LOJIX_BOOTSTRAP_OPENSSH")
+        .unwrap_or_else(|_| "/__lojix-bootstrap-wrapper-required__/bin/ssh".to_string())
 }
 
 #[derive(Debug)]
@@ -1969,6 +2065,7 @@ fn validate_activation_backend(
             BootstrapActivationBackendValidated::Remote(BootstrapRemoteBackendValidated {
                 nix_store_uri,
                 ssh_identity,
+                ssh_policy: validate_ssh_policy(remote.ssh_policy)?,
                 system_profile_path: absolute_normal_path(&remote.system_profile_path.0)?,
                 boot_entries_directory: absolute_normal_path(&remote.boot_entries_directory.0)?,
             })
@@ -1980,6 +2077,16 @@ fn validate_activation_backend(
             }),
         ),
     }
+}
+
+fn validate_ssh_policy(
+    policy: BootstrapSshPolicy,
+) -> std::result::Result<BootstrapSshPolicyValidated, BootstrapError> {
+    Ok(BootstrapSshPolicyValidated {
+        identity_file: safe_private_regular_file(&policy.identity_file.0)?,
+        known_hosts_file: safe_private_regular_file(&policy.known_hosts_file.0)?,
+        strict_host_key_mode: policy.strict_host_key_mode,
+    })
 }
 
 fn validate_flake_reference(value: &str) -> std::result::Result<String, BootstrapError> {
@@ -2149,6 +2256,27 @@ fn safe_existing_directory(value: &str) -> std::result::Result<PathBuf, Bootstra
 fn safe_private_existing_directory(value: &str) -> std::result::Result<PathBuf, BootstrapError> {
     let path = safe_existing_directory(value)?;
     private_directory_metadata(&path)?;
+    Ok(path)
+}
+
+fn safe_private_regular_file(value: &str) -> std::result::Result<PathBuf, BootstrapError> {
+    let path = absolute_normal_path(value)?;
+    let parent = path
+        .parent()
+        .ok_or(BootstrapError::Validation("private file has no parent"))?;
+    safe_private_existing_directory(
+        parent
+            .to_str()
+            .ok_or(BootstrapError::Validation("path is not utf8"))?,
+    )?;
+    let metadata = fs::symlink_metadata(&path).map_err(BootstrapError::Journal)?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.mode() & 0o777 != PRIVATE_EVIDENCE_MODE
+    {
+        return Err(BootstrapError::Validation("private SSH file is unsafe"));
+    }
     Ok(path)
 }
 

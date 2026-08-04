@@ -126,8 +126,10 @@ streams subscription events.
   Remote BootOnce launches a deterministic target transient systemd unit with
   no-block dispatch and polls that exact unit, so losing the initiating SSH
   connection cannot interrupt profile or EFI work. Evidence is private and
-  atomic before cleanup, which removes only verified known files through the
-  owned child directory. `BuildOnly` has no activation or transport field and
+  atomic; finalized journals are retained until cleanup can be proven through
+  inode-bound directory handles. Remote policy supplies private identity and
+  known-host files, strict host checking, and an OpenSSH closure path shared
+  with Nix copy, with no ambient SSH config or agent. `BuildOnly` has no activation or transport field and
   therefore cannot activate. No daemon socket, daemon configuration, old
   journal/store, route, host, user, or path default participates.
 

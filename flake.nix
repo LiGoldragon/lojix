@@ -79,9 +79,11 @@
               --prefix PATH : ${
                 pkgs.lib.makeBinPath [
                   pkgs.nix
+                  pkgs.openssh
                   pkgs.systemd
                 ]
-              }
+              } \
+              --set LOJIX_BOOTSTRAP_OPENSSH ${pkgs.openssh}/bin/ssh
           '';
         };
       in
