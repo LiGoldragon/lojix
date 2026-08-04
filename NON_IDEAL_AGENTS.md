@@ -47,13 +47,17 @@ permission, or stall a deploy that operates within it. `AGENTS.md` and
   (`ProposalFile` in `src/schema_runtime.rs`). The cluster `secrets/` directory is
   inferred as that file's sibling, `<source-parent>/secrets`
   (`ClusterSecretsDirectory::from_proposal_source`).
-- **Deploys evaluate and build locally, then copy the exact closure.** Lojix
-  evaluates and realizes the immutable closure in its authenticated local Nix
-  context, copies that closure with `nix copy --to ssh-ng://root@<node>…`, and
-  only then connects as root for the target-side profile/system operation. It
-  never runs `nix eval --store ssh-ng://…`: that remote-store transport can
-  wedge while Nix and SSH wait on one another. The `root` reach is `li`'s admin
-  keys in each node's `root` `authorized_keys` (CriomOS-home `ARCHITECTURE.md`
+- **Activating deploys realize locally, then copy the exact closure.** Lojix
+  evaluates and realizes the immutable closure in its authenticated daemon-local
+  Nix context, then invokes `nix copy --to ssh-ng://root@<node>…` for that exact
+  closure before the target-side profile/system operation. This is not a
+  target-store evaluation or realization. A self target still invokes that
+  `ssh-ng` copy addressed back to the daemon host; it is not skipped, even
+  though it has no cross-host destination. `Realize` is local-only and stops
+  before copy, profile, or activation. Lojix never runs
+  `nix eval --store ssh-ng://…`: that remote-store transport can wedge while
+  Nix and SSH wait on one another. The `root` reach is `li`'s admin keys in each
+  node's `root` `authorized_keys` (CriomOS-home `ARCHITECTURE.md`
   "Cluster-host update authority": the maintainer has root SSH on all cluster
   hosts).
 - **A first build is slow; re-evaluating the same immutable pin is not.** A deploy's
@@ -114,8 +118,8 @@ bird's home-manager profile pointer and `current-home` gcroot both point at that
 closure.
 
 - `ActivateNow` sets the profile and runs the activation package; `SetProfile` sets
-  the profile only; `Realize` builds and realizes the closure on the target store
-  and stops (no profile, no activate).
+  the profile only; `Realize` evaluates and realizes the closure in the daemon's
+  local Nix context, then stops (no copy, profile, or activate).
 - `<proposal-source>` is the local `datom.dotos` path; `<criomos-flake-ref>` is the
   pinned CriomOS reference. Under `RequireImmutable` the reference must carry its
   immutable identity in the query string —

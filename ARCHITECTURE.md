@@ -15,18 +15,19 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 > `--override-input` values into `nix eval`. Activating deploys still
 > reject until copy/activate is target-safe.
 
-> **Build-on-target (2026-06-19, report 150).** A deploy whose target
-> node is NOT the daemon host realizes the node's closure in the TARGET
-> node's own store over `ssh-ng://root@<node>.<cluster>.criome`
-> (`nix build --eval-store auto --store <uri> <attr>^*`): evaluation
-> stays local and cheap while realization — and any model-bearing NAR —
-> happens on the target, so a node's closure never transits the daemon
-> host (Spirit `ufjd` / `0a9p` / `lc28`). When the target node IS the
-> daemon host (e.g. deploying ouranos from the ouranos-hosted daemon)
-> the build stays `Local`; an explicit operator `builder` still wins.
-> The daemon's own host is named by `DaemonConfiguration::daemon_host`.
-> A target-store build leaves the closure already on the target, so the
-> copy step is a no-op and only the `BootOnce` activation runs there.
+> **Daemon-local realization and transfer (2026-08-04).** Every activating
+> deploy evaluates and realizes its immutable closure in the daemon's
+> authenticated local Nix context. Lojix then invokes
+> `nix copy --to ssh-ng://root@<node>.<cluster>.criome <closure>` to transfer
+> that exact closure before the target-side profile/system operation. It does
+> not evaluate or realize through a target Nix store. An explicit operator
+> `builder` can use a configured Nix builder, but its result is imported into
+> the daemon-local store before that same exact-closure transfer. When the
+> target node IS the daemon host (for example, deploying ouranos from the
+> ouranos-hosted daemon), the implementation still invokes the same `ssh-ng`
+> copy addressed back to that host: it has no cross-host destination, but it
+> is not a skipped or no-op copy. The daemon's own host is named by
+> `DaemonConfiguration::daemon_host`.
 > The `BootOnce` transient-unit name is the deterministic
 > `lojix-boot-once-deploy-<deployment-identifier>` — the same string the
 > durable resume cursor persists — so a daemon crash inside the BootOnce
