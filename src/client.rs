@@ -71,11 +71,11 @@ impl SocketExchange {
 /// CheckHostKeyMaterial).
 #[derive(Debug)]
 pub struct OrdinaryClient {
-    input: signal_lojix::schema::lib::Input,
+    input: signal_lojix::schema::lib::z2VTvQ,
 }
 
 impl OrdinaryClient {
-    pub fn run_from_environment() -> Result<signal_lojix::schema::lib::Output> {
+    pub fn run_from_environment() -> Result<signal_lojix::schema::lib::z2VcR1> {
         Self::from_arguments(std::env::args_os().skip(1))?.run()
     }
 
@@ -98,11 +98,11 @@ impl OrdinaryClient {
         Ok(Self { input })
     }
 
-    pub fn input(&self) -> &signal_lojix::schema::lib::Input {
+    pub fn input(&self) -> &signal_lojix::schema::lib::z2VTvQ {
         &self.input
     }
 
-    pub fn run(self) -> Result<signal_lojix::schema::lib::Output> {
+    pub fn run(self) -> Result<signal_lojix::schema::lib::z2VcR1> {
         let exchange = SocketExchange::for_environment(ORDINARY_SOCKET_ENV)?;
         let identifier = exchange_identifier();
         let reply = exchange.exchange(self.input.encode_request_frame(identifier)?)?;
@@ -112,7 +112,7 @@ impl OrdinaryClient {
     fn decode_reply(
         bytes: &[u8],
         expected_exchange: ExchangeIdentifier,
-    ) -> Result<signal_lojix::schema::lib::Output> {
+    ) -> Result<signal_lojix::schema::lib::z2VcR1> {
         let frame = signal_lojix::schema::lib::ContractMarker::decode_frame(bytes)?;
         match frame.into_body() {
             signal_lojix::schema::lib::FrameBody::Reply { exchange, reply }
@@ -137,13 +137,14 @@ impl OrdinaryClient {
     }
 
     #[cfg(feature = "dotos-text")]
-    fn decode_dotos_text(text: &str) -> Result<signal_lojix::schema::lib::Input> {
-        text.parse::<signal_lojix::schema::lib::Input>()
+    fn decode_dotos_text(text: &str) -> Result<signal_lojix::schema::lib::z2VTvQ> {
+        dotos::DotosSource::new(text)
+            .parse::<signal_lojix::schema::lib::z2VTvQ>()
             .map_err(|error| Error::DotosRequestText(error.to_string()))
     }
 
     #[cfg(not(feature = "dotos-text"))]
-    fn decode_dotos_text(_text: &str) -> Result<signal_lojix::schema::lib::Input> {
+    fn decode_dotos_text(_text: &str) -> Result<signal_lojix::schema::lib::z2VTvQ> {
         Err(Error::DotosTextUnsupported)
     }
 }
@@ -153,11 +154,11 @@ impl OrdinaryClient {
 /// Pin / Unpin / Retire) over the daemon's owner/meta socket.
 #[derive(Debug)]
 pub struct MetaClient {
-    input: meta_signal_lojix::schema::lib::Input,
+    input: meta_signal_lojix::schema::lib::z2VW7Q,
 }
 
 impl MetaClient {
-    pub fn run_from_environment() -> Result<meta_signal_lojix::schema::lib::Output> {
+    pub fn run_from_environment() -> Result<meta_signal_lojix::schema::lib::z2VeCY> {
         Self::from_arguments(std::env::args_os().skip(1))?.run()
     }
 
@@ -178,11 +179,11 @@ impl MetaClient {
         Ok(Self { input })
     }
 
-    pub fn input(&self) -> &meta_signal_lojix::schema::lib::Input {
+    pub fn input(&self) -> &meta_signal_lojix::schema::lib::z2VW7Q {
         &self.input
     }
 
-    pub fn run(self) -> Result<meta_signal_lojix::schema::lib::Output> {
+    pub fn run(self) -> Result<meta_signal_lojix::schema::lib::z2VeCY> {
         let exchange = SocketExchange::for_environment(OWNER_SOCKET_ENV)?;
         let identifier = exchange_identifier();
         let reply = exchange.exchange(self.input.encode_request_frame(identifier)?)?;
@@ -192,7 +193,7 @@ impl MetaClient {
     fn decode_reply(
         bytes: &[u8],
         expected_exchange: ExchangeIdentifier,
-    ) -> Result<meta_signal_lojix::schema::lib::Output> {
+    ) -> Result<meta_signal_lojix::schema::lib::z2VeCY> {
         let frame = meta_signal_lojix::schema::lib::ContractMarker::decode_frame(bytes)?;
         match frame.into_body() {
             meta_signal_lojix::schema::lib::FrameBody::Reply { exchange, reply }
@@ -217,13 +218,14 @@ impl MetaClient {
     }
 
     #[cfg(feature = "dotos-text")]
-    fn decode_dotos_text(text: &str) -> Result<meta_signal_lojix::schema::lib::Input> {
-        text.parse::<meta_signal_lojix::schema::lib::Input>()
+    fn decode_dotos_text(text: &str) -> Result<meta_signal_lojix::schema::lib::z2VW7Q> {
+        dotos::DotosSource::new(text)
+            .parse::<meta_signal_lojix::schema::lib::z2VW7Q>()
             .map_err(|error| Error::DotosRequestText(error.to_string()))
     }
 
     #[cfg(not(feature = "dotos-text"))]
-    fn decode_dotos_text(_text: &str) -> Result<meta_signal_lojix::schema::lib::Input> {
+    fn decode_dotos_text(_text: &str) -> Result<meta_signal_lojix::schema::lib::z2VW7Q> {
         Err(Error::DotosTextUnsupported)
     }
 }

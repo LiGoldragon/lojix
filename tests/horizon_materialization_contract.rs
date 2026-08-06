@@ -1,17 +1,16 @@
-//! Horizon materialization contract tests. These are source-level because the
-//! generated Nexus catalog is the load-bearing artifact: production deploys
-//! must name materialization as a real engine feature, not hide it behind an
-//! inline Rust shortcut.
+//! Horizon materialization runtime tests. The handwritten Nexus vocabulary is
+//! load-bearing: production deploys name materialization as a real engine
+//! effect instead of hiding it behind an inline shortcut.
 
 use horizon_lib::proposal::{NodeService, NodeServiceKind};
 
 #[test]
-fn nexus_schema_names_horizon_materialization_and_eval_overrides() {
-    let schema = include_str!("../schema/nexus.schema");
-    assert!(schema.contains("HorizonMaterializationCommand"));
-    assert!(schema.contains("(MaterializeHorizon HorizonMaterializationCommand)"));
-    assert!(schema.contains("NixEvalCommand"));
-    assert!(schema.contains("Vector.FlakeInputOverride"));
+fn handwritten_nexus_names_horizon_materialization_and_eval_overrides() {
+    let flow = include_str!("../src/runtime_flow.rs");
+    assert!(flow.contains("pub struct HorizonMaterializationCommand"));
+    assert!(flow.contains("MaterializeHorizon(HorizonMaterializationCommand)"));
+    assert!(flow.contains("pub struct NixEvalCommand"));
+    assert!(flow.contains("Vec<FlakeInputOverride>"));
 }
 
 #[test]

@@ -37,7 +37,6 @@
           filter =
             path: type:
             (craneLib.filterCargoSources path type)
-            || (type == "regular" && pkgs.lib.hasSuffix ".schema" path)
             || (type == "regular" && pkgs.lib.hasSuffix ".dotos" path)
             || (
               type == "regular"

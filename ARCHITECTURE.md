@@ -6,7 +6,7 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 
 > **Status (2026-08-04):** implemented Rust crate at the repo root.
 > The daemon uses the actor-native `triad-runtime` multi-listener for
-> two authority-tiered sockets and awaits the generated async Nexus
+> two authority-tiered sockets and awaits the handwritten async Nexus
 > runner directly; child-process effects use `tokio::process`. Production
 > host and user-environment build requests select their materialization mode
 > explicitly. `Horizon` enters a materialization effect that projects the proposal with
@@ -167,8 +167,9 @@ src/
   daemon.rs             # actor-native two-socket daemon shell
   client.rs             # thin CLI socket exchange
   bootstrap.rs          # daemon-free explicit resumable v5 bootstrap pipeline
-  schema_runtime.rs     # async hand-written engine over generated schema nouns
-  schema/               # checked-in generated Nexus/SEMA artifacts
+  runtime_model.rs      # hand-written durable and operational nouns
+  runtime_flow.rs       # hand-written Nexus effects, work, and runner logic
+  schema_runtime.rs     # async hand-written Nexus decision engine
   bin/
     lojix-daemon.rs     # daemon entry
     lojix.rs            # CLI entry
@@ -180,7 +181,7 @@ the workspace actor-systems doctrine. No zero-state holders.
 
 ## 4 · Storage and wire
 
-- **Storage:** schema-derived SEMA tables over a durable `sema-engine`
+- **Storage:** handwritten runtime nouns in SEMA tables over a durable `sema-engine`
   store — one exact configured absolute file shared by daemon startup and the
   reset service. The ten
   record families (live set, gc-roots, event log, container lifecycle,

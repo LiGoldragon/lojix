@@ -24,8 +24,8 @@ use horizon_lib::proposal::{ClusterProposal, ClusterTrust, NodeProposal, NodePub
 use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
 use horizon_lib::species::{Arch, Bootloader, Keyboard, MachineSpecies, NodeSpecies};
 use lojix::Store;
-use lojix::schema::sema as ordinary;
-use lojix::schema::sema as meta;
+use lojix::runtime_model as ordinary;
+use lojix::runtime_model as meta;
 use lojix::schema_runtime::{RuntimeConfiguration, SchemaRuntime};
 
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";

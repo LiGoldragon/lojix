@@ -1,440 +1,466 @@
-//! Explicit boundary translation between public Signal contracts and the
-//! daemon's private SEMA vocabulary.
+//! Structural boundary between encoded public Interfaces and lojix-owned runtime nouns.
 //!
-//! The engine, persistence layer, and generated Nexus runner use only
-//! `schema::sema` values.  This module is deliberately the sole place where a
-//! public contract type is lowered or raised; in particular it never exposes
-//! a local `SourceRevisionRecord` on the wire.
+//! The public crates own identity, ordering, archive behavior, and Signal roles.
+//! Lojix owns only its readable runtime model. Translation crosses the four
+//! encoded roots through the producer-owned structural behavior; no readable
+//! public alias vocabulary is reproduced here.
 
-use crate::schema::sema;
+use crate::runtime_model as sema;
+use sema::*;
+use signal_lojix::schema::lib::{WireShape, WireShapeError, WireValue};
 
-use meta_signal_lojix::schema::lib as meta;
-use signal_lojix::schema::lib as ordinary;
-
-macro_rules! scalar {
-    ($name:ident, $public:path, $local:path) => {
-        fn $name(value: $public) -> $local {
-            <$local>::new(value.into_payload())
+macro_rules! wire_newtype {
+    ($name:ident, $inner:ty) => {
+        impl WireShape for sema::$name {
+            fn to_wire(&self) -> WireValue {
+                self.payload().to_wire()
+            }
+            fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
+                Ok(Self::new(<$inner as WireShape>::from_wire(value)?))
+            }
         }
     };
 }
 
-scalar!(cluster_name, ordinary::ClusterName, sema::ClusterName);
-scalar!(node_name, ordinary::NodeName, sema::NodeName);
-scalar!(user_name, ordinary::UserName, sema::UserName);
-scalar!(pin_label, ordinary::PinLabel, sema::PinLabel);
-scalar!(
-    flake_reference,
-    ordinary::FlakeReference,
-    sema::FlakeReference
-);
-scalar!(
-    proposal_source,
-    ordinary::ProposalSource,
-    sema::ProposalSource
-);
-scalar!(
-    deployment_identifier,
-    ordinary::DeploymentIdentifier,
-    sema::DeploymentIdentifier
-);
-scalar!(
-    generation_identifier,
-    ordinary::GenerationIdentifier,
-    sema::GenerationIdentifier
-);
-scalar!(
-    test_run_identifier,
-    ordinary::TestRunIdentifier,
-    sema::TestRunIdentifier
-);
-scalar!(
-    subscription_token,
-    ordinary::SubscriptionToken,
-    sema::SubscriptionToken
-);
-scalar!(
-    event_log_position,
-    ordinary::EventLogPosition,
-    sema::EventLogPosition
-);
-
-fn requested_generation_artifact(
-    value: ordinary::RequestedGenerationArtifact,
-) -> sema::GenerationArtifact {
-    match value {
-        ordinary::RequestedGenerationArtifact::CompleteHost => {
-            sema::GenerationArtifact::CompleteHost
-        }
-        ordinary::RequestedGenerationArtifact::BaseHost => sema::GenerationArtifact::BaseHost,
-        ordinary::RequestedGenerationArtifact::UserEnvironment => {
-            sema::GenerationArtifact::UserEnvironment
-        }
-    }
-}
-
-fn host_composition(value: ordinary::HostComposition) -> sema::HostComposition {
-    match value {
-        ordinary::HostComposition::CompleteHost => sema::HostComposition::CompleteHost,
-        ordinary::HostComposition::BaseHost => sema::HostComposition::BaseHost,
-    }
-}
-
-fn host_deploy_action(value: ordinary::HostDeployAction) -> sema::HostDeployAction {
-    match value {
-        ordinary::HostDeployAction::Evaluate => sema::HostDeployAction::Evaluate,
-        ordinary::HostDeployAction::Realize => sema::HostDeployAction::Realize,
-        ordinary::HostDeployAction::SetBootProfile => sema::HostDeployAction::SetBootProfile,
-        ordinary::HostDeployAction::ActivateNow => sema::HostDeployAction::ActivateNow,
-        ordinary::HostDeployAction::TestActivation => sema::HostDeployAction::TestActivation,
-        ordinary::HostDeployAction::ScheduleBootOnce => sema::HostDeployAction::ScheduleBootOnce,
-    }
-}
-
-fn user_environment_action(value: ordinary::UserEnvironmentAction) -> sema::UserEnvironmentAction {
-    match value {
-        ordinary::UserEnvironmentAction::Realize => sema::UserEnvironmentAction::Realize,
-        ordinary::UserEnvironmentAction::SetProfile => sema::UserEnvironmentAction::SetProfile,
-        ordinary::UserEnvironmentAction::ActivateNow => sema::UserEnvironmentAction::ActivateNow,
-    }
-}
-
-fn source_revision_policy(value: ordinary::SourceRevisionPolicy) -> sema::SourceRevisionPolicy {
-    match value {
-        ordinary::SourceRevisionPolicy::RequireImmutable => {
-            sema::SourceRevisionPolicy::RequireImmutable
-        }
-        ordinary::SourceRevisionPolicy::ResolveAndRecord => {
-            sema::SourceRevisionPolicy::ResolveAndRecord
-        }
-    }
-}
-
-fn test_mode(value: ordinary::TestMode) -> sema::TestMode {
-    match value {
-        ordinary::TestMode::Hermetic => sema::TestMode::Hermetic,
-        ordinary::TestMode::Live => sema::TestMode::Live,
-    }
-}
-
-fn host_selection(value: ordinary::HostSelection) -> sema::HostSelection {
-    match value {
-        ordinary::HostSelection::DefaultHost => sema::HostSelection::DefaultHost,
-        ordinary::HostSelection::OnHost(node) => sema::HostSelection::OnHost(node_name(node)),
-    }
-}
-
-fn selection(value: ordinary::Selection) -> sema::Selection {
-    match value {
-        ordinary::Selection::ByNode(selector) => sema::Selection::ByNode(sema::NodeSelector {
-            cluster_name: cluster_name(selector.cluster_name),
-            node_name: node_name(selector.node_name),
-            optional_generation_artifact: selector
-                .optional_requested_generation_artifact
-                .map(requested_generation_artifact),
-        }),
-        ordinary::Selection::ByGeneration(lookup) => sema::Selection::ByGeneration(
-            sema::GenerationLookup::new(generation_identifier(lookup.into_payload())),
-        ),
-        ordinary::Selection::ByDeployment(lookup) => sema::Selection::ByDeployment(
-            sema::DeploymentLookup::new(deployment_identifier(lookup.into_payload())),
-        ),
-        ordinary::Selection::ByEventLog(range) => {
-            sema::Selection::ByEventLog(sema::EventLogRange {
-                from: event_log_position(range.from),
-                until: event_log_position(range.until),
-            })
-        }
-        ordinary::Selection::ByTestRun(lookup) => sema::Selection::ByTestRun(sema::TestRunLookup {
-            cluster_name: cluster_name(lookup.cluster_name),
-            node_name: node_name(lookup.node_name),
-            optional_test_run_identifier: lookup
-                .optional_test_run_identifier
-                .map(test_run_identifier),
-        }),
-    }
-}
-
-fn deployment_watch(value: ordinary::DeploymentWatch) -> sema::DeploymentWatch {
-    sema::DeploymentWatch {
-        optional_deployment_identifier: value
-            .optional_deployment_identifier
-            .map(deployment_identifier),
-        optional_cluster_name: value.optional_cluster_name.map(cluster_name),
-        optional_node_name: value.optional_node_name.map(node_name),
-    }
-}
-
-fn cache_retention_watch(value: ordinary::CacheRetentionWatch) -> sema::CacheRetentionWatch {
-    sema::CacheRetentionWatch {
-        optional_cluster_name: value.optional_cluster_name.map(cluster_name),
-        optional_node_name: value.optional_node_name.map(node_name),
-    }
-}
-
-fn subscription_close(value: ordinary::SubscriptionClose) -> sema::SubscriptionClose {
-    sema::SubscriptionClose::new(subscription_token(value.into_payload()))
-}
-
-fn key_material_query(value: ordinary::KeyMaterialQuery) -> sema::KeyMaterialQuery {
-    sema::KeyMaterialQuery {
-        cluster_name: cluster_name(value.cluster_name),
-        node_name: node_name(value.node_name),
-        proposal_source: proposal_source(value.proposal_source),
-    }
-}
-
-/// Lower an unprivileged request before it enters the local engine.
-pub fn ordinary_ingress(value: ordinary::Input) -> sema::OrdinaryIngress {
-    match value {
-        ordinary::Input::Query(payload) => {
-            sema::OrdinaryIngress::Query(selection(payload.into_payload()))
-        }
-        ordinary::Input::WatchDeployments(payload) => {
-            sema::OrdinaryIngress::WatchDeployments(deployment_watch(payload.into_payload()))
-        }
-        ordinary::Input::WatchCacheRetention(payload) => {
-            sema::OrdinaryIngress::WatchCacheRetention(cache_retention_watch(
-                payload.into_payload(),
-            ))
-        }
-        ordinary::Input::Unwatch(payload) => {
-            sema::OrdinaryIngress::Unwatch(subscription_close(payload.into_payload()))
-        }
-        ordinary::Input::CheckHostKeyMaterial(payload) => {
-            sema::OrdinaryIngress::CheckHostKeyMaterial(key_material_query(payload.into_payload()))
-        }
-    }
-}
-
-fn node_selection(value: meta::NodeSelection) -> sema::NodeSelection {
-    match value {
-        meta::NodeSelection::Nodes(nodes) => {
-            sema::NodeSelection::Nodes(nodes.into_iter().map(node_name).collect())
-        }
-        meta::NodeSelection::All => sema::NodeSelection::All,
-    }
-}
-
-fn test_request(value: meta::TestRequest) -> sema::TestRequest {
-    match value {
-        meta::TestRequest::Run(run) => sema::TestRequest::Run(sema::TestRun {
-            cluster_name: cluster_name(run.cluster_name),
-            node_selection: node_selection(run.node_selection),
-            host_selection: host_selection(run.host_selection),
-            test_execution_profile: test_execution_profile(run.test_execution_profile),
-        }),
-        meta::TestRequest::Check(check) => sema::TestRequest::Check(sema::QuickCheck::new(
-            check.into_payload().into_iter().map(node_name).collect(),
-        )),
-    }
-}
-
-fn deployment_transport(value: meta::DeploymentTransport) -> sema::DeploymentTransport {
-    sema::DeploymentTransport {
-        nix_store_uri: sema::NixStoreUri::new(value.nix_store_uri.into_payload()),
-        ssh_destination: sema::SshDestination::new(value.ssh_destination.into_payload()),
-    }
-}
-
-fn deployment_input_mode(value: meta::DeploymentInputMode) -> sema::DeploymentInputMode {
-    match value {
-        meta::DeploymentInputMode::Direct => sema::DeploymentInputMode::Direct,
-        meta::DeploymentInputMode::Horizon => sema::DeploymentInputMode::Horizon,
-    }
-}
-
-fn deployment_output_selector(
-    value: meta::DeploymentOutputSelector,
-) -> sema::DeploymentOutputSelector {
-    sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new(
-        value.into_payload().into_payload(),
-    ))
-}
-
-fn activation_backend(value: meta::ActivationBackend) -> sema::ActivationBackend {
-    match value {
-        meta::ActivationBackend::NixosSystemdBootV1 => sema::ActivationBackend::NixosSystemdBootV1,
-        meta::ActivationBackend::HomeManagerNixProfileV1 => {
-            sema::ActivationBackend::HomeManagerNixProfileV1
-        }
-    }
-}
-
-fn nix_builder_spec(value: meta::NixBuilderSpec) -> sema::NixBuilderSpec {
-    sema::NixBuilderSpec::new(value.into_payload())
-}
-
-fn test_execution_profile(value: meta::TestExecutionProfile) -> sema::TestExecutionProfile {
-    sema::TestExecutionProfile {
-        test_mode: test_mode(value.test_mode),
-        nix_system: sema::NixSystem::new(value.nix_system.into_payload()),
-        deployment_output_selector: deployment_output_selector(value.deployment_output_selector),
-        optional_deployment_transport: value
-            .optional_deployment_transport
-            .map(deployment_transport),
-    }
-}
-
-fn extra_substituter(value: meta::ExtraSubstituter) -> sema::ExtraSubstituter {
-    sema::ExtraSubstituter {
-        url: value.url,
-        public_key: value.public_key,
-    }
-}
-
-fn deploy_request(value: meta::DeployRequest) -> sema::DeploySubmission {
-    match value {
-        meta::DeployRequest::Host(deployment) => {
-            sema::DeploySubmission::Host(sema::HostDeployment {
-                cluster_name: cluster_name(deployment.cluster_name),
-                node_name: node_name(deployment.node_name),
-                host_composition: host_composition(deployment.host_composition),
-                proposal_source: proposal_source(deployment.proposal_source),
-                flake_reference: flake_reference(deployment.flake_reference),
-                deployment_transport: deployment_transport(deployment.deployment_transport),
-                deployment_input_mode: deployment_input_mode(deployment.deployment_input_mode),
-                deployment_output_selector: deployment_output_selector(
-                    deployment.deployment_output_selector,
-                ),
-                activation_backend: activation_backend(deployment.activation_backend),
-                host_deploy_action: host_deploy_action(deployment.host_deploy_action),
-                source_revision_policy: source_revision_policy(deployment.source_revision_policy),
-                optional_nix_builder_spec: deployment
-                    .optional_nix_builder_spec
-                    .map(nix_builder_spec),
-                extra_substituter_vector: deployment
-                    .extra_substituter_vector
-                    .into_iter()
-                    .map(extra_substituter)
-                    .collect(),
-            })
-        }
-        meta::DeployRequest::UserEnvironment(deployment) => {
-            sema::DeploySubmission::UserEnvironment(sema::UserEnvironmentDeployment {
-                cluster_name: cluster_name(deployment.cluster_name),
-                node_name: node_name(deployment.node_name),
-                user_name: user_name(deployment.user_name),
-                proposal_source: proposal_source(deployment.proposal_source),
-                flake_reference: flake_reference(deployment.flake_reference),
-                deployment_transport: deployment_transport(deployment.deployment_transport),
-                deployment_input_mode: deployment_input_mode(deployment.deployment_input_mode),
-                deployment_output_selector: deployment_output_selector(
-                    deployment.deployment_output_selector,
-                ),
-                activation_backend: activation_backend(deployment.activation_backend),
-                user_environment_action: user_environment_action(
-                    deployment.user_environment_action,
-                ),
-                source_revision_policy: source_revision_policy(deployment.source_revision_policy),
-                optional_nix_builder_spec: deployment
-                    .optional_nix_builder_spec
-                    .map(nix_builder_spec),
-                extra_substituter_vector: deployment
-                    .extra_substituter_vector
-                    .into_iter()
-                    .map(extra_substituter)
-                    .collect(),
-            })
-        }
-    }
-}
-
-/// Lower a privileged request before it enters the local engine.
-pub fn meta_ingress(value: meta::Input) -> sema::MetaIngress {
-    match value {
-        meta::Input::Deploy(payload) => {
-            sema::MetaIngress::Deploy(deploy_request(payload.into_payload()))
-        }
-        meta::Input::Pin(payload) => {
-            let request = payload.into_payload();
-            sema::MetaIngress::Pin(sema::PinRequest {
-                cluster_name: cluster_name(request.cluster_name),
-                node_name: node_name(request.node_name),
-                generation_identifier: generation_identifier(request.generation_identifier),
-                pin_label: pin_label(request.pin_label),
-            })
-        }
-        meta::Input::Unpin(payload) => {
-            let request = payload.into_payload();
-            sema::MetaIngress::Unpin(sema::UnpinRequest {
-                cluster_name: cluster_name(request.cluster_name),
-                node_name: node_name(request.node_name),
-                pin_label: pin_label(request.pin_label),
-            })
-        }
-        meta::Input::Retire(payload) => {
-            let request = payload.into_payload();
-            sema::MetaIngress::Retire(sema::RetireRequest {
-                cluster_name: cluster_name(request.cluster_name),
-                node_name: node_name(request.node_name),
-                generation_identifier: generation_identifier(request.generation_identifier),
-            })
-        }
-        meta::Input::Test(payload) => sema::MetaIngress::Test(test_request(payload.into_payload())),
-    }
-}
-
-macro_rules! outward_scalar {
-    ($name:ident, $local:path, $public:path) => {
-        fn $name(value: $local) -> $public {
-            <$public>::new(value.into_payload())
+macro_rules! wire_struct {
+    ($name:ident { $($field:ident: $field_type:ty),* $(,)? }) => {
+        impl WireShape for sema::$name {
+            fn to_wire(&self) -> WireValue {
+                WireValue::Product(vec![$(self.$field.to_wire()),*])
+            }
+            fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
+                let WireValue::Product(fields) = value else { return Err(WireShapeError) };
+                let mut fields = fields.into_iter();
+                let result = Self {
+                    $($field: <$field_type as WireShape>::from_wire(
+                        fields.next().ok_or(WireShapeError)?,
+                    )?),*
+                };
+                if fields.next().is_some() { return Err(WireShapeError); }
+                Ok(result)
+            }
         }
     };
 }
 
-outward_scalar!(
-    public_cluster_name,
-    sema::ClusterName,
-    ordinary::ClusterName
-);
-outward_scalar!(public_node_name, sema::NodeName, ordinary::NodeName);
-outward_scalar!(public_user_name, sema::UserName, ordinary::UserName);
-outward_scalar!(public_pin_label, sema::PinLabel, ordinary::PinLabel);
-outward_scalar!(
-    public_immutable_revision,
-    sema::ImmutableRevision,
-    ordinary::ImmutableRevision
-);
-outward_scalar!(
-    public_deployment_identifier,
-    sema::DeploymentIdentifier,
-    ordinary::DeploymentIdentifier
-);
-outward_scalar!(
-    public_generation_identifier,
-    sema::GenerationIdentifier,
-    ordinary::GenerationIdentifier
-);
-outward_scalar!(
-    public_test_run_identifier,
-    sema::TestRunIdentifier,
-    ordinary::TestRunIdentifier
-);
-outward_scalar!(
-    public_subscription_token,
-    sema::SubscriptionToken,
-    ordinary::SubscriptionToken
-);
-outward_scalar!(
-    public_event_log_position,
-    sema::EventLogPosition,
-    ordinary::EventLogPosition
-);
+macro_rules! wire_enum {
+    ($name:ident {
+        unit { $($unit_ordinal:literal => $unit:ident),* $(,)? }
+        unary { $($unary_ordinal:literal => $unary:ident($payload:ty)),* $(,)? }
+    }) => {
+        impl WireShape for sema::$name {
+            fn to_wire(&self) -> WireValue {
+                match self {
+                    $(Self::$unit => WireValue::Variant { ordinal: $unit_ordinal, fields: Vec::new() },)*
+                    $(Self::$unary(payload) => WireValue::Variant {
+                        ordinal: $unary_ordinal,
+                        fields: vec![payload.to_wire()],
+                    },)*
+                }
+            }
+            fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
+                let WireValue::Variant { ordinal, fields } = value else {
+                    return Err(WireShapeError);
+                };
+                match ordinal {
+                    $($unit_ordinal if fields.is_empty() => Ok(Self::$unit),)*
+                    $($unary_ordinal if fields.len() == 1 => Ok(Self::$unary(
+                        <$payload as WireShape>::from_wire(
+                            fields.into_iter().next().ok_or(WireShapeError)?,
+                        )?,
+                    )),)*
+                    _ => Err(WireShapeError),
+                }
+            }
+        }
+    };
+}
 
-fn public_marker(value: sema::StateMarker) -> ordinary::DatabaseMarker {
-    ordinary::DatabaseMarker {
-        commit_sequence: ordinary::CommitSequence::new(value.commit_sequence.into_payload()),
-        state_digest: ordinary::StateDigest::new(value.state_digest.into_payload()),
+wire_enum!(UserEnvironmentAction { unit { 0 => ActivateNow, 1 => Realize, 2 => SetProfile } unary {  } });
+wire_enum!(OrdinaryEgress { unit {  } unary { 0 => TestRunsQueried(TestRunListing), 1 => UnwatchRejected(RejectedUnwatch), 2 => QueryRejected(RejectedQuery), 3 => Watching(SubscriptionOpened), 4 => KeyMaterialCheckRejected(RejectedKeyMaterialCheck), 5 => Queried(GenerationListing), 6 => DeploymentEventsQueried(EventLogPage), 7 => Unwatched(SubscriptionClosed), 8 => KeyMaterialChecked(KeyMaterialReport), 9 => WatchRejected(RejectedWatch) } });
+wire_newtype!(GenerationIdentifier, u64);
+wire_enum!(CacheRetentionTransition { unit { 0 => Demoted, 1 => Retired, 2 => Pinned, 3 => Promoted, 4 => Unpinned, 5 => Evicted } unary {  } });
+wire_newtype!(CommitSequence, u64);
+wire_struct!(DeploymentPhaseEvent { deployment_identifier: DeploymentIdentifier, generation_identifier: GenerationIdentifier, cluster_name: ClusterName, node_name: NodeName, deployment_phase: DeploymentPhase, event_log_position: EventLogPosition, state_marker: StateMarker, optional_immutable_revision: Option<ImmutableRevision>, optional_deployment_terminal: Option<DeploymentTerminal> });
+wire_struct!(DeploymentWatch { optional_deployment_identifier: Option<DeploymentIdentifier>, optional_cluster_name: Option<ClusterName>, optional_node_name: Option<NodeName> });
+wire_newtype!(ProposalSource, String);
+wire_enum!(RequestedDeploymentAction { unit {  } unary { 0 => Host(HostDeployAction), 1 => UserEnvironment(UserEnvironmentAction) } });
+wire_newtype!(NodeName, String);
+wire_struct!(RejectedQuery {
+    query_rejection_reason: QueryRejectionReason,
+    state_marker: StateMarker
+});
+wire_newtype!(GenerationLookup, GenerationIdentifier);
+wire_enum!(TestOutcome { unit { 1 => Pending, 2 => Passed } unary { 0 => Failed(FailureStage) } });
+wire_enum!(KeyMaterialCheckRejectionReason { unit { 0 => ProposalSourceUnreachable, 1 => HostUnreachable, 2 => PublicationMalformed, 3 => NodeUnknown } unary {  } });
+wire_struct!(TestRunLookup { cluster_name: ClusterName, node_name: NodeName, optional_test_run_identifier: Option<TestRunIdentifier> });
+wire_newtype!(SubscriptionToken, u64);
+wire_newtype!(NixSystem, String);
+wire_struct!(DeploymentRecord { deployment_identifier: DeploymentIdentifier, generation_identifier: GenerationIdentifier, deployment_request_identity: DeploymentRequestIdentity, optional_admission_marker: Option<AdmissionMarker>, deployment_lifecycle: DeploymentLifecycle, optional_terminal_marker: Option<TerminalMarker>, optional_deployment_terminal: Option<DeploymentTerminal> });
+wire_enum!(FailureStage { unit { 0 => HermeticCheck, 1 => BringUp, 2 => Assert, 3 => Deploy, 4 => TearDown } unary {  } });
+wire_enum!(HostDeployAction { unit { 0 => TestActivation, 1 => ScheduleBootOnce, 2 => Realize, 3 => SetBootProfile, 4 => Evaluate, 5 => ActivateNow } unary {  } });
+wire_newtype!(PinLabel, String);
+wire_struct!(GenerationListing { generation_vector: Vec<Generation>, deployment_record_vector: Vec<DeploymentRecord>, state_marker: StateMarker });
+wire_newtype!(DeploymentLookup, DeploymentIdentifier);
+wire_enum!(UnwatchRejectionReason { unit { 0 => SubscriptionTokenUnknown, 1 => SubscriptionAlreadyClosed } unary {  } });
+wire_enum!(GenerationSlot { unit { 0 => Pinned, 1 => Recent, 2 => Rollback, 3 => BootPending, 4 => Current } unary {  } });
+wire_newtype!(TestRunIdentifier, u64);
+wire_enum!(HostComposition { unit { 0 => CompleteHost, 1 => BaseHost } unary {  } });
+wire_struct!(CacheRetentionWatch { optional_cluster_name: Option<ClusterName>, optional_node_name: Option<NodeName> });
+wire_newtype!(FlakeAttribute, String);
+wire_enum!(DeploymentPhase { unit { 0 => Built, 1 => Completed, 2 => Failed, 3 => Copying, 4 => Rejected, 5 => Activated, 6 => Submitted, 7 => Building, 8 => Activating } unary {  } });
+wire_newtype!(DatabaseMarker, StateMarker);
+wire_newtype!(AdmissionMarker, StateMarker);
+wire_newtype!(SshDestination, String);
+wire_newtype!(UserName, String);
+wire_struct!(DeploymentRequestIdentity { deployment_environment: DeploymentEnvironment, cluster_name: ClusterName, node_name: NodeName, generation_artifact: GenerationArtifact, requested_deployment_action: RequestedDeploymentAction, activation_effect: ActivationEffect, source_revision_policy: SourceRevisionPolicy, optional_immutable_revision: Option<ImmutableRevision> });
+wire_newtype!(TransitionMarker, StateMarker);
+wire_newtype!(EventLogPosition, u64);
+wire_newtype!(RejectedWatch, WatchRejectionReason);
+wire_struct!(CacheRetentionTransitionEvent { generation_identifier: GenerationIdentifier, cluster_name: ClusterName, node_name: NodeName, cache_retention_transition: CacheRetentionTransition, generation_slot: GenerationSlot, optional_generation_slot: Option<GenerationSlot>, optional_pin_label: Option<PinLabel>, event_log_position: EventLogPosition });
+wire_newtype!(NixBuilderSpec, String);
+wire_enum!(DeploymentInputMode { unit { 0 => Horizon, 1 => Direct } unary {  } });
+wire_enum!(TestRunPhase { unit { 0 => Submitted, 1 => BringingUp, 2 => TearingDown, 3 => Completed, 4 => Deploying, 5 => Asserting, 6 => Failed } unary {  } });
+wire_struct!(DeploymentTransport {
+    nix_store_uri: NixStoreUri,
+    ssh_destination: SshDestination
+});
+wire_struct!(TestExecutionProfile { test_mode: TestMode, nix_system: NixSystem, deployment_output_selector: DeploymentOutputSelector, optional_deployment_transport: Option<DeploymentTransport> });
+wire_struct!(SubscriptionOpened {
+    subscription_token: SubscriptionToken,
+    commit_sequence: CommitSequence
+});
+wire_enum!(WatchRejectionReason { unit { 0 => MalformedWatch, 1 => SubscriptionLimitReached, 2 => StreamUnavailable } unary {  } });
+wire_enum!(ActivationBackend { unit { 0 => HomeManagerNixProfileV1, 1 => NixosSystemdBootV1 } unary {  } });
+wire_enum!(GenerationArtifact { unit { 0 => BaseHost, 1 => CompleteHost, 2 => UserEnvironment } unary {  } });
+wire_struct!(RejectedUnwatch {
+    unwatch_rejection_reason: UnwatchRejectionReason,
+    subscription_token: SubscriptionToken
+});
+wire_struct!(EventLogPage { deployment_phase_event_vector: Vec<DeploymentPhaseEvent>, cache_retention_transition_event_vector: Vec<CacheRetentionTransitionEvent>, state_marker: StateMarker });
+wire_newtype!(SubscriptionClose, SubscriptionToken);
+wire_newtype!(TerminalMarker, StateMarker);
+wire_enum!(DeploymentEnvironment { unit { 0 => HostEnvironment } unary { 1 => UserEnvironment(UserName) } });
+wire_newtype!(ImmutableRevision, String);
+wire_enum!(HostSelection { unit { 1 => DefaultHost } unary { 0 => OnHost(NodeName) } });
+wire_struct!(EventLogRange {
+    from: EventLogPosition,
+    until: EventLogPosition
+});
+wire_enum!(DeploymentLifecycle { unit { 0 => Failed, 1 => Rejected, 2 => Completed, 3 => Building, 4 => Activating, 5 => Submitted, 6 => Copying, 7 => Activated, 8 => Built } unary {  } });
+wire_newtype!(DeploymentOutputSelector, FlakeAttribute);
+wire_newtype!(ClosurePath, String);
+wire_enum!(ActivationEffect { unit { 0 => ProfileOnly, 1 => BootOnceProfile, 2 => TestActivation, 3 => LiveActivation, 4 => BootProfile } unary {  } });
+wire_newtype!(SubscriptionClosed, SubscriptionToken);
+wire_enum!(OrdinaryIngress { unit {  } unary { 0 => CheckHostKeyMaterial(KeyMaterialQuery), 1 => WatchDeployments(DeploymentWatch), 2 => Query(Selection), 3 => WatchCacheRetention(CacheRetentionWatch), 4 => Unwatch(SubscriptionClose) } });
+wire_enum!(TestMode { unit { 0 => Hermetic, 1 => Live } unary {  } });
+wire_newtype!(StateDigest, u64);
+wire_enum!(QueryRejectionReason { unit { 0 => MalformedSelector, 1 => EventLogPositionOutOfRange, 2 => GenerationUnknown, 3 => NodeUnknown } unary {  } });
+wire_newtype!(NixStoreUri, String);
+wire_struct!(TestRunListing { test_run_record_vector: Vec<TestRunRecord>, database_marker: DatabaseMarker });
+wire_enum!(DeploymentTerminal { unit { 2 => Succeeded } unary { 0 => Failed(DeploymentFailure), 1 => Rejected(DeploymentTerminalReason) } });
+wire_enum!(SourceRevisionPolicy { unit { 0 => ResolveAndRecord, 1 => RequireImmutable } unary {  } });
+wire_struct!(KeyMaterialQuery {
+    cluster_name: ClusterName,
+    node_name: NodeName,
+    proposal_source: ProposalSource
+});
+wire_newtype!(ClusterName, String);
+wire_newtype!(DeploymentIdentifier, u64);
+wire_struct!(DeploymentFailure {
+    deployment_failure_stage: DeploymentFailureStage,
+    deployment_terminal_reason: DeploymentTerminalReason
+});
+wire_enum!(DeploymentFailureStage { unit { 0 => Build, 1 => Eval, 2 => MaterializeHorizon, 3 => Daemon, 4 => Activate, 5 => CopyClosure, 6 => Admission, 7 => FlakeAuth } unary {  } });
+wire_struct!(RejectedKeyMaterialCheck {
+    key_material_check_rejection_reason: KeyMaterialCheckRejectionReason,
+    state_marker: StateMarker
+});
+wire_newtype!(FlakeReference, String);
+wire_enum!(DeploymentTerminalReason { unit { 0 => NodeUnknown, 1 => FlakeReferenceMalformed, 2 => ProposalSourceUnreachable, 3 => DeploymentInFlight, 4 => InvalidDeploymentRouting, 5 => UnsupportedDeployAction, 6 => InternalError, 7 => ClusterUnknown, 8 => ActivationFailed, 9 => BuilderUnreachable, 10 => SubstituterUnreachable } unary {  } });
+wire_enum!(Selection { unit {  } unary { 0 => ByNode(NodeSelector), 1 => ByTestRun(TestRunLookup), 2 => ByDeployment(DeploymentLookup), 3 => ByGeneration(GenerationLookup), 4 => ByEventLog(EventLogRange) } });
+wire_struct!(UserEnvironmentDeployment { cluster_name: ClusterName, node_name: NodeName, user_name: UserName, proposal_source: ProposalSource, flake_reference: FlakeReference, deployment_transport: DeploymentTransport, deployment_input_mode: DeploymentInputMode, deployment_output_selector: DeploymentOutputSelector, activation_backend: ActivationBackend, user_environment_action: UserEnvironmentAction, source_revision_policy: SourceRevisionPolicy, optional_nix_builder_spec: Option<NixBuilderSpec>, extra_substituter_vector: Vec<ExtraSubstituter> });
+wire_struct!(HostDeployment { cluster_name: ClusterName, node_name: NodeName, host_composition: HostComposition, proposal_source: ProposalSource, flake_reference: FlakeReference, deployment_transport: DeploymentTransport, deployment_input_mode: DeploymentInputMode, deployment_output_selector: DeploymentOutputSelector, activation_backend: ActivationBackend, host_deploy_action: HostDeployAction, source_revision_policy: SourceRevisionPolicy, optional_nix_builder_spec: Option<NixBuilderSpec>, extra_substituter_vector: Vec<ExtraSubstituter> });
+wire_struct!(AppliedPin {
+    generation_identifier: GenerationIdentifier,
+    pin_label: PinLabel,
+    from_slot: GenerationSlot,
+    to_slot: GenerationSlot,
+    state_marker: StateMarker
+});
+wire_enum!(PinRejectionReason { unit { 0 => PinSlotExhausted, 1 => InternalError, 2 => NodeUnknown, 3 => PinLabelInUse, 4 => GenerationUnknown } unary {  } });
+wire_enum!(NodeSelection { unit { 0 => All } unary { 1 => Nodes(Vec<NodeName>) } });
+wire_enum!(RetireRejectionReason { unit { 0 => NodeUnknown, 1 => GenerationUnknown, 2 => GenerationPinned, 3 => InternalError, 4 => GenerationActive } unary {  } });
+wire_struct!(RejectedTest {
+    test_rejection_reason: TestRejectionReason,
+    state_marker: StateMarker
+});
+wire_newtype!(RejectedDeploy, DeploymentRecord);
+wire_enum!(UnpinRejectionReason { unit { 0 => GenerationNotPinned, 1 => PinLabelUnknown, 2 => InternalError, 3 => NodeUnknown } unary {  } });
+wire_struct!(PinRequest {
+    cluster_name: ClusterName,
+    node_name: NodeName,
+    generation_identifier: GenerationIdentifier,
+    pin_label: PinLabel
+});
+wire_struct!(RejectedUnpin {
+    unpin_rejection_reason: UnpinRejectionReason,
+    state_marker: StateMarker
+});
+wire_enum!(TestRequest { unit {  } unary { 0 => Run(TestRun), 1 => Check(QuickCheck) } });
+wire_struct!(RejectedPin {
+    pin_rejection_reason: PinRejectionReason,
+    state_marker: StateMarker
+});
+wire_struct!(UnpinRequest {
+    cluster_name: ClusterName,
+    node_name: NodeName,
+    pin_label: PinLabel
+});
+wire_struct!(ExtraSubstituter {
+    url: String,
+    public_key: String
+});
+wire_enum!(MetaEgress { unit {  } unary { 0 => PinRejected(RejectedPin), 1 => DeployRejected(RejectedDeploy), 2 => DeployAccepted(DeployHandle), 3 => TestRejected(RejectedTest), 4 => Unpinned(AppliedUnpin), 5 => Tested(AcceptedTest), 6 => UnpinRejected(RejectedUnpin), 7 => DeployTerminal(DeploymentRecord), 8 => Pinned(AppliedPin), 9 => RetireRejected(RejectedRetire), 10 => Retired(AppliedRetire) } });
+wire_struct!(DeployHandle {
+    deployment_identifier: DeploymentIdentifier,
+    state_marker: StateMarker
+});
+wire_struct!(RetireRequest {
+    cluster_name: ClusterName,
+    node_name: NodeName,
+    generation_identifier: GenerationIdentifier
+});
+wire_enum!(DeploySubmission { unit {  } unary { 0 => UserEnvironment(UserEnvironmentDeployment), 1 => Host(HostDeployment) } });
+wire_newtype!(QuickCheck, Vec<NodeName>);
+wire_struct!(AcceptedTest {
+    test_run_identifier: TestRunIdentifier,
+    state_marker: StateMarker
+});
+wire_struct!(AppliedUnpin {
+    generation_identifier: GenerationIdentifier,
+    pin_label: PinLabel,
+    from_slot: GenerationSlot,
+    to_slot: GenerationSlot,
+    state_marker: StateMarker
+});
+wire_enum!(TestRejectionReason { unit { 0 => SubstrateUnavailable, 1 => NoTestDefaults, 2 => ClusterUnknown, 3 => HostDeclaresNoVmHost, 4 => LiveNotYetEnabled, 5 => NodeUnknown, 6 => VmHostNotDeclaredForNode, 7 => InternalError } unary {  } });
+wire_struct!(RejectedRetire {
+    retire_rejection_reason: RetireRejectionReason,
+    state_marker: StateMarker
+});
+wire_enum!(MetaIngress { unit {  } unary { 0 => Retire(RetireRequest), 1 => Pin(PinRequest), 2 => Deploy(DeploySubmission), 3 => Test(TestRequest), 4 => Unpin(UnpinRequest) } });
+wire_struct!(AppliedRetire {
+    generation_identifier: GenerationIdentifier,
+    generation_slot: GenerationSlot,
+    state_marker: StateMarker
+});
+wire_struct!(TestRun {
+    cluster_name: ClusterName,
+    node_selection: NodeSelection,
+    host_selection: HostSelection,
+    test_execution_profile: TestExecutionProfile
+});
+
+wire_struct!(StateMarker {
+    commit_sequence: sema::CommitSequence,
+    state_digest: sema::StateDigest
+});
+
+impl WireShape for sema::NodeSelector {
+    fn to_wire(&self) -> WireValue {
+        let requested = match self.optional_generation_artifact {
+            None => WireValue::Absent,
+            Some(sema::GenerationArtifact::UserEnvironment) => {
+                WireValue::Present(Box::new(WireValue::Variant {
+                    ordinal: 0,
+                    fields: Vec::new(),
+                }))
+            }
+            Some(sema::GenerationArtifact::CompleteHost) => {
+                WireValue::Present(Box::new(WireValue::Variant {
+                    ordinal: 1,
+                    fields: Vec::new(),
+                }))
+            }
+            Some(sema::GenerationArtifact::BaseHost) => {
+                WireValue::Present(Box::new(WireValue::Variant {
+                    ordinal: 2,
+                    fields: Vec::new(),
+                }))
+            }
+        };
+        WireValue::Product(vec![
+            self.cluster_name.to_wire(),
+            self.node_name.to_wire(),
+            requested,
+        ])
+    }
+
+    fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
+        let WireValue::Product(mut fields) = value else {
+            return Err(WireShapeError);
+        };
+        if fields.len() != 3 {
+            return Err(WireShapeError);
+        }
+        let requested = fields.pop().ok_or(WireShapeError)?;
+        let optional_generation_artifact = match requested {
+            WireValue::Absent => None,
+            WireValue::Present(value) => match *value {
+                WireValue::Variant { ordinal: 0, fields } if fields.is_empty() => {
+                    Some(sema::GenerationArtifact::UserEnvironment)
+                }
+                WireValue::Variant { ordinal: 1, fields } if fields.is_empty() => {
+                    Some(sema::GenerationArtifact::CompleteHost)
+                }
+                WireValue::Variant { ordinal: 2, fields } if fields.is_empty() => {
+                    Some(sema::GenerationArtifact::BaseHost)
+                }
+                _ => return Err(WireShapeError),
+            },
+            _ => return Err(WireShapeError),
+        };
+        let node_name = sema::NodeName::from_wire(fields.pop().ok_or(WireShapeError)?)?;
+        let cluster_name = sema::ClusterName::from_wire(fields.pop().ok_or(WireShapeError)?)?;
+        Ok(Self {
+            cluster_name,
+            node_name,
+            optional_generation_artifact,
+        })
     }
 }
 
-/// Ordinary egress is a privacy boundary: only a canonical immutable Nix
-/// store-item root can leave it. Local persistence may retain other private
-/// strings, but they never become a public closure path.
-fn public_closure_path(value: sema::ClosurePath) -> Option<ordinary::ClosurePath> {
-    canonical_nix_store_root(value.payload())
-        .then(|| ordinary::ClosurePath::new(value.into_payload()))
+impl WireShape for sema::Generation {
+    fn to_wire(&self) -> WireValue {
+        let closure = canonical_nix_store_root(self.closure_path.payload())
+            .then(|| self.closure_path.clone())
+            .to_wire();
+        WireValue::Product(vec![
+            self.generation_identifier.to_wire(),
+            self.deployment_identifier.to_wire(),
+            self.cluster_name.to_wire(),
+            self.node_name.to_wire(),
+            self.generation_artifact.to_wire(),
+            self.activation_effect.to_wire(),
+            self.generation_slot.to_wire(),
+            closure,
+            self.optional_immutable_revision.to_wire(),
+        ])
+    }
+
+    fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
+        let WireValue::Product(fields) = value else {
+            return Err(WireShapeError);
+        };
+        let mut fields = fields.into_iter();
+        let generation_identifier =
+            sema::GenerationIdentifier::from_wire(fields.next().ok_or(WireShapeError)?)?;
+        let deployment_identifier =
+            sema::DeploymentIdentifier::from_wire(fields.next().ok_or(WireShapeError)?)?;
+        let cluster_name = sema::ClusterName::from_wire(fields.next().ok_or(WireShapeError)?)?;
+        let node_name = sema::NodeName::from_wire(fields.next().ok_or(WireShapeError)?)?;
+        let generation_artifact =
+            sema::GenerationArtifact::from_wire(fields.next().ok_or(WireShapeError)?)?;
+        let activation_effect =
+            sema::ActivationEffect::from_wire(fields.next().ok_or(WireShapeError)?)?;
+        let generation_slot =
+            sema::GenerationSlot::from_wire(fields.next().ok_or(WireShapeError)?)?;
+        let closure_path =
+            Option::<sema::ClosurePath>::from_wire(fields.next().ok_or(WireShapeError)?)?
+                .ok_or(WireShapeError)?;
+        let optional_immutable_revision =
+            Option::<sema::ImmutableRevision>::from_wire(fields.next().ok_or(WireShapeError)?)?;
+        if fields.next().is_some() {
+            return Err(WireShapeError);
+        }
+        Ok(Self {
+            generation_identifier,
+            deployment_identifier,
+            cluster_name,
+            node_name,
+            generation_artifact,
+            activation_effect,
+            generation_slot,
+            closure_path,
+            optional_immutable_revision,
+        })
+    }
+}
+
+impl WireShape for sema::TestRunRecord {
+    fn to_wire(&self) -> WireValue {
+        let closure = self
+            .optional_closure_path
+            .clone()
+            .filter(|path| canonical_nix_store_root(path.payload()))
+            .to_wire();
+        WireValue::Product(vec![
+            self.test_run_identifier.to_wire(),
+            self.cluster_name.to_wire(),
+            self.node.to_wire(),
+            self.host.to_wire(),
+            self.test_mode.to_wire(),
+            self.test_run_phase.to_wire(),
+            self.test_outcome.to_wire(),
+            closure,
+        ])
+    }
+
+    fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
+        let WireValue::Product(fields) = value else {
+            return Err(WireShapeError);
+        };
+        let mut fields = fields.into_iter();
+        let result = Self {
+            test_run_identifier: sema::TestRunIdentifier::from_wire(
+                fields.next().ok_or(WireShapeError)?,
+            )?,
+            cluster_name: sema::ClusterName::from_wire(fields.next().ok_or(WireShapeError)?)?,
+            node: sema::NodeName::from_wire(fields.next().ok_or(WireShapeError)?)?,
+            host: sema::NodeName::from_wire(fields.next().ok_or(WireShapeError)?)?,
+            test_mode: sema::TestMode::from_wire(fields.next().ok_or(WireShapeError)?)?,
+            test_run_phase: sema::TestRunPhase::from_wire(fields.next().ok_or(WireShapeError)?)?,
+            test_outcome: sema::TestOutcome::from_wire(fields.next().ok_or(WireShapeError)?)?,
+            optional_closure_path: Option::<sema::ClosurePath>::from_wire(
+                fields.next().ok_or(WireShapeError)?,
+            )?,
+        };
+        if fields.next().is_some() {
+            return Err(WireShapeError);
+        }
+        Ok(result)
+    }
+}
+
+impl WireShape for sema::KeyMaterialReport {
+    fn to_wire(&self) -> WireValue {
+        WireValue::Product(vec![
+            self.node_name.to_wire(),
+            WireValue::Sequence(Vec::new()),
+            self.state_marker.to_wire(),
+        ])
+    }
+
+    fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
+        let WireValue::Product(fields) = value else {
+            return Err(WireShapeError);
+        };
+        let mut fields = fields.into_iter();
+        let node_name = sema::NodeName::from_wire(fields.next().ok_or(WireShapeError)?)?;
+        let WireValue::Sequence(_) = fields.next().ok_or(WireShapeError)? else {
+            return Err(WireShapeError);
+        };
+        let state_marker = sema::StateMarker::from_wire(fields.next().ok_or(WireShapeError)?)?;
+        if fields.next().is_some() {
+            return Err(WireShapeError);
+        }
+        Ok(Self {
+            node_name,
+            string_vector: Vec::new(),
+            state_marker,
+        })
+    }
 }
 
 fn canonical_nix_store_root(value: &str) -> bool {
@@ -473,652 +499,37 @@ fn credential_like(value: &str) -> bool {
     .any(|term| value.contains(term))
 }
 
-fn public_generation_artifact(
-    value: sema::GenerationArtifact,
-) -> crate::Result<ordinary::GenerationArtifact> {
-    match value {
-        sema::GenerationArtifact::CompleteHost => Ok(ordinary::GenerationArtifact::CompleteHost),
-        sema::GenerationArtifact::BaseHost => Ok(ordinary::GenerationArtifact::BaseHost),
-        sema::GenerationArtifact::UserEnvironment => {
-            Ok(ordinary::GenerationArtifact::UserEnvironment)
-        }
-    }
+pub fn ordinary_ingress(value: signal_lojix::schema::lib::z2VTvQ) -> sema::OrdinaryIngress {
+    sema::OrdinaryIngress::from_wire(value.to_wire())
+        .expect("the verified ordinary Interface has the lojix ingress shape")
 }
 
-fn public_activation_effect(
-    value: sema::ActivationEffect,
-) -> crate::Result<ordinary::ActivationEffect> {
-    match value {
-        sema::ActivationEffect::LiveActivation => Ok(ordinary::ActivationEffect::LiveActivation),
-        sema::ActivationEffect::BootProfile => Ok(ordinary::ActivationEffect::BootProfile),
-        sema::ActivationEffect::TestActivation => Ok(ordinary::ActivationEffect::TestActivation),
-        sema::ActivationEffect::BootOnceProfile => Ok(ordinary::ActivationEffect::BootOnceProfile),
-        sema::ActivationEffect::ProfileOnly => Ok(ordinary::ActivationEffect::ProfileOnly),
-    }
+pub fn meta_ingress(value: meta_signal_lojix::schema::lib::z2VW7Q) -> sema::MetaIngress {
+    sema::MetaIngress::from_wire(value.to_wire())
+        .expect("the verified owner Interface has the lojix ingress shape")
 }
 
-fn public_generation_slot(value: sema::GenerationSlot) -> crate::Result<ordinary::GenerationSlot> {
-    match value {
-        sema::GenerationSlot::Current => Ok(ordinary::GenerationSlot::Current),
-        sema::GenerationSlot::BootPending => Ok(ordinary::GenerationSlot::BootPending),
-        sema::GenerationSlot::Rollback => Ok(ordinary::GenerationSlot::Rollback),
-        sema::GenerationSlot::Pinned => Ok(ordinary::GenerationSlot::Pinned),
-        sema::GenerationSlot::Recent => Ok(ordinary::GenerationSlot::Recent),
-    }
-}
-
-fn public_test_mode(value: sema::TestMode) -> ordinary::TestMode {
-    match value {
-        sema::TestMode::Hermetic => ordinary::TestMode::Hermetic,
-        sema::TestMode::Live => ordinary::TestMode::Live,
-    }
-}
-
-fn public_test_run_phase(value: sema::TestRunPhase) -> ordinary::TestRunPhase {
-    match value {
-        sema::TestRunPhase::Submitted => ordinary::TestRunPhase::Submitted,
-        sema::TestRunPhase::BringingUp => ordinary::TestRunPhase::BringingUp,
-        sema::TestRunPhase::Deploying => ordinary::TestRunPhase::Deploying,
-        sema::TestRunPhase::Asserting => ordinary::TestRunPhase::Asserting,
-        sema::TestRunPhase::TearingDown => ordinary::TestRunPhase::TearingDown,
-        sema::TestRunPhase::Completed => ordinary::TestRunPhase::Completed,
-        sema::TestRunPhase::Failed => ordinary::TestRunPhase::Failed,
-    }
-}
-
-fn public_failure_stage(value: sema::FailureStage) -> ordinary::FailureStage {
-    match value {
-        sema::FailureStage::BringUp => ordinary::FailureStage::BringUp,
-        sema::FailureStage::Deploy => ordinary::FailureStage::Deploy,
-        sema::FailureStage::Assert => ordinary::FailureStage::Assert,
-        sema::FailureStage::TearDown => ordinary::FailureStage::TearDown,
-        sema::FailureStage::HermeticCheck => ordinary::FailureStage::HermeticCheck,
-    }
-}
-
-fn public_test_outcome(value: sema::TestOutcome) -> ordinary::TestOutcome {
-    match value {
-        sema::TestOutcome::Pending => ordinary::TestOutcome::Pending,
-        sema::TestOutcome::Passed => ordinary::TestOutcome::Passed,
-        sema::TestOutcome::Failed(stage) => {
-            ordinary::TestOutcome::Failed(public_failure_stage(stage))
-        }
-    }
-}
-
-fn public_deployment_phase(value: sema::DeploymentPhase) -> ordinary::DeploymentPhase {
-    match value {
-        sema::DeploymentPhase::Submitted => ordinary::DeploymentPhase::Submitted,
-        sema::DeploymentPhase::Building => ordinary::DeploymentPhase::Building,
-        sema::DeploymentPhase::Built => ordinary::DeploymentPhase::Built,
-        sema::DeploymentPhase::Copying => ordinary::DeploymentPhase::Copying,
-        sema::DeploymentPhase::Activating => ordinary::DeploymentPhase::Activating,
-        sema::DeploymentPhase::Activated => ordinary::DeploymentPhase::Activated,
-        sema::DeploymentPhase::Completed => ordinary::DeploymentPhase::Completed,
-        sema::DeploymentPhase::Rejected => ordinary::DeploymentPhase::Rejected,
-        sema::DeploymentPhase::Failed => ordinary::DeploymentPhase::Failed,
-    }
-}
-
-fn public_cache_transition(
-    value: sema::CacheRetentionTransition,
-) -> ordinary::CacheRetentionTransition {
-    match value {
-        sema::CacheRetentionTransition::Pinned => ordinary::CacheRetentionTransition::Pinned,
-        sema::CacheRetentionTransition::Unpinned => ordinary::CacheRetentionTransition::Unpinned,
-        sema::CacheRetentionTransition::Promoted => ordinary::CacheRetentionTransition::Promoted,
-        sema::CacheRetentionTransition::Demoted => ordinary::CacheRetentionTransition::Demoted,
-        sema::CacheRetentionTransition::Retired => ordinary::CacheRetentionTransition::Retired,
-        sema::CacheRetentionTransition::Evicted => ordinary::CacheRetentionTransition::Evicted,
-    }
-}
-
-fn public_generation(value: sema::Generation) -> crate::Result<ordinary::Generation> {
-    Ok(ordinary::Generation {
-        generation_identifier: public_generation_identifier(value.generation_identifier),
-        deployment_identifier: public_deployment_identifier(value.deployment_identifier),
-        cluster_name: public_cluster_name(value.cluster_name),
-        node_name: public_node_name(value.node_name),
-        generation_artifact: public_generation_artifact(value.generation_artifact)?,
-        activation_effect: public_activation_effect(value.activation_effect)?,
-        generation_slot: public_generation_slot(value.generation_slot)?,
-        optional_closure_path: public_closure_path(value.closure_path),
-        optional_immutable_revision: value
-            .optional_immutable_revision
-            .map(public_immutable_revision),
+pub fn ordinary_egress(
+    value: sema::OrdinaryEgress,
+) -> crate::Result<signal_lojix::schema::lib::z2VcR1> {
+    signal_lojix::schema::lib::z2VcR1::from_wire(value.to_wire()).map_err(|_| {
+        crate::Error::Invariant(
+            "ordinary egress no longer matches its verified Interface".to_owned(),
+        )
     })
 }
 
-fn public_test_run_record(value: sema::TestRunRecord) -> ordinary::TestRunRecord {
-    ordinary::TestRunRecord {
-        test_run_identifier: public_test_run_identifier(value.test_run_identifier),
-        cluster_name: public_cluster_name(value.cluster_name),
-        node: public_node_name(value.node),
-        host: public_node_name(value.host),
-        test_mode: public_test_mode(value.test_mode),
-        test_run_phase: public_test_run_phase(value.test_run_phase),
-        test_outcome: public_test_outcome(value.test_outcome),
-        optional_closure_path: value.optional_closure_path.and_then(public_closure_path),
-    }
-}
-
-fn public_deployment_environment(
-    value: sema::DeploymentEnvironment,
-) -> crate::Result<ordinary::DeploymentEnvironment> {
-    match value {
-        sema::DeploymentEnvironment::HostEnvironment => {
-            Ok(ordinary::DeploymentEnvironment::HostEnvironment)
-        }
-        sema::DeploymentEnvironment::UserEnvironment(user) => Ok(
-            ordinary::DeploymentEnvironment::UserEnvironment(public_user_name(user)),
-        ),
-    }
-}
-
-fn public_host_action(value: sema::HostDeployAction) -> ordinary::HostDeployAction {
-    match value {
-        sema::HostDeployAction::Evaluate => ordinary::HostDeployAction::Evaluate,
-        sema::HostDeployAction::Realize => ordinary::HostDeployAction::Realize,
-        sema::HostDeployAction::SetBootProfile => ordinary::HostDeployAction::SetBootProfile,
-        sema::HostDeployAction::ActivateNow => ordinary::HostDeployAction::ActivateNow,
-        sema::HostDeployAction::TestActivation => ordinary::HostDeployAction::TestActivation,
-        sema::HostDeployAction::ScheduleBootOnce => ordinary::HostDeployAction::ScheduleBootOnce,
-    }
-}
-
-fn public_user_action(value: sema::UserEnvironmentAction) -> ordinary::UserEnvironmentAction {
-    match value {
-        sema::UserEnvironmentAction::Realize => ordinary::UserEnvironmentAction::Realize,
-        sema::UserEnvironmentAction::SetProfile => ordinary::UserEnvironmentAction::SetProfile,
-        sema::UserEnvironmentAction::ActivateNow => ordinary::UserEnvironmentAction::ActivateNow,
-    }
-}
-
-fn public_requested_action(
-    value: sema::RequestedDeploymentAction,
-) -> crate::Result<ordinary::RequestedDeploymentAction> {
-    match value {
-        sema::RequestedDeploymentAction::Host(action) => Ok(
-            ordinary::RequestedDeploymentAction::Host(public_host_action(action)),
-        ),
-        sema::RequestedDeploymentAction::UserEnvironment(action) => Ok(
-            ordinary::RequestedDeploymentAction::UserEnvironment(public_user_action(action)),
-        ),
-    }
-}
-
-fn public_source_policy(value: sema::SourceRevisionPolicy) -> ordinary::SourceRevisionPolicy {
-    match value {
-        sema::SourceRevisionPolicy::RequireImmutable => {
-            ordinary::SourceRevisionPolicy::RequireImmutable
-        }
-        sema::SourceRevisionPolicy::ResolveAndRecord => {
-            ordinary::SourceRevisionPolicy::ResolveAndRecord
-        }
-    }
-}
-
-fn public_deployment_lifecycle(
-    value: sema::DeploymentLifecycle,
-) -> crate::Result<ordinary::DeploymentLifecycle> {
-    match value {
-        sema::DeploymentLifecycle::Submitted => Ok(ordinary::DeploymentLifecycle::Submitted),
-        sema::DeploymentLifecycle::Building => Ok(ordinary::DeploymentLifecycle::Building),
-        sema::DeploymentLifecycle::Built => Ok(ordinary::DeploymentLifecycle::Built),
-        sema::DeploymentLifecycle::Copying => Ok(ordinary::DeploymentLifecycle::Copying),
-        sema::DeploymentLifecycle::Activating => Ok(ordinary::DeploymentLifecycle::Activating),
-        sema::DeploymentLifecycle::Activated => Ok(ordinary::DeploymentLifecycle::Activated),
-        sema::DeploymentLifecycle::Completed => Ok(ordinary::DeploymentLifecycle::Completed),
-        sema::DeploymentLifecycle::Rejected => Ok(ordinary::DeploymentLifecycle::Rejected),
-        sema::DeploymentLifecycle::Failed => Ok(ordinary::DeploymentLifecycle::Failed),
-    }
-}
-
-fn public_terminal_reason(
-    value: sema::DeploymentTerminalReason,
-) -> ordinary::DeploymentTerminalReason {
-    match value {
-        sema::DeploymentTerminalReason::ClusterUnknown => {
-            ordinary::DeploymentTerminalReason::ClusterUnknown
-        }
-        sema::DeploymentTerminalReason::NodeUnknown => {
-            ordinary::DeploymentTerminalReason::NodeUnknown
-        }
-        sema::DeploymentTerminalReason::ProposalSourceUnreachable => {
-            ordinary::DeploymentTerminalReason::ProposalSourceUnreachable
-        }
-        sema::DeploymentTerminalReason::FlakeReferenceMalformed => {
-            ordinary::DeploymentTerminalReason::FlakeReferenceMalformed
-        }
-        sema::DeploymentTerminalReason::InvalidDeploymentRouting => {
-            ordinary::DeploymentTerminalReason::InvalidDeploymentRouting
-        }
-        sema::DeploymentTerminalReason::BuilderUnreachable => {
-            ordinary::DeploymentTerminalReason::BuilderUnreachable
-        }
-        sema::DeploymentTerminalReason::SubstituterUnreachable => {
-            ordinary::DeploymentTerminalReason::SubstituterUnreachable
-        }
-        sema::DeploymentTerminalReason::DeploymentInFlight => {
-            ordinary::DeploymentTerminalReason::DeploymentInFlight
-        }
-        sema::DeploymentTerminalReason::UnsupportedDeployAction => {
-            ordinary::DeploymentTerminalReason::UnsupportedDeployAction
-        }
-        sema::DeploymentTerminalReason::InternalError => {
-            ordinary::DeploymentTerminalReason::InternalError
-        }
-        sema::DeploymentTerminalReason::ActivationFailed => {
-            ordinary::DeploymentTerminalReason::ActivationFailed
-        }
-    }
-}
-
-fn public_deployment_failure_stage(
-    value: sema::DeploymentFailureStage,
-) -> ordinary::DeploymentFailureStage {
-    match value {
-        sema::DeploymentFailureStage::Admission => ordinary::DeploymentFailureStage::Admission,
-        sema::DeploymentFailureStage::FlakeAuth => ordinary::DeploymentFailureStage::FlakeAuth,
-        sema::DeploymentFailureStage::MaterializeHorizon => {
-            ordinary::DeploymentFailureStage::MaterializeHorizon
-        }
-        sema::DeploymentFailureStage::Eval => ordinary::DeploymentFailureStage::Eval,
-        sema::DeploymentFailureStage::Build => ordinary::DeploymentFailureStage::Build,
-        sema::DeploymentFailureStage::CopyClosure => ordinary::DeploymentFailureStage::CopyClosure,
-        sema::DeploymentFailureStage::Activate => ordinary::DeploymentFailureStage::Activate,
-        sema::DeploymentFailureStage::Daemon => ordinary::DeploymentFailureStage::Daemon,
-    }
-}
-
-fn public_terminal(value: sema::DeploymentTerminal) -> crate::Result<ordinary::DeploymentTerminal> {
-    match value {
-        sema::DeploymentTerminal::Succeeded => Ok(ordinary::DeploymentTerminal::Succeeded),
-        sema::DeploymentTerminal::Rejected(reason) => Ok(ordinary::DeploymentTerminal::Rejected(
-            public_terminal_reason(reason),
-        )),
-        sema::DeploymentTerminal::Failed(failure) => Ok(ordinary::DeploymentTerminal::Failed(
-            ordinary::DeploymentFailure {
-                deployment_failure_stage: public_deployment_failure_stage(
-                    failure.deployment_failure_stage,
-                ),
-                deployment_terminal_reason: public_terminal_reason(
-                    failure.deployment_terminal_reason,
-                ),
-            },
-        )),
-    }
-}
-
-fn public_deployment_record(
-    value: sema::DeploymentRecord,
-) -> crate::Result<ordinary::DeploymentRecord> {
-    let identity = value.deployment_request_identity;
-    Ok(ordinary::DeploymentRecord {
-        deployment_identifier: public_deployment_identifier(value.deployment_identifier),
-        generation_identifier: public_generation_identifier(value.generation_identifier),
-        deployment_request_identity: ordinary::DeploymentRequestIdentity {
-            deployment_environment: public_deployment_environment(identity.deployment_environment)?,
-            cluster_name: public_cluster_name(identity.cluster_name),
-            node_name: public_node_name(identity.node_name),
-            generation_artifact: public_generation_artifact(identity.generation_artifact)?,
-            requested_deployment_action: public_requested_action(
-                identity.requested_deployment_action,
-            )?,
-            activation_effect: public_activation_effect(identity.activation_effect)?,
-            source_revision_policy: public_source_policy(identity.source_revision_policy),
-            optional_immutable_revision: identity
-                .optional_immutable_revision
-                .map(public_immutable_revision),
-        },
-        optional_admission_marker: value
-            .optional_admission_marker
-            .map(|marker| ordinary::AdmissionMarker::new(public_marker(marker.into_payload()))),
-        deployment_lifecycle: public_deployment_lifecycle(value.deployment_lifecycle)?,
-        optional_terminal_marker: value
-            .optional_terminal_marker
-            .map(|marker| ordinary::TerminalMarker::new(public_marker(marker.into_payload()))),
-        optional_deployment_terminal: value
-            .optional_deployment_terminal
-            .map(public_terminal)
-            .transpose()?,
-    })
-}
-
-fn public_query_reason(value: sema::QueryRejectionReason) -> ordinary::QueryRejectionReason {
-    match value {
-        sema::QueryRejectionReason::GenerationUnknown => {
-            ordinary::QueryRejectionReason::GenerationUnknown
-        }
-        sema::QueryRejectionReason::NodeUnknown => ordinary::QueryRejectionReason::NodeUnknown,
-        sema::QueryRejectionReason::EventLogPositionOutOfRange => {
-            ordinary::QueryRejectionReason::EventLogPositionOutOfRange
-        }
-        sema::QueryRejectionReason::MalformedSelector => {
-            ordinary::QueryRejectionReason::MalformedSelector
-        }
-    }
-}
-
-fn public_watch_reason(value: sema::WatchRejectionReason) -> ordinary::WatchRejectionReason {
-    match value {
-        sema::WatchRejectionReason::SubscriptionLimitReached => {
-            ordinary::WatchRejectionReason::SubscriptionLimitReached
-        }
-        sema::WatchRejectionReason::MalformedWatch => {
-            ordinary::WatchRejectionReason::MalformedWatch
-        }
-        sema::WatchRejectionReason::StreamUnavailable => {
-            ordinary::WatchRejectionReason::StreamUnavailable
-        }
-    }
-}
-
-fn public_unwatch_reason(value: sema::UnwatchRejectionReason) -> ordinary::UnwatchRejectionReason {
-    match value {
-        sema::UnwatchRejectionReason::SubscriptionTokenUnknown => {
-            ordinary::UnwatchRejectionReason::SubscriptionTokenUnknown
-        }
-        sema::UnwatchRejectionReason::SubscriptionAlreadyClosed => {
-            ordinary::UnwatchRejectionReason::SubscriptionAlreadyClosed
-        }
-    }
-}
-
-fn public_key_reason(
-    value: sema::KeyMaterialCheckRejectionReason,
-) -> ordinary::KeyMaterialCheckRejectionReason {
-    match value {
-        sema::KeyMaterialCheckRejectionReason::NodeUnknown => {
-            ordinary::KeyMaterialCheckRejectionReason::NodeUnknown
-        }
-        sema::KeyMaterialCheckRejectionReason::ProposalSourceUnreachable => {
-            ordinary::KeyMaterialCheckRejectionReason::ProposalSourceUnreachable
-        }
-        sema::KeyMaterialCheckRejectionReason::HostUnreachable => {
-            ordinary::KeyMaterialCheckRejectionReason::HostUnreachable
-        }
-        sema::KeyMaterialCheckRejectionReason::PublicationMalformed => {
-            ordinary::KeyMaterialCheckRejectionReason::PublicationMalformed
-        }
-    }
-}
-
-fn public_phase_event(
-    value: sema::DeploymentPhaseEvent,
-) -> crate::Result<ordinary::DeploymentPhaseEvent> {
-    Ok(ordinary::DeploymentPhaseEvent {
-        deployment_identifier: public_deployment_identifier(value.deployment_identifier),
-        generation_identifier: public_generation_identifier(value.generation_identifier),
-        cluster_name: public_cluster_name(value.cluster_name),
-        node_name: public_node_name(value.node_name),
-        deployment_phase: public_deployment_phase(value.deployment_phase),
-        event_log_position: public_event_log_position(value.event_log_position),
-        transition_marker: ordinary::TransitionMarker::new(public_marker(value.state_marker)),
-        optional_immutable_revision: value
-            .optional_immutable_revision
-            .map(public_immutable_revision),
-        optional_deployment_terminal: value
-            .optional_deployment_terminal
-            .map(public_terminal)
-            .transpose()?,
-    })
-}
-
-fn public_retention_event(
-    value: sema::CacheRetentionTransitionEvent,
-) -> crate::Result<ordinary::CacheRetentionTransitionEvent> {
-    Ok(ordinary::CacheRetentionTransitionEvent {
-        generation_identifier: public_generation_identifier(value.generation_identifier),
-        cluster_name: public_cluster_name(value.cluster_name),
-        node_name: public_node_name(value.node_name),
-        cache_retention_transition: public_cache_transition(value.cache_retention_transition),
-        generation_slot: public_generation_slot(value.generation_slot)?,
-        optional_generation_slot: value
-            .optional_generation_slot
-            .map(public_generation_slot)
-            .transpose()?,
-        optional_pin_label: value.optional_pin_label.map(public_pin_label),
-        event_log_position: public_event_log_position(value.event_log_position),
-    })
-}
-
-/// Raise a local ordinary result into the peer-callable public contract.
-pub fn ordinary_egress(value: sema::OrdinaryEgress) -> crate::Result<ordinary::Output> {
-    Ok(match value {
-        sema::OrdinaryEgress::Queried(listing) => {
-            ordinary::Output::Queried(ordinary::QueriedPayload::new(ordinary::GenerationListing {
-                generation_vector: listing
-                    .generation_vector
-                    .into_iter()
-                    .map(public_generation)
-                    .collect::<crate::Result<_>>()?,
-                deployment_record_vector: listing
-                    .deployment_record_vector
-                    .into_iter()
-                    .map(public_deployment_record)
-                    .collect::<crate::Result<_>>()?,
-                database_marker: public_marker(listing.state_marker),
-            }))
-        }
-        sema::OrdinaryEgress::DeploymentEventsQueried(page) => {
-            ordinary::Output::DeploymentEventsQueried(
-                ordinary::DeploymentEventsQueriedPayload::new(ordinary::EventLogPage {
-                    deployment_phase_event_vector: page
-                        .deployment_phase_event_vector
-                        .into_iter()
-                        .map(public_phase_event)
-                        .collect::<crate::Result<_>>()?,
-                    cache_retention_transition_event_vector: page
-                        .cache_retention_transition_event_vector
-                        .into_iter()
-                        .map(public_retention_event)
-                        .collect::<crate::Result<_>>()?,
-                    database_marker: public_marker(page.state_marker),
-                }),
-            )
-        }
-        sema::OrdinaryEgress::TestRunsQueried(listing) => ordinary::Output::TestRunsQueried(
-            ordinary::TestRunsQueriedPayload::new(ordinary::TestRunListing {
-                test_run_record_vector: listing
-                    .test_run_record_vector
-                    .into_iter()
-                    .map(public_test_run_record)
-                    .collect(),
-                database_marker: public_marker(listing.database_marker.into_payload()),
-            }),
-        ),
-        sema::OrdinaryEgress::Watching(opened) => ordinary::Output::Watching(
-            ordinary::WatchingPayload::new(ordinary::SubscriptionOpened {
-                subscription_token: public_subscription_token(opened.subscription_token),
-                commit_sequence: ordinary::CommitSequence::new(
-                    opened.commit_sequence.into_payload(),
-                ),
-            }),
-        ),
-        sema::OrdinaryEgress::Unwatched(closed) => {
-            ordinary::Output::Unwatched(ordinary::UnwatchedPayload::new(
-                ordinary::SubscriptionClosed::new(public_subscription_token(closed.into_payload())),
-            ))
-        }
-        sema::OrdinaryEgress::KeyMaterialChecked(report) => ordinary::Output::KeyMaterialChecked(
-            ordinary::KeyMaterialCheckedPayload::new(ordinary::KeyMaterialReport {
-                node_name: public_node_name(report.node_name),
-                // Local diagnostics deliberately remain daemon-side; their
-                // strings may contain host details and are not a public schema.
-                key_material_mismatch_vector: Vec::new(),
-                database_marker: public_marker(report.state_marker),
-            }),
-        ),
-        sema::OrdinaryEgress::QueryRejected(rejected) => ordinary::Output::QueryRejected(
-            ordinary::QueryRejectedPayload::new(ordinary::RejectedQuery {
-                query_rejection_reason: public_query_reason(rejected.query_rejection_reason),
-                database_marker: public_marker(rejected.state_marker),
-            }),
-        ),
-        sema::OrdinaryEgress::WatchRejected(rejected) => {
-            ordinary::Output::WatchRejected(ordinary::WatchRejectedPayload::new(
-                ordinary::RejectedWatch::new(public_watch_reason(rejected.into_payload())),
-            ))
-        }
-        sema::OrdinaryEgress::UnwatchRejected(rejected) => ordinary::Output::UnwatchRejected(
-            ordinary::UnwatchRejectedPayload::new(ordinary::RejectedUnwatch {
-                unwatch_rejection_reason: public_unwatch_reason(rejected.unwatch_rejection_reason),
-                subscription_token: public_subscription_token(rejected.subscription_token),
-            }),
-        ),
-        sema::OrdinaryEgress::KeyMaterialCheckRejected(rejected) => {
-            ordinary::Output::KeyMaterialCheckRejected(
-                ordinary::KeyMaterialCheckRejectedPayload::new(
-                    ordinary::RejectedKeyMaterialCheck {
-                        key_material_check_rejection_reason: public_key_reason(
-                            rejected.key_material_check_rejection_reason,
-                        ),
-                        database_marker: public_marker(rejected.state_marker),
-                    },
-                ),
-            )
-        }
-    })
-}
-
-fn public_pin_reason(value: sema::PinRejectionReason) -> meta::PinRejectionReason {
-    match value {
-        sema::PinRejectionReason::GenerationUnknown => meta::PinRejectionReason::GenerationUnknown,
-        sema::PinRejectionReason::NodeUnknown => meta::PinRejectionReason::NodeUnknown,
-        sema::PinRejectionReason::PinLabelInUse => meta::PinRejectionReason::PinLabelInUse,
-        sema::PinRejectionReason::PinSlotExhausted => meta::PinRejectionReason::PinSlotExhausted,
-        sema::PinRejectionReason::InternalError => meta::PinRejectionReason::InternalError,
-    }
-}
-
-fn public_unpin_reason(value: sema::UnpinRejectionReason) -> meta::UnpinRejectionReason {
-    match value {
-        sema::UnpinRejectionReason::PinLabelUnknown => meta::UnpinRejectionReason::PinLabelUnknown,
-        sema::UnpinRejectionReason::NodeUnknown => meta::UnpinRejectionReason::NodeUnknown,
-        sema::UnpinRejectionReason::GenerationNotPinned => {
-            meta::UnpinRejectionReason::GenerationNotPinned
-        }
-        sema::UnpinRejectionReason::InternalError => meta::UnpinRejectionReason::InternalError,
-    }
-}
-
-fn public_retire_reason(value: sema::RetireRejectionReason) -> meta::RetireRejectionReason {
-    match value {
-        sema::RetireRejectionReason::GenerationUnknown => {
-            meta::RetireRejectionReason::GenerationUnknown
-        }
-        sema::RetireRejectionReason::NodeUnknown => meta::RetireRejectionReason::NodeUnknown,
-        sema::RetireRejectionReason::GenerationActive => {
-            meta::RetireRejectionReason::GenerationActive
-        }
-        sema::RetireRejectionReason::GenerationPinned => {
-            meta::RetireRejectionReason::GenerationPinned
-        }
-        sema::RetireRejectionReason::InternalError => meta::RetireRejectionReason::InternalError,
-    }
-}
-
-fn public_test_reason(value: sema::TestRejectionReason) -> meta::TestRejectionReason {
-    match value {
-        sema::TestRejectionReason::ClusterUnknown => meta::TestRejectionReason::ClusterUnknown,
-        sema::TestRejectionReason::NodeUnknown => meta::TestRejectionReason::NodeUnknown,
-        sema::TestRejectionReason::VmHostNotDeclaredForNode => {
-            meta::TestRejectionReason::VmHostNotDeclaredForNode
-        }
-        sema::TestRejectionReason::HostDeclaresNoVmHost => {
-            meta::TestRejectionReason::HostDeclaresNoVmHost
-        }
-        sema::TestRejectionReason::NoTestDefaults => meta::TestRejectionReason::NoTestDefaults,
-        sema::TestRejectionReason::LiveNotYetEnabled => {
-            meta::TestRejectionReason::LiveNotYetEnabled
-        }
-        sema::TestRejectionReason::SubstrateUnavailable => {
-            meta::TestRejectionReason::SubstrateUnavailable
-        }
-        sema::TestRejectionReason::InternalError => meta::TestRejectionReason::InternalError,
-    }
-}
-
-/// Raise a local privileged result into the owner-only public contract.
-pub fn meta_egress(value: sema::MetaEgress) -> crate::Result<meta::Output> {
-    Ok(match value {
-        sema::MetaEgress::DeployAccepted(handle) => {
-            meta::Output::DeployAccepted(meta::DeployAcceptedPayload::new(meta::DeployHandle {
-                deployment_identifier: public_deployment_identifier(handle.deployment_identifier),
-                database_marker: public_marker(handle.state_marker),
-            }))
-        }
-        sema::MetaEgress::DeployRejected(rejected) => {
-            meta::Output::DeployRejected(meta::DeployRejectedPayload::new(
-                meta::RejectedDeploy::new(public_deployment_record(rejected.into_payload())?),
-            ))
-        }
-        sema::MetaEgress::DeployTerminal(record) => meta::Output::DeployTerminal(
-            meta::DeployTerminalPayload::new(public_deployment_record(record)?),
-        ),
-        sema::MetaEgress::Pinned(applied) => {
-            meta::Output::Pinned(meta::PinnedPayload::new(meta::AppliedPin {
-                generation_identifier: public_generation_identifier(applied.generation_identifier),
-                pin_label: public_pin_label(applied.pin_label),
-                from_slot: public_generation_slot(applied.from_slot)?,
-                to_slot: public_generation_slot(applied.to_slot)?,
-                database_marker: public_marker(applied.state_marker),
-            }))
-        }
-        sema::MetaEgress::PinRejected(rejected) => {
-            meta::Output::PinRejected(meta::PinRejectedPayload::new(meta::RejectedPin {
-                pin_rejection_reason: public_pin_reason(rejected.pin_rejection_reason),
-                database_marker: public_marker(rejected.state_marker),
-            }))
-        }
-        sema::MetaEgress::Unpinned(applied) => {
-            meta::Output::Unpinned(meta::UnpinnedPayload::new(meta::AppliedUnpin {
-                generation_identifier: public_generation_identifier(applied.generation_identifier),
-                pin_label: public_pin_label(applied.pin_label),
-                from_slot: public_generation_slot(applied.from_slot)?,
-                to_slot: public_generation_slot(applied.to_slot)?,
-                database_marker: public_marker(applied.state_marker),
-            }))
-        }
-        sema::MetaEgress::UnpinRejected(rejected) => {
-            meta::Output::UnpinRejected(meta::UnpinRejectedPayload::new(meta::RejectedUnpin {
-                unpin_rejection_reason: public_unpin_reason(rejected.unpin_rejection_reason),
-                database_marker: public_marker(rejected.state_marker),
-            }))
-        }
-        sema::MetaEgress::Retired(applied) => {
-            meta::Output::Retired(meta::RetiredPayload::new(meta::AppliedRetire {
-                generation_identifier: public_generation_identifier(applied.generation_identifier),
-                generation_slot: public_generation_slot(applied.generation_slot)?,
-                database_marker: public_marker(applied.state_marker),
-            }))
-        }
-        sema::MetaEgress::RetireRejected(rejected) => {
-            meta::Output::RetireRejected(meta::RetireRejectedPayload::new(meta::RejectedRetire {
-                retire_rejection_reason: public_retire_reason(rejected.retire_rejection_reason),
-                database_marker: public_marker(rejected.state_marker),
-            }))
-        }
-        sema::MetaEgress::Tested(accepted) => {
-            meta::Output::Tested(meta::TestedPayload::new(meta::AcceptedTest {
-                test_run_identifier: public_test_run_identifier(accepted.test_run_identifier),
-                database_marker: public_marker(accepted.state_marker),
-            }))
-        }
-        sema::MetaEgress::TestRejected(rejected) => {
-            meta::Output::TestRejected(meta::TestRejectedPayload::new(meta::RejectedTest {
-                test_rejection_reason: public_test_reason(rejected.test_rejection_reason),
-                database_marker: public_marker(rejected.state_marker),
-            }))
-        }
+pub fn meta_egress(
+    value: sema::MetaEgress,
+) -> crate::Result<meta_signal_lojix::schema::lib::z2VeCY> {
+    meta_signal_lojix::schema::lib::z2VeCY::from_wire(value.to_wire()).map_err(|_| {
+        crate::Error::Invariant("owner egress no longer matches its verified Interface".to_owned())
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_nix_store_root, meta_egress, ordinary_egress, public_closure_path};
-    use crate::schema::sema;
+    use super::*;
 
     fn marker() -> sema::StateMarker {
         sema::StateMarker {
@@ -1127,125 +538,57 @@ mod tests {
         }
     }
 
-    fn deployment_record() -> sema::DeploymentRecord {
-        sema::DeploymentRecord {
-            deployment_identifier: sema::DeploymentIdentifier::new(1),
+    fn generation(path: &str) -> sema::Generation {
+        sema::Generation {
             generation_identifier: sema::GenerationIdentifier::new(1),
-            deployment_request_identity: sema::DeploymentRequestIdentity {
-                deployment_environment: sema::DeploymentEnvironment::HostEnvironment,
-                cluster_name: sema::ClusterName::new("alpha"),
-                node_name: sema::NodeName::new("node-1"),
-                generation_artifact: sema::GenerationArtifact::BaseHost,
-                requested_deployment_action: sema::RequestedDeploymentAction::Host(
-                    sema::HostDeployAction::Realize,
-                ),
-                activation_effect: sema::ActivationEffect::LiveActivation,
-                source_revision_policy: sema::SourceRevisionPolicy::ResolveAndRecord,
-                optional_immutable_revision: None,
-            },
-            optional_admission_marker: None,
-            deployment_lifecycle: sema::DeploymentLifecycle::Failed,
-            optional_terminal_marker: Some(sema::TerminalMarker::new(marker())),
-            optional_deployment_terminal: Some(sema::DeploymentTerminal::Failed(
-                sema::DeploymentFailure {
-                    deployment_failure_stage: sema::DeploymentFailureStage::Eval,
-                    deployment_terminal_reason:
-                        sema::DeploymentTerminalReason::FlakeReferenceMalformed,
-                },
-            )),
+            deployment_identifier: sema::DeploymentIdentifier::new(1),
+            cluster_name: sema::ClusterName::new("alpha"),
+            node_name: sema::NodeName::new("node-1"),
+            generation_artifact: sema::GenerationArtifact::BaseHost,
+            activation_effect: sema::ActivationEffect::LiveActivation,
+            generation_slot: sema::GenerationSlot::Current,
+            closure_path: sema::ClosurePath::new(path),
+            optional_immutable_revision: None,
         }
     }
 
     #[test]
-    fn ordinary_closure_projection_allows_only_a_canonical_store_item_root() {
+    fn ordinary_projection_keeps_only_canonical_store_item_roots() {
         let valid = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-system-toplevel";
-        assert!(canonical_nix_store_root(valid));
-        assert_eq!(
-            public_closure_path(sema::ClosurePath::new(valid)),
-            Some(signal_lojix::schema::lib::ClosurePath::new(valid))
-        );
-    }
-
-    #[test]
-    fn ordinary_closure_projection_omits_private_or_noncanonical_paths() {
-        for value in [
-            "/home/li/private",
-            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-system/bin/switch",
-            "/nix/store/short-system",
-            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-private-secret",
-            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-name/../escape",
-            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-name\nleak",
-        ] {
-            assert!(
-                public_closure_path(sema::ClosurePath::new(value)).is_none(),
-                "ordinary projection must omit an unsafe private closure path"
-            );
-        }
-    }
-
-    #[test]
-    fn public_outputs_omit_private_source_failure_and_transport_text() {
-        let private_store_uri = "ssh-ng://private-copy.invalid:2244?compress=true";
-        let private_ssh_destination = "private-login@private-activation.invalid";
-        let private_text = format!(
-            "proposal=/srv/private/cluster.dotos ref=github:owner/repo?token=raw-secret error=raw failure path=/tmp/private store={private_store_uri} ssh={private_ssh_destination}"
-        );
-        let private_path = "/srv/private/generated-input";
-        let queried = ordinary_egress(sema::OrdinaryEgress::Queried(sema::GenerationListing {
-            generation_vector: vec![sema::Generation {
-                generation_identifier: sema::GenerationIdentifier::new(1),
-                deployment_identifier: sema::DeploymentIdentifier::new(1),
-                cluster_name: sema::ClusterName::new("alpha"),
-                node_name: sema::NodeName::new("node-1"),
-                generation_artifact: sema::GenerationArtifact::BaseHost,
-                activation_effect: sema::ActivationEffect::LiveActivation,
-                generation_slot: sema::GenerationSlot::Current,
-                closure_path: sema::ClosurePath::new(private_path),
-                optional_immutable_revision: None,
-            }],
-            deployment_record_vector: vec![deployment_record()],
+        let visible = ordinary_egress(sema::OrdinaryEgress::Queried(sema::GenerationListing {
+            generation_vector: vec![generation(valid)],
+            deployment_record_vector: Vec::new(),
             state_marker: marker(),
         }))
-        .expect("project ordinary output");
-        let signal_lojix::schema::lib::Output::Queried(listing) = &queried else {
-            panic!("expected ordinary listing");
-        };
-        assert!(
-            listing.payload().generation_vector[0]
-                .optional_closure_path
-                .is_none()
-        );
+        .expect("project canonical listing");
+        assert!(format!("{visible:?}").contains(valid));
 
-        let checked = ordinary_egress(sema::OrdinaryEgress::KeyMaterialChecked(
+        for private in [
+            "/home/li/private",
+            "/nix/store/short-system",
+            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-secret",
+        ] {
+            let visible = ordinary_egress(sema::OrdinaryEgress::Queried(sema::GenerationListing {
+                generation_vector: vec![generation(private)],
+                deployment_record_vector: Vec::new(),
+                state_marker: marker(),
+            }))
+            .expect("project private listing");
+            assert!(!format!("{visible:?}").contains(private));
+        }
+    }
+
+    #[test]
+    fn public_key_report_drops_private_runtime_text() {
+        let private = "token=raw-secret path=/srv/private";
+        let visible = ordinary_egress(sema::OrdinaryEgress::KeyMaterialChecked(
             sema::KeyMaterialReport {
                 node_name: sema::NodeName::new("node-1"),
-                string_vector: vec![private_text.clone()],
+                string_vector: vec![private.to_owned()],
                 state_marker: marker(),
             },
         ))
-        .expect("project key-material output");
-        let signal_lojix::schema::lib::Output::KeyMaterialChecked(report) = &checked else {
-            panic!("expected typed key-material report");
-        };
-        assert!(report.payload().key_material_mismatch_vector.is_empty());
-
-        let terminal = meta_egress(sema::MetaEgress::DeployTerminal(deployment_record()))
-            .expect("project terminal output");
-        let printed = format!("{queried:?}{checked:?}{terminal:?}");
-        for forbidden in [
-            private_text.as_str(),
-            private_path,
-            private_store_uri,
-            private_ssh_destination,
-            "proposal_source",
-            "flake_reference",
-            "source_revision_record",
-            "string_vector",
-        ] {
-            assert!(
-                !printed.contains(forbidden),
-                "public output must not expose raw private field or value"
-            );
-        }
+        .expect("project key report");
+        assert!(!format!("{visible:?}").contains(private));
     }
 }

@@ -21,7 +21,7 @@ use rkyv::validation::shared::SharedValidator;
 use rkyv::{Archive, Deserialize as RkyvDeserialize};
 use sema_engine::TableRegistration;
 
-use crate::schema::sema::{
+use crate::runtime_model::{
     ContainerLifecycleRecord, DeployJob, DeploymentRecord, EventLogEntry, GcRoot,
     IdentifierAllocation, LiveGeneration, StoredTestRun,
 };

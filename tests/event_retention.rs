@@ -1,4 +1,4 @@
-use lojix::schema::sema::{self as ordinary, EventLogEntry, LoggedEvent};
+use lojix::runtime_model::{self as ordinary, EventLogEntry, LoggedEvent};
 use lojix::{EventLogRetention, Store};
 
 fn event(position: u64) -> EventLogEntry {

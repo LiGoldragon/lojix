@@ -2,12 +2,12 @@
 //!
 //! The daemon owns the live generation set, the GC-roots retention tree, the
 //! append-only event log, and the container-lifecycle mirror. It drives the
-//! generated Nexus runner: each wire frame becomes a `NexusWork::SignalArrived`
+//! handwritten Nexus runner: each wire frame becomes a `NexusWork::SignalArrived`
 //! tagged by listener role, the engine decides the next step, and the deploy
 //! pipeline runs as a chain of effect continuations. The CLI is only a
 //! text-to-Signal adapter for this daemon.
 //!
-//! Durable `sema-engine`-backed state backs the `SemaEngine` for this build,
+//! Durable `sema-engine`-backed state backs the handwritten runtime model,
 //! while the daemon socket shell is actor-native. Daemon state — the live
 //! generation set, GC-roots, the append-only event log, and the container
 //! mirror — persists to a `*.sema` file and self-resumes on restart: opening
@@ -28,7 +28,7 @@ use sema_engine::{
     VersionedHistoryRetention, VersionedStoreName, VersioningPolicy,
 };
 
-use crate::schema::sema::{
+use crate::runtime_model::{
     AdmissionMarker, CommitSequence, ContainerLifecycleRecord, DeployJob, DeploymentLifecycle,
     DeploymentOutboxRecord, DeploymentRecord, DeploymentRequestIdentity, DeploymentTerminal,
     EventLogEntry, GcRoot, IdentifierAllocation, ImmutableRevision, LiveGeneration,
@@ -42,7 +42,8 @@ pub mod client;
 pub mod daemon;
 pub mod inspection;
 pub mod reconstruction;
-pub mod schema;
+pub mod runtime_flow;
+pub mod runtime_model;
 pub mod schema_runtime;
 
 /// The Lojix durable-store schema version. v4 records exact private deployment
@@ -304,29 +305,11 @@ pub struct TestDefaults {
 /// The rkyv-stored test mode. A daemon-local mirror of the shared
 /// `signal-lojix` `TestMode`, so the binary startup configuration archives
 /// without depending on the wire crate's rkyv layout. Converts to/from the
-/// generated wire type at the lowering boundary.
+/// encoded Interface type at the structural adapter boundary.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestMode {
     Hermetic,
     Live,
-}
-
-impl From<TestMode> for signal_lojix::schema::lib::TestMode {
-    fn from(mode: TestMode) -> Self {
-        match mode {
-            TestMode::Hermetic => Self::Hermetic,
-            TestMode::Live => Self::Live,
-        }
-    }
-}
-
-impl From<signal_lojix::schema::lib::TestMode> for TestMode {
-    fn from(mode: signal_lojix::schema::lib::TestMode) -> Self {
-        match mode {
-            signal_lojix::schema::lib::TestMode::Hermetic => Self::Hermetic,
-            signal_lojix::schema::lib::TestMode::Live => Self::Live,
-        }
-    }
 }
 
 impl DaemonConfiguration {
@@ -928,7 +911,7 @@ impl Store {
     }
 
     fn outbox_key(
-        deployment_identifier: &crate::schema::sema::DeploymentIdentifier,
+        deployment_identifier: &crate::runtime_model::DeploymentIdentifier,
         transition_marker: &TransitionMarker,
     ) -> RecordKey {
         RecordKey::new(format!(
@@ -949,11 +932,11 @@ impl Store {
 
     fn transition_intent_event(
         intent: &PendingTransitionIntent,
-    ) -> Result<crate::schema::sema::DeploymentPhaseEvent> {
+    ) -> Result<crate::runtime_model::DeploymentPhaseEvent> {
         let marker = intent.optional_transition_marker.clone().ok_or_else(|| {
             Error::Invariant("attempted to deliver an unbound transition intent".to_string())
         })?;
-        Ok(crate::schema::sema::DeploymentPhaseEvent {
+        Ok(crate::runtime_model::DeploymentPhaseEvent {
             deployment_identifier: intent.deployment_identifier.clone(),
             generation_identifier: intent.generation_identifier.clone(),
             cluster_name: intent.cluster_name.clone(),
@@ -1076,7 +1059,7 @@ impl Store {
             .assert(self.deployment_outbox, outbox);
         if matches!(
             intent.deployment_phase,
-            crate::schema::sema::DeploymentPhase::Submitted
+            crate::runtime_model::DeploymentPhase::Submitted
         ) || intent.optional_deployment_terminal.is_some()
         {
             let mut record = self
@@ -1090,7 +1073,7 @@ impl Store {
                 })?;
             if matches!(
                 intent.deployment_phase,
-                crate::schema::sema::DeploymentPhase::Submitted
+                crate::runtime_model::DeploymentPhase::Submitted
             ) {
                 record.optional_admission_marker =
                     Some(AdmissionMarker::new(marker.clone().into_payload()));
@@ -1172,7 +1155,7 @@ impl Store {
         let event = Self::transition_intent_event(&intent)?;
         let expected_entry = EventLogEntry {
             event_log_position: event.event_log_position.clone(),
-            logged_event: crate::schema::sema::LoggedEvent::Deployment(event),
+            logged_event: crate::runtime_model::LoggedEvent::Deployment(event),
         };
         match self
             .event_log_entries()?
@@ -1221,7 +1204,7 @@ impl Store {
         let event = Self::transition_intent_event(&intent)?;
         let expected_entry = EventLogEntry {
             event_log_position: event.event_log_position.clone(),
-            logged_event: crate::schema::sema::LoggedEvent::Deployment(event.clone()),
+            logged_event: crate::runtime_model::LoggedEvent::Deployment(event.clone()),
         };
         if !self
             .event_log_entries()?
@@ -1314,7 +1297,7 @@ impl Store {
     }
 
     fn outbox_record_for_event(
-        event: crate::schema::sema::DeploymentPhaseEvent,
+        event: crate::runtime_model::DeploymentPhaseEvent,
     ) -> DeploymentOutboxRecord {
         DeploymentOutboxRecord {
             deployment_identifier: event.deployment_identifier.clone(),
@@ -1360,7 +1343,7 @@ impl Store {
         let existing = self.deployment_outbox_records()?;
         let mut additions = Vec::new();
         for entry in self.event_log_entries()? {
-            let crate::schema::sema::LoggedEvent::Deployment(event) = entry.logged_event else {
+            let crate::runtime_model::LoggedEvent::Deployment(event) = entry.logged_event else {
                 continue;
             };
             let candidate = Self::outbox_record_for_event(event);
@@ -1538,7 +1521,7 @@ impl Store {
             generation_identifier: record.generation_identifier.clone(),
             cluster_name: record.deployment_request_identity.cluster_name.clone(),
             node_name: record.deployment_request_identity.node_name.clone(),
-            deployment_phase: crate::schema::sema::DeploymentPhase::Submitted,
+            deployment_phase: crate::runtime_model::DeploymentPhase::Submitted,
             event_log_position: allocation.next_event_log_position.into(),
             optional_immutable_revision: record
                 .deployment_request_identity
@@ -1551,7 +1534,7 @@ impl Store {
         };
         if !matches!(
             deploy_job.deploy_job_phase,
-            crate::schema::sema::DeployJobPhase::Submitted
+            crate::runtime_model::DeployJobPhase::Submitted
         ) || deploy_job.cluster_name != record.deployment_request_identity.cluster_name
             || deploy_job.node_name != record.deployment_request_identity.node_name
         {
@@ -1605,11 +1588,11 @@ impl Store {
 
     fn terminal_phase(
         deployment_lifecycle: DeploymentLifecycle,
-    ) -> Result<crate::schema::sema::DeploymentPhase> {
+    ) -> Result<crate::runtime_model::DeploymentPhase> {
         match deployment_lifecycle {
-            DeploymentLifecycle::Completed => Ok(crate::schema::sema::DeploymentPhase::Completed),
-            DeploymentLifecycle::Rejected => Ok(crate::schema::sema::DeploymentPhase::Rejected),
-            DeploymentLifecycle::Failed => Ok(crate::schema::sema::DeploymentPhase::Failed),
+            DeploymentLifecycle::Completed => Ok(crate::runtime_model::DeploymentPhase::Completed),
+            DeploymentLifecycle::Rejected => Ok(crate::runtime_model::DeploymentPhase::Rejected),
+            DeploymentLifecycle::Failed => Ok(crate::runtime_model::DeploymentPhase::Failed),
             _ => Err(Error::Invariant(
                 "terminal intent requires a terminal deployment lifecycle".to_string(),
             )),
@@ -1618,11 +1601,11 @@ impl Store {
 
     fn terminal_job_phase(
         deployment_lifecycle: DeploymentLifecycle,
-    ) -> crate::schema::sema::DeployJobPhase {
+    ) -> crate::runtime_model::DeployJobPhase {
         match deployment_lifecycle {
-            DeploymentLifecycle::Completed => crate::schema::sema::DeployJobPhase::Activated,
+            DeploymentLifecycle::Completed => crate::runtime_model::DeployJobPhase::Activated,
             DeploymentLifecycle::Rejected | DeploymentLifecycle::Failed => {
-                crate::schema::sema::DeployJobPhase::Failed
+                crate::runtime_model::DeployJobPhase::Failed
             }
             _ => unreachable!("terminal job phase requires a terminal lifecycle"),
         }
@@ -1714,7 +1697,7 @@ impl Store {
             .find(|job| *job.deployment_identifier.payload() == deployment_identifier)
         {
             job.deploy_job_phase = Self::terminal_job_phase(deployment_lifecycle);
-            job.deploy_resume_stage = crate::schema::sema::DeployResumeStage::FinishDeployment;
+            job.deploy_resume_stage = crate::runtime_model::DeployResumeStage::FinishDeployment;
             commit = commit.mutate(self.deploy_jobs, job);
         }
         self.database.commit_atomic(commit)?;
@@ -1776,7 +1759,7 @@ impl Store {
             generation_identifier: record.generation_identifier.clone(),
             cluster_name: record.deployment_request_identity.cluster_name.clone(),
             node_name: record.deployment_request_identity.node_name.clone(),
-            deployment_phase: crate::schema::sema::DeploymentPhase::Rejected,
+            deployment_phase: crate::runtime_model::DeploymentPhase::Rejected,
             event_log_position: allocation.next_event_log_position.into(),
             optional_immutable_revision: record
                 .deployment_request_identity
@@ -1839,7 +1822,7 @@ impl Store {
     pub fn set_deployment_immutable_revision(
         &self,
         deployment_identifier: u64,
-        immutable_revision: crate::schema::sema::ImmutableRevision,
+        immutable_revision: crate::runtime_model::ImmutableRevision,
     ) -> Result<()> {
         let _write = self.lock_write()?;
         let mut record = self
@@ -1865,7 +1848,7 @@ impl Store {
     pub fn record_resolved_source(
         &self,
         deployment_identifier: u64,
-        immutable_revision: crate::schema::sema::ImmutableRevision,
+        immutable_revision: crate::runtime_model::ImmutableRevision,
         deploy_job: DeployJob,
     ) -> Result<()> {
         validate_fresh_deploy_job(&deploy_job)?;
@@ -1911,7 +1894,7 @@ impl Store {
     pub fn append_event_log_entry(&self, entry: EventLogEntry) -> Result<()> {
         if matches!(
             entry.logged_event,
-            crate::schema::sema::LoggedEvent::Deployment(_)
+            crate::runtime_model::LoggedEvent::Deployment(_)
         ) {
             return Err(Error::Invariant(
                 "deployment journal entries require a pending transition intent".to_string(),
@@ -1950,7 +1933,7 @@ impl Store {
         deployment_identifier: u64,
         deployment_lifecycle: DeploymentLifecycle,
         deploy_job: DeployJob,
-        event: crate::schema::sema::DeploymentPhaseEvent,
+        event: crate::runtime_model::DeploymentPhaseEvent,
     ) -> Result<u64> {
         if matches!(
             deployment_lifecycle,
@@ -2064,7 +2047,7 @@ impl Store {
         deployment_identifier: u64,
         deployment_lifecycle: DeploymentLifecycle,
         deploy_job: DeployJob,
-        event: crate::schema::sema::DeploymentPhaseEvent,
+        event: crate::runtime_model::DeploymentPhaseEvent,
     ) -> Result<StateMarker> {
         let transition_ordinal = self.begin_deployment_phase_transition(
             deployment_identifier,
@@ -2096,7 +2079,7 @@ impl Store {
         deploy_job: DeployJob,
     ) -> Result<EventLogEntry> {
         let event = match &entry.logged_event {
-            crate::schema::sema::LoggedEvent::Deployment(event) => event.clone(),
+            crate::runtime_model::LoggedEvent::Deployment(event) => event.clone(),
             _ => {
                 return Err(Error::Invariant(
                     "deployment phase commit requires a deployment event".to_string(),
@@ -2109,7 +2092,7 @@ impl Store {
             deploy_job,
             event,
         )?;
-        if let crate::schema::sema::LoggedEvent::Deployment(event) = &mut entry.logged_event {
+        if let crate::runtime_model::LoggedEvent::Deployment(event) = &mut entry.logged_event {
             event.state_marker = marker;
         }
         Ok(entry)
@@ -2162,7 +2145,7 @@ impl Store {
         let generation_identifier = *generation.generation_identifier.payload();
         let prior_current: std::collections::BTreeSet<u64> = if matches!(
             generation.generation_slot,
-            crate::schema::sema::GenerationSlot::Current
+            crate::runtime_model::GenerationSlot::Current
         ) {
             self.live_generations()?
                 .into_iter()
@@ -2172,7 +2155,7 @@ impl Store {
                         && existing.deployment_environment == generation.deployment_environment
                         && matches!(
                             existing.generation_slot,
-                            crate::schema::sema::GenerationSlot::Current
+                            crate::runtime_model::GenerationSlot::Current
                         )
                 })
                 .map(|existing| *existing.generation_identifier.payload())
@@ -2200,13 +2183,13 @@ impl Store {
             );
         for mut existing in self.live_generations()? {
             if prior_current.contains(existing.generation_identifier.payload()) {
-                existing.generation_slot = crate::schema::sema::GenerationSlot::Recent;
+                existing.generation_slot = crate::runtime_model::GenerationSlot::Recent;
                 commit = commit.mutate(self.live_set, existing);
             }
         }
         for mut existing in roots {
             if prior_current.contains(existing.generation_identifier.payload()) {
-                existing.generation_slot = crate::schema::sema::GenerationSlot::Recent;
+                existing.generation_slot = crate::runtime_model::GenerationSlot::Recent;
                 commit = commit.mutate(self.gc_roots, existing);
             }
         }
@@ -2429,7 +2412,7 @@ impl EngineRecord for StoredTestRun {
 #[cfg(test)]
 mod transition_intent_tests {
     use super::*;
-    use crate::schema::sema as ordinary;
+    use crate::runtime_model as ordinary;
 
     fn admission_identity() -> ordinary::DeploymentRequestIdentity {
         ordinary::DeploymentRequestIdentity {

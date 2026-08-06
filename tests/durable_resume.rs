@@ -11,7 +11,7 @@
 //! resume from the persisted rows instead.
 
 use lojix::Store;
-use lojix::schema::sema::{self as ordinary, GcRoot, LiveGeneration};
+use lojix::runtime_model::{self as ordinary, GcRoot, LiveGeneration};
 use tempfile::TempDir;
 
 /// A live generation and its matching gc-root for one generation identifier.

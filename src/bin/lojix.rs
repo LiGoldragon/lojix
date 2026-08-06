@@ -10,7 +10,7 @@ fn main() {
     match OrdinaryClient::run_from_environment() {
         Ok(output) => {
             #[cfg(feature = "dotos-text")]
-            println!("{output}");
+            println!("{}", dotos::DotosEncode::to_dotos(&output));
             #[cfg(not(feature = "dotos-text"))]
             println!("{output:?}");
         }

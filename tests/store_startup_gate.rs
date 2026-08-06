@@ -1,4 +1,4 @@
-use lojix::schema::sema::{self as ordinary, GcRoot, LiveGeneration};
+use lojix::runtime_model::{self as ordinary, GcRoot, LiveGeneration};
 use lojix::{Error, Store};
 use redb::{Database, TableDefinition};
 use tempfile::TempDir;

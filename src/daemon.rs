@@ -1,12 +1,12 @@
 //! The lojix daemon loop — two authority-tiered unix sockets driving the
-//! generated Nexus runner.
+//! handwritten Nexus runner.
 //!
 //! Resolves the port-plan §4.4 blocker by binding two `AsyncListenerSocket`s on
 //! one `AsyncMultiListenerDaemon` (the runtime's two-socket primitive), each
 //! tagged by its authority role. `handle_stream` decodes the length-prefixed wire frame
-//! for the arriving role into a `SignalInput`, drives it through
-//! awaits `NexusEngine::execute` (which runs the `Runner` continuation loop —
-//! the deploy pipeline included), and encodes the reply back. The schema engine
+//! for the arriving role into a `SignalInput`, then awaits
+//! `NexusEngine::execute` (which runs the `Runner` continuation loop —
+//! the deploy pipeline included), and encodes the reply back. The runtime engine
 //! is the single source of routing truth; there is no inline request `Store`.
 
 use std::fmt::{Display, Formatter};
@@ -33,8 +33,8 @@ const MAXIMUM_REQUEST_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// serial accept loop (audit R2). A legitimate client sends immediately.
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-use crate::schema::nexus::{self, NexusEngine};
-use crate::schema::sema;
+use crate::runtime_flow::{self as nexus, NexusEngine};
+use crate::runtime_model as sema;
 use crate::schema_runtime::{
     DeploySubmissionOutcome, RuntimeConfiguration, SchemaRuntime, TestSubmissionOutcome,
 };
@@ -432,7 +432,7 @@ impl RequestWorker {
     }
 
     /// Build a per-request engine over the shared `Store` and drive it. The
-    /// generated runner is async, and child-process effects are awaited through
+    /// runner is async, and child-process effects are awaited through
     /// Tokio process handles rather than hidden behind a blocking-pool bridge.
     /// The engine's in-flight cursor is local to this call, so concurrent
     /// requests never corrupt each other's deploy state (intent 2alg).
@@ -452,7 +452,7 @@ impl RequestWorker {
             // typed rejection on the SAME authority tier the request arrived on
             // (audit R4), so the client decodes a real reply, not an EOF.
             _ => Err(Error::Invariant(format!(
-                "generated Nexus runner terminated without a reply for {listener}"
+                "Nexus runner terminated without a reply for {listener}"
             ))),
         }
     }
@@ -640,8 +640,8 @@ impl DeployJobs {
     fn persist_reconciled_self_switch(
         &self,
         deployment_identifier: u64,
-        generation: crate::schema::sema::LiveGeneration,
-        root: crate::schema::sema::GcRoot,
+        generation: crate::runtime_model::LiveGeneration,
+        root: crate::runtime_model::GcRoot,
     ) {
         let already_recorded = self
             .store

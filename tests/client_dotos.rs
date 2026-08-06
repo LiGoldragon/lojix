@@ -8,25 +8,28 @@ use std::ffi::OsString;
 
 use lojix::Error;
 use lojix::client::{MetaClient, OrdinaryClient};
+#[cfg(feature = "dotos-text")]
 use meta_signal_lojix::schema::lib as meta;
+#[cfg(feature = "dotos-text")]
 use signal_lojix::schema::lib as ordinary;
 use triad_runtime::{ComponentArgument, ComponentCommand};
 
-fn ordinary_query() -> ordinary::Input {
-    ordinary::Input::query(ordinary::Selection::ByNode(ordinary::NodeSelector {
-        cluster_name: ordinary::ClusterName::new("alpha"),
-        node_name: ordinary::NodeName::new("node-1"),
-        optional_requested_generation_artifact: None,
-    }))
+const ORDINARY_QUERY: &str = "Query.ByNode.(alpha node-1 None)";
+#[cfg(feature = "dotos-text")]
+const OWNER_PIN: &str = "Pin.(alpha node-1 42 keep)";
+
+#[cfg(feature = "dotos-text")]
+fn ordinary_query() -> ordinary::z2VTvQ {
+    dotos::DotosSource::new(ORDINARY_QUERY)
+        .parse()
+        .expect("ordinary Interface Dotos")
 }
 
-fn owner_pin() -> meta::Input {
-    meta::Input::pin(meta::PinRequest {
-        cluster_name: meta::ClusterName::new("alpha"),
-        node_name: meta::NodeName::new("node-1"),
-        generation_identifier: meta::GenerationIdentifier::new(42),
-        pin_label: meta::PinLabel::new("keep"),
-    })
+#[cfg(feature = "dotos-text")]
+fn owner_pin() -> meta::z2VW7Q {
+    dotos::DotosSource::new(OWNER_PIN)
+        .parse()
+        .expect("owner Interface Dotos")
 }
 
 fn dotos_argument(argument: impl Into<String>) -> ComponentArgument {
@@ -38,9 +41,8 @@ fn dotos_argument(argument: impl Into<String>) -> ComponentArgument {
 #[test]
 #[cfg(not(feature = "dotos-text"))]
 fn inline_dotos_requires_text_feature() {
-    let error =
-        OrdinaryClient::from_argument(dotos_argument("(Query (ByNode (alpha node-1 None)))"))
-            .expect_err("inline Dotos must reject without its parser");
+    let error = OrdinaryClient::from_argument(dotos_argument(ORDINARY_QUERY))
+        .expect_err("inline Dotos must reject without its parser");
     assert!(matches!(error, Error::DotosTextUnsupported));
 }
 
@@ -69,7 +71,7 @@ fn public_clients_reject_file_argument_variants() {
 
 #[test]
 fn public_clients_reject_zero_extra_flags_and_raw_paths() {
-    let inline = ordinary_query().to_string();
+    let inline = ORDINARY_QUERY;
     let cases = [
         Vec::new(),
         vec![OsString::from("--help")],
@@ -95,7 +97,7 @@ fn public_clients_reject_zero_extra_flags_and_raw_paths() {
 #[cfg(feature = "dotos-text")]
 fn ordinary_client_decodes_inline_dotos() {
     let input = ordinary_query();
-    let client = OrdinaryClient::from_arguments([OsString::from(input.to_string())])
+    let client = OrdinaryClient::from_arguments([OsString::from(ORDINARY_QUERY)])
         .expect("decode ordinary Dotos");
     assert_eq!(client.input(), &input);
 }
@@ -104,7 +106,7 @@ fn ordinary_client_decodes_inline_dotos() {
 #[cfg(feature = "dotos-text")]
 fn meta_client_decodes_inline_dotos() {
     let input = owner_pin();
-    let client = MetaClient::from_arguments([OsString::from(input.to_string())])
-        .expect("decode owner Dotos");
+    let client =
+        MetaClient::from_arguments([OsString::from(OWNER_PIN)]).expect("decode owner Dotos");
     assert_eq!(client.input(), &input);
 }

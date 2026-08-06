@@ -14,7 +14,7 @@ use horizon_lib::proposal::{ClusterProposal, ClusterTrust, NodeProposal, NodePub
 use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
 use horizon_lib::species::{Arch, Bootloader, Keyboard, MachineSpecies, NodeSpecies};
 use lojix::Store;
-use lojix::schema::sema;
+use lojix::runtime_model as sema;
 use lojix::schema_runtime::{DeploySubmissionOutcome, SchemaRuntime};
 
 fn write_proposal(path: &Path) {

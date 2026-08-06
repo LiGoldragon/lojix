@@ -1,5 +1,5 @@
 //! Hand-implemented `SchemaRuntime` noun — the single data-bearing type that
-//! implements both engine traits (`nexus::NexusEngine` + `sema::SemaEngine`).
+//! implements the handwritten `nexus::NexusEngine` decision boundary.
 //!
 //! `decide` is the routing brain (port plan §4.2): ordinary reads route to
 //! `SemaRead`, ordinary subscription verbs reply with the token handshake, and
@@ -9,7 +9,7 @@
 //! — recording a phase transition between stages and finally replying
 //! `DeployAccepted`. `run_effect` does real `nix` IO through `tokio::process::Command`
 //! so actor-native request tasks await child processes directly instead of
-//! routing generated Nexus execution through a blocking-pool bridge.
+//! routing Nexus execution through a blocking-pool bridge.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,8 +26,8 @@ use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::schema::nexus::NexusEngine;
-use crate::schema::{nexus, sema};
+use crate::runtime_flow::{self as nexus, NexusEngine};
+use crate::runtime_model as sema;
 
 fn canonical_nix_store_root(value: &str) -> bool {
     let Some(item) = value.strip_prefix("/nix/store/") else {
@@ -71,7 +71,7 @@ fn credential_like(value: &str) -> bool {
 // can cross this module boundary.
 #[allow(clippy::new_ret_no_self)]
 mod ordinary {
-    pub use crate::schema::sema::*;
+    pub use crate::runtime_model::*;
 
     pub type Input = OrdinaryIngress;
     pub type Output = OrdinaryEgress;
@@ -128,7 +128,7 @@ mod ordinary {
 
 #[allow(clippy::new_ret_no_self)]
 mod meta {
-    pub use crate::schema::sema::*;
+    pub use crate::runtime_model::*;
 
     pub type Input = MetaIngress;
     pub type Output = MetaEgress;
@@ -221,8 +221,8 @@ use crate::{DaemonConfiguration, Error, Result, Store};
 
 /// The lojix engine noun. Carries the durable `Store` (the four sema tables)
 /// and, while a deploy is in flight, the pipeline cursor that threads the
-/// effect chain across continuation hops. Implements both engine traits; the
-/// generated `NexusEngine::execute` drives the `Runner` over it.
+/// effect chain across continuation hops. The handwritten
+/// `NexusEngine::execute` drives the `Runner` over it.
 #[derive(Debug)]
 pub struct SchemaRuntime {
     /// The shared durable state. Each request is served by its OWN
@@ -322,7 +322,7 @@ pub struct TestDefaults {
     default_mode: ordinary::TestMode,
     /// The cluster→flake resolution (Unit 2b): the flake whose
     /// exact hermetic output selector the configured shorthand builds, and
-    /// whose generated runner the live path brings up.
+    /// whose built microVM runner the live path brings up.
     test_flake: ordinary::FlakeReference,
     /// Exact hermetic system and output selector for a configured shorthand.
     test_nix_system: sema::NixSystem,
@@ -535,7 +535,7 @@ struct ResolvedTestRun {
     host: ordinary::NodeName,
     profile: sema::TestExecutionProfile,
     /// The flake paired with the exact output selector the hermetic dispatch
-    /// builds (and whose generated runner the live path brings up).
+    /// builds (and whose built microVM runner the live path brings up).
     flake: ordinary::FlakeReference,
 }
 
@@ -596,7 +596,7 @@ impl ResolvedTestRun {
     }
 
     /// The live bring-up command for this run: the report-51 host-untouched
-    /// user-namespace bring-up of the generated microVM runner on the resolved
+    /// user-namespace bring-up of the built microVM runner on the resolved
     /// vmhost. The runner closure and guest IP are filled by the live path's
     /// preceding build; BUILT but not run live here (gated).
     fn bring_up_command(&self, runner: ordinary::ClosurePath) -> nexus::BringUpTestVmCommand {
@@ -836,14 +836,14 @@ impl HermeticCheck {
 }
 
 /// The live host-untouched VM lifecycle.
-/// — the report-51 user-namespace bring-up/teardown of the generated microVM
+/// — the report-51 user-namespace bring-up/teardown of the built microVM
 /// runner on the resolved vmhost. BUILT here, NOT run live (the first
 /// Prometheus cycle is psyche-gated): the invocation shapes are constructed so
 /// the bracket is provably end-to-end, but a live run is gated.
 ///
 /// Bring-up `ssh <host-fqdn>` runs a `systemd-run --user` durable unit that
 /// `unshare -rn`'s a private network namespace, creates the additive tap
-/// inside it, and `nsenter`s the generated runner — no sudo, no
+/// inside it, and `nsenter`s the built runner — no sudo, no
 /// switch-to-configuration, host netns byte-identical. Teardown
 /// `systemctl --user stop`s the units so the tap + route vanish with the
 /// namespace.
@@ -882,7 +882,7 @@ impl LiveTestVm {
 
     /// The host-untouched bring-up invocation (report 51 §3): a `--user`
     /// systemd-run unit that `unshare -rn`s a private netns, brings up the
-    /// additive tap inside it, and `nsenter`s the generated runner. Constructed
+    /// additive tap inside it, and `nsenter`s the built runner. Constructed
     /// here; on a live (gated) run this is `.run().await`'d.
     fn bring_up_invocation(&self) -> NixCommand {
         let script = format!(
@@ -897,7 +897,7 @@ impl LiveTestVm {
     }
 
     /// The in-namespace bring-up body: create the tap, route to the guest IP,
-    /// then `nsenter` the generated runner. The tap design maps one-to-one onto
+    /// then `nsenter` the built runner. The tap design maps one-to-one onto
     /// the C2-emitted `.network` content (report 51 §2), applied in the netns
     /// instead of host networkd.
     fn bring_up_body(&self) -> String {
@@ -1082,7 +1082,7 @@ struct DeployPipeline {
     resume_stage: sema::DeployResumeStage,
     /// Exact receipt of the immediately preceding phase transition. It is
     /// persisted only after Store returns the commit receipt; a restart uses
-    /// this real receipt to enter the generated continuation, never a zero or
+    /// this real receipt to enter the runner continuation, never a zero or
     /// predicted marker.
     phase_receipt: Option<sema::PhaseReceipt>,
     submission: sema::DeploySubmission,
@@ -2342,8 +2342,8 @@ impl SchemaRuntime {
     /// Drive an already-submitted deploy's effect pipeline to its terminal
     /// reply (up9q surface a, the daemon-owned executor body). Requires the
     /// in-flight cursor to be set by a prior [`Self::submit_deploy`]; re-enters
-    /// the generated runner at the persisted continuation. A newly submitted
-    /// job starts at `ResolveFlakeAuth`; a restarted job seeds the generated
+    /// the handwritten runner at the persisted continuation. A newly submitted
+    /// job starts at `ResolveFlakeAuth`; a restarted job seeds the handwritten
     /// runner with its durable predecessor result instead, so it never reruns
     /// resolver/Horizon work that already committed. The
     /// returned `meta::Output` is daemon-internal executor evidence for logging
@@ -2483,7 +2483,7 @@ impl SchemaRuntime {
     /// (Unit 2b, the daemon-owned executor body — mirrors
     /// [`Self::drive_submitted_deploy`]). Requires the in-flight test cursor set
     /// by a prior [`Self::submit_test`] (or `decide_test` for the
-    /// in-process proof). Re-enters the generated runner at the cursor's first
+    /// in-process proof). Re-enters the handwritten runner at the cursor's first
     /// effect (the hermetic `nix build`, or the live bring-up), runs it for
     /// real, and rewrites the durable row through real phases to a terminal
     /// `Passed` (with the built closure) or `Failed(stage)` — never a faked
@@ -2522,7 +2522,7 @@ impl SchemaRuntime {
 
     /// Drive a test-pipeline `NexusAction` to its terminal `Tested`/
     /// `TestRejected` reply, threading any further effect / sema-write
-    /// continuations through the generated runner. The hermetic path is a
+    /// continuations through the handwritten runner. The hermetic path is a
     /// single effect then a terminal write, so this usually runs one or two
     /// hops; the live path threads bring-up → deploy → assert → teardown.
     async fn drive_to_terminal(&mut self, mut action: nexus::NexusAction) -> meta::Output {
@@ -6119,26 +6119,6 @@ impl nexus::NexusEngine for SchemaRuntime {
             nexus::NexusWork::EffectCompleted(result) => self.decide_effect_completion(result),
         };
         action.with_origin_route(origin_route)
-    }
-}
-
-impl sema::SemaEngine for SchemaRuntime {
-    fn apply_inner(
-        &mut self,
-        input: sema::sema::Sema<sema::sema::WriteInput>,
-    ) -> sema::sema::Sema<sema::sema::WriteOutput> {
-        let origin_route = input.origin_route();
-        self.apply_sema(input.into_root())
-            .with_origin_route(origin_route)
-    }
-
-    fn observe_inner(
-        &self,
-        input: sema::sema::Sema<sema::sema::ReadInput>,
-    ) -> sema::sema::Sema<sema::sema::ReadOutput> {
-        let origin_route = input.origin_route();
-        self.observe_sema(input.into_root())
-            .with_origin_route(origin_route)
     }
 }
 

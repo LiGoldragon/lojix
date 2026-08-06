@@ -10,7 +10,7 @@ This repo is the **implementation home** for the daemon-based deploy
 stack. The architectural decisions are settled (per `ARCHITECTURE.md`);
 what remains is implementation and validation.
 
-The library half (`lojix`) holds shared types, schema-derived
+The library half (`lojix`) holds shared types, handwritten
 Nexus/SEMA runtime code, the actor-native socket shell, and
 request/reply plumbing. The two binaries (`lojix-daemon`, `lojix`) are
 thin entry points.
@@ -38,7 +38,7 @@ these):
 
 ## Storage and wire defaults
 
-- **Storage:** schema-derived SEMA table nouns over one durable, configured
+- **Storage:** handwritten runtime nouns in SEMA tables over one durable, configured
   exact store path. The startup archive carries that path to the daemon and
   reset service; no component derives `lojix.sema`. The reset service supplies
   its archive through `LOJIX_CONFIGURATION` and calls only pathless inline
@@ -71,7 +71,7 @@ these):
 ## Status (2026-08-04)
 
 - The actor-native daemon socket shell is implemented at the repo root.
-- The generated Nexus runner and handwritten effect hooks are async;
+- The handwritten Nexus runner and effect hooks are async;
   the daemon awaits `NexusEngine::execute` directly and does not wrap
   engine execution in `spawn_blocking`.
 - Production host and user-environment deploy requests enter the
