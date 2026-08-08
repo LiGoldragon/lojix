@@ -211,8 +211,8 @@ dependencies = [
 
 [[package]]
 name = "dotos"
-version = "0.10.0"
-source = "git+https://github.com/LiGoldragon/dotos.git?rev=80c7b17f7ad3cf547d2624c6a243e5de5f85c9f3#80c7b17f7ad3cf547d2624c6a243e5de5f85c9f3"
+version = "0.10.1"
+source = "git+https://github.com/LiGoldragon/dotos.git?rev=b3c2c76fe7a18ba026ab054d1fa7162e55860b9e#b3c2c76fe7a18ba026ab054d1fa7162e55860b9e"
 dependencies = [
  "dotos-derive",
  "rkyv",
@@ -221,7 +221,7 @@ dependencies = [
 [[package]]
 name = "dotos-derive"
 version = "0.5.0"
-source = "git+https://github.com/LiGoldragon/dotos.git?rev=80c7b17f7ad3cf547d2624c6a243e5de5f85c9f3#80c7b17f7ad3cf547d2624c6a243e5de5f85c9f3"
+source = "git+https://github.com/LiGoldragon/dotos.git?rev=b3c2c76fe7a18ba026ab054d1fa7162e55860b9e#b3c2c76fe7a18ba026ab054d1fa7162e55860b9e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -391,8 +391,8 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "horizon-lib"
-version = "0.3.1"
-source = "git+https://github.com/LiGoldragon/horizon-rs.git?rev=c62b38193cd482d31a88dc5633de4cda32beb3f3#c62b38193cd482d31a88dc5633de4cda32beb3f3"
+version = "0.3.2"
+source = "git+https://github.com/LiGoldragon/horizon-rs.git?rev=81f1d95d3d6dc554cb0230b65b356aff02b8a6ab#81f1d95d3d6dc554cb0230b65b356aff02b8a6ab"
 dependencies = [
  "dotos",
  "ipnet",
@@ -502,7 +502,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lojix"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "dotos",
  "horizon-lib",
@@ -514,7 +514,7 @@ dependencies = [
  "sema-engine",
  "serde_json",
  "sha2",
- "signal-frame 0.3.0 (git+https://github.com/LiGoldragon/signal-frame.git?rev=01676293a623d97b65e320d4138c4b480c6d5dad)",
+ "signal-frame 0.3.2",
  "signal-lojix",
  "tempfile",
  "thiserror",
@@ -530,8 +530,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-lojix"
-version = "0.8.1"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?rev=8cb72f1e9014a909a3d99e5e3be433cda87f42f9#8cb72f1e9014a909a3d99e5e3be433cda87f42f9"
+version = "0.8.2"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?rev=45c51112824b487ae3a8e3e5b05cd372b6619481#45c51112824b487ae3a8e3e5b05cd372b6619481"
 dependencies = [
  "core-ethos",
  "dotos",
@@ -540,7 +540,7 @@ dependencies = [
  "rust-logos",
  "schema-rust",
  "sema-translator",
- "signal-frame 0.3.0 (git+https://github.com/LiGoldragon/signal-frame.git?rev=01676293a623d97b65e320d4138c4b480c6d5dad)",
+ "signal-frame 0.3.2",
  "signal-lojix",
  "signal-sema-translator",
  "structural-codec",
@@ -816,7 +816,7 @@ dependencies = [
  "blake3",
  "rkyv",
  "sema",
- "signal-frame 0.3.0 (git+https://github.com/LiGoldragon/signal-frame.git?rev=f46872e7e8edae5264c892443d415a273b231234)",
+ "signal-frame 0.3.0",
  "signal-sema",
  "thiserror",
 ]
@@ -896,23 +896,23 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "signal-frame"
 version = "0.3.0"
-source = "git+https://github.com/LiGoldragon/signal-frame.git?rev=01676293a623d97b65e320d4138c4b480c6d5dad#01676293a623d97b65e320d4138c4b480c6d5dad"
-dependencies = [
- "dotos",
- "paste",
- "rkyv",
- "signal-frame-macros 0.1.1 (git+https://github.com/LiGoldragon/signal-frame.git?rev=01676293a623d97b65e320d4138c4b480c6d5dad)",
- "thiserror",
-]
-
-[[package]]
-name = "signal-frame"
-version = "0.3.0"
 source = "git+https://github.com/LiGoldragon/signal-frame.git?rev=f46872e7e8edae5264c892443d415a273b231234#f46872e7e8edae5264c892443d415a273b231234"
 dependencies = [
  "paste",
  "rkyv",
  "signal-frame-macros 0.1.1 (git+https://github.com/LiGoldragon/signal-frame.git?rev=f46872e7e8edae5264c892443d415a273b231234)",
+ "thiserror",
+]
+
+[[package]]
+name = "signal-frame"
+version = "0.3.2"
+source = "git+https://github.com/LiGoldragon/signal-frame.git?rev=80f70d929ae6d72707052f097be2264872913983#80f70d929ae6d72707052f097be2264872913983"
+dependencies = [
+ "dotos",
+ "paste",
+ "rkyv",
+ "signal-frame-macros 0.1.2",
  "thiserror",
 ]
 
@@ -930,16 +930,6 @@ dependencies = [
 [[package]]
 name = "signal-frame-macros"
 version = "0.1.1"
-source = "git+https://github.com/LiGoldragon/signal-frame.git?rev=01676293a623d97b65e320d4138c4b480c6d5dad#01676293a623d97b65e320d4138c4b480c6d5dad"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "signal-frame-macros"
-version = "0.1.1"
 source = "git+https://github.com/LiGoldragon/signal-frame.git?rev=0786fbe8caf27552afcdd5deb85bc82ec6088337#0786fbe8caf27552afcdd5deb85bc82ec6088337"
 dependencies = [
  "proc-macro2",
@@ -951,6 +941,16 @@ dependencies = [
 name = "signal-frame-macros"
 version = "0.1.1"
 source = "git+https://github.com/LiGoldragon/signal-frame.git?rev=f46872e7e8edae5264c892443d415a273b231234#f46872e7e8edae5264c892443d415a273b231234"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "signal-frame-macros"
+version = "0.1.2"
+source = "git+https://github.com/LiGoldragon/signal-frame.git?rev=80f70d929ae6d72707052f097be2264872913983#80f70d929ae6d72707052f097be2264872913983"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -969,8 +969,8 @@ dependencies = [
 
 [[package]]
 name = "signal-lojix"
-version = "0.8.2"
-source = "git+https://github.com/LiGoldragon/signal-lojix.git?rev=e76d25dd9da261cc0e72afd2074240d843974e4d#e76d25dd9da261cc0e72afd2074240d843974e4d"
+version = "0.8.3"
+source = "git+https://github.com/LiGoldragon/signal-lojix.git?rev=50c4fab3f8a2b16aa1261104395f1dae315035d1#50c4fab3f8a2b16aa1261104395f1dae315035d1"
 dependencies = [
  "core-ethos",
  "dotos",
@@ -979,7 +979,7 @@ dependencies = [
  "rust-logos",
  "schema-rust",
  "sema-translator",
- "signal-frame 0.3.0 (git+https://github.com/LiGoldragon/signal-frame.git?rev=01676293a623d97b65e320d4138c4b480c6d5dad)",
+ "signal-frame 0.3.2",
  "signal-sema-translator",
  "structural-codec",
  "thiserror",
