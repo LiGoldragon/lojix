@@ -42,6 +42,21 @@ fn owner_deploy_lowers_to_runtime_shape() {
 }
 
 #[test]
+fn owner_deploy_rejection_lowers_to_public_shape() {
+    let input = dune_host_deploy("ActivateNow");
+    let lojix::runtime_model::MetaIngress::Deploy(request) = lojix::adapters::meta_ingress(input)
+    else {
+        panic!("owner Host deploy must lower to a runtime Host submission");
+    };
+    let mut engine = SchemaRuntime::new();
+    let DeploySubmissionOutcome::Rejected(record) = engine.submit_deploy(request) else {
+        panic!("fixture proposal source must produce a typed rejection");
+    };
+    lojix::adapters::meta_egress(lojix::runtime_model::MetaEgress::DeployRejected(record))
+        .expect("typed owner rejection must match the public egress shape");
+}
+
+#[test]
 fn owner_dotos_request_frame_roundtrips_with_its_exchange() {
     let input = dune_host_deploy("Evaluate");
     let expected_exchange = exchange();

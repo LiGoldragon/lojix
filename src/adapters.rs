@@ -213,7 +213,24 @@ wire_struct!(RejectedTest {
     test_rejection_reason: TestRejectionReason,
     state_marker: StateMarker
 });
-wire_newtype!(RejectedDeploy, DeploymentRecord);
+// `RejectedDeploy.{DeploymentRecord}` is a one-field product in the owner
+// contract, even though the runtime keeps the record as a compact newtype.
+impl WireShape for sema::RejectedDeploy {
+    fn to_wire(&self) -> WireValue {
+        WireValue::Product(vec![self.payload().to_wire()])
+    }
+
+    fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
+        let WireValue::Product(mut fields) = value else {
+            return Err(WireShapeError);
+        };
+        if fields.len() != 1 {
+            return Err(WireShapeError);
+        }
+        let field = fields.pop().ok_or(WireShapeError)?;
+        Ok(Self::new(sema::DeploymentRecord::from_wire(field)?))
+    }
+}
 wire_enum!(UnpinRejectionReason { unit { 0 => GenerationNotPinned, 1 => PinLabelUnknown, 2 => InternalError, 3 => NodeUnknown } unary {  } });
 wire_struct!(PinRequest {
     cluster_name: ClusterName,
