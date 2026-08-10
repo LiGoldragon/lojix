@@ -26,6 +26,22 @@ fn dune_host_deploy(action: &str) -> meta::z2VW7Q {
 }
 
 #[test]
+#[cfg(feature = "dotos-text")]
+fn owner_deploy_lowers_to_runtime_shape() {
+    let input = dune_host_deploy("ActivateNow");
+    let lojix::runtime_model::MetaIngress::Deploy(lojix::runtime_model::DeploySubmission::Host(
+        host,
+    )) = lojix::adapters::meta_ingress(input)
+    else {
+        panic!("owner Host deploy must lower to a runtime Host submission");
+    };
+    assert_eq!(
+        host.deployment_output_selector.payload().payload(),
+        "checks.fixture-a"
+    );
+}
+
+#[test]
 fn owner_dotos_request_frame_roundtrips_with_its_exchange() {
     let input = dune_host_deploy("Evaluate");
     let expected_exchange = exchange();

@@ -148,7 +148,25 @@ wire_struct!(EventLogRange {
     until: EventLogPosition
 });
 wire_enum!(DeploymentLifecycle { unit { 0 => Failed, 1 => Rejected, 2 => Completed, 3 => Building, 4 => Activating, 5 => Submitted, 6 => Copying, 7 => Activated, 8 => Built } unary {  } });
-wire_newtype!(DeploymentOutputSelector, FlakeAttribute);
+// The public signal schema declares `DeploymentOutputSelector.{FlakeAttribute}`
+// as a one-field product.  Keep the readable runtime noun compact, but retain
+// that product boundary when crossing the verified wire contract.
+impl WireShape for sema::DeploymentOutputSelector {
+    fn to_wire(&self) -> WireValue {
+        WireValue::Product(vec![self.payload().to_wire()])
+    }
+
+    fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
+        let WireValue::Product(mut fields) = value else {
+            return Err(WireShapeError);
+        };
+        if fields.len() != 1 {
+            return Err(WireShapeError);
+        }
+        let field = fields.pop().ok_or(WireShapeError)?;
+        Ok(Self::new(sema::FlakeAttribute::from_wire(field)?))
+    }
+}
 wire_newtype!(ClosurePath, String);
 wire_enum!(ActivationEffect { unit { 0 => ProfileOnly, 1 => BootOnceProfile, 2 => TestActivation, 3 => LiveActivation, 4 => BootProfile } unary {  } });
 wire_newtype!(SubscriptionClosed, SubscriptionToken);
