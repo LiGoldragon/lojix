@@ -132,6 +132,11 @@ streams subscription events.
   with Nix copy, with no ambient SSH config or agent. `BuildOnly` has no activation or transport field and
   therefore cannot activate. No daemon socket, daemon configuration, old
   journal/store, route, host, user, or path default participates.
+  This is the explicitly authorized daemon-free crossing for incompatible
+  daemon/client protocol or persisted schema generations: it does not assume
+  compatibility or invent a migration path. A run is complete only when its
+  durable terminal-evidence record is persisted alongside its journal; request
+  admission, build completion, or a disconnected client is not terminal truth.
 
 ## 2 · Not owned
 
