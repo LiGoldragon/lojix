@@ -104,11 +104,45 @@ impl Daemon {
         )
         .await?;
         let request_error_log = RequestErrorLog::new("lojix-daemon");
-        AsyncMultiListenerDaemon::new(sockets, runtime, request_error_log)
+        let daemon = AsyncMultiListenerDaemon::new(sockets, runtime, request_error_log)
             .with_concurrency_limit(RequestConcurrencyLimit::new(MAXIMUM_CONCURRENT_REQUESTS))
-            .run()
+            .bind()
             .await
-            .map_err(Self::map_daemon_error)
+            .map_err(|error| {
+                Self::map_daemon_error(AsyncMultiListenerDaemonError::Listener(error))
+            })?;
+        daemon
+            .start()
+            .await
+            .map_err(|error| Self::map_daemon_error(AsyncMultiListenerDaemonError::Start(error)))?;
+
+        // `systemd` stops the service with SIGTERM.  Bind both listeners before
+        // waiting and keep accepting both concurrently until that signal
+        // arrives; then the triad runtime closes admission, drains active
+        // requests, stops its owned runtime, and drops the socket-file guards.
+        // This is not an owner-wire operation: process lifecycle remains the
+        // service manager's authority, while every domain mutation remains a
+        // typed socket request.
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut interrupt =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        loop {
+            tokio::select! {
+                _ = terminate.recv() => break,
+                _ = interrupt.recv() => break,
+                result = daemon.serve_next_connection_at(0) => {
+                    result.map_err(|error| Self::map_daemon_error(AsyncMultiListenerDaemonError::Listener(error)))?;
+                }
+                result = daemon.serve_next_connection_at(1) => {
+                    result.map_err(|error| Self::map_daemon_error(AsyncMultiListenerDaemonError::Listener(error)))?;
+                }
+            }
+        }
+        daemon
+            .stop()
+            .await
+            .map_err(|error| Self::map_daemon_error(AsyncMultiListenerDaemonError::Stop(error)))
     }
 
     fn map_daemon_error(error: AsyncMultiListenerDaemonError<Error>) -> Error {

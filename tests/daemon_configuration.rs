@@ -248,6 +248,11 @@ fn stop_daemon(mut daemon: Child, name: &str) {
         .expect("send systemd-style SIGTERM");
     let output = daemon.wait_with_output().expect("wait for daemon stop");
     assert!(
+        output.status.success(),
+        "{name} must exit cleanly after systemd-style SIGTERM: {}",
+        output_text(&output)
+    );
+    assert!(
         !String::from_utf8_lossy(&output.stderr).contains("panicked at"),
         "{name} must not panic while serving the fresh-store path: {}",
         output_text(&output)
