@@ -128,6 +128,17 @@
             }
           );
 
+          # Process-level startup witness for the exact CriomOS writer archive,
+          # a missing configured SEMA store, both public authority tiers, and
+          # a service-style terminate/restart cycle.
+          fresh-daemon-startup = craneLib.cargoTest (
+            commonArguments
+            // {
+              inherit cargoArtifacts;
+              cargoExtraArgs = "--test daemon_configuration --features dotos-text";
+            }
+          );
+
           daemon-startup-rejects-dotos =
             let
               package = self.packages.${system}.default;
