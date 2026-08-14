@@ -244,7 +244,7 @@ fn run_client(binary: &str, socket_environment: &str, socket: &Path, request: &s
 fn stop_daemon(mut daemon: Child, name: &str) {
     let process_identifier =
         rustix::process::Pid::from_raw(daemon.id() as i32).expect("child process identifier");
-    rustix::process::kill_process(process_identifier, rustix::process::Signal::Term)
+    rustix::process::kill_process(process_identifier, rustix::process::Signal::TERM)
         .expect("send systemd-style SIGTERM");
     let output = daemon.wait_with_output().expect("wait for daemon stop");
     assert!(
