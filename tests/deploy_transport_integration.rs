@@ -24,7 +24,7 @@ use horizon_lib::species::{Arch, Bootloader, Keyboard, MachineSpecies, NodeSpeci
 use lojix::Store;
 use lojix::runtime_model as ordinary;
 use lojix::runtime_model as meta;
-use lojix::schema_runtime::{RuntimeConfiguration, SchemaRuntime};
+use lojix::schema_runtime::{DeploySubmissionOutcome, RuntimeConfiguration, SchemaRuntime};
 
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 const FLAKE: &str =
@@ -215,7 +215,7 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
             user_environment_request(
                 &source,
                 "ssh-ng://fixture-copy-a.invalid",
-                "fixture-a@fixture-activate-a.invalid",
+                "root@fixture-activate-a.invalid",
             ),
         )
         .await,
@@ -253,8 +253,8 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
     assert!(commands[eval].contains("narHash="), "{}", commands[eval]);
     assert!(commands[copy].contains(OUTPUT), "{}", commands[copy]);
     assert!(commands[copy].contains("ssh-ng://fixture-copy-a.invalid"));
-    assert!(commands[profile].contains("fixture-a@fixture-activate-a.invalid"));
-    assert!(commands[activate].contains("fixture-a@fixture-activate-a.invalid"));
+    assert!(commands[profile].contains("root@fixture-activate-a.invalid"));
+    assert!(commands[activate].contains("root@fixture-activate-a.invalid"));
     assert!(commands[profile].contains("runuser --login --command"));
     assert!(commands[profile].contains(OUTPUT));
     assert!(commands[activate].contains("runuser --login --command"));
@@ -295,7 +295,7 @@ async fn second_arbitrary_transport_flow_preserves_both_request_values() {
     write_fixture_proposal(&source);
     let mut engine = runtime(directory.path(), &programs);
     let nix_store_uri = "ssh-ng://fixture-copy-b.invalid:2244?compress=true";
-    let ssh_destination = "fixture-b@fixture-activate-b.invalid";
+    let ssh_destination = "root@fixture-activate-b.invalid";
 
     assert!(matches!(
         submit_and_drive(
@@ -325,6 +325,73 @@ async fn second_arbitrary_transport_flow_preserves_both_request_values() {
 }
 
 #[tokio::test]
+async fn matched_user_remote_activation_runs_directly_without_runuser() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let programs = directory.path().join("programs");
+    fake_programs(&programs, false, false);
+    let source = directory.path().join("datom.dotos");
+    write_fixture_proposal(&source);
+    let mut engine = runtime(directory.path(), &programs);
+    let ssh_destination = "bird@fixture-activate-matched.invalid";
+
+    assert!(matches!(
+        submit_and_drive(
+            &mut engine,
+            user_environment_request(&source, "ssh-ng://fixture-copy-matched.invalid", ssh_destination),
+        )
+        .await,
+        meta::MetaEgress::DeployTerminal(record)
+            if matches!(record.optional_deployment_terminal, Some(meta::DeploymentTerminal::Succeeded))
+    ));
+
+    let ssh: Vec<_> = command_lines(&programs)
+        .into_iter()
+        .filter(|line| line.starts_with("ssh "))
+        .collect();
+    assert_eq!(ssh.len(), 2, "{ssh:?}");
+    assert!(
+        ssh.iter().all(|line| line.contains(ssh_destination)),
+        "{ssh:?}"
+    );
+    assert!(ssh.iter().all(|line| !line.contains("runuser")), "{ssh:?}");
+    assert!(
+        ssh.iter().any(|line| line.contains("nix-env -p")),
+        "{ssh:?}"
+    );
+    assert!(ssh.iter().any(|line| line.contains("/activate")), "{ssh:?}");
+}
+
+#[test]
+fn mismatched_unprivileged_remote_login_is_rejected_before_effects() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let programs = directory.path().join("programs");
+    fake_programs(&programs, false, false);
+    let source = directory.path().join("datom.dotos");
+    write_fixture_proposal(&source);
+    let mut engine = runtime(directory.path(), &programs);
+
+    let outcome = engine.submit_deploy(user_environment_request(
+        &source,
+        "ssh-ng://fixture-copy-mismatch.invalid",
+        "other@fixture-activate-mismatch.invalid",
+    ));
+    let DeploySubmissionOutcome::Rejected(rejected) = outcome else {
+        panic!("mismatched unprivileged login must be rejected at admission");
+    };
+    assert!(matches!(
+        rejected.into_payload().optional_deployment_terminal,
+        Some(meta::DeploymentTerminal::Rejected(
+            meta::DeploymentTerminalReason::InvalidDeploymentRouting
+        ))
+    ));
+    assert!(engine.store().deploy_jobs().expect("job rows").is_empty());
+    assert!(
+        !programs.join("commands").exists(),
+        "routing rejection must run no Nix, copy, profile, or activation command"
+    );
+}
+
+#[tokio::test]
 async fn copy_and_activation_failures_are_terminal_rejections() {
     for (fail_copy, fail_activation) in [(true, false), (false, true)] {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -339,7 +406,7 @@ async fn copy_and_activation_failures_are_terminal_rejections() {
             user_environment_request(
                 &source,
                 "ssh-ng://fixture-copy-a.invalid",
-                "fixture-a@fixture-activate-a.invalid",
+                "root@fixture-activate-a.invalid",
             ),
         )
         .await

@@ -2861,10 +2861,39 @@ impl SchemaRuntime {
                     .bytes()
                     .all(|byte| !byte.is_ascii_control())
         });
-        let valid_transport = SshTarget::validate_nix_store_uri(transport.nix_store_uri.payload())
-            .is_ok()
-            && SshTarget::validate_ssh_destination(transport.ssh_destination.payload()).is_ok();
-        (!valid_backend || !valid_selector || !valid_builder || !valid_transport)
+        let target = SshTarget::from_transport(&nexus::DeploymentTransport {
+            nix_store_uri: nexus::NixStoreUri::new(transport.nix_store_uri.payload().clone()),
+            ssh_destination: nexus::SshDestination::new(
+                transport.ssh_destination.payload().clone(),
+            ),
+        });
+        let valid_transport = target.is_ok();
+        let valid_user_environment_authority = match request {
+            meta::DeployRequest::Host(_) => true,
+            meta::DeployRequest::UserEnvironment(deployment) => {
+                if matches!(
+                    deployment.user_environment_action,
+                    meta::UserEnvironmentAction::Realize
+                ) {
+                    true
+                } else {
+                    HorizonUserName::try_new(deployment.user_name.payload().clone())
+                        .ok()
+                        .zip(target.as_ref().ok())
+                        .is_some_and(|(user, target)| {
+                            !matches!(
+                                target.user_environment_activation_authority(&user),
+                                RemoteUserActivationAuthority::UnprivilegedMismatch
+                            )
+                        })
+                }
+            }
+        };
+        (!valid_backend
+            || !valid_selector
+            || !valid_builder
+            || !valid_transport
+            || !valid_user_environment_authority)
             .then_some(meta::DeployRejectionReason::InvalidDeploymentRouting)
     }
 
@@ -5063,6 +5092,17 @@ struct SshTarget {
     ssh_destination: String,
 }
 
+/// The authority available to a remote Home Manager activation. The SSH login
+/// is request-owned routing data, so it — never the logical node name — decides
+/// whether the target user can run directly, needs explicit root mediation, or
+/// must be rejected before the profile can change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteUserActivationAuthority {
+    MatchedUser,
+    RootMediated,
+    UnprivilegedMismatch,
+}
+
 impl SshTarget {
     fn from_transport(transport: &nexus::DeploymentTransport) -> std::result::Result<Self, String> {
         let nix_store_uri = transport.nix_store_uri.payload().clone();
@@ -5108,6 +5148,26 @@ impl SshTarget {
             );
         }
         Ok(())
+    }
+
+    /// Classify the explicit SSH login for a Home Manager target. Only the
+    /// literal `root` login carries mediation authority; Lojix never promotes
+    /// another login or derives a root route from node or user identity.
+    fn user_environment_activation_authority(
+        &self,
+        user: &HorizonUserName,
+    ) -> RemoteUserActivationAuthority {
+        let (login, _) = self
+            .ssh_destination
+            .split_once('@')
+            .expect("SshTarget retains a validated SSH destination");
+        if login == user.as_str() {
+            RemoteUserActivationAuthority::MatchedUser
+        } else if login == "root" {
+            RemoteUserActivationAuthority::RootMediated
+        } else {
+            RemoteUserActivationAuthority::UnprivilegedMismatch
+        }
     }
 
     /// `ssh -o BatchMode=yes <user>@<domain> <remote_command>`.
@@ -5254,6 +5314,7 @@ impl Activation {
                     .map_err(|error| format!("invalid user name for home activation: {error}"))?;
                 Ok(Self::UserEnvironment(UserEnvironmentActivation {
                     node_name: command.node_name.clone(),
+                    authority: target.user_environment_activation_authority(&user),
                     target,
                     user,
                     store_path,
@@ -5524,14 +5585,15 @@ impl HostActivation {
     }
 }
 
-/// User-environment activation on the target. `SetProfile`/`ActivateNow` use
-/// the root deployment connection to run the profile operation as the requested
-/// user, then `ActivateNow` additionally runs the activation package. Includes
-/// the local fast-path: skip ssh entirely when the dispatcher already is the
-/// requested user on the target node.
+/// User-environment activation on the target. A request explicitly logged in as
+/// the target user runs directly; an explicit root login mediates through a
+/// target-user login; any other remote login is refused before a profile or
+/// activation effect. Includes the local fast-path: skip ssh entirely when the
+/// dispatcher already is the requested user on the target node.
 #[derive(Debug, Clone)]
 struct UserEnvironmentActivation {
     node_name: ordinary::NodeName,
+    authority: RemoteUserActivationAuthority,
     target: SshTarget,
     user: HorizonUserName,
     store_path: String,
@@ -5557,24 +5619,41 @@ impl UserEnvironmentActivation {
         NixCommand::new(format!("{}/activate", self.store_path), Vec::new())
     }
 
-    fn remote_profile_invocation(&self) -> NixCommand {
-        self.root_mediated_invocation(ShellCommand::from_raw(format!(
+    fn remote_profile_invocation(&self) -> std::result::Result<NixCommand, String> {
+        self.remote_invocation(ShellCommand::from_raw(format!(
             "nix-env -p \"$HOME/.local/state/nix/profiles/home-manager\" --set {}",
             ShellArgument::new(self.store_path.clone()).to_command_text(),
         )))
     }
 
-    fn remote_activate_invocation(&self) -> NixCommand {
-        self.root_mediated_invocation(ShellCommand::from_raw(
+    fn remote_activate_invocation(&self) -> std::result::Result<NixCommand, String> {
+        self.remote_invocation(ShellCommand::from_raw(
             ShellArgument::new(format!("{}/activate", self.store_path)).to_command_text(),
         ))
     }
 
-    /// The deployment SSH identity is root (the same authority used for closure
-    /// realization and copying). Drop privilege to the target account for the
-    /// profile and activation commands, so a user profile deploy works even when
-    /// that account has no SSH login while preserving the profile's user-owned
-    /// state.
+    /// Build the remote command from the authority carried by the explicit SSH
+    /// destination. This is the effect-side fail-closed guard for recovered
+    /// jobs; fresh submissions reject this same mismatch before any effect.
+    fn remote_invocation(&self, command: ShellCommand) -> std::result::Result<NixCommand, String> {
+        match self.authority {
+            RemoteUserActivationAuthority::MatchedUser => {
+                Ok(self.target.remote_invocation(command))
+            }
+            RemoteUserActivationAuthority::RootMediated => {
+                Ok(self.root_mediated_invocation(command))
+            }
+            RemoteUserActivationAuthority::UnprivilegedMismatch => Err(
+                "remote Home Manager activation login differs from the target user and is not root"
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// The explicit deployment SSH identity is root. Drop privilege to the
+    /// target account for the profile and activation commands, so a user profile
+    /// deploy works even when that account has no SSH login while preserving the
+    /// profile's user-owned state.
     ///
     /// Drop through a login (`runuser --login`), not a bare privilege drop. The
     /// root SSH session's environment — `XDG_RUNTIME_DIR` and
@@ -5611,7 +5690,7 @@ impl UserEnvironmentActivation {
     async fn run_profile(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
         if !self.is_local_context(execution).await {
             return self
-                .remote_profile_invocation()
+                .remote_profile_invocation()?
                 .run(execution)
                 .await
                 .map(|_| ());
@@ -5627,7 +5706,7 @@ impl UserEnvironmentActivation {
     async fn run_activate(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
         if !self.is_local_context(execution).await {
             return self
-                .remote_activate_invocation()
+                .remote_activate_invocation()?
                 .run(execution)
                 .await
                 .map(|_| ());
@@ -7751,18 +7830,18 @@ mod tests {
 
     // ---- Step 3: user-environment activation argv ----
 
-    fn user_environment_activation(mode: meta::UserEnvironmentAction) -> UserEnvironmentActivation {
+    fn user_environment_activation(
+        mode: meta::UserEnvironmentAction,
+        ssh_destination: &str,
+    ) -> UserEnvironmentActivation {
         let profile =
             nexus::ActivationProfile::UserEnvironment(nexus::UserEnvironmentActivationProfile {
                 user_environment_action: mode,
                 user_name: ordinary::UserName::new("li"),
             });
-        match Activation::from_command(
-            &activate_command(profile, ordinary::ActivationEffect::LiveActivation),
-            None,
-        )
-        .expect("activation")
-        {
+        let mut command = activate_command(profile, ordinary::ActivationEffect::LiveActivation);
+        command.deployment_transport.ssh_destination = nexus::SshDestination::new(ssh_destination);
+        match Activation::from_command(&command, None).expect("activation") {
             Activation::UserEnvironment(activation) => activation,
             Activation::Host(_) => panic!("expected user-environment activation"),
         }
@@ -7770,14 +7849,16 @@ mod tests {
 
     #[test]
     fn user_environment_remote_profile_uses_root_mediation() {
-        let activation = user_environment_activation(meta::UserEnvironmentAction::SetProfile);
-        let invocation = activation.remote_profile_invocation();
+        let activation = user_environment_activation(
+            meta::UserEnvironmentAction::SetProfile,
+            "root@fixture.invalid",
+        );
+        let invocation = activation
+            .remote_profile_invocation()
+            .expect("root-mediated profile invocation");
         assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
-        assert!(
-            argv.contains("fixture-login@fixture-activate.invalid"),
-            "{argv}"
-        );
+        assert!(argv.contains("root@fixture.invalid"), "{argv}");
         assert!(argv.contains("runuser --login --command"), "{argv}");
         assert!(argv.trim_end().ends_with("li"), "{argv}");
         assert!(
@@ -7789,16 +7870,47 @@ mod tests {
 
     #[test]
     fn user_environment_remote_activate_uses_root_mediation() {
-        let activation = user_environment_activation(meta::UserEnvironmentAction::ActivateNow);
-        let invocation = activation.remote_activate_invocation();
-        let argv = invocation.joined_arguments();
-        assert!(
-            argv.contains("fixture-login@fixture-activate.invalid"),
-            "{argv}"
+        let activation = user_environment_activation(
+            meta::UserEnvironmentAction::ActivateNow,
+            "root@fixture.invalid",
         );
+        let invocation = activation
+            .remote_activate_invocation()
+            .expect("root-mediated activation invocation");
+        let argv = invocation.joined_arguments();
+        assert!(argv.contains("root@fixture.invalid"), "{argv}");
         assert!(argv.contains("runuser --login --command"), "{argv}");
         assert!(argv.trim_end().ends_with("li"), "{argv}");
         assert!(argv.contains(&format!("{STORE}/activate")), "{argv}");
+    }
+
+    #[test]
+    fn user_environment_matched_remote_login_runs_without_mediation() {
+        let activation = user_environment_activation(
+            meta::UserEnvironmentAction::ActivateNow,
+            "li@fixture.invalid",
+        );
+        let invocation = activation
+            .remote_activate_invocation()
+            .expect("matched-user activation invocation");
+        let argv = invocation.joined_arguments();
+        assert!(argv.contains("li@fixture.invalid"), "{argv}");
+        assert!(!argv.contains("runuser"), "{argv}");
+        assert!(argv.contains(&format!("{STORE}/activate")), "{argv}");
+    }
+
+    #[test]
+    fn user_environment_local_profile_invocation_remains_local() {
+        let activation = user_environment_activation(
+            meta::UserEnvironmentAction::SetProfile,
+            "other@fixture.invalid",
+        );
+        let invocation = activation.local_profile_invocation(Path::new("/home/li"));
+        assert_eq!(invocation.program(), "nix-env");
+        let argv = invocation.joined_arguments();
+        assert!(argv.contains("/home/li/.local/state/nix/profiles/home-manager"));
+        assert!(!argv.contains("ssh"));
+        assert!(!argv.contains("runuser"));
     }
 
     // ---- per-deploy secrets provisioning ----

@@ -17,6 +17,12 @@ Lojix never derives an address, domain, login, store URI, Nix output attribute,
 or builder path from a cluster/node/user name. An explicit `root@…` SSH
 destination is permitted, but is never assumed.
 
+For `SetProfile` and `ActivateNow`, the explicit SSH login is the activation
+authority: a login matching the requested user runs the profile and activation
+directly; the literal `root` login retains `runuser --login` mediation; a
+different unprivileged login is rejected as `InvalidDeploymentRouting` before
+any deployment effect. Logical node identity never changes that choice.
+
 The same request also owns its input mode, exact flake output selector,
 activation backend, and optional Nix builder specification. `Horizon` is an
 explicit input mode; `Direct` does no Horizon materialization. A supplied
