@@ -61,7 +61,7 @@ selects, follows, or modifies a Spirit database.
 exactly one inline `ConfigurationWriteRequest` object—never a `.dotos` file,
 raw path, or flag—containing, in
 order, ordinary socket and mode, owner socket and mode, state directory, exact
-store path, daemon host, effect timeout, `NoTestDefaults` or `TestDefaults`,
+store path, daemon host, `NoTestDefaults` or `TestDefaults`,
 and output path; it writes the rkyv startup archive. Production uses
 `NoTestDefaults`.
 `lojix-daemon` accepts only that generated signal/rkyv file, never inline

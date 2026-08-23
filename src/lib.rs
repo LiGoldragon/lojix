@@ -262,11 +262,6 @@ pub struct DaemonConfiguration {
     /// Decoded from the same rkyv startup file — not a flag, not a runtime
     /// `Configure`.
     pub daemon_host: String,
-    /// Maximum wall-clock duration for one external Nix, SSH, or activation
-    /// command. The daemon owns timeout and cancellation for every such stage;
-    /// zero is rejected by the startup configuration writer rather than
-    /// becoming an accidental unbounded command.
-    pub effect_timeout_seconds: u64,
     /// The test-op defaults the daemon fills into a `(Check …)` shorthand at
     /// lowering (report 54). `None` when the daemon was started without a baked
     /// fixture — the production posture: a bare `(Check …)`/`(Run …)` then

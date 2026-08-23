@@ -15,14 +15,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
 
 use dotos::DotosSource;
 use horizon_lib::name::{
     ClusterName as HorizonClusterName, NodeName as HorizonNodeName, UserName as HorizonUserName,
 };
 use horizon_lib::{ClusterProposal, Horizon, Viewpoint};
-use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
@@ -253,10 +251,9 @@ pub struct RuntimeConfiguration {
     /// behavior. Deploy evaluation/build is local for every target and does
     /// not use this name to select a remote Nix store.
     daemon_host: ordinary::NodeName,
-    /// Execution policy shared by every external Nix, SSH, and process effect.
-    /// It provides one bounded deadline and owns whole-process-group cleanup,
-    /// so a lost remote transport cannot leave an eternal Building job or an
-    /// SSH descendant behind.
+    /// Program resolution shared by every external Nix, SSH, and process
+    /// effect. Production uses the declarative service PATH; focused tests use
+    /// an isolated fixture directory.
     effect_execution: EffectExecution,
     /// A test-only gate that the deploy pipeline awaits before its first effect
     /// runs. `None` in production (the pipeline runs straight through). A test
@@ -281,23 +278,18 @@ pub struct RuntimeConfiguration {
 /// environment shared by other tests.
 #[derive(Debug, Clone)]
 struct EffectExecution {
-    timeout: Duration,
     program_directory: Option<PathBuf>,
 }
 
 impl EffectExecution {
-    const TERMINATION_GRACE: Duration = Duration::from_secs(5);
-
-    fn production(timeout_seconds: u64) -> Self {
+    fn production() -> Self {
         Self {
-            timeout: Duration::from_secs(timeout_seconds),
             program_directory: None,
         }
     }
 
-    fn test(program_directory: PathBuf, timeout: Duration) -> Self {
+    fn test(program_directory: PathBuf) -> Self {
         Self {
-            timeout,
             program_directory: Some(program_directory),
         }
     }
@@ -941,7 +933,7 @@ impl RuntimeConfiguration {
             generated_inputs_directory: PathBuf::from(&configuration.state_directory_path)
                 .join("generated-inputs"),
             daemon_host: ordinary::NodeName::new(configuration.daemon_host.clone()),
-            effect_execution: EffectExecution::production(configuration.effect_timeout_seconds),
+            effect_execution: EffectExecution::production(),
             effect_barrier: None,
             test_defaults: configuration.test_defaults.as_ref().map(TestDefaults::from),
         }
@@ -951,7 +943,7 @@ impl RuntimeConfiguration {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
             daemon_host: ordinary::NodeName::new("daemon-host"),
-            effect_execution: EffectExecution::production(60),
+            effect_execution: EffectExecution::production(),
             effect_barrier: None,
             test_defaults: Some(TestDefaults::test_default()),
         }
@@ -963,25 +955,24 @@ impl RuntimeConfiguration {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
             daemon_host: ordinary::NodeName::new("daemon-host"),
-            effect_execution: EffectExecution::production(60),
+            effect_execution: EffectExecution::production(),
             effect_barrier: Some(barrier),
             test_defaults: Some(TestDefaults::test_default()),
         }
     }
 
     /// A hermetic focused-test configuration whose external command names are
-    /// resolved from `program_directory` and bounded by `effect_timeout`.
+    /// resolved from `program_directory`.
     /// Production configuration cannot set this directory; it resolves command
     /// names through the declarative service PATH.
     pub fn test_with_effect_program_directory(
         generated_inputs_directory: PathBuf,
         program_directory: PathBuf,
-        effect_timeout: Duration,
     ) -> Self {
         Self {
             generated_inputs_directory,
             daemon_host: ordinary::NodeName::new("daemon-host"),
-            effect_execution: EffectExecution::test(program_directory, effect_timeout),
+            effect_execution: EffectExecution::test(program_directory),
             effect_barrier: None,
             test_defaults: Some(TestDefaults::test_default()),
         }
@@ -5917,18 +5908,12 @@ impl NixCommand {
         )
     }
 
-    /// Run the command in a fresh session/process group with bounded wall-clock
-    /// time. `setsid` execs the requested program as the session leader, so the
-    /// child pid is also the process-group id. A timeout first sends TERM to the
-    /// whole group, then KILL after a short grace period, and always waits for
-    /// the direct child before returning. This prevents a wedged Nix transport
-    /// (or SSH descendant it started) from leaving a deploy permanently in
-    /// Building or Copying.
+    /// Run the command to its own reported completion. Effect completion is
+    /// owned by the command's exit status; elapsed wall time never converts an
+    /// active Nix, SSH, or activation effect into a deployment failure.
     async fn run(&self, execution: &EffectExecution) -> std::result::Result<String, String> {
-        let mut command = Command::new("setsid");
+        let mut command = Command::new(execution.program(&self.program));
         command
-            .arg("--")
-            .arg(execution.program(&self.program))
             .args(&self.arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -5936,11 +5921,6 @@ impl NixCommand {
         let mut child = command
             .spawn()
             .map_err(|error| format!("failed to spawn session for {}: {error}", self.program))?;
-        let process_group = child
-            .id()
-            .and_then(|raw| i32::try_from(raw).ok())
-            .and_then(Pid::from_raw)
-            .ok_or_else(|| format!("spawned {} without a usable process id", self.program))?;
         let stdout = child
             .stdout
             .take()
@@ -5960,43 +5940,12 @@ impl NixCommand {
             stderr.read_to_end(&mut bytes).await.map(|_| bytes)
         });
 
-        let outcome = match tokio::time::timeout(execution.timeout, child.wait()).await {
-            Ok(Ok(status)) => Ok(status),
-            Ok(Err(error)) => Err(format!(
+        let outcome = match child.wait().await {
+            Ok(status) => Ok(status),
+            Err(error) => Err(format!(
                 "failed while waiting for {}: {error}",
                 self.program
             )),
-            Err(_) => {
-                let terminate = kill_process_group(process_group, Signal::TERM)
-                    .map_err(|error| error.to_string());
-                let reap =
-                    tokio::time::timeout(EffectExecution::TERMINATION_GRACE, child.wait()).await;
-                let detail = match reap {
-                    Ok(Ok(_)) => format!(
-                        "{} timed out after {:?}; terminated its process group ({terminate:?})",
-                        self.program, execution.timeout
-                    ),
-                    Ok(Err(error)) => {
-                        let kill = kill_process_group(process_group, Signal::KILL)
-                            .map_err(|kill_error| kill_error.to_string());
-                        let retry = child.wait().await;
-                        format!(
-                            "{} timed out after {:?}; TERM result {terminate:?}; KILL result {kill:?}; reaping failed: {error}; retry result {retry:?}",
-                            self.program, execution.timeout
-                        )
-                    }
-                    Err(_) => {
-                        let kill = kill_process_group(process_group, Signal::KILL)
-                            .map_err(|error| error.to_string());
-                        let reap_after_kill = child.wait().await;
-                        format!(
-                            "{} timed out after {:?}; TERM result {terminate:?}; KILL result {kill:?}; final reap result {reap_after_kill:?}",
-                            self.program, execution.timeout
-                        )
-                    }
-                };
-                Err(detail)
-            }
         };
         let stdout = stdout_task
             .await
@@ -6729,7 +6678,6 @@ mod tests {
         let configuration = Arc::new(RuntimeConfiguration::test_with_effect_program_directory(
             directory.path().join("inputs"),
             directory.path().to_path_buf(),
-            Duration::from_secs(5),
         ));
         let store = Arc::new(Store::open(directory.path().join("lojix.sema")).expect("open store"));
         let engine = SchemaRuntime::with_store_and_configuration(store, configuration.clone());

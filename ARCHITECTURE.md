@@ -238,7 +238,7 @@ the workspace actor-systems doctrine. No zero-state holders.
 - `lojix-write-configuration` is the launch-only DOTOS boundary: it accepts
   exactly one inline `ConfigurationWriteRequest` object (never a file, raw
   path, or flag) and writes the rkyv signal file from the ordered socket/mode, state-directory,
-  daemon-host, timeout, test-default, and output-path request. Test defaults
+  daemon-host, test-default, and output-path request. Test defaults
   include their exact Nix system and output selector. Production
   writes `NoTestDefaults`; the daemon receives only the resulting signal file.
 - A deploy proposal source, when `DeploymentInputMode::Horizon` requires one,

@@ -30,8 +30,8 @@ The daemon has no default socket locations. Clients must receive both
 `LOJIX_ORDINARY_SOCKET` and `LOJIX_OWNER_SOCKET` from their environment or
 launch configuration. CriomOS configures those paths explicitly through
 `services.lojix`; it also supplies the service account, socket modes, state
-directory, exact store path, startup archive path, daemon host, and
-effect timeout. Enabling the service without those values is rejected at Nix
+directory, exact store path, startup archive path, and daemon host. Enabling
+the service without those values is rejected at Nix
 evaluation time.
 
 Production startup uses `NoTestDefaults`. Test fixtures may use explicit

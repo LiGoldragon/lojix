@@ -21,7 +21,6 @@ fn startup_archive(
         state_directory_path: directory.display().to_string(),
         store_path: store_path.display().to_string(),
         daemon_host: "fixture-daemon".to_string(),
-        effect_timeout_seconds: 60,
         test_defaults: None,
     }
     .write_rkyv_file(&archive)

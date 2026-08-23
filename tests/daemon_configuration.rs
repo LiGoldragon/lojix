@@ -31,7 +31,6 @@ fn daemon_configuration_round_trips_through_rkyv_file() {
             .display()
             .to_string(),
         daemon_host: "fixture-daemon".to_string(),
-        effect_timeout_seconds: 60,
         test_defaults: Some(lojix::TestDefaults {
             cluster: "fixture-cluster".to_string(),
             default_vm_host: "fixture-vm-host".to_string(),
@@ -164,7 +163,7 @@ fn write_service_configuration(
     archive: &Path,
 ) {
     let request = format!(
-        "ConfigurationWriteRequest.{{{} 432 {} 384 {} {} fresh-daemon 60 NoTestDefaults {}}}",
+        "ConfigurationWriteRequest.{{{} 432 {} 384 {} {} fresh-daemon NoTestDefaults {}}}",
         ordinary_socket.display(),
         owner_socket.display(),
         state_directory.display(),
@@ -241,7 +240,7 @@ fn run_client(binary: &str, socket_environment: &str, socket: &Path, request: &s
 /// systemd stops `Type=simple` services with SIGTERM. The daemon has no
 /// request-shaped shutdown operation, so this is the service lifecycle exit
 /// the source-level witness must tolerate before the configured store reopens.
-fn stop_daemon(mut daemon: Child, name: &str) {
+fn stop_daemon(daemon: Child, name: &str) {
     let process_identifier =
         rustix::process::Pid::from_raw(daemon.id() as i32).expect("child process identifier");
     rustix::process::kill_process(process_identifier, rustix::process::Signal::TERM)

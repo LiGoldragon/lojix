@@ -3,15 +3,13 @@
 //! These tests execute the same submit/drive pipeline as the daemon-owned job
 //! actor. They prove the production order without opening a network connection:
 //! local immutable evaluation/build, target copy, root-mediated Home Manager
-//! profile set, then target-user activation. They also prove bounded timeout
-//! cancellation reaches a child process group and leaves a terminal job row.
+//! profile set, then target-user activation.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use dotos::DotosEncode;
 use horizon_lib::address::{YggAddress, YggSubnet};
@@ -174,12 +172,11 @@ fn selector(value: &str) -> ordinary::DeploymentOutputSelector {
     ordinary::DeploymentOutputSelector::new(ordinary::FlakeAttribute::new(value))
 }
 
-fn runtime(directory: &Path, programs: &Path, timeout: Duration) -> SchemaRuntime {
+fn runtime(directory: &Path, programs: &Path) -> SchemaRuntime {
     let store = Arc::new(Store::open(directory.join("lojix.sema")).expect("open test store"));
     let configuration = Arc::new(RuntimeConfiguration::test_with_effect_program_directory(
         directory.join("generated-inputs"),
         programs.to_path_buf(),
-        timeout,
     ));
     SchemaRuntime::with_store_and_configuration(store, configuration)
 }
@@ -210,7 +207,7 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
     fake_programs(&programs, false, false);
     let source = directory.path().join("datom.dotos");
     write_fixture_proposal(&source);
-    let mut engine = runtime(directory.path(), &programs, Duration::from_secs(2));
+    let mut engine = runtime(directory.path(), &programs);
 
     assert!(matches!(
         submit_and_drive(
@@ -296,7 +293,7 @@ async fn second_arbitrary_transport_flow_preserves_both_request_values() {
     fake_programs(&programs, false, false);
     let source = directory.path().join("datom.dotos");
     write_fixture_proposal(&source);
-    let mut engine = runtime(directory.path(), &programs, Duration::from_secs(2));
+    let mut engine = runtime(directory.path(), &programs);
     let nix_store_uri = "ssh-ng://fixture-copy-b.invalid:2244?compress=true";
     let ssh_destination = "fixture-b@fixture-activate-b.invalid";
 
@@ -335,7 +332,7 @@ async fn copy_and_activation_failures_are_terminal_rejections() {
         fake_programs(&programs, fail_copy, fail_activation);
         let source = directory.path().join("datom.dotos");
         write_fixture_proposal(&source);
-        let mut engine = runtime(directory.path(), &programs, Duration::from_secs(2));
+        let mut engine = runtime(directory.path(), &programs);
 
         match submit_and_drive(
             &mut engine,
@@ -363,63 +360,4 @@ async fn copy_and_activation_failures_are_terminal_rejections() {
                 .is_empty()
         );
     }
-}
-
-#[tokio::test]
-async fn timeout_kills_the_whole_session_group_reaps_and_rejects() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let programs = directory.path().join("programs");
-    fs::create_dir_all(&programs).expect("create fake command directory");
-    let source = directory.path().join("datom.dotos");
-    write_fixture_proposal(&source);
-    write_executable(
-        &programs.join("nix"),
-        "#!/bin/sh\nset -eu\ndir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n( trap 'touch \"$dir/descendant-terminated\"; exit 0' TERM; while :; do sleep 1; done ) &\necho $! > \"$dir/descendant-pid\"\nwhile :; do sleep 1; done\n",
-    );
-    let store = Arc::new(Store::open(directory.path().join("lojix.sema")).expect("open store"));
-    let configuration = Arc::new(RuntimeConfiguration::test_with_effect_program_directory(
-        directory.path().join("generated-inputs"),
-        programs.clone(),
-        Duration::from_millis(100),
-    ));
-    let mut engine = SchemaRuntime::with_store_and_configuration(store, configuration);
-    let request = meta::DeploySubmission::Host(meta::HostDeployment {
-        cluster_name: ordinary::ClusterName::new("alpha"),
-        node_name: ordinary::NodeName::new("beacon"),
-        host_composition: ordinary::HostComposition::BaseHost,
-        proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
-        flake_reference: ordinary::FlakeReference::new(FLAKE),
-        deployment_transport: transport(
-            "ssh-ng://fixture-copy-b.invalid",
-            "fixture-b@fixture-activate-b.invalid",
-        ),
-        deployment_input_mode: ordinary::DeploymentInputMode::Direct,
-        deployment_output_selector: selector("checks.fixture-timeout"),
-        activation_backend: ordinary::ActivationBackend::NixosSystemdBootV1,
-        host_deploy_action: ordinary::HostDeployAction::Evaluate,
-        source_revision_policy: meta::SourceRevisionPolicy::RequireImmutable,
-        optional_nix_builder_spec: None,
-        extra_substituter_vector: Vec::new(),
-    });
-
-    match submit_and_drive(&mut engine, request).await {
-        meta::MetaEgress::DeployTerminal(record)
-            if matches!(
-                record.deployment_lifecycle,
-                meta::DeploymentLifecycle::Failed
-            ) => {}
-        other => panic!("timeout must terminally reject, got {other:?}"),
-    }
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        programs.join("descendant-terminated").exists(),
-        "TERM must reach the descendant in the timed-out command's process group"
-    );
-    assert!(
-        engine
-            .store()
-            .deploy_jobs()
-            .expect("read durable job rows")
-            .is_empty()
-    );
 }
