@@ -30,7 +30,6 @@ use crate::Store;
 const JOURNAL_SCHEMA_VERSION: u32 = 5;
 const JOURNAL_PREFIX: &str = ".lojix-bootstrap-v5-";
 const TEMPORARY_EVIDENCE_PREFIX: &str = ".lojix-bootstrap-evidence-";
-const BOOT_ENTRY_PREFIX: &str = "nixos-generation-";
 const JOURNAL_STATE_FILE: &str = "bootstrap-v5.rkyv";
 const JOURNAL_STORE_FILE: &str = "lojix-v5.sema";
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
@@ -883,9 +882,9 @@ fn boot_once_script(
          [ -n \"$OLD\" ]\n\
          nix-env -p \"$PROFILE\" --set \"$CLOSURE\"\n\
          \"$CLOSURE/bin/switch-to-configuration\" boot\n\
-         SYSTEM_LINK=$(readlink \"$PROFILE\")\n\
-         GENERATION=$(echo \"$SYSTEM_LINK\" | sed -E 's/^system-([0-9]+)-link$/\\1/')\n\
-         NEW=\"{BOOT_ENTRY_PREFIX}$GENERATION.conf\"\n\
+         LOADER_CONF=$(dirname \"$ENTRIES\")/loader.conf\n\
+         NEW=$(awk '$1 == \"default\" {{print $2; exit}}' \"$LOADER_CONF\")\n\
+         [ -n \"$NEW\" ]\n\
          [ -f \"$ENTRIES/$NEW\" ]\n\
          [ \"$NEW\" != \"$OLD\" ]\n\
          bootctl set-default \"$OLD\"\n\

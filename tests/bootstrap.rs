@@ -318,6 +318,16 @@ fn remote_dispatch_is_no_block_and_identity_is_explicit() {
             && body.contains("RemainAfterExit=yes")
             && body.contains("--unit=")
     }));
+    let boot_once = dispatch.arguments.last().expect("boot-once command");
+    assert!(
+        boot_once.contains("LOADER_CONF=$(dirname \"$ENTRIES\")/loader.conf"),
+        "candidate must come from its generated loader configuration: {boot_once}"
+    );
+    assert!(
+        boot_once.contains("bootctl set-default \"$OLD\"")
+            && boot_once.contains("bootctl set-oneshot \"$NEW\""),
+        "current entry remains persistent while generated candidate is one-shot: {boot_once}"
+    );
     assert!(executor.commands.iter().any(|command| {
         command.program.ends_with("/ssh")
             && command

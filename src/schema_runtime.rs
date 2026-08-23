@@ -5345,10 +5345,10 @@ impl HostActivation {
     }
 
     /// The bash script that runs inside the transient unit on the target. `OLD`
-    /// (the rollback target) is read from `bootctl status`'s `Current Entry`
-    /// (the running generation), `NEW` is derived from the system profile's
-    /// `readlink` (canonical latest). reboot 1 lands NEW, reboot 2+ returns to
-    /// OLD — headless-safe rollback (`boot_once_script()`).
+    /// (the rollback target) is read from `bootctl status`'s `Current Entry`.
+    /// After the candidate has generated its boot configuration, `NEW` is read
+    /// from its generated `loader.conf`, which is the only authority that names
+    /// the hash-named entry. Reboot 1 lands NEW; reboot 2+ returns to OLD.
     fn boot_once_script(&self) -> String {
         let store = &self.store_path;
         format!(
@@ -5359,9 +5359,8 @@ impl HostActivation {
              [ -n \"$OLD\" ]\n\
              nix-env -p /nix/var/nix/profiles/system --set \"$CLOSURE\"\n\
              \"$CLOSURE/bin/switch-to-configuration\" boot\n\
-             SYSTEM_LINK=$(readlink /nix/var/nix/profiles/system)\n\
-             GENERATION=$(echo \"$SYSTEM_LINK\" | sed -E 's/^system-([0-9]+)-link$/\\1/')\n\
-             NEW=\"nixos-generation-$GENERATION.conf\"\n\
+             NEW=$(awk '$1 == \"default\" {{print $2; exit}}' /boot/loader/loader.conf)\n\
+             [ -n \"$NEW\" ]\n\
              [ -f \"/boot/loader/entries/$NEW\" ]\n\
              [ \"$NEW\" != \"$OLD\" ]\n\
              bootctl set-default \"$OLD\"\n\
@@ -5425,9 +5424,9 @@ impl HostActivation {
 
     /// The activation script for a detached self-Switch: set the system profile,
     /// `switch-to-configuration switch` — the same Switch semantics as the
-    /// foreground path's `ssh_invocation`, NOT a boot-once entry — then the EFI
-    /// reconcile (`bootctl set-default` the running generation, clear any stale
-    /// one-shot) the foreground Switch path runs via `reconcile_efi`. The whole
+    /// foreground path's `ssh_invocation`, NOT a boot-once entry — then clears
+    /// both EFI overrides so declarative `loader.conf` is the sole authority.
+    /// The whole
     /// activation runs inside the transient unit, so the daemon restart `switch`
     /// triggers cannot kill it mid-flight; the post-switch reconcile rides along
     /// in the same PID-1-owned unit rather than a (now-dead) foreground ssh.
@@ -5438,19 +5437,15 @@ impl HostActivation {
              set -eu\n\
              nix-env -p /nix/var/nix/profiles/system --set {store}\n\
              {store}/bin/switch-to-configuration switch\n\
-             SYSTEM_LINK=$(readlink /nix/var/nix/profiles/system)\n\
-             GENERATION=$(echo \"$SYSTEM_LINK\" | sed -E 's/^system-([0-9]+)-link$/\\1/')\n\
-             ENTRY=\"nixos-generation-$GENERATION.conf\"\n\
-             [ -f \"/boot/loader/entries/$ENTRY\" ]\n\
-             bootctl set-default \"$ENTRY\"\n\
+             bootctl set-default ''\n\
              bootctl set-oneshot ''\n"
         )
     }
 
     /// Whether this action reconciles EFI bootloader vars after activation.
-    /// `Boot`/`Switch` write `loader.conf`'s default but not EFI's
-    /// `LoaderEntryDefault`; reconcile claims it explicitly and clears any
-    /// stale one-shot. `Test` is non-persistent; `BootOnce` is its own thing
+    /// `Boot`/`Switch` write the declarative `loader.conf` default. Reconcile
+    /// removes both EFI overrides so they cannot compete. `Test` is
+    /// non-persistent; `BootOnce` is its own thing
     /// (`requires_efi_reconcile()`).
     fn requires_efi_reconcile(&self) -> bool {
         matches!(
@@ -5459,22 +5454,10 @@ impl HostActivation {
         )
     }
 
-    /// `readlink /nix/var/nix/profiles/system` — stdout parsed via
-    /// `SystemProfileLink` to derive the `nixos-generation-N.conf` entry.
-    fn step_readlink_system_profile_invocation(&self) -> NixCommand {
-        self.target.remote_invocation(ShellCommand::from_raw(
-            "readlink /nix/var/nix/profiles/system",
-        ))
-    }
-
-    /// `bootctl set-default <entry>` — points EFI `LoaderEntryDefault` at the
-    /// just-installed generation.
-    fn step_set_efi_default_invocation(&self, entry: &BootEntry) -> NixCommand {
+    /// Clear EFI `LoaderEntryDefault`; `loader.conf` owns persistent boot.
+    fn step_clear_efi_default_invocation(&self) -> NixCommand {
         self.target
-            .remote_invocation(ShellCommand::from_raw(format!(
-                "bootctl set-default {}",
-                entry.as_str()
-            )))
+            .remote_invocation(ShellCommand::from_raw("bootctl set-default ''"))
     }
 
     /// `bootctl set-oneshot ''` — clears any pending EFI one-shot from a prior
@@ -5523,13 +5506,7 @@ impl HostActivation {
     }
 
     async fn reconcile_efi(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
-        let output = self
-            .step_readlink_system_profile_invocation()
-            .run(execution)
-            .await?;
-        let link = SystemProfileLink::try_new(output.trim())?;
-        let entry = link.generation().boot_entry();
-        self.step_set_efi_default_invocation(&entry)
+        self.step_clear_efi_default_invocation()
             .run(execution)
             .await?;
         self.step_clear_efi_oneshot_invocation()
@@ -5683,50 +5660,6 @@ impl UserEnvironmentActivation {
             .await
             .ok()?;
         Some(output.trim().to_string())
-    }
-}
-
-/// The `system-N-link` symlink target of `/nix/var/nix/profiles/system`, parsed
-/// to its generation number.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SystemProfileLink {
-    generation: SystemGeneration,
-}
-
-impl SystemProfileLink {
-    fn try_new(link: &str) -> std::result::Result<Self, String> {
-        let number = link
-            .strip_prefix("system-")
-            .and_then(|rest| rest.strip_suffix("-link"))
-            .and_then(|number| number.parse::<u64>().ok())
-            .ok_or_else(|| format!("invalid system profile link: {link}"))?;
-        Ok(Self {
-            generation: SystemGeneration(number),
-        })
-    }
-
-    fn generation(&self) -> SystemGeneration {
-        self.generation
-    }
-}
-
-/// A NixOS system generation number, projecting to its EFI boot-entry name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SystemGeneration(u64);
-
-impl SystemGeneration {
-    fn boot_entry(self) -> BootEntry {
-        BootEntry(format!("nixos-generation-{}.conf", self.0))
-    }
-}
-
-/// A systemd-boot EFI loader entry filename (`nixos-generation-N.conf`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BootEntry(String);
-
-impl BootEntry {
-    fn as_str(&self) -> &str {
-        &self.0
     }
 }
 
@@ -7183,7 +7116,7 @@ mod tests {
     }
 
     #[test]
-    fn boot_activation_runs_switch_to_configuration_boot_then_reconciles_efi() {
+    fn boot_activation_runs_switch_to_configuration_then_releases_efi_to_loader_configuration() {
         let activation = host_activation(ordinary::HostDeployAction::SetBootProfile);
         let invocation = activation.ssh_invocation().expect("boot invocation");
         let argv = invocation.joined_arguments();
@@ -7193,23 +7126,14 @@ mod tests {
         );
         assert!(!argv.contains("$CLOSURE"), "{argv}");
         assert!(activation.requires_efi_reconcile());
-        // EFI reconcile commands are present and correctly shaped.
-        let readlink = activation.step_readlink_system_profile_invocation();
+        // EFI overrides are cleared, returning authority to declarative loader.conf.
+        let clear_default = activation.step_clear_efi_default_invocation();
         assert!(
-            readlink
+            clear_default
                 .joined_arguments()
-                .contains("readlink /nix/var/nix/profiles/system"),
+                .contains("bootctl set-default ''"),
             "{}",
-            readlink.joined_arguments()
-        );
-        let entry = BootEntry("nixos-generation-42.conf".to_string());
-        let set_default = activation.step_set_efi_default_invocation(&entry);
-        assert!(
-            set_default
-                .joined_arguments()
-                .contains("bootctl set-default nixos-generation-42.conf"),
-            "{}",
-            set_default.joined_arguments()
+            clear_default.joined_arguments()
         );
         let clear = activation.step_clear_efi_oneshot_invocation();
         assert!(
@@ -7814,9 +7738,8 @@ mod tests {
              [ -n \"$OLD\" ]\n\
              nix-env -p /nix/var/nix/profiles/system --set \"$CLOSURE\"\n\
              \"$CLOSURE/bin/switch-to-configuration\" boot\n\
-             SYSTEM_LINK=$(readlink /nix/var/nix/profiles/system)\n\
-             GENERATION=$(echo \"$SYSTEM_LINK\" | sed -E 's/^system-([0-9]+)-link$/\\1/')\n\
-             NEW=\"nixos-generation-$GENERATION.conf\"\n\
+             NEW=$(awk '$1 == \"default\" {{print $2; exit}}' /boot/loader/loader.conf)\n\
+             [ -n \"$NEW\" ]\n\
              [ -f \"/boot/loader/entries/$NEW\" ]\n\
              [ \"$NEW\" != \"$OLD\" ]\n\
              bootctl set-default \"$OLD\"\n\
@@ -7824,18 +7747,6 @@ mod tests {
              echo \"boot-once: oneshot=$NEW persistent-default=$OLD (=running generation)\"\n",
         );
         assert_eq!(activation.boot_once_script(), expected);
-    }
-
-    // ---- Step 3: system profile link parse + EFI entry derivation ----
-
-    #[test]
-    fn system_profile_link_parses_generation_and_derives_entry() {
-        let link = SystemProfileLink::try_new("system-42-link").expect("link");
-        assert_eq!(
-            link.generation().boot_entry().as_str(),
-            "nixos-generation-42.conf"
-        );
-        assert!(SystemProfileLink::try_new("not-a-link").is_err());
     }
 
     // ---- Step 3: user-environment activation argv ----
