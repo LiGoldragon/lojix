@@ -664,13 +664,12 @@ impl DeployJobs {
             .map(|path| path.display().to_string())
     }
 
-    /// Persist a reconciled self-switch generation idempotently and fail-safe
-    /// (bead primary-7u8p audit). If a prior reconcile already recorded this
-    /// generation (its gc-root is present) but crashed before retracting the job
-    /// row, just drop the row. Otherwise record, and retract the resume cursor
-    /// ONLY on a successful write: a genuine store failure keeps the row so the
-    /// next restart retries, rather than silently dropping the generation and
-    /// reviving the lost-generation / id-reuse bug this fix closes.
+    /// Persist a reconciled self-switch generation idempotently and fail-safe.
+    /// A recovered generation is not a completed deployment until its public
+    /// terminal-success transition has been journalled and acknowledged. The
+    /// terminal transition retires the private cursor in that acknowledgement
+    /// commit, so neither an activation-store failure nor a terminal-write
+    /// failure can erase the only durable retry witness.
     fn persist_reconciled_self_switch(
         &self,
         deployment_identifier: u64,
@@ -686,13 +685,14 @@ impl DeployJobs {
                 })
             })
             .unwrap_or(false);
-        if already_recorded {
-            let _ = self.store.retract_deploy_job(deployment_identifier);
+        if !already_recorded && self.store.record_activation(generation, root).is_err() {
             return;
         }
-        if self.store.record_activation(generation, root).is_ok() {
-            let _ = self.store.retract_deploy_job(deployment_identifier);
-        }
+        let _ = self.store.terminalize_deployment(
+            deployment_identifier,
+            sema::DeploymentLifecycle::Completed,
+            sema::DeploymentTerminal::Succeeded,
+        );
     }
 }
 
@@ -780,6 +780,191 @@ impl Message<ReconcilePersistedJobs> for DeployJobs {
         context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.reconcile_persisted_jobs(context.actor_ref().clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime_model as ordinary;
+
+    const CLOSURE: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-self-switch";
+    const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn self_switch_submission() -> sema::DeploySubmission {
+        sema::DeploySubmission::Host(sema::HostDeployment {
+            cluster_name: ordinary::ClusterName::new("fixture-cluster"),
+            node_name: ordinary::NodeName::new("fixture-daemon"),
+            host_composition: ordinary::HostComposition::CompleteHost,
+            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            flake_reference: ordinary::FlakeReference::new(format!(
+                "github:LiGoldragon/CriomOS?rev={REVISION}"
+            )),
+            deployment_transport: sema::DeploymentTransport {
+                nix_store_uri: sema::NixStoreUri::new("ssh-ng://fixture-copy.invalid"),
+                ssh_destination: sema::SshDestination::new("root@fixture-daemon.invalid"),
+            },
+            deployment_input_mode: sema::DeploymentInputMode::Direct,
+            deployment_output_selector: sema::DeploymentOutputSelector::new(
+                sema::FlakeAttribute::new(
+                    "nixosConfigurations.fixture-daemon.config.system.build.toplevel",
+                ),
+            ),
+            activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
+            host_deploy_action: ordinary::HostDeployAction::ActivateNow,
+            source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
+            optional_nix_builder_spec: None,
+            extra_substituter_vector: Vec::new(),
+        })
+    }
+
+    fn self_switch_job() -> sema::DeployJob {
+        sema::DeployJob {
+            deployment_identifier: ordinary::DeploymentIdentifier::new(0),
+            generation_identifier: ordinary::GenerationIdentifier::new(0),
+            cluster_name: ordinary::ClusterName::new("fixture-cluster"),
+            node_name: ordinary::NodeName::new("fixture-daemon"),
+            deploy_job_phase: sema::DeployJobPhase::Submitted,
+            optional_closure_path: Some(ordinary::ClosurePath::new(CLOSURE)),
+            source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
+            flake_reference: ordinary::FlakeReference::new(format!(
+                "github:LiGoldragon/CriomOS?rev={REVISION}"
+            )),
+            optional_flake_reference: Some(ordinary::FlakeReference::new(format!(
+                "github:LiGoldragon/CriomOS?rev={REVISION}"
+            ))),
+            resolved_revision: Some(REVISION.to_string()),
+            deployment_transport: sema::DeploymentTransport {
+                nix_store_uri: sema::NixStoreUri::new("ssh-ng://fixture-copy.invalid"),
+                ssh_destination: sema::SshDestination::new("root@fixture-daemon.invalid"),
+            },
+            deployment_input_mode: sema::DeploymentInputMode::Direct,
+            deployment_output_selector: sema::DeploymentOutputSelector::new(
+                sema::FlakeAttribute::new(
+                    "nixosConfigurations.fixture-daemon.config.system.build.toplevel",
+                ),
+            ),
+            activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
+            optional_nix_builder_spec: None,
+            boot_once_unit: None,
+            optional_generation_slot: Some(ordinary::GenerationSlot::Current),
+            persisted_flake_input_override_vector: Vec::new(),
+            deploy_resume_stage: sema::DeployResumeStage::ResolveFlakeAuth,
+            optional_phase_receipt: None,
+            optional_deploy_submission: Some(self_switch_submission()),
+        }
+    }
+
+    fn self_switch_identity() -> ordinary::DeploymentRequestIdentity {
+        ordinary::DeploymentRequestIdentity {
+            deployment_environment: ordinary::DeploymentEnvironment::HostEnvironment,
+            cluster_name: ordinary::ClusterName::new("fixture-cluster"),
+            node_name: ordinary::NodeName::new("fixture-daemon"),
+            generation_artifact: ordinary::GenerationArtifact::CompleteHost,
+            requested_deployment_action: ordinary::RequestedDeploymentAction::Host(
+                ordinary::HostDeployAction::ActivateNow,
+            ),
+            activation_effect: ordinary::ActivationEffect::LiveActivation,
+            source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
+            optional_immutable_revision: Some(ordinary::ImmutableRevision::new(REVISION)),
+        }
+    }
+
+    #[test]
+    fn successor_reconciles_self_switch_as_current_and_public_terminal_success() {
+        let directory = tempfile::tempdir().expect("temporary store directory");
+        let store = Arc::new(Store::open(directory.path().join("lojix.sema")).expect("open store"));
+        let mut job = self_switch_job();
+        let record = store
+            .allocate_deployment_record(self_switch_identity(), job.clone())
+            .expect("admit interrupted self-switch");
+        let deployment_identifier = *record.deployment_identifier.payload();
+        job.deployment_identifier = record.deployment_identifier.clone();
+        job.generation_identifier = record.generation_identifier.clone();
+
+        let copying_position = store
+            .allocate_event_log_position()
+            .expect("reserve copying event position");
+        job.deploy_job_phase = sema::DeployJobPhase::Copying;
+        job.deploy_resume_stage = sema::DeployResumeStage::ActivateGeneration;
+        store
+            .advance_deployment_phase(
+                deployment_identifier,
+                ordinary::DeploymentLifecycle::Copying,
+                job.clone(),
+                ordinary::DeploymentPhaseEvent {
+                    deployment_identifier: record.deployment_identifier.clone(),
+                    generation_identifier: record.generation_identifier.clone(),
+                    cluster_name: ordinary::ClusterName::new("fixture-cluster"),
+                    node_name: ordinary::NodeName::new("fixture-daemon"),
+                    deployment_phase: ordinary::DeploymentPhase::Copying,
+                    event_log_position: ordinary::EventLogPosition::new(copying_position),
+                    state_marker: ordinary::StateMarker {
+                        commit_sequence: ordinary::CommitSequence::new(0),
+                        state_digest: ordinary::StateDigest::new(0),
+                    },
+                    optional_immutable_revision: Some(ordinary::ImmutableRevision::new(REVISION)),
+                    optional_deployment_terminal: None,
+                },
+            )
+            .expect("persist copying boundary");
+        job.deploy_job_phase = sema::DeployJobPhase::Activating;
+        job.deploy_resume_stage = sema::DeployResumeStage::RecordGenerationActivated;
+        store
+            .upsert_deploy_job(job.clone())
+            .expect("persist activating cursor");
+
+        let (generation, root) = job
+            .self_switch_activation_record(Some(CLOSURE))
+            .expect("matching live system profile proves the switch completed");
+        let successor = DeployJobs {
+            store: store.clone(),
+            configuration: Arc::new(RuntimeConfiguration::test_default()),
+            cap: 1,
+            active_count: 0,
+        };
+        successor.persist_reconciled_self_switch(deployment_identifier, generation, root);
+
+        assert!(
+            store
+                .live_generations()
+                .expect("current live generation")
+                .iter()
+                .any(|generation| {
+                    *generation.deployment_identifier.payload() == deployment_identifier
+                        && matches!(
+                            generation.generation_slot,
+                            ordinary::GenerationSlot::Current
+                        )
+                })
+        );
+        let record = store
+            .deployment_records()
+            .expect("public deployment record")
+            .into_iter()
+            .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
+            .expect("reconciled deployment record");
+        assert!(matches!(
+            record.deployment_lifecycle,
+            ordinary::DeploymentLifecycle::Completed
+        ));
+        assert!(matches!(
+            record.optional_deployment_terminal,
+            Some(ordinary::DeploymentTerminal::Succeeded)
+        ));
+        assert!(store.event_log_in_range(0, u64::MAX).expect("terminal event").iter().any(
+            |entry| matches!(
+                &entry.logged_event,
+                ordinary::LoggedEvent::Deployment(event)
+                    if *event.deployment_identifier.payload() == deployment_identifier
+                        && matches!(event.deployment_phase, ordinary::DeploymentPhase::Completed)
+                        && matches!(
+                            event.optional_deployment_terminal,
+                            Some(ordinary::DeploymentTerminal::Succeeded)
+                        )
+            )
+        ));
+        assert!(store.deploy_jobs().expect("reconciled cursor").is_empty());
     }
 }
 
