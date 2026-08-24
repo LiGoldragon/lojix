@@ -4679,8 +4679,7 @@ impl ProposalFile {
         }
         let path = PathBuf::from(raw);
         if !path.is_absolute()
-            || path.file_name().and_then(|name| name.to_str())
-                != Some(CANONICAL_PROPOSAL_ARTIFACT)
+            || path.file_name().and_then(|name| name.to_str()) != Some(CANONICAL_PROPOSAL_ARTIFACT)
             || path.components().any(|component| {
                 !matches!(
                     component,
@@ -5223,6 +5222,17 @@ impl SshTarget {
         Ok(())
     }
 
+    /// Return an `ssh-ng://root@<host>` store URI for closure copy. The
+    /// daemon always copies as root so the Nix store transfer succeeds
+    /// regardless of the activation user's SSH or Nix trust posture.
+    fn root_copy_store_uri(&self) -> String {
+        let after_scheme = &self.nix_store_uri["ssh-ng://".len()..];
+        match after_scheme.split_once('@') {
+            Some((_, host_and_rest)) => format!("ssh-ng://root@{host_and_rest}"),
+            None => format!("ssh-ng://root@{after_scheme}"),
+        }
+    }
+
     /// Classify the explicit SSH login for a Home Manager target. Only the
     /// literal `root` login carries mediation authority; Lojix never promotes
     /// another login or derives a root route from node or user identity.
@@ -5312,13 +5322,16 @@ impl ShellArgument {
 }
 
 /// Move the locally realized immutable closure from the dispatcher store to
-/// the activation target. Always passes `--substitute-on-destination` so the
-/// target pulls signed paths from the cluster cache when available; unsigned
-/// daemon-to-daemon transfer is rejected under `require-sigs` (risk R6).
+/// the activation target. Always copies as root — the login in the caller's
+/// `nix_store_uri` is replaced with `root` so the daemon's own store
+/// authority governs the transfer regardless of the activation user. Always
+/// passes `--substitute-on-destination` so the target pulls signed paths
+/// from the cluster cache when available; unsigned daemon-to-daemon transfer
+/// is rejected under `require-sigs` (risk R6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClosureCopy {
     store_path: String,
-    target: SshTarget,
+    root_store_uri: String,
 }
 
 impl ClosureCopy {
@@ -5326,7 +5339,7 @@ impl ClosureCopy {
         let target = SshTarget::from_transport(&command.deployment_transport)?;
         Ok(Self {
             store_path: command.closure_path.payload().clone(),
-            target,
+            root_store_uri: target.root_copy_store_uri(),
         })
     }
 
@@ -5337,7 +5350,7 @@ impl ClosureCopy {
             "copy".to_string(),
             "--substitute-on-destination".to_string(),
             "--to".to_string(),
-            self.target.nix_store_uri.clone(),
+            self.root_store_uri.clone(),
             self.store_path.clone(),
         ];
         NixCommand::new("nix", arguments)
@@ -7511,7 +7524,7 @@ mod tests {
         let argv = invocation.joined_arguments();
         assert!(argv.contains("--substitute-on-destination"), "{argv}");
         assert!(
-            argv.contains("--to ssh-ng://fixture-copy.invalid"),
+            argv.contains("--to ssh-ng://root@fixture-copy.invalid"),
             "{argv}"
         );
         assert!(!argv.contains("--from"), "{argv}");
@@ -7519,19 +7532,30 @@ mod tests {
     }
 
     #[test]
-    fn copy_uses_exact_nix_store_uri_without_rewriting_it() {
+    fn copy_rewrites_login_to_root_preserving_host_and_params() {
         let mut command = copy_command();
         command.deployment_transport.nix_store_uri =
-            nexus::NixStoreUri::new("ssh-ng://other-copy.invalid:2222?compress=true");
+            nexus::NixStoreUri::new("ssh-ng://bird@zeus.example:2222?compress=true");
         let copy = ClosureCopy::from_command(&command).expect("copy transport");
         let invocation = copy.invocation();
         let argv = invocation.joined_arguments();
         assert!(argv.contains("--substitute-on-destination"), "{argv}");
         assert!(!argv.contains("--from"), "{argv}");
         assert!(
-            argv.contains("--to ssh-ng://other-copy.invalid:2222?compress=true"),
+            argv.contains("--to ssh-ng://root@zeus.example:2222?compress=true"),
             "{argv}"
         );
+    }
+
+    #[test]
+    fn copy_preserves_root_login_unchanged() {
+        let mut command = copy_command();
+        command.deployment_transport.nix_store_uri =
+            nexus::NixStoreUri::new("ssh-ng://root@zeus.example");
+        let copy = ClosureCopy::from_command(&command).expect("copy transport");
+        let invocation = copy.invocation();
+        let argv = invocation.joined_arguments();
+        assert!(argv.contains("--to ssh-ng://root@zeus.example"), "{argv}");
     }
 
     fn activate_command(
