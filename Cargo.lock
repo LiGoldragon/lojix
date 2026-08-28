@@ -391,8 +391,8 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "horizon-lib"
-version = "0.3.2"
-source = "git+https://github.com/LiGoldragon/horizon-rs.git?rev=81f1d95d3d6dc554cb0230b65b356aff02b8a6ab#81f1d95d3d6dc554cb0230b65b356aff02b8a6ab"
+version = "0.4.0"
+source = "git+https://github.com/LiGoldragon/horizon-rs.git?rev=c70915eb550f729996e0921069b34d7844c9b2e9#c70915eb550f729996e0921069b34d7844c9b2e9"
 dependencies = [
  "dotos",
  "ipnet",

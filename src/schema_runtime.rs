@@ -7565,7 +7565,7 @@ mod tests {
     }
 
     #[test]
-    fn materialized_horizon_json_preserves_local_agent_intercom_capabilities() {
+    fn materialized_horizon_json_preserves_empty_service_vectors() {
         use std::collections::BTreeMap;
 
         use horizon_lib::address::{YggAddress, YggSubnet};
@@ -7574,9 +7574,7 @@ mod tests {
         use horizon_lib::machine::Machine;
         use horizon_lib::magnitude::Magnitude;
         use horizon_lib::name::{ClusterName, NodeName};
-        use horizon_lib::proposal::{
-            ClusterTrust, NodeProposal, NodePubKeys, NodeService, YggPubKeyEntry,
-        };
+        use horizon_lib::proposal::{ClusterTrust, NodeProposal, NodePubKeys, YggPubKeyEntry};
         use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
         use horizon_lib::species::{Arch, Bootloader, Keyboard, MachineSpecies, NodeSpecies};
 
@@ -7632,15 +7630,12 @@ mod tests {
         };
         let mut nodes = BTreeMap::new();
         nodes.insert(
-            NodeName::try_new("graphical").expect("graphical node name"),
-            node(vec![
-                NodeService::AgentIntercomLocal {},
-                NodeService::AgentIntercomGraphical {},
-            ]),
+            NodeName::try_new("edge").expect("edge node name"),
+            node(vec![]),
         );
         nodes.insert(
-            NodeName::try_new("headless").expect("headless node name"),
-            node(vec![NodeService::AgentIntercomLocal {}]),
+            NodeName::try_new("worker").expect("worker node name"),
+            node(vec![]),
         );
         let proposal = ClusterProposal {
             nodes,
@@ -7657,9 +7652,9 @@ mod tests {
         let horizon = proposal
             .project(&Viewpoint {
                 cluster: ClusterName::try_new("test-cluster").expect("cluster name"),
-                node: NodeName::try_new("graphical").expect("graphical node name"),
+                node: NodeName::try_new("edge").expect("edge node name"),
             })
-            .expect("local Agent Intercom projection");
+            .expect("project empty service vectors");
         let directory = tempfile::tempdir().expect("materialization directory");
         GeneratedInputDirectory::new(directory.path().join("horizon"))
             .write_horizon(&horizon)
@@ -7669,13 +7664,10 @@ mod tests {
         )
         .expect("parse materialized horizon JSON");
 
+        assert_eq!(horizon_json["node"]["services"], serde_json::json!([]));
         assert_eq!(
-            horizon_json["node"]["services"],
-            serde_json::json!([{"AgentIntercomLocal": {}}, {"AgentIntercomGraphical": {}}])
-        );
-        assert_eq!(
-            horizon_json["exNodes"]["headless"]["services"],
-            serde_json::json!([{"AgentIntercomLocal": {}}])
+            horizon_json["exNodes"]["worker"]["services"],
+            serde_json::json!([])
         );
     }
 
