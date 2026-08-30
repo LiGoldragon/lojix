@@ -11,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
-use dotos::DotosEncode;
+use datomic::Datomic;
 use horizon_lib::address::{YggAddress, YggSubnet};
 use horizon_lib::domain::DomainConfiguration;
 use horizon_lib::io::Io;
@@ -109,7 +109,8 @@ fn fixture_proposal() -> ClusterProposal {
 }
 
 fn write_fixture_proposal(path: &Path) {
-    fs::write(path, fixture_proposal().to_dotos()).expect("write Dotos fixture proposal");
+    fs::write(path, fixture_proposal().textualize().as_ref())
+        .expect("write Datomic fixture proposal");
 }
 
 fn write_executable(path: &Path, text: &str) {
@@ -205,7 +206,7 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
     let directory = tempfile::tempdir().expect("tempdir");
     let programs = directory.path().join("programs");
     fake_programs(&programs, false, false);
-    let source = directory.path().join("datom.dotos");
+    let source = directory.path().join("proposal.datom");
     write_fixture_proposal(&source);
     let mut engine = runtime(directory.path(), &programs);
 
@@ -291,7 +292,7 @@ async fn second_arbitrary_transport_flow_preserves_both_request_values() {
     let directory = tempfile::tempdir().expect("tempdir");
     let programs = directory.path().join("programs");
     fake_programs(&programs, false, false);
-    let source = directory.path().join("datom.dotos");
+    let source = directory.path().join("proposal.datom");
     write_fixture_proposal(&source);
     let mut engine = runtime(directory.path(), &programs);
     let nix_store_uri = "ssh-ng://fixture-copy-b.invalid:2244?compress=true";
@@ -329,7 +330,7 @@ async fn matched_user_remote_activation_runs_directly_without_runuser() {
     let directory = tempfile::tempdir().expect("tempdir");
     let programs = directory.path().join("programs");
     fake_programs(&programs, false, false);
-    let source = directory.path().join("datom.dotos");
+    let source = directory.path().join("proposal.datom");
     write_fixture_proposal(&source);
     let mut engine = runtime(directory.path(), &programs);
     let ssh_destination = "bird@fixture-activate-matched.invalid";
@@ -366,7 +367,7 @@ fn mismatched_unprivileged_remote_login_is_rejected_before_effects() {
     let directory = tempfile::tempdir().expect("tempdir");
     let programs = directory.path().join("programs");
     fake_programs(&programs, false, false);
-    let source = directory.path().join("datom.dotos");
+    let source = directory.path().join("proposal.datom");
     write_fixture_proposal(&source);
     let mut engine = runtime(directory.path(), &programs);
 
@@ -397,7 +398,7 @@ async fn copy_and_activation_failures_are_terminal_rejections() {
         let directory = tempfile::tempdir().expect("tempdir");
         let programs = directory.path().join("programs");
         fake_programs(&programs, fail_copy, fail_activation);
-        let source = directory.path().join("datom.dotos");
+        let source = directory.path().join("proposal.datom");
         write_fixture_proposal(&source);
         let mut engine = runtime(directory.path(), &programs);
 

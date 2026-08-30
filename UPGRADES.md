@@ -1,8 +1,12 @@
 # Upgrades
 
-## Horizon 0.4.0 node-service removal
+## 0.20.0 — canonical ClusterProposal artifact
 
-Lojix now pins Horizon 0.4.0, whose schema removes the retired Agent
-Intercom node-service variants. Update the Horizon producer and proposal data
-before starting this Lojix revision. Lojix materialization preserves the
-declared service vectors and provides no compatibility translation.
+Lojix 0.20.0 accepts a Horizon proposal only from a direct regular
+`proposal.datom` artifact, whose content is embodied through
+`Text<ClusterProposal>`. It no longer accepts a legacy `.dotos` proposal
+source. Deploy the matching `goldragon/proposal.datom` and the Horizon 0.5
+dependency together, then submit the normal immutable Lojix deployment request
+with that exact canonical source path. Observe the returned deployment through
+the ordinary Lojix client until its terminal record is `Succeeded`; admission
+does not establish the upgrade.

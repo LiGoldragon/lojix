@@ -18,9 +18,11 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use datomic::TextEdge;
 use dotos::{DotosDecode, DotosDecodeError, DotosSource};
 use horizon_lib::name::{ClusterName as HorizonClusterName, NodeName as HorizonNodeName};
 use horizon_lib::{ClusterProposal, Viewpoint};
+use protos::Text;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -663,8 +665,8 @@ fn materialize<E: BootstrapExecutor>(
     };
     let proposal_text =
         fs::read_to_string(&input.proposal_source).map_err(|_| BootstrapError::Materialization)?;
-    let proposal: ClusterProposal = DotosSource::new(&proposal_text)
-        .parse()
+    let proposal: ClusterProposal = Text::<ClusterProposal>::from(proposal_text.as_str())
+        .embody()
         .map_err(|_| BootstrapError::Materialization)?;
     let cluster = HorizonClusterName::try_new(input.cluster_name.clone())
         .map_err(|_| BootstrapError::Materialization)?;
@@ -1996,7 +1998,7 @@ fn validate_input(
             BootstrapHorizonInputValidated {
                 proposal_source: safe_existing_regular_file(
                     &input.proposal_source.0,
-                    Some("dotos"),
+                    "proposal.datom",
                 )?,
                 cluster_name: validate_name(&input.cluster_name.0)?,
                 node_name: validate_name(&input.node_name.0)?,
@@ -2225,14 +2227,12 @@ fn parse_ssh_identity(
 
 fn safe_existing_regular_file(
     value: &str,
-    extension: Option<&str>,
+    required_file_name: &str,
 ) -> std::result::Result<PathBuf, BootstrapError> {
     let path = safe_existing_path(value)?;
     let metadata = fs::symlink_metadata(&path).map_err(BootstrapError::Journal)?;
     if !metadata.file_type().is_file()
-        || extension.is_some_and(|extension| {
-            path.extension().and_then(|value| value.to_str()) != Some(extension)
-        })
+        || path.file_name().and_then(|value| value.to_str()) != Some(required_file_name)
     {
         return Err(BootstrapError::Validation(
             "path is not the required regular file",

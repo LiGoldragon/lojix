@@ -151,7 +151,7 @@ dependencies = [
  "content-identity 0.5.0",
  "name-table 0.1.0",
  "name-table 0.3.0",
- "protos",
+ "protos 0.5.0",
  "raw-discovery",
  "rkyv",
  "signal-sema-translator",
@@ -197,6 +197,14 @@ checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
  "typenum",
+]
+
+[[package]]
+name = "datomic"
+version = "0.7.1"
+source = "git+https://github.com/LiGoldragon/datomic.git?rev=b670c72d0c2cb94ad1e39b372271f6569d91e214#b670c72d0c2cb94ad1e39b372271f6569d91e214"
+dependencies = [
+ "protos 0.14.0",
 ]
 
 [[package]]
@@ -254,6 +262,19 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys",
+]
+
+[[package]]
+name = "ethos-zero"
+version = "0.7.1"
+source = "git+https://github.com/LiGoldragon/ethos-zero?rev=b922afba278d5e1430f0a52ce49898c3263e87bc#b922afba278d5e1430f0a52ce49898c3263e87bc"
+dependencies = [
+ "datomic",
+ "proc-macro2",
+ "protos 0.14.0",
+ "quote",
+ "syn 3.0.3",
+ "thiserror",
 ]
 
 [[package]]
@@ -391,12 +412,16 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "horizon-lib"
-version = "0.4.0"
-source = "git+https://github.com/LiGoldragon/horizon-rs.git?rev=c70915eb550f729996e0921069b34d7844c9b2e9#c70915eb550f729996e0921069b34d7844c9b2e9"
+version = "0.5.1"
+source = "git+https://github.com/LiGoldragon/horizon-rs.git?rev=f8c5808466a47c2fd741cf0b119d73e8ba2add3d#f8c5808466a47c2fd741cf0b119d73e8ba2add3d"
 dependencies = [
- "dotos",
+ "datomic",
+ "ethos-zero",
  "ipnet",
+ "protos 0.14.0",
+ "quote",
  "serde",
+ "syn 3.0.3",
  "thiserror",
 ]
 
@@ -502,12 +527,14 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lojix"
-version = "0.19.2"
+version = "0.20.0"
 dependencies = [
+ "datomic",
  "dotos",
  "horizon-lib",
  "kameo 0.20.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "meta-signal-lojix",
+ "protos 0.14.0",
  "redb",
  "rkyv",
  "rustix",
@@ -644,6 +671,11 @@ dependencies = [
  "rkyv",
  "signal-frame 0.4.0",
 ]
+
+[[package]]
+name = "protos"
+version = "0.14.0"
+source = "git+https://github.com/LiGoldragon/protos.git?rev=bfde3b878dd3de2991d7f605b59f57a13ef8f20b#bfde3b878dd3de2991d7f605b59f57a13ef8f20b"
 
 [[package]]
 name = "ptr_meta"
@@ -1001,7 +1033,7 @@ source = "git+https://github.com/LiGoldragon/signal-sema-translator.git?rev=3a26
 dependencies = [
  "blake3",
  "name-table 0.3.0",
- "protos",
+ "protos 0.5.0",
  "rkyv",
  "signal-frame 0.4.0",
  "thiserror",

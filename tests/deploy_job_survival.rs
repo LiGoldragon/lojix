@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use dotos::DotosEncode;
+use datomic::Datomic;
 use horizon_lib::address::{YggAddress, YggSubnet};
 use horizon_lib::domain::DomainConfiguration;
 use horizon_lib::io::Io;
@@ -81,7 +81,7 @@ fn write_proposal(path: &Path) {
         },
         domain_configuration: DomainConfiguration::default(),
     };
-    fs::write(path, proposal.to_dotos()).expect("write proposal");
+    fs::write(path, proposal.textualize().as_ref()).expect("write proposal");
 }
 
 fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
@@ -111,7 +111,7 @@ fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
 fn accepted_deploy_job_survives_a_store_reopen_with_its_correlation_identity() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("lojix.sema");
-    let proposal_source = directory.path().join("cluster.dotos");
+    let proposal_source = directory.path().join("proposal.datom");
     write_proposal(&proposal_source);
     let store = Arc::new(Store::open(&path).expect("open store"));
     let mut runtime = SchemaRuntime::with_store(store.clone());

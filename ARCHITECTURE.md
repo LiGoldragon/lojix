@@ -155,7 +155,7 @@ streams subscription events.
   the subscription-delivery primitive. `sema` (the storage kernel
   beneath it) owns redb/rkyv mechanics. This crate consumes both
   through `sema-engine`'s public surface.
-- **Cluster proposal source** — a request-supplied, validated `.dotos` path
+- **Cluster proposal source** — a request-supplied, validated `.datomic` path
   (read only for an explicitly selected Horizon materialization).
 - **Per-host key material** — `clavifaber` (this stack is
   cluster-side, not per-host).
@@ -242,9 +242,9 @@ the workspace actor-systems doctrine. No zero-state holders.
   include their exact Nix system and output selector. Production
   writes `NoTestDefaults`; the daemon receives only the resulting signal file.
 - A deploy proposal source, when `DeploymentInputMode::Horizon` requires one,
-  is an existing, direct, regular absolute `.dotos`
-  file with no traversal, symlink, control, or credential-shaped path and a
-  valid cluster-proposal parse. A closure is usable by an effect or a fresh
+  is an existing, direct, regular absolute canonical artifact named
+  `proposal.datom`, with no traversal, symlink, control, or credential-shaped
+  path and content embodied as `Text<ClusterProposal>`. A closure is usable by an effect or a fresh
   durable v4 row only as a canonical immutable Nix store-item root. Public
   adapters redact every other path and never project raw proposal sources,
   flake references, or daemon error text.

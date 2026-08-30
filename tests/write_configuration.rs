@@ -21,7 +21,7 @@ fn write_configuration_round_trips_through_rkyv() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon TestDefaults.{{fixture-cluster fixture-vm-host Hermetic github:fixture-owner/fixture-test-flake x86_64-linux checks.fixture-a /var/lib/fixture-lojix/cluster.dotos}} {}}}",
+        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon TestDefaults.{{fixture-cluster fixture-vm-host Hermetic github:fixture-owner/fixture-test-flake x86_64-linux checks.fixture-a /var/lib/fixture-lojix/proposal.datom}} {}}}",
         output.display()
     );
 
@@ -53,7 +53,7 @@ fn write_configuration_round_trips_through_rkyv() {
     );
     assert_eq!(
         test_defaults.proposal_source,
-        "/var/lib/fixture-lojix/cluster.dotos"
+        "/var/lib/fixture-lojix/proposal.datom"
     );
 }
 

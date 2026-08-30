@@ -16,16 +16,19 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
-use dotos::DotosSource;
+use datomic::TextEdge;
 use horizon_lib::name::{
     ClusterName as HorizonClusterName, NodeName as HorizonNodeName, UserName as HorizonUserName,
 };
 use horizon_lib::{ClusterProposal, Horizon, Viewpoint};
+use protos::Text;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::runtime_flow::{self as nexus, NexusEngine};
 use crate::runtime_model as sema;
+
+const CANONICAL_PROPOSAL_ARTIFACT: &str = "proposal.datom";
 
 fn canonical_nix_store_root(value: &str) -> bool {
     let Some(item) = value.strip_prefix("/nix/store/") else {
@@ -319,7 +322,7 @@ pub struct TestDefaults {
     /// Exact hermetic system and output selector for a configured shorthand.
     test_nix_system: sema::NixSystem,
     test_output_selector: sema::DeploymentOutputSelector,
-    /// The cluster proposal DOTOS file projected to validate `(OnHost h)`
+    /// The canonical ClusterProposal artifact projected to validate `(OnHost h)`
     /// against the node's declared host-set and to resolve `All` to the
     /// cluster's test-VM nodes. Empty when host-set validation is not
     /// configured.
@@ -710,7 +713,7 @@ pub enum TestSubmissionOutcome {
     Rejected(meta::RejectedTest),
 }
 
-/// A projected cluster — the proposal DOTOS file the daemon reads to validate
+/// A projected cluster — the canonical ClusterProposal artifact the daemon reads to validate
 /// `(OnHost h)` against a node's declared host-set and to resolve `All` to the
 /// cluster's test-VM-host nodes (Unit 2b host/node selection). Wraps the parsed
 /// `ClusterProposal`; the host-set is read from each node's `Machine` primary
@@ -4597,7 +4600,7 @@ struct ProposalFile {
 
 impl ProposalFile {
     /// The proposal source is a privileged local configuration input.  Its
-    /// path must name one existing regular `.dotos` file directly; redirects,
+    /// path must name the canonical regular proposal artifact directly; redirects,
     /// traversal, controls, and credential-shaped locations are not admitted
     /// into either Horizon projection or Nix materialization.
     fn checked(source: &ordinary::ProposalSource) -> Option<Self> {
@@ -4607,7 +4610,8 @@ impl ProposalFile {
         }
         let path = PathBuf::from(raw);
         if !path.is_absolute()
-            || path.extension().and_then(|extension| extension.to_str()) != Some("dotos")
+            || path.file_name().and_then(|name| name.to_str())
+                != Some(CANONICAL_PROPOSAL_ARTIFACT)
             || path.components().any(|component| {
                 !matches!(
                     component,
@@ -4642,9 +4646,9 @@ impl ProposalFile {
     fn load(&self) -> Result<ClusterProposal> {
         let text = fs::read_to_string(&self.path)
             .map_err(|_| Error::Invariant("proposal source is unavailable".to_string()))?;
-        DotosSource::new(&text)
-            .parse()
-            .map_err(|_| Error::Invariant("proposal source is not valid DOTOS".to_string()))
+        Text::<ClusterProposal>::from(text.as_str())
+            .embody()
+            .map_err(|_| Error::Invariant("proposal source is not valid Datomic".to_string()))
     }
 }
 
@@ -6477,34 +6481,36 @@ mod tests {
     }
 
     #[test]
-    fn proposal_source_is_a_safe_regular_readable_dotos_file_before_deploy_admission() {
+    fn proposal_source_is_the_safe_canonical_artifact_before_deploy_admission() {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
         let directory = tempfile::tempdir().expect("temporary proposal directory");
-        let malformed = directory.path().join("malformed.dotos");
+        let malformed = directory.path().join("malformed.datom");
         fs::write(&malformed, "not a cluster proposal").expect("write malformed proposal");
-        let unreadable = directory.path().join("unreadable.dotos");
+        let unreadable = directory.path().join("unreadable.datom");
         fs::write(&unreadable, "not used").expect("write unreadable proposal");
         let mut permissions = fs::metadata(&unreadable)
             .expect("unreadable proposal metadata")
             .permissions();
         permissions.set_mode(0o000);
         fs::set_permissions(&unreadable, permissions).expect("make proposal unreadable");
-        let symlink_path = directory.path().join("linked.dotos");
+        let symlink_path = directory.path().join("linked.datom");
         symlink(&malformed, &symlink_path).expect("create proposal symlink");
 
         for source in [
-            directory.path().join("missing.dotos"),
+            directory.path().join("missing.datom"),
             directory.path().join("proposal.nota"),
+            directory.path().join("proposal.dotos"),
+            directory.path().join("proposal.datomic"),
             malformed,
             unreadable,
             symlink_path,
-            directory.path().join("private-secret.dotos"),
+            directory.path().join("private-secret.datom"),
             directory
                 .path()
                 .join("nested")
                 .join("..")
-                .join("proposal.dotos"),
+                .join("proposal.datom"),
         ] {
             let source = ordinary::ProposalSource::new(source.to_string_lossy().to_string());
             assert!(
@@ -6512,7 +6518,7 @@ mod tests {
                 "unsafe or unavailable proposal source must fail admission"
             );
         }
-        let control = ordinary::ProposalSource::new("/tmp/proposal\n.dotos");
+        let control = ordinary::ProposalSource::new("/tmp/proposal\n.datom");
         assert!(ProposalFile::available(&control).is_none());
     }
 
@@ -7938,7 +7944,7 @@ mod tests {
 
     #[test]
     fn secrets_directory_is_the_datom_source_sibling() {
-        let source = ordinary::ProposalSource::new("/fixture/cluster/datom.dotos".to_string());
+        let source = ordinary::ProposalSource::new("/fixture/cluster/proposal.datom".to_string());
         let directory = ClusterSecretsDirectory::from_proposal_source(&source);
         assert_eq!(directory.path, PathBuf::from("/fixture/cluster/secrets"));
     }
@@ -7946,7 +7952,7 @@ mod tests {
     #[test]
     fn absent_secrets_directory_yields_no_files() {
         let source = ordinary::ProposalSource::new(
-            "/nonexistent/path/that/has/no/secrets/datom.dotos".to_string(),
+            "/nonexistent/path/that/has/no/secrets/proposal.datom".to_string(),
         );
         let directory = ClusterSecretsDirectory::from_proposal_source(&source);
         assert!(
@@ -7978,7 +7984,7 @@ mod tests {
         let _ = fs::remove_dir_all(&generated);
         let source = ordinary::ProposalSource::new(
             source_directory
-                .join("datom.dotos")
+                .join("proposal.datom")
                 .to_string_lossy()
                 .to_string(),
         );
@@ -8033,7 +8039,7 @@ mod tests {
         let _ = fs::remove_dir_all(&generated);
         let source = ordinary::ProposalSource::new(
             source_directory
-                .join("datom.dotos")
+                .join("proposal.datom")
                 .to_string_lossy()
                 .to_string(),
         );
@@ -8113,7 +8119,7 @@ mod tests {
             std::env::temp_dir().join(format!("lojix-secrets-empty-{}", std::process::id()));
         let _ = fs::remove_dir_all(&generated);
         let source =
-            ordinary::ProposalSource::new("/nonexistent/bootstrap/datom.dotos".to_string());
+            ordinary::ProposalSource::new("/nonexistent/bootstrap/proposal.datom".to_string());
         let cluster = ClusterSecretsDirectory::from_proposal_source(&source);
         GeneratedInputDirectory::new(generated.clone())
             .write_secrets(&cluster)

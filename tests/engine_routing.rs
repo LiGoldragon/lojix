@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use dotos::DotosEncode;
+use datomic::Datomic;
 use horizon_lib::address::{YggAddress, YggSubnet};
 use horizon_lib::domain::DomainConfiguration;
 use horizon_lib::io::Io;
@@ -83,7 +83,7 @@ fn write_proposal(path: &Path) {
         },
         domain_configuration: DomainConfiguration::default(),
     };
-    fs::write(path, proposal.to_dotos()).expect("write proposal");
+    fs::write(path, proposal.textualize().as_ref()).expect("write proposal");
 }
 
 fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
@@ -112,7 +112,7 @@ fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
 #[test]
 fn accepted_submission_creates_a_correlated_durable_record() {
     let directory = tempfile::tempdir().expect("temporary proposal directory");
-    let proposal_source = directory.path().join("cluster.dotos");
+    let proposal_source = directory.path().join("proposal.datom");
     write_proposal(&proposal_source);
     let mut engine = SchemaRuntime::new();
     let accepted = match engine.submit_deploy(host_submission(&proposal_source)) {
@@ -137,7 +137,7 @@ fn accepted_submission_creates_a_correlated_durable_record() {
 #[test]
 fn capacity_rejection_is_a_correlated_terminal_record() {
     let directory = tempfile::tempdir().expect("temporary proposal directory");
-    let proposal_source = directory.path().join("cluster.dotos");
+    let proposal_source = directory.path().join("proposal.datom");
     write_proposal(&proposal_source);
     let engine = SchemaRuntime::new();
     let rejected = engine.reject_deployment_in_flight(host_submission(&proposal_source));

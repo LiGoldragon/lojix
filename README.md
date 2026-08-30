@@ -27,7 +27,8 @@ later effect is eligible. Restart completes unacknowledged intents; compacted
 acknowledged history is never replayed.
 
 Deploy admission reads a proposal only from an existing, non-symlink absolute
-regular `.dotos` file that parses as a cluster proposal. Resolver output,
+regular canonical artifact named `proposal.datom`, embodied as
+`Text<ClusterProposal>`. Resolver output,
 effect output, persisted resume cursors, live generations, and GC roots may
 use a closure only when it is a canonical immutable `/nix/store/<hash>-<name>`
 root. Public replies expose no raw proposal source, flake reference, local
@@ -96,7 +97,7 @@ BootstrapRun.{
   <request-id>
   BuildOnly.{
     Direct.{<immutable-github-flake-ref> <nix-system> <output-selector>}
-    | Horizon.{<proposal.dotos> <cluster> <node> <CompleteHost-or-BaseHost> <NoSecrets-or-SecretsDirectory.{<directory>}> <immutable-github-flake-ref> <nix-system> <output-selector>}
+    | Horizon.{<proposal.datom> <cluster> <node> <CompleteHost-or-BaseHost> <NoSecrets-or-SecretsDirectory.{<directory>}> <immutable-github-flake-ref> <nix-system> <output-selector>}
     <NoBuilder-or-NixBuilder.{<builder-spec>}>
     <journal-parent> <new-gc-root-path> <new-terminal-evidence-path>
   }

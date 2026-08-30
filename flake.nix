@@ -37,7 +37,7 @@
           filter =
             path: type:
             (craneLib.filterCargoSources path type)
-            || (type == "regular" && pkgs.lib.hasSuffix ".dotos" path)
+            || (type == "regular" && baseNameOf path == "proposal.datom")
             || (
               type == "regular"
               && builtins.elem (baseNameOf path) [

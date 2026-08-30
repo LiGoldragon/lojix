@@ -185,10 +185,6 @@ pub enum Error {
 
     #[error("horizon projection error: {0}")]
     Horizon(#[from] horizon_lib::Error),
-
-    #[error("horizon dotos decode error: {0}")]
-    HorizonDotos(#[from] dotos::DotosDecodeError),
-
     #[error("horizon json encode error: {0}")]
     HorizonJson(#[from] serde_json::Error),
 
@@ -283,7 +279,7 @@ pub struct DaemonConfiguration {
 ///
 /// `test_flake`, `test_nix_system`, and `test_output_selector` make the
 /// shorthand's hermetic execution profile fully explicit in startup
-/// configuration. `proposal_source` is the cluster proposal DOTOS file the
+/// configuration. `proposal_source` is the canonical ClusterProposal artifact the
 /// daemon projects to validate `(OnHost h)` and resolve `All`; it is empty when
 /// host-set validation is not configured.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
