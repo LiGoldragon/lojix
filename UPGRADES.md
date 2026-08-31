@@ -1,5 +1,13 @@
 # Upgrades
 
+## 0.20.1 — query lookup wire shape
+
+Lojix 0.20.1 preserves the public one-field product shape of
+`Query.ByDeployment` and `Query.ByGeneration` while decoding both selectors
+into the runtime model. Querying an unknown identifier now completes with the
+ordinary typed empty `Queried` reply instead of ending the client exchange at
+the wire boundary.
+
 ## 0.20.0 — canonical ClusterProposal artifact
 
 Lojix 0.20.0 accepts a Horizon proposal only from a direct regular

@@ -122,6 +122,26 @@ fn fresh_store_daemon_serves_owner_and_ordinary_interfaces_after_restart() {
         output_text(&ordinary_reply)
     );
 
+    for request in ["Query.ByDeployment.(1)", "Query.ByGeneration.(1)"] {
+        let reply = run_client(
+            env!("CARGO_BIN_EXE_lojix"),
+            "LOJIX_ORDINARY_SOCKET",
+            &ordinary_socket,
+            request,
+        );
+        assert!(
+            reply.status.success(),
+            "{request} must complete one ordinary client exchange rather than fail its frame decode: {}",
+            output_text(&reply)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&reply.stdout).trim(),
+            "Queried.([] [] (1 1))",
+            "a virgin store must report the typed empty query result for {request}: {}",
+            output_text(&reply)
+        );
+    }
+
     stop_daemon(daemon, "first daemon");
     assert!(
         store.exists(),

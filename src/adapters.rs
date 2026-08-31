@@ -22,6 +22,30 @@ macro_rules! wire_newtype {
     };
 }
 
+// The public contract sometimes gives a one-field product its own noun.  The
+// runtime keeps those nouns as compact newtypes, while this adapter preserves
+// the product boundary at the wire crossing.
+macro_rules! wire_product_newtype {
+    ($name:ident, $inner:ty) => {
+        impl WireShape for sema::$name {
+            fn to_wire(&self) -> WireValue {
+                WireValue::Product(vec![self.payload().to_wire()])
+            }
+
+            fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
+                let WireValue::Product(mut fields) = value else {
+                    return Err(WireShapeError);
+                };
+                if fields.len() != 1 {
+                    return Err(WireShapeError);
+                }
+                let field = fields.pop().ok_or(WireShapeError)?;
+                Ok(Self::new(<$inner as WireShape>::from_wire(field)?))
+            }
+        }
+    };
+}
+
 macro_rules! wire_struct {
     ($name:ident { $($field:ident: $field_type:ty),* $(,)? }) => {
         impl WireShape for sema::$name {
@@ -90,7 +114,7 @@ wire_struct!(RejectedQuery {
     query_rejection_reason: QueryRejectionReason,
     state_marker: StateMarker
 });
-wire_newtype!(GenerationLookup, GenerationIdentifier);
+wire_product_newtype!(GenerationLookup, GenerationIdentifier);
 wire_enum!(TestOutcome { unit { 1 => Pending, 2 => Passed } unary { 0 => Failed(FailureStage) } });
 wire_enum!(KeyMaterialCheckRejectionReason { unit { 0 => ProposalSourceUnreachable, 1 => HostUnreachable, 2 => PublicationMalformed, 3 => NodeUnknown } unary {  } });
 wire_struct!(TestRunLookup { cluster_name: ClusterName, node_name: NodeName, optional_test_run_identifier: Option<TestRunIdentifier> });
@@ -101,7 +125,7 @@ wire_enum!(FailureStage { unit { 0 => HermeticCheck, 1 => BringUp, 2 => Assert, 
 wire_enum!(HostDeployAction { unit { 0 => TestActivation, 1 => ScheduleBootOnce, 2 => Realize, 3 => SetBootProfile, 4 => Evaluate, 5 => ActivateNow } unary {  } });
 wire_newtype!(PinLabel, String);
 wire_struct!(GenerationListing { generation_vector: Vec<Generation>, deployment_record_vector: Vec<DeploymentRecord>, state_marker: StateMarker });
-wire_newtype!(DeploymentLookup, DeploymentIdentifier);
+wire_product_newtype!(DeploymentLookup, DeploymentIdentifier);
 wire_enum!(UnwatchRejectionReason { unit { 0 => SubscriptionTokenUnknown, 1 => SubscriptionAlreadyClosed } unary {  } });
 wire_enum!(GenerationSlot { unit { 0 => Pinned, 1 => Recent, 2 => Rollback, 3 => BootPending, 4 => Current } unary {  } });
 wire_newtype!(TestRunIdentifier, u64);
