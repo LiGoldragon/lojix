@@ -299,6 +299,10 @@ pub enum EffectResult {
     ClosureBuilt(BuiltClosure),
     ClosureCopied(CopiedClosure),
     GenerationActivated(ActivatedGeneration),
+    /// A same-host TestActivation has been handed to PID 1. Its terminal
+    /// outcome belongs to the private retained-unit observer rather than this
+    /// foreground runner, which the candidate may replace.
+    DetachedTestActivationDispatched,
     PathsCollected(GarbageCollected),
     HermeticCheckBuilt(CheckBuilt),
     TestVmStarted(TestVmBroughtUp),

@@ -573,13 +573,73 @@ impl DeployJobs {
     /// so this start path computes and (for terminal rows) clears, leaving live
     /// resumption to S5. Pre-activation rows are dropped here so they do not
     /// wedge the cap; they are re-submittable by the operator.
-    fn reconcile_persisted_jobs(&mut self, actor: ActorRef<DeployJobs>) {
+    async fn reconcile_persisted_jobs(&mut self, actor: ActorRef<DeployJobs>) {
         let Ok(jobs) = self.store.deploy_jobs() else {
             return;
         };
         let daemon_host = self.configuration.daemon_host();
         for job in jobs {
             let deployment_identifier = *job.deployment_identifier.payload();
+            if let Some(unit) = job.detached_test_activation_unit(daemon_host) {
+                // Test activation is deliberately non-persistent. Its retained
+                // PID-1 receipt, not /nix/var/nix/profiles/system, is the only
+                // authority for the successor's terminal outcome.
+                // Subscribe before the first GetUnit lookup. systemd-run's
+                // accepted transient can still be in PID 1's registration
+                // window while the candidate has already replaced us.
+                let Ok(observer) = unit.prepare_observer().await else {
+                    // An observer transport error is not a terminal activation
+                    // outcome. Leave the durable Activating row for recovery.
+                    continue;
+                };
+                match observer.initial_outcome().await {
+                    Ok(crate::schema_runtime::DetachedActivationOutcome::Succeeded) => {
+                        if self
+                            .store
+                            .terminalize_deployment(
+                                deployment_identifier,
+                                sema::DeploymentLifecycle::Completed,
+                                sema::DeploymentTerminal::Succeeded,
+                            )
+                            .is_ok()
+                        {
+                            unit.clean().await;
+                        }
+                    }
+                    Ok(crate::schema_runtime::DetachedActivationOutcome::Failed)
+                    | Ok(crate::schema_runtime::DetachedActivationOutcome::Missing) => {
+                        if self
+                            .store
+                            .terminalize_deployment(
+                                deployment_identifier,
+                                sema::DeploymentLifecycle::Failed,
+                                sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
+                                    deployment_failure_stage:
+                                        sema::DeploymentFailureStage::Activate,
+                                    deployment_terminal_reason:
+                                        sema::DeploymentTerminalReason::ActivationFailed,
+                                }),
+                            )
+                            .is_ok()
+                        {
+                            unit.clean().await;
+                        }
+                    }
+                    Ok(
+                        crate::schema_runtime::DetachedActivationOutcome::PendingRegistration
+                        | crate::schema_runtime::DetachedActivationOutcome::Running,
+                    ) => {
+                        // The exact observer owns both the queued UnitNew and
+                        // the subscribe-before-read terminal-state watcher.
+                        observer.observe(self.store.clone(), deployment_identifier);
+                    }
+                    Err(_) => {
+                        // Same as an observer interruption: no invented
+                        // terminal result from a failed systemd observation.
+                    }
+                }
+                continue;
+            }
             match job.resumption() {
                 // A detached self-switch (bead primary-7u8p): a persisted host
                 // `ActivateNow` through `NixosSystemdBootV1` targeting the
@@ -779,7 +839,8 @@ impl Message<ReconcilePersistedJobs> for DeployJobs {
         _message: ReconcilePersistedJobs,
         context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.reconcile_persisted_jobs(context.actor_ref().clone());
+        self.reconcile_persisted_jobs(context.actor_ref().clone())
+            .await;
     }
 }
 

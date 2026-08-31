@@ -192,6 +192,111 @@
               cargoClippyExtraArgs = "--all-targets --features dotos-text -- -D warnings";
             }
           );
+
+          # A retained transient is the PID-1 handoff receipt available after
+          # the initiating service cgroup dies. `--wait` intentionally remains
+          # blocked while `RemainAfterExit=yes` retains that receipt; stopping
+          # the unit is the event that releases the waiter.
+          retained-transient-semantics = pkgs.testers.nixosTest {
+            name = "lojix-retained-transient-semantics";
+            nodes.machine = { ... }: { };
+            testScript = ''
+              start_all()
+              machine.succeed(
+                  "systemd-run --unit=lojix-retained-result --no-block --service-type=oneshot --remain-after-exit ${pkgs.coreutils}/bin/true"
+              )
+              machine.wait_for_unit("lojix-retained-result.service")
+              machine.succeed(
+                  "systemctl show lojix-retained-result.service --property=LoadState --property=ActiveState --property=Result | grep -Fx 'LoadState=loaded' && systemctl show lojix-retained-result.service --property=LoadState --property=ActiveState --property=Result | grep -Fx 'ActiveState=active' && systemctl show lojix-retained-result.service --property=LoadState --property=ActiveState --property=Result | grep -Fx 'Result=success'"
+              )
+              machine.succeed(
+                  "systemd-run --unit=lojix-retained-waiter --wait --service-type=oneshot --remain-after-exit ${pkgs.coreutils}/bin/true >/run/lojix-retained-waiter.out 2>&1 & echo $! >/run/lojix-retained-waiter.pid"
+              )
+              machine.wait_for_unit("lojix-retained-waiter.service")
+              machine.succeed("kill -0 $(cat /run/lojix-retained-waiter.pid)")
+              machine.succeed("systemctl stop lojix-retained-waiter.service")
+              machine.wait_until_succeeds("! kill -0 $(cat /run/lojix-retained-waiter.pid)")
+            '';
+          };
+
+          # An actual owner request drives the real daemon through Nix/SSH into
+          # a same-host `test` candidate which replaces `lojix.service`. The
+          # successor must expose both typed sockets, terminalize this exact
+          # TestActivation, and leave the persistent system profile unchanged.
+          # Nix and SSH are the only fake effect boundaries.
+          same-host-test-activation =
+            let
+              package = self.packages.${system}.default;
+              candidate = pkgs.writeShellScriptBin "switch-to-configuration" ''
+                if [ "$1" = test ]; then
+                  : > /run/lojix-testactivation-candidate-entered
+                  systemctl restart lojix.service
+                fi
+              '';
+              fake-nix = pkgs.writeShellScriptBin "nix" ''
+                printf '%s\n' "$@" > /run/lojix-fake-nix-argv
+                case "$1" in
+                  flake) printf '%s\n' '{"url":"github:fixture-owner/fixture-flake?ref=main","locked":{"rev":"0123456789abcdef0123456789abcdef01234567"}}' ;;
+                  eval) printf '%s\n' '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-lojix-test-candidate.drv' ;;
+                  build) printf '%s\n' '${candidate}' ;;
+                  copy) exit 0 ;;
+                  *) exit 89 ;;
+                esac
+              '';
+              fake-ssh = pkgs.writeShellScriptBin "ssh" ''
+                for argument in "$@"; do command="$argument"; done
+                exec /bin/sh -c "$command"
+              '';
+              startup = pkgs.runCommand "lojix-testactivation-startup.rkyv" {
+                nativeBuildInputs = [ package ];
+              } ''
+                lojix-write-configuration "ConfigurationWriteRequest.{/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix /var/lib/lojix/lojix.sema atlas NoTestDefaults $out}"
+              '';
+              proposal = "{«atlas {EdgeTesting Large Max {Metal Some.X86_64 4 None None None None None None None None []} {Qwerty Uefi «» [] None} {AAA= Some.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA Some.{aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa “200::1” 300:ca41:6b12:fba}} [] None None False False [] False False None None []} beacon {EdgeTesting Large Max {Pod Some.X86_64 4 None None Some.atlas Some.operator None None None None []} {Qwerty Uefi «» [] None} {AAA= Some.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA Some.{aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa “200::1” 300:ca41:6b12:fba}} [] None None False False [] False False None None []}» «» «» {Max «» «» «»} {criome []}}";
+            in
+            pkgs.testers.nixosTest {
+              name = "lojix-same-host-test-activation";
+              nodes.machine = { ... }: {
+                environment.systemPackages = [ package fake-nix fake-ssh candidate ];
+                systemd.services.lojix = {
+                  wantedBy = [ "multi-user.target" ];
+                  serviceConfig = {
+                    ExecStart = "${package}/bin/lojix-daemon ${startup}";
+                    Restart = "always";
+                    KillMode = "control-group";
+                    StateDirectory = "lojix";
+                    Environment = "PATH=${pkgs.lib.makeBinPath [ fake-nix fake-ssh pkgs.systemd pkgs.coreutils candidate ]}";
+                  };
+                  preStart = ''
+                    printf '%s' '${proposal}' > /var/lib/lojix/proposal.datom
+                  '';
+                };
+              };
+              testScript = ''
+                start_all()
+                machine.wait_for_unit("lojix.service")
+                machine.wait_until_succeeds("test -S /run/lojix/ordinary.sock && test -S /run/lojix/owner.sock")
+                profile_before = machine.succeed("readlink -f /nix/var/nix/profiles/system").strip()
+                predecessor_invocation = machine.succeed("systemctl show lojix.service --property=InvocationID --value").strip()
+                machine.succeed("LOJIX_OWNER_SOCKET=/run/lojix/owner.sock ${package}/bin/meta-lojix 'Deploy.Host.(fixture-cluster atlas BaseHost /var/lib/lojix/proposal.datom github:fixture-owner/fixture-flake?ref=main (ssh-ng://fixture-copy.invalid fixture-login@fixture-activate.invalid) Direct (checks.fixture-a) NixosSystemdBootV1 TestActivation ResolveAndRecord None [])' >/run/lojix-admission")
+                machine.log(machine.succeed("cat /run/lojix-admission"))
+                machine.log(machine.succeed("cat /run/lojix-fake-nix-argv"))
+                machine.succeed("grep -F 'DeployAccepted.' /run/lojix-admission")
+                machine.wait_until_succeeds("test -e /run/lojix-testactivation-candidate-entered")
+                machine.wait_until_succeeds("test \"$(systemctl show lojix.service --property=InvocationID --value)\" != '" + predecessor_invocation + "'")
+                machine.wait_for_unit("lojix.service")
+                machine.wait_until_succeeds("test -S /run/lojix/ordinary.sock && test -S /run/lojix/owner.sock")
+                machine.wait_until_succeeds("systemctl show lojix-self-switch-deploy-1.service --property=Result --value | grep -Fx success")
+                machine.log(machine.succeed("systemctl show lojix-self-switch-deploy-1.service --property=LoadState --property=ActiveState --property=SubState --property=Result"))
+                machine.succeed("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Query.ByDeployment.(1)' >/run/lojix-deployment-before-wait")
+                machine.log(machine.succeed("cat /run/lojix-deployment-before-wait"))
+                machine.log(machine.succeed("journalctl -u lojix.service --since '2 minutes ago' --no-pager"))
+                machine.wait_until_succeeds("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Query.ByDeployment.(1)' | grep -Fq Succeeded")
+                machine.succeed("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Query.ByDeployment.(1)' >/run/lojix-deployment")
+                machine.succeed("grep -Fq Succeeded /run/lojix-deployment")
+                assert profile_before == machine.succeed("readlink -f /nix/var/nix/profiles/system").strip()
+              '';
+            };
         };
 
         formatter = pkgs.nixfmt;
