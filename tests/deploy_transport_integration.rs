@@ -253,7 +253,7 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
     );
     assert!(commands[eval].contains("narHash="), "{}", commands[eval]);
     assert!(commands[copy].contains(OUTPUT), "{}", commands[copy]);
-    assert!(commands[copy].contains("ssh-ng://fixture-copy-a.invalid"));
+    assert!(commands[copy].contains("ssh-ng://root@fixture-copy-a.invalid"));
     assert!(commands[profile].contains("root@fixture-activate-a.invalid"));
     assert!(commands[activate].contains("root@fixture-activate-a.invalid"));
     assert!(commands[profile].contains("runuser --login --command"));
@@ -317,7 +317,10 @@ async fn second_arbitrary_transport_flow_preserves_both_request_values() {
         .iter()
         .filter(|line| line.starts_with("ssh "))
         .collect();
-    assert!(copy.contains(nix_store_uri), "{copy}");
+    assert!(
+        copy.contains("ssh-ng://root@fixture-copy-b.invalid:2244?compress=true"),
+        "{copy}"
+    );
     assert_eq!(ssh.len(), 2, "{ssh:?}");
     assert!(
         ssh.iter().all(|line| line.contains(ssh_destination)),
