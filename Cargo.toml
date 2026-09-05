@@ -44,8 +44,8 @@ horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", rev
 datom-codec       = { git = "https://github.com/LiGoldragon/datom-codec", rev = "41a3c073d5c5" }
 protos            = { git = "https://github.com/LiGoldragon/protos", rev = "2d999f173334" }
 kameo             = "0.20"
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix.git", rev = "c152ce07c6174c76d929f3fde323a2a79a53c49c" }
-signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix.git", rev = "4f50413c93cff97ab8ce7b78595218f79c8794e4" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix.git", rev = "55c1df20ddfa6ae99e0f4bca57b803bf366b781f" }
+signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix.git", rev = "5ce3f11feac22a0ddbed028dec2a60385f77fa55" }
 signal-frame      = { git = "https://github.com/LiGoldragon/signal-frame.git", rev = "80f70d929ae6d72707052f097be2264872913983", default-features = false }
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 redb              = "4"
