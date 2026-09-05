@@ -11,9 +11,28 @@ use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use datom_codec::{Conceivable, Textualizable};
 use lojix::DaemonConfiguration;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn text(value: &str) -> protos::Text {
+    protos::Text::try_from(value).expect("fixture text")
+}
+
+fn inline_datom<T: Conceivable<datom_codec::Datom, Fault = std::convert::Infallible>>(
+    value: &T,
+) -> String {
+    value
+        .conceive()
+        .expect("generated Datom ascent")
+        .1
+        .textualize()
+}
+
+fn ordinary_query(selection: signal_lojix::Selection) -> String {
+    inline_datom(&signal_lojix::Request::Query(selection))
+}
 
 #[test]
 fn daemon_configuration_round_trips_through_rkyv_file() {
@@ -51,7 +70,7 @@ fn daemon_configuration_round_trips_through_rkyv_file() {
 }
 
 /// This is the production service boundary, kept process-level on purpose:
-/// `lojix-write-configuration` receives the exact `ConfigurationWriteRequest`
+/// `lojix-write-configuration` receives the exact generated `ConfigurationWriteRequest`
 /// archive shape CriomOS writes, `lojix-daemon` receives only that archive, and
 /// the public owner and ordinary binaries construct their verified Interface
 /// values before sending frames to the two sockets.
@@ -92,7 +111,9 @@ fn fresh_store_daemon_serves_owner_and_ordinary_interfaces_after_restart() {
         env!("CARGO_BIN_EXE_meta-lojix"),
         "LOJIX_OWNER_SOCKET",
         &owner_socket,
-        "Pin.(fresh-cluster fresh-node 1 fresh-pin)",
+        &inline_datom(&meta_signal_lojix::Request::Pin(
+            meta_signal_lojix::PinRequest(text("fresh-cluster"), text("fresh-node"), 1, text("fresh-pin")),
+        )),
     );
     assert!(
         owner_reply.status.success(),
@@ -109,7 +130,11 @@ fn fresh_store_daemon_serves_owner_and_ordinary_interfaces_after_restart() {
         env!("CARGO_BIN_EXE_lojix"),
         "LOJIX_ORDINARY_SOCKET",
         &ordinary_socket,
-        "Query.ByNode.(fresh-cluster fresh-node None)",
+        &ordinary_query(signal_lojix::Selection::ByNode(signal_lojix::NodeSelector(
+            text("fresh-cluster"),
+            text("fresh-node"),
+            None,
+        ))),
     );
     assert!(
         ordinary_reply.status.success(),
@@ -122,12 +147,19 @@ fn fresh_store_daemon_serves_owner_and_ordinary_interfaces_after_restart() {
         output_text(&ordinary_reply)
     );
 
-    for request in ["Query.ByDeployment.(1)", "Query.ByGeneration.(1)"] {
+    for request in [
+        ordinary_query(signal_lojix::Selection::ByDeployment(
+            signal_lojix::DeploymentLookup(1),
+        )),
+        ordinary_query(signal_lojix::Selection::ByGeneration(
+            signal_lojix::GenerationLookup(1),
+        )),
+    ] {
         let reply = run_client(
             env!("CARGO_BIN_EXE_lojix"),
             "LOJIX_ORDINARY_SOCKET",
             &ordinary_socket,
-            request,
+            &request,
         );
         assert!(
             reply.status.success(),
@@ -136,7 +168,7 @@ fn fresh_store_daemon_serves_owner_and_ordinary_interfaces_after_restart() {
         );
         assert_eq!(
             String::from_utf8_lossy(&reply.stdout).trim(),
-            "Queried.([] [] (1 1))",
+            "Queried.{ [] [] { 1 1 } }",
             "a virgin store must report the typed empty query result for {request}: {}",
             output_text(&reply)
         );
@@ -160,7 +192,11 @@ fn fresh_store_daemon_serves_owner_and_ordinary_interfaces_after_restart() {
         env!("CARGO_BIN_EXE_lojix"),
         "LOJIX_ORDINARY_SOCKET",
         &ordinary_socket,
-        "Query.ByNode.(fresh-cluster fresh-node None)",
+        &ordinary_query(signal_lojix::Selection::ByNode(signal_lojix::NodeSelector(
+            text("fresh-cluster"),
+            text("fresh-node"),
+            None,
+        ))),
     );
     assert!(
         restarted_reply.status.success(),
