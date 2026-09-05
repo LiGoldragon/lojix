@@ -75,7 +75,7 @@ fn registered_tables_with_no_rows_report_empty() {
     assert!(matches!(inspection.database(), DatabaseInspection::Opened));
     assert_eq!(
         inspection.schema(),
-        &SchemaInspection::Matches { version: 4 }
+        &SchemaInspection::Matches { version: 5 }
     );
     assert_eq!(
         inspection
