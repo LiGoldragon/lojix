@@ -5,22 +5,13 @@
 //! local immutable evaluation/build, target copy, root-mediated Home Manager
 //! profile set, then target-user activation.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
-use datomic::Datomic;
-use horizon_lib::address::{YggAddress, YggSubnet};
-use horizon_lib::domain::DomainConfiguration;
-use horizon_lib::io::Io;
-use horizon_lib::machine::Machine;
-use horizon_lib::magnitude::Magnitude;
-use horizon_lib::name::{NodeName as HorizonNodeName, UserName as HorizonUserName};
-use horizon_lib::proposal::{ClusterProposal, ClusterTrust, NodeProposal, NodePubKeys};
-use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
-use horizon_lib::species::{Arch, Bootloader, Keyboard, MachineSpecies, NodeSpecies};
+use datom_codec::Textualizable;
+use horizon_lib::*;
 use lojix::Store;
 use lojix::runtime_model as ordinary;
 use lojix::runtime_model as meta;
@@ -31,86 +22,51 @@ const FLAKE: &str =
     "github:fixture-owner/fixture-flake?rev=0123456789abcdef0123456789abcdef01234567";
 const OUTPUT: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-home-manager-generation";
 
-fn proposal_node(species: MachineSpecies, super_node: Option<&str>) -> NodeProposal {
-    NodeProposal {
-        species: NodeSpecies::EdgeTesting,
-        size: Magnitude::Large,
-        trust: Magnitude::Max,
-        machine: Machine {
-            species,
-            arch: Some(Arch::X86_64),
-            cores: 4,
-            model: None,
-            mother_board: None,
-            super_node: super_node.map(|name| HorizonNodeName::try_new(name).expect("node name")),
-            super_user: super_node
-                .map(|_| HorizonUserName::try_new("operator").expect("user name")),
-            chip_gen: None,
-            ram_gb: None,
-            disk_gb: None,
-            location: None,
-            super_nodes: Vec::new(),
-        },
-        io: Io {
-            keyboard: Keyboard::Qwerty,
-            bootloader: Bootloader::Uefi,
-            disks: BTreeMap::new(),
-            swap_devices: Vec::new(),
-            compressed_swap: None,
-        },
-        pub_keys: NodePubKeys {
-            ssh: SshPubKey::try_new("AAA=").expect("ssh key"),
-            nix: Some(
-                NixPubKey::try_new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-                    .expect("nix key"),
-            ),
-            yggdrasil: Some(horizon_lib::proposal::YggPubKeyEntry {
-                pub_key: YggPubKey::try_new("a".repeat(64)).expect("ygg key"),
-                address: YggAddress::try_new("200::1").expect("ygg address"),
-                subnet: YggSubnet::try_new("300:ca41:6b12:fba").expect("ygg subnet"),
-            }),
-        },
-        link_local_ips: Vec::new(),
-        node_ip: None,
-        wireguard_pub_key: None,
-        nordvpn: false,
-        wifi_cert: false,
-        wireguard_untrusted_proxies: Vec::new(),
-        wants_printing: false,
-        wants_hw_video_accel: false,
-        router_interfaces: None,
-        online: None,
-        services: Vec::new(),
-    }
-}
-
-fn fixture_proposal() -> ClusterProposal {
-    let mut nodes = BTreeMap::new();
-    nodes.insert(
-        HorizonNodeName::try_new("atlas").expect("node name"),
-        proposal_node(MachineSpecies::Metal, None),
-    );
-    nodes.insert(
-        HorizonNodeName::try_new("beacon").expect("node name"),
-        proposal_node(MachineSpecies::Pod, Some("atlas")),
-    );
-    ClusterProposal {
-        nodes,
-        users: BTreeMap::new(),
-        domains: BTreeMap::new(),
-        trust: ClusterTrust {
-            cluster: Magnitude::Max,
-            clusters: BTreeMap::new(),
-            nodes: BTreeMap::new(),
-            users: BTreeMap::new(),
-        },
-        domain_configuration: DomainConfiguration::default(),
-    }
-}
-
 fn write_fixture_proposal(path: &Path) {
-    fs::write(path, fixture_proposal().textualize().as_ref())
-        .expect("write Datomic fixture proposal");
+    fn text(value: &str) -> protos::Text {
+        protos::Text::try_from(value).expect("fixture text")
+    }
+    let hardware = || Hardware(4.into(), None, None, None, None, None);
+    let node = |name: &str, machine| {
+        NodeDefinition(
+            text(name),
+            NodeVariant::Live(LiveDefinition()),
+            Magnitude::Max,
+            Magnitude::Max,
+            machine,
+            NodeEnvironment(Keyboard::Qwerty, None),
+            NodeNetwork(vec![], None, None, vec![], None),
+            NodeKeys(text("ssh-ed25519 AAAAfixture"), None, None),
+            Some(true),
+            vec![],
+        )
+    };
+    let atlas = node(
+        "atlas",
+        MachineDefinition::Metal(Architecture::X86_64, hardware()),
+    );
+    // A current `VirtualMachine` is the hosted guest replacement for the old
+    // Pod fixture; it remains a VM with an explicit cluster host.
+    let beacon = node(
+        "beacon",
+        MachineDefinition::VirtualMachine(
+            VirtualMachineHost::Cluster(text("atlas"), vec![], Some(text("operator")), None),
+            hardware(),
+            Some(20.into()),
+        ),
+    );
+    let definition = HorizonDefinition(
+        HorizonConfiguration(vec![], DomainConfiguration(text("criome"), vec![])),
+        ClusterDefinition(
+            text("alpha"),
+            vec![atlas, beacon],
+            vec![],
+            vec![],
+            vec![],
+            ClusterTrust(Magnitude::Max, vec![], vec![], vec![]),
+        ),
+    );
+    fs::write(path, definition.textualize()).expect("write HorizonDefinition");
 }
 
 fn write_executable(path: &Path, text: &str) {
@@ -145,11 +101,26 @@ fn user_environment_request(
     nix_store_uri: &str,
     ssh_destination: &str,
 ) -> meta::DeploySubmission {
+    user_environment_request_with_secrets(
+        source,
+        nix_store_uri,
+        ssh_destination,
+        ordinary::SecretsInput::NoSecrets,
+    )
+}
+
+fn user_environment_request_with_secrets(
+    source: &Path,
+    nix_store_uri: &str,
+    ssh_destination: &str,
+    secrets_input: ordinary::SecretsInput,
+) -> meta::DeploySubmission {
     meta::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
         cluster_name: ordinary::ClusterName::new("alpha"),
         node_name: ordinary::NodeName::new("beacon"),
         user_name: ordinary::UserName::new("bird"),
         proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
+        secrets_input,
         flake_reference: ordinary::FlakeReference::new(FLAKE),
         deployment_transport: transport(nix_store_uri, ssh_destination),
         deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
@@ -285,6 +256,102 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
         generation.generation_slot,
         ordinary::GenerationSlot::Current
     );
+    let secrets_flake = directory
+        .path()
+        .join("generated-inputs/alpha/beacon/user-environment/secrets/flake.nix");
+    let secrets_text =
+        fs::read_to_string(secrets_flake).expect("read generated empty secrets input");
+    assert!(secrets_text.contains("sopsFiles = {"), "{secrets_text}");
+    assert!(
+        !secrets_text.contains(&source.display().to_string()),
+        "public generated input must not retain the Horizon path or a private-input path"
+    );
+}
+
+#[tokio::test]
+async fn explicit_empty_secrets_directory_is_accepted_without_public_path_leakage() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let programs = directory.path().join("programs");
+    fake_programs(&programs, false, false);
+    let source = directory.path().join("horizon-definition.datom");
+    write_fixture_proposal(&source);
+    let secrets = directory.path().join("caller-owned-secrets");
+    fs::create_dir_all(&secrets).expect("create explicit empty secrets directory");
+    let mut engine = runtime(directory.path(), &programs);
+
+    assert!(matches!(
+        submit_and_drive(
+            &mut engine,
+            user_environment_request_with_secrets(
+                &source,
+                "ssh-ng://fixture-copy-secrets.invalid",
+                "root@fixture-activate-secrets.invalid",
+                ordinary::SecretsInput::SecretsDirectory(ordinary::SecretsDirectory::new(
+                    secrets.display().to_string(),
+                )),
+            ),
+        )
+        .await,
+        meta::MetaEgress::DeployTerminal(record)
+            if matches!(record.optional_deployment_terminal, Some(meta::DeploymentTerminal::Succeeded))
+    ));
+    let generated = directory
+        .path()
+        .join("generated-inputs/alpha/beacon/user-environment/secrets/flake.nix");
+    let generated = fs::read_to_string(generated).expect("read generated secrets flake");
+    assert!(generated.contains("sopsFiles = {"), "{generated}");
+    assert!(
+        !generated.contains(&secrets.display().to_string()),
+        "the public generated input names no caller-owned private path"
+    );
+}
+
+#[tokio::test]
+async fn invalid_explicit_secrets_inputs_fail_before_effects() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().expect("tempdir");
+    let source = directory.path().join("horizon-definition.datom");
+    write_fixture_proposal(&source);
+    let existing_file = directory.path().join("not-a-directory");
+    fs::write(&existing_file, "fixture").expect("write non-directory");
+    let existing_directory = directory.path().join("real-directory");
+    fs::create_dir_all(&existing_directory).expect("create real directory");
+    let link = directory.path().join("directory-link");
+    symlink(&existing_directory, &link).expect("make symlink witness");
+
+    let inputs = [
+        ordinary::SecretsInput::SecretsDirectory(ordinary::SecretsDirectory::new("relative")),
+        ordinary::SecretsInput::SecretsDirectory(ordinary::SecretsDirectory::new(
+            directory.path().join("missing").display().to_string(),
+        )),
+        ordinary::SecretsInput::SecretsDirectory(ordinary::SecretsDirectory::new(
+            existing_file.display().to_string(),
+        )),
+        ordinary::SecretsInput::SecretsDirectory(ordinary::SecretsDirectory::new(
+            link.display().to_string(),
+        )),
+    ];
+    for input in inputs {
+        let programs = tempfile::tempdir().expect("program directory");
+        fake_programs(programs.path(), false, false);
+        let mut engine = runtime(directory.path(), programs.path());
+        let outcome = submit_and_drive(
+            &mut engine,
+            user_environment_request_with_secrets(
+                &source,
+                "ssh-ng://fixture-copy-invalid-secrets.invalid",
+                "root@fixture-activate-invalid-secrets.invalid",
+                input,
+            ),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            meta::MetaEgress::DeployTerminal(record)
+                if matches!(record.optional_deployment_terminal, Some(meta::DeploymentTerminal::Failed(_)))
+        ));
+    }
 }
 
 #[tokio::test]

@@ -1,83 +1,45 @@
-//! Thin-client Dotos edge tests.
+//! Thin-client Datom ingress tests.
 //!
-//! Each public CLI accepts one inline DOTOS/NOTA request and lowers it to
-//! exactly one public contract input. Ordinary and owner traffic remain
-//! structurally separate, and neither client reads a caller-selected file.
+//! Each public CLI accepts one canonical inline Datom request and lowers it to
+//! exactly one generated contract input. Ordinary and owner traffic retain
+//! their separate authority-tier contracts; neither client reads a
+//! caller-selected request file.
 
 use std::ffi::OsString;
 
-use lojix::Error;
 use lojix::client::{MetaClient, OrdinaryClient};
-#[cfg(feature = "dotos-text")]
-use meta_signal_lojix::schema::lib as meta;
-#[cfg(feature = "dotos-text")]
-use signal_lojix::schema::lib as ordinary;
-use triad_runtime::{ComponentArgument, ComponentCommand};
+use protos::Textualizable;
 
-const ORDINARY_QUERY: &str = "Query.ByNode.(alpha node-1 None)";
-#[cfg(feature = "dotos-text")]
-const OWNER_PIN: &str = "Pin.(alpha node-1 42 keep)";
-
-#[cfg(feature = "dotos-text")]
-fn ordinary_query() -> ordinary::z2VTvQ {
-    dotos::DotosSource::new(ORDINARY_QUERY)
-        .parse()
-        .expect("ordinary Interface Dotos")
+fn text(value: &str) -> protos::Text {
+    protos::Text::try_from(value).expect("fixture text")
 }
 
-#[cfg(feature = "dotos-text")]
-fn owner_pin() -> meta::z2VW7Q {
-    dotos::DotosSource::new(OWNER_PIN)
-        .parse()
-        .expect("owner Interface Dotos")
+fn ordinary_query() -> signal_lojix::Request {
+    signal_lojix::Request::Query(signal_lojix::Selection::ByNode(signal_lojix::NodeSelector(
+        text("alpha"),
+        text("node-1"),
+        None,
+    )))
 }
 
-fn dotos_argument(argument: impl Into<String>) -> ComponentArgument {
-    ComponentCommand::from_arguments([argument.into()])
-        .dotos_argument()
-        .expect("one Dotos component argument")
+fn owner_pin() -> meta_signal_lojix::Request {
+    meta_signal_lojix::Request::Pin(meta_signal_lojix::PinRequest(
+        text("alpha"),
+        text("node-1"),
+        42.into(),
+        text("keep"),
+    ))
 }
 
 #[test]
-#[cfg(not(feature = "dotos-text"))]
-fn inline_dotos_requires_text_feature() {
-    let error = OrdinaryClient::from_argument(dotos_argument(ORDINARY_QUERY))
-        .expect_err("inline Dotos must reject without its parser");
-    assert!(matches!(error, Error::DotosTextUnsupported));
-}
-
-#[test]
-fn public_clients_reject_file_argument_variants() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let dotos_path = directory.path().join("request.dotos");
-    let signal_path = directory.path().join("request.sema");
-    std::fs::write(&dotos_path, "not read").expect("write dotos witness");
-    std::fs::write(&signal_path, "not read").expect("write signal witness");
-
-    let dotos_file = dotos_argument(dotos_path.display().to_string());
-    let signal_file = ComponentCommand::from_arguments([signal_path.display().to_string()])
-        .signal_file_argument()
-        .expect("signal file argument");
-
-    assert!(matches!(
-        OrdinaryClient::from_argument(dotos_file),
-        Err(Error::InlineDotosRequired)
-    ));
-    assert!(matches!(
-        MetaClient::from_argument(signal_file),
-        Err(Error::InlineDotosRequired)
-    ));
-}
-
-#[test]
-fn public_clients_reject_zero_extra_flags_and_raw_paths() {
-    let inline = ORDINARY_QUERY;
+fn public_clients_reject_non_single_inline_datom_arguments() {
+    let inline = ordinary_query().textualize();
     let cases = [
         Vec::new(),
         vec![OsString::from("--help")],
         vec![OsString::from("--pretty")],
-        vec![OsString::from("/tmp/not-an-inline-request.dotos")],
-        vec![OsString::from(inline), OsString::from("extra")],
+        vec![OsString::from("/tmp/not-an-inline-request.datom")],
+        vec![OsString::from(&inline), OsString::from("extra")],
     ];
     for arguments in cases {
         assert!(
@@ -94,19 +56,17 @@ fn public_clients_reject_zero_extra_flags_and_raw_paths() {
 }
 
 #[test]
-#[cfg(feature = "dotos-text")]
-fn ordinary_client_decodes_inline_dotos() {
+fn ordinary_client_decodes_canonical_inline_datom() {
     let input = ordinary_query();
-    let client = OrdinaryClient::from_arguments([OsString::from(ORDINARY_QUERY)])
-        .expect("decode ordinary Dotos");
+    let client = OrdinaryClient::from_arguments([OsString::from(input.textualize())])
+        .expect("decode ordinary Datom request");
     assert_eq!(client.input(), &input);
 }
 
 #[test]
-#[cfg(feature = "dotos-text")]
-fn meta_client_decodes_inline_dotos() {
+fn meta_client_decodes_canonical_inline_datom() {
     let input = owner_pin();
-    let client =
-        MetaClient::from_arguments([OsString::from(OWNER_PIN)]).expect("decode owner Dotos");
+    let client = MetaClient::from_arguments([OsString::from(input.textualize())])
+        .expect("decode owner Datom request");
     assert_eq!(client.input(), &input);
 }

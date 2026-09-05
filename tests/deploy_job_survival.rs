@@ -1,87 +1,44 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use datomic::Datomic;
-use horizon_lib::address::{YggAddress, YggSubnet};
-use horizon_lib::domain::DomainConfiguration;
-use horizon_lib::io::Io;
-use horizon_lib::machine::Machine;
-use horizon_lib::magnitude::Magnitude;
-use horizon_lib::name::NodeName as HorizonNodeName;
-use horizon_lib::proposal::{ClusterProposal, ClusterTrust, NodeProposal, NodePubKeys};
-use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
-use horizon_lib::species::{Arch, Bootloader, Keyboard, MachineSpecies, NodeSpecies};
+use datom_codec::Textualizable;
+use horizon_lib::*;
 use lojix::Store;
 use lojix::runtime_model as sema;
 use lojix::schema_runtime::{DeploySubmissionOutcome, SchemaRuntime};
 
 fn write_proposal(path: &Path) {
-    let node = NodeProposal {
-        species: NodeSpecies::EdgeTesting,
-        size: Magnitude::Large,
-        trust: Magnitude::Max,
-        machine: Machine {
-            species: MachineSpecies::Metal,
-            arch: Some(Arch::X86_64),
-            cores: 4,
-            model: None,
-            mother_board: None,
-            super_node: None,
-            super_user: None,
-            chip_gen: None,
-            ram_gb: None,
-            disk_gb: None,
-            location: None,
-            super_nodes: Vec::new(),
-        },
-        io: Io {
-            keyboard: Keyboard::Qwerty,
-            bootloader: Bootloader::Uefi,
-            disks: BTreeMap::new(),
-            swap_devices: Vec::new(),
-            compressed_swap: None,
-        },
-        pub_keys: NodePubKeys {
-            ssh: SshPubKey::try_new("AAA=").expect("ssh key"),
-            nix: Some(
-                NixPubKey::try_new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-                    .expect("nix key"),
-            ),
-            yggdrasil: Some(horizon_lib::proposal::YggPubKeyEntry {
-                pub_key: YggPubKey::try_new("a".repeat(64)).expect("ygg key"),
-                address: YggAddress::try_new("200::1").expect("ygg address"),
-                subnet: YggSubnet::try_new("300:ca41:6b12:fba").expect("ygg subnet"),
-            }),
-        },
-        link_local_ips: Vec::new(),
-        node_ip: None,
-        wireguard_pub_key: None,
-        nordvpn: false,
-        wifi_cert: false,
-        wireguard_untrusted_proxies: Vec::new(),
-        wants_printing: false,
-        wants_hw_video_accel: false,
-        router_interfaces: None,
-        online: None,
-        services: Vec::new(),
-    };
-    let mut nodes = BTreeMap::new();
-    nodes.insert(HorizonNodeName::try_new("node-1").expect("node name"), node);
-    let proposal = ClusterProposal {
-        nodes,
-        users: BTreeMap::new(),
-        domains: BTreeMap::new(),
-        trust: ClusterTrust {
-            cluster: Magnitude::Max,
-            clusters: BTreeMap::new(),
-            nodes: BTreeMap::new(),
-            users: BTreeMap::new(),
-        },
-        domain_configuration: DomainConfiguration::default(),
-    };
-    fs::write(path, proposal.textualize().as_ref()).expect("write proposal");
+    fn text(value: &str) -> protos::Text {
+        protos::Text::try_from(value).expect("fixture text")
+    }
+    let node = NodeDefinition(
+        text("node-1"),
+        NodeVariant::Live(LiveDefinition()),
+        Magnitude::Max,
+        Magnitude::Max,
+        MachineDefinition::Metal(
+            Architecture::X86_64,
+            Hardware(4.into(), None, None, None, None, None),
+        ),
+        NodeEnvironment(Keyboard::Qwerty, None),
+        NodeNetwork(vec![], None, None, vec![], None),
+        NodeKeys(text("ssh-ed25519 AAAAfixture"), None, None),
+        Some(true),
+        vec![],
+    );
+    let definition = HorizonDefinition(
+        HorizonConfiguration(vec![], DomainConfiguration(text("criome"), vec![])),
+        ClusterDefinition(
+            text("alpha"),
+            vec![node],
+            vec![],
+            vec![],
+            vec![],
+            ClusterTrust(Magnitude::Max, vec![], vec![], vec![]),
+        ),
+    );
+    fs::write(path, definition.textualize()).expect("write HorizonDefinition");
 }
 
 fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
@@ -90,6 +47,7 @@ fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
         node_name: sema::NodeName::new("node-1"),
         host_composition: sema::HostComposition::BaseHost,
         proposal_source: sema::ProposalSource::new(proposal_source.display().to_string()),
+        secrets_input: sema::SecretsInput::NoSecrets,
         flake_reference: sema::FlakeReference::new("github:example/fixture"),
         deployment_transport: sema::DeploymentTransport {
             nix_store_uri: sema::NixStoreUri::new("ssh-ng://fixture-copy.invalid"),

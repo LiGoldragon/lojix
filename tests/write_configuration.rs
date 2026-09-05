@@ -1,7 +1,7 @@
-//! Bootstrap config-writer round trip: the DOTOS-to-rkyv `lojix-write-configuration`
+//! Bootstrap config-writer round trip: the Datom-to-rkyv `lojix-write-configuration`
 //! tool produces a startup file that the daemon's
 //! `DaemonConfiguration::from_rkyv_file` reads back unchanged. This is the
-//! DOTOS-to-binary boundary at deploy time — the daemon never parses DOTOS.
+//! current Datom-to-binary boundary at deploy time.
 
 use std::process::Command;
 
@@ -44,7 +44,7 @@ fn write_configuration_round_trips_through_rkyv() {
     assert_eq!(configuration.daemon_host, "fixture-daemon");
     let test_defaults = configuration
         .test_defaults
-        .expect("the (TestDefaults …) form lowers to a baked fixture");
+        .expect("the generated TestDefaults form lowers to a baked fixture");
     assert_eq!(test_defaults.cluster, "fixture-cluster");
     assert_eq!(test_defaults.default_vm_host, "fixture-vm-host");
     assert_eq!(
@@ -58,7 +58,7 @@ fn write_configuration_round_trips_through_rkyv() {
 }
 
 /// The production posture: a `NoTestDefaults` choice lowers to `None`, so the
-/// daemon bakes no per-node test fixture and a bare `(Check …)`/`(Run …)`
+/// daemon bakes no per-node test fixture and a bare check/run request
 /// rejects with `NoTestDefaults` instead of resolving against a baked cluster.
 #[test]
 fn write_configuration_bakes_no_test_defaults_for_production() {
@@ -82,10 +82,10 @@ fn write_configuration_requires_one_inline_object_and_never_reads_a_request_file
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "(ConfigurationWriteRequest (/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon NoTestDefaults {}))",
+        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon NoTestDefaults {}}}",
         output.display()
     );
-    let request_file = directory.path().join("request.dotos");
+    let request_file = directory.path().join("request.datom");
     std::fs::write(&request_file, &request).expect("write request-file witness");
 
     for arguments in [
