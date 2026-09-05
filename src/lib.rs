@@ -47,6 +47,19 @@ pub mod runtime_flow;
 pub mod runtime_model;
 pub mod schema_runtime;
 
+/// The supported Nix platform for a resolved Horizon machine architecture.
+///
+/// Horizon deliberately models hardware architecture without an operating
+/// system suffix.  Every materializer converts through this one table before
+/// it compares or emits a Nix platform string.
+pub(crate) fn nix_system_from_horizon_architecture(architecture: &str) -> Option<&'static str> {
+    match architecture {
+        "x86_64" => Some("x86_64-linux"),
+        "aarch64" => Some("aarch64-linux"),
+        _ => None,
+    }
+}
+
 /// The Lojix durable-store schema version. v4 records exact private deployment
 /// routing snapshots and deliberately does not decode or migrate earlier
 /// layouts. Use the path-scoped `lojix-reset-store` primitive while the daemon

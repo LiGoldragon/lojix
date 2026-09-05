@@ -4849,11 +4849,14 @@ impl GeneratedInputDirectory {
 
     fn write_system(&self, system: &str) -> Result<Self> {
         self.prepare()?;
+        let system = NixSystemName::from_horizon_architecture(system).ok_or_else(|| {
+            Error::Invariant("Horizon architecture has no supported Nix system".to_string())
+        })?;
         fs::write(
             self.path.join("flake.nix"),
             format!(
                 "{{ outputs = _: {{ system = \"{}\"; }}; }}\n",
-                NixSystemName::from_horizon_architecture(system).as_str()
+                system.as_str()
             ),
         )?;
         Ok(self.clone())
@@ -5103,12 +5106,8 @@ impl ClusterSecretFile {
 struct NixSystemName(&'static str);
 
 impl NixSystemName {
-    fn from_horizon_architecture(architecture: &str) -> Self {
-        match architecture {
-            "x86_64" => Self("x86_64-linux"),
-            "aarch64" => Self("aarch64-linux"),
-            _ => Self("unknown-linux"),
-        }
+    fn from_horizon_architecture(architecture: &str) -> Option<Self> {
+        crate::nix_system_from_horizon_architecture(architecture).map(Self)
     }
 
     fn as_str(self) -> &'static str {
@@ -8101,13 +8100,18 @@ mod tests {
     #[test]
     fn resolved_horizon_architecture_maps_to_nix_system() {
         assert_eq!(
-            NixSystemName::from_horizon_architecture("x86_64").as_str(),
+            NixSystemName::from_horizon_architecture("x86_64")
+                .expect("x86_64 is supported")
+                .as_str(),
             "x86_64-linux"
         );
         assert_eq!(
-            NixSystemName::from_horizon_architecture("aarch64").as_str(),
+            NixSystemName::from_horizon_architecture("aarch64")
+                .expect("aarch64 is supported")
+                .as_str(),
             "aarch64-linux"
         );
+        assert!(NixSystemName::from_horizon_architecture("riscv64").is_none());
     }
 
     #[test]

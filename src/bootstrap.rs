@@ -829,8 +829,12 @@ fn materialize<E: BootstrapExecutor>(
     let horizon = definition
         .project(&input.node_name)
         .map_err(|_| BootstrapError::Materialization)?;
-    let projected_system = &horizon.node.machine.architecture;
-    if projected_system.as_str() != input.nix_system {
+    let Some(projected_system) =
+        crate::nix_system_from_horizon_architecture(&horizon.node.machine.architecture)
+    else {
+        return Err(BootstrapError::Materialization);
+    };
+    if projected_system != input.nix_system {
         return Err(BootstrapError::Materialization);
     }
 
@@ -2512,4 +2516,20 @@ fn is_canonical_nix_store_item(value: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'_' | b'-'))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn horizon_architecture_is_compared_as_a_nix_system() {
+        assert_eq!(
+            crate::nix_system_from_horizon_architecture("x86_64"),
+            Some("x86_64-linux")
+        );
+        assert_eq!(
+            crate::nix_system_from_horizon_architecture("aarch64"),
+            Some("aarch64-linux")
+        );
+        assert_eq!(crate::nix_system_from_horizon_architecture("riscv64"), None);
+    }
 }
