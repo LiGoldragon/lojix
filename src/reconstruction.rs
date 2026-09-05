@@ -14,12 +14,15 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use dotos::{Delimiter, DotosBlock, DotosSource};
+use datom_codec::{Actualizable, IncorporationBudget, Potential};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use rkyv::rancor;
 use sema_engine::TableRegistration;
 
-use crate::{DaemonConfiguration, Error, Result, Store, single_inline_dotos_argument};
+use crate::{DaemonConfiguration, Error, Result, Store, single_inline_datom_argument};
+
+#[path = "ingress.rs"]
+mod ingress;
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");
@@ -77,7 +80,7 @@ impl std::fmt::Display for StoreResetOutcome {
 }
 
 /// One exact, version-aware Lojix store reset. It accepts only inline
-/// `(ResetStore)`, never a raw path, configuration path, directory, glob, or
+/// `ResetStore`, never a raw path, configuration path, directory, glob, or
 /// request file. The archive supplied by the service environment owns the
 /// store selection. That configured primary must be an existing regular,
 /// non-symlink file with a recognised Lojix catalog; a sibling Spirit database
@@ -104,7 +107,7 @@ impl StoreResetCommand {
         arguments: impl IntoIterator<Item = OsString>,
         configuration_path: impl Into<PathBuf>,
     ) -> Result<Self> {
-        let text = single_inline_dotos_argument(arguments)?;
+        let text = single_inline_datom_argument(arguments)?;
         parse_reset_request(&text)?;
         Ok(Self {
             configuration_path: configuration_path.into(),
@@ -143,25 +146,15 @@ impl StoreResetCommand {
     }
 }
 
-/// `(ResetStore)` is a one-field parenthesised DOTOS object. It is deliberately
+/// `ResetStore` is a bare current Datom command. It is deliberately
 /// parsed structurally rather than treated as a magic string so extra fields,
 /// another delimiter, and a malformed document are all rejected at the same
 /// boundary.
 fn parse_reset_request(text: &str) -> Result<()> {
-    let root = DotosSource::new(text)
-        .parse_root()
-        .map_err(|error| Error::DotosRequestText(error.to_string()))?;
-    let fields = DotosBlock::new(&root)
-        .expect_children(Delimiter::Parenthesis, "ResetStore", 1)
-        .map_err(|error| Error::DotosRequestText(error.to_string()))?;
-    let request = DotosBlock::new(&fields[0])
-        .parse_string()
-        .map_err(|error| Error::DotosRequestText(error.to_string()))?;
-    if request != "ResetStore" {
-        return Err(Error::DotosRequestText(
-            "expected the exact inline (ResetStore) object".to_string(),
-        ));
-    }
+    let request = Potential::<ingress::ResetStore>::from(text.to_owned())
+        .actualize(IncorporationBudget::try_from(16_384).expect("static ingress budget"))
+        .map_err(|fault| Error::DatomRequestText(format!("{fault:?}")))?;
+    let ingress::ResetStore::ResetStore = request;
     Ok(())
 }
 
@@ -434,7 +427,7 @@ mod tests {
 
     fn reset_command(archive: &Path) -> StoreResetCommand {
         StoreResetCommand::from_arguments_with_configuration(
-            [OsString::from("(ResetStore)")],
+            [OsString::from("ResetStore")],
             archive.to_path_buf(),
         )
         .expect("exact reset command")
@@ -464,12 +457,12 @@ mod tests {
             vec![OsString::from("--pretty")],
             vec![OsString::from("/tmp/lojix-store.sema")],
             vec![OsString::from("StoreResetRequest.{/tmp/lojix-store.sema}")],
-            vec![OsString::from("(ResetStore)"), OsString::from("extra")],
+            vec![OsString::from("ResetStore"), OsString::from("extra")],
         ] {
             assert!(
                 StoreResetCommand::from_arguments_with_configuration(arguments, archive.clone())
                     .is_err(),
-                "reset must accept only one inline (ResetStore) object"
+                "reset must accept only one inline ResetStore Datom"
             );
         }
     }

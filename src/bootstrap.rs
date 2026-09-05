@@ -18,7 +18,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use dotos::{DotosDecode, DotosDecodeError, DotosSource};
+use datom_codec::{Actualizable, IncorporationBudget, Potential};
 use horizon_lib::HorizonDefinition;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sha2::{Digest, Sha256};
@@ -36,22 +36,16 @@ const PRIVATE_EVIDENCE_MODE: u32 = 0o600;
 
 static JOURNAL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// The one accepted inline object.
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
-pub enum BootstrapCliInput {
-    BootstrapRun(BootstrapRun),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapRun {
     pub request_id: BootstrapRequestId,
     pub mode: BootstrapMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapRequestId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum BootstrapMode {
     BuildOnly(BootstrapBuildOnly),
@@ -60,7 +54,7 @@ pub enum BootstrapMode {
 
 /// The exact dry-run/build-only variant.  Its type has no transport or
 /// activation field, so a decoded BuildOnly request cannot activate by design.
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapBuildOnly {
     pub input: BootstrapInput,
     pub builder: BootstrapBuilder,
@@ -69,7 +63,7 @@ pub struct BootstrapBuildOnly {
     pub terminal_evidence_path: BootstrapTerminalEvidencePath,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapBootOnce {
     pub input: BootstrapInput,
     pub builder: BootstrapBuilder,
@@ -80,13 +74,13 @@ pub struct BootstrapBootOnce {
     pub terminal_evidence_path: BootstrapTerminalEvidencePath,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootstrapInput {
     Direct(BootstrapDirectInput),
     Horizon(BootstrapHorizonInput),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapDirectInput {
     pub flake_reference: BootstrapFlakeReference,
     pub nix_system: BootstrapNixSystem,
@@ -96,7 +90,7 @@ pub struct BootstrapDirectInput {
 /// Horizon materialization carries its complete authority surface.  In
 /// particular, `secrets_input` is explicit; no sibling `secrets/` directory is
 /// inferred from the proposal path.
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapHorizonInput {
     pub proposal_source: BootstrapProposalSource,
     pub cluster_name: BootstrapClusterName,
@@ -108,44 +102,44 @@ pub struct BootstrapHorizonInput {
     pub output_selector: BootstrapOutputSelector,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootstrapMaterializationShape {
     CompleteHost,
     BaseHost,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootstrapSecretsInput {
     NoSecrets,
     SecretsDirectory(BootstrapSecretsDirectory),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootstrapBuilder {
     NoBuilder,
     NixBuilder(BootstrapBuilderSpec),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootstrapTestPlan {
     NoTest,
     RunHermeticTest(BootstrapHermeticTest),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapHermeticTest {
     pub flake_reference: BootstrapFlakeReference,
     pub nix_system: BootstrapNixSystem,
     pub output_selector: BootstrapOutputSelector,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootstrapActivationBackend {
     RemoteNixosSystemdBootV1(BootstrapRemoteNixosSystemdBootV1),
     LocalBootstrapV1(BootstrapLocalBootstrapV1),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapRemoteNixosSystemdBootV1 {
     pub nix_store_uri: BootstrapNixStoreUri,
     pub ssh_destination: BootstrapSshDestination,
@@ -156,19 +150,19 @@ pub struct BootstrapRemoteNixosSystemdBootV1 {
 
 /// Request-owned SSH authority. The bootstrapper accepts no ambient agent,
 /// config, user/host, proxy, multiplexing, or trust-store default.
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapSshPolicy {
     pub identity_file: BootstrapSshIdentityFile,
     pub known_hosts_file: BootstrapSshKnownHostsFile,
     pub strict_host_key_mode: BootstrapStrictHostKeyMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootstrapStrictHostKeyMode {
     RequireKnownHost,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapLocalBootstrapV1 {
     pub system_profile_path: BootstrapSystemProfilePath,
     pub boot_entries_directory: BootstrapBootEntriesDirectory,
@@ -176,7 +170,7 @@ pub struct BootstrapLocalBootstrapV1 {
 
 macro_rules! text_field {
     ($name:ident) => {
-        #[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
+        #[derive(Debug, Clone, PartialEq, Eq)]
         pub struct $name(pub String);
     };
 }
@@ -262,10 +256,10 @@ pub struct BootstrapTerminal {
 
 #[derive(Debug, Error)]
 pub enum BootstrapError {
-    #[error("bootstrap invocation requires one inline DOTOS object: {0}")]
+    #[error("bootstrap invocation requires one inline Datom object: {0}")]
     Argument(#[from] crate::Error),
-    #[error("bootstrap DOTOS decode failed: {0}")]
-    Decode(#[from] DotosDecodeError),
+    #[error("bootstrap Datom decode failed: {0}")]
+    Decode(String),
     #[error("unsafe or incomplete bootstrap request: {0}")]
     Validation(&'static str),
     #[error("bootstrap journal creation failed: {0}")]
@@ -338,7 +332,7 @@ impl BootstrapExecutor for ProcessBootstrapExecutor {
     }
 }
 
-/// Decode and run exactly one inline DOTOS object.  This function never
+/// Decode and run exactly one inline Datom object. This function never
 /// consults daemon environment variables or socket paths.
 pub fn run_from_environment() -> std::result::Result<BootstrapTerminal, BootstrapError> {
     let request = decode_single_inline(std::env::args_os().skip(1))?;
@@ -346,12 +340,183 @@ pub fn run_from_environment() -> std::result::Result<BootstrapTerminal, Bootstra
     run_with_executor(request, &mut executor)
 }
 
+#[path = "ingress.rs"]
+mod ingress;
+
 pub fn decode_single_inline(
     arguments: impl IntoIterator<Item = OsString>,
 ) -> std::result::Result<BootstrapRun, BootstrapError> {
-    let text = crate::single_inline_dotos_argument(arguments)?;
-    let BootstrapCliInput::BootstrapRun(request) = DotosSource::new(&text).parse()?;
-    Ok(request)
+    let text = crate::single_inline_datom_argument(arguments)?;
+    let request = Potential::<ingress::BootstrapRequest>::from(text)
+        .actualize(IncorporationBudget::try_from(16_384).expect("static ingress budget"))
+        .map_err(|fault| BootstrapError::Decode(format!("{fault:?}")))?;
+    bootstrap_run_from_ingress(request)
+}
+
+fn ingress_text(value: protos::Text) -> String {
+    value.to_string()
+}
+
+fn bootstrap_run_from_ingress(
+    request: ingress::BootstrapRequest,
+) -> std::result::Result<BootstrapRun, BootstrapError> {
+    let ingress::BootstrapRequest::BootstrapRun(ingress::BootstrapRun(request_id, mode)) = request;
+    Ok(BootstrapRun {
+        request_id: BootstrapRequestId(ingress_text(request_id)),
+        mode: bootstrap_mode_from_ingress(mode),
+    })
+}
+
+fn bootstrap_mode_from_ingress(value: ingress::BootstrapMode) -> BootstrapMode {
+    match value {
+        ingress::BootstrapMode::BuildOnly(ingress::BootstrapBuildOnly(
+            input,
+            builder,
+            journal_parent,
+            gc_root_path,
+            terminal_evidence_path,
+        )) => BootstrapMode::BuildOnly(BootstrapBuildOnly {
+            input: bootstrap_input_from_ingress(input),
+            builder: bootstrap_builder_from_ingress(builder),
+            journal_parent: BootstrapJournalParent(ingress_text(journal_parent)),
+            gc_root_path: BootstrapGcRootPath(ingress_text(gc_root_path)),
+            terminal_evidence_path: BootstrapTerminalEvidencePath(ingress_text(
+                terminal_evidence_path,
+            )),
+        }),
+        ingress::BootstrapMode::BootOnce(ingress::BootstrapBootOnce(
+            input,
+            builder,
+            test_plan,
+            activation_backend,
+            journal_parent,
+            gc_root_path,
+            terminal_evidence_path,
+        )) => BootstrapMode::BootOnce(BootstrapBootOnce {
+            input: bootstrap_input_from_ingress(input),
+            builder: bootstrap_builder_from_ingress(builder),
+            test_plan: bootstrap_test_plan_from_ingress(test_plan),
+            activation_backend: bootstrap_activation_backend_from_ingress(activation_backend),
+            journal_parent: BootstrapJournalParent(ingress_text(journal_parent)),
+            gc_root_path: BootstrapGcRootPath(ingress_text(gc_root_path)),
+            terminal_evidence_path: BootstrapTerminalEvidencePath(ingress_text(
+                terminal_evidence_path,
+            )),
+        }),
+    }
+}
+
+fn bootstrap_input_from_ingress(value: ingress::BootstrapInput) -> BootstrapInput {
+    match value {
+        ingress::BootstrapInput::Direct(ingress::BootstrapDirectInput(
+            flake_reference,
+            nix_system,
+            output_selector,
+        )) => BootstrapInput::Direct(BootstrapDirectInput {
+            flake_reference: BootstrapFlakeReference(ingress_text(flake_reference)),
+            nix_system: BootstrapNixSystem(ingress_text(nix_system)),
+            output_selector: BootstrapOutputSelector(ingress_text(output_selector)),
+        }),
+        ingress::BootstrapInput::Horizon(ingress::BootstrapHorizonInput(
+            proposal_source,
+            cluster_name,
+            node_name,
+            materialization_shape,
+            secrets_input,
+            flake_reference,
+            nix_system,
+            output_selector,
+        )) => BootstrapInput::Horizon(BootstrapHorizonInput {
+            proposal_source: BootstrapProposalSource(ingress_text(proposal_source)),
+            cluster_name: BootstrapClusterName(ingress_text(cluster_name)),
+            node_name: BootstrapNodeName(ingress_text(node_name)),
+            materialization_shape: match materialization_shape {
+                ingress::BootstrapMaterializationShape::CompleteHost => {
+                    BootstrapMaterializationShape::CompleteHost
+                }
+                ingress::BootstrapMaterializationShape::BaseHost => {
+                    BootstrapMaterializationShape::BaseHost
+                }
+            },
+            secrets_input: match secrets_input {
+                ingress::BootstrapSecretsInput::NoSecrets => BootstrapSecretsInput::NoSecrets,
+                ingress::BootstrapSecretsInput::SecretsDirectory(path) => {
+                    BootstrapSecretsInput::SecretsDirectory(BootstrapSecretsDirectory(
+                        ingress_text(path),
+                    ))
+                }
+            },
+            flake_reference: BootstrapFlakeReference(ingress_text(flake_reference)),
+            nix_system: BootstrapNixSystem(ingress_text(nix_system)),
+            output_selector: BootstrapOutputSelector(ingress_text(output_selector)),
+        }),
+    }
+}
+
+fn bootstrap_builder_from_ingress(value: ingress::BootstrapBuilder) -> BootstrapBuilder {
+    match value {
+        ingress::BootstrapBuilder::NoBuilder => BootstrapBuilder::NoBuilder,
+        ingress::BootstrapBuilder::NixBuilder(value) => {
+            BootstrapBuilder::NixBuilder(BootstrapBuilderSpec(ingress_text(value)))
+        }
+    }
+}
+
+fn bootstrap_test_plan_from_ingress(value: ingress::BootstrapTestPlan) -> BootstrapTestPlan {
+    match value {
+        ingress::BootstrapTestPlan::NoTest => BootstrapTestPlan::NoTest,
+        ingress::BootstrapTestPlan::RunHermeticTest(ingress::BootstrapHermeticTest(
+            flake_reference,
+            nix_system,
+            output_selector,
+        )) => BootstrapTestPlan::RunHermeticTest(BootstrapHermeticTest {
+            flake_reference: BootstrapFlakeReference(ingress_text(flake_reference)),
+            nix_system: BootstrapNixSystem(ingress_text(nix_system)),
+            output_selector: BootstrapOutputSelector(ingress_text(output_selector)),
+        }),
+    }
+}
+
+fn bootstrap_activation_backend_from_ingress(
+    value: ingress::BootstrapActivationBackend,
+) -> BootstrapActivationBackend {
+    match value {
+        ingress::BootstrapActivationBackend::RemoteNixosSystemdBootV1(
+            ingress::BootstrapRemoteNixosSystemdBootV1(
+                nix_store_uri,
+                ssh_destination,
+                ingress::BootstrapSshPolicy(identity_file, known_hosts_file, strict_host_key_mode),
+                system_profile_path,
+                boot_entries_directory,
+            ),
+        ) => BootstrapActivationBackend::RemoteNixosSystemdBootV1(
+            BootstrapRemoteNixosSystemdBootV1 {
+                nix_store_uri: BootstrapNixStoreUri(ingress_text(nix_store_uri)),
+                ssh_destination: BootstrapSshDestination(ingress_text(ssh_destination)),
+                ssh_policy: BootstrapSshPolicy {
+                    identity_file: BootstrapSshIdentityFile(ingress_text(identity_file)),
+                    known_hosts_file: BootstrapSshKnownHostsFile(ingress_text(known_hosts_file)),
+                    strict_host_key_mode: match strict_host_key_mode {
+                        ingress::BootstrapStrictHostKeyMode::RequireKnownHost => {
+                            BootstrapStrictHostKeyMode::RequireKnownHost
+                        }
+                    },
+                },
+                system_profile_path: BootstrapSystemProfilePath(ingress_text(system_profile_path)),
+                boot_entries_directory: BootstrapBootEntriesDirectory(ingress_text(
+                    boot_entries_directory,
+                )),
+            },
+        ),
+        ingress::BootstrapActivationBackend::LocalBootstrapV1(
+            ingress::BootstrapLocalBootstrapV1(system_profile_path, boot_entries_directory),
+        ) => BootstrapActivationBackend::LocalBootstrapV1(BootstrapLocalBootstrapV1 {
+            system_profile_path: BootstrapSystemProfilePath(ingress_text(system_profile_path)),
+            boot_entries_directory: BootstrapBootEntriesDirectory(ingress_text(
+                boot_entries_directory,
+            )),
+        }),
+    }
 }
 
 /// Run the pipeline against an injected executor.  The production entry point
@@ -662,8 +827,8 @@ fn materialize<E: BootstrapExecutor>(
     };
     let proposal_text =
         fs::read_to_string(&input.proposal_source).map_err(|_| BootstrapError::Materialization)?;
-    let definition: HorizonDefinition = horizon_lib::decode(&proposal_text)
-        .map_err(|_| BootstrapError::Materialization)?;
+    let definition: HorizonDefinition =
+        horizon_lib::decode(&proposal_text).map_err(|_| BootstrapError::Materialization)?;
     let horizon = definition
         .project(&input.node_name)
         .map_err(|_| BootstrapError::Materialization)?;

@@ -10,14 +10,14 @@ use std::process::Command;
 
 use lojix::bootstrap::{
     BootstrapActivationBackend, BootstrapBootOnce, BootstrapBuildOnly, BootstrapBuilder,
-    BootstrapCliInput, BootstrapCommand, BootstrapCrashInjector, BootstrapCrashPoint,
-    BootstrapDirectInput, BootstrapEffectStage, BootstrapExecutor, BootstrapGcRootPath,
-    BootstrapHermeticTest, BootstrapJournalParent, BootstrapLocalBootstrapV1, BootstrapMode,
-    BootstrapNixStoreUri, BootstrapNixSystem, BootstrapOutputSelector,
-    BootstrapRemoteNixosSystemdBootV1, BootstrapRequestId, BootstrapRun, BootstrapSshDestination,
-    BootstrapSshIdentityFile, BootstrapSshKnownHostsFile, BootstrapSshPolicy,
-    BootstrapStrictHostKeyMode, BootstrapSystemProfilePath, BootstrapTerminalEvidencePath,
-    BootstrapTestPlan, decode_single_inline, run_with_executor, run_with_executor_and_crash,
+    BootstrapCommand, BootstrapCrashInjector, BootstrapCrashPoint, BootstrapDirectInput,
+    BootstrapEffectStage, BootstrapExecutor, BootstrapGcRootPath, BootstrapHermeticTest,
+    BootstrapJournalParent, BootstrapLocalBootstrapV1, BootstrapMode, BootstrapNixStoreUri,
+    BootstrapNixSystem, BootstrapOutputSelector, BootstrapRemoteNixosSystemdBootV1,
+    BootstrapRequestId, BootstrapRun, BootstrapSshDestination, BootstrapSshIdentityFile,
+    BootstrapSshKnownHostsFile, BootstrapSshPolicy, BootstrapStrictHostKeyMode,
+    BootstrapSystemProfilePath, BootstrapTerminalEvidencePath, BootstrapTestPlan,
+    decode_single_inline, run_with_executor, run_with_executor_and_crash,
 };
 
 const FLAKE: &str = "github:fixture-owner/fixture-flake/0123456789abcdef0123456789abcdef01234567";
@@ -702,10 +702,7 @@ fn cli_remains_exactly_one_inline_object() {
         directory.path().join("root").display(),
         directory.path().join("evidence").display(),
     ))]).expect("one inline request");
-    assert!(matches!(
-        BootstrapCliInput::BootstrapRun(parsed),
-        BootstrapCliInput::BootstrapRun(_)
-    ));
+    assert!(matches!(parsed.mode, BootstrapMode::BuildOnly(_)));
     assert!(
         !Command::new(env!("CARGO_BIN_EXE_lojix-bootstrap"))
             .arg("--help")

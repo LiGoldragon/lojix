@@ -1,0 +1,42 @@
+Types
+[ protos:[ Text ] ]
+[ InspectionRequest.[ InspectStore.InspectStore ]
+  InspectStore.{ Text }
+  ResetStore.[ ResetStore ]
+  BootstrapRequest.[ BootstrapRun.BootstrapRun ]
+  BootstrapRun.{ BootstrapRequestId BootstrapMode }
+  BootstrapRequestId.Text
+  BootstrapMode.[ BuildOnly.BootstrapBuildOnly BootOnce.BootstrapBootOnce ]
+  BootstrapBuildOnly.{ BootstrapInput BootstrapBuilder BootstrapJournalParent BootstrapGcRootPath BootstrapTerminalEvidencePath }
+  BootstrapBootOnce.{ BootstrapInput BootstrapBuilder BootstrapTestPlan BootstrapActivationBackend BootstrapJournalParent BootstrapGcRootPath BootstrapTerminalEvidencePath }
+  BootstrapInput.[ Direct.BootstrapDirectInput Horizon.BootstrapHorizonInput ]
+  BootstrapDirectInput.{ BootstrapFlakeReference BootstrapNixSystem BootstrapOutputSelector }
+  BootstrapHorizonInput.{ BootstrapProposalSource BootstrapClusterName BootstrapNodeName BootstrapMaterializationShape BootstrapSecretsInput BootstrapFlakeReference BootstrapNixSystem BootstrapOutputSelector }
+  BootstrapMaterializationShape.[ CompleteHost BaseHost ]
+  BootstrapSecretsInput.[ NoSecrets SecretsDirectory.BootstrapSecretsDirectory ]
+  BootstrapBuilder.[ NoBuilder NixBuilder.BootstrapBuilderSpec ]
+  BootstrapTestPlan.[ NoTest RunHermeticTest.BootstrapHermeticTest ]
+  BootstrapHermeticTest.{ BootstrapFlakeReference BootstrapNixSystem BootstrapOutputSelector }
+  BootstrapActivationBackend.[ RemoteNixosSystemdBootV1.BootstrapRemoteNixosSystemdBootV1 LocalBootstrapV1.BootstrapLocalBootstrapV1 ]
+  BootstrapRemoteNixosSystemdBootV1.{ BootstrapNixStoreUri BootstrapSshDestination BootstrapSshPolicy BootstrapSystemProfilePath BootstrapBootEntriesDirectory }
+  BootstrapSshPolicy.{ BootstrapSshIdentityFile BootstrapSshKnownHostsFile BootstrapStrictHostKeyMode }
+  BootstrapStrictHostKeyMode.[ RequireKnownHost ]
+  BootstrapLocalBootstrapV1.{ BootstrapSystemProfilePath BootstrapBootEntriesDirectory }
+  BootstrapFlakeReference.Text
+  BootstrapNixSystem.Text
+  BootstrapOutputSelector.Text
+  BootstrapProposalSource.Text
+  BootstrapClusterName.Text
+  BootstrapNodeName.Text
+  BootstrapSecretsDirectory.Text
+  BootstrapBuilderSpec.Text
+  BootstrapJournalParent.Text
+  BootstrapGcRootPath.Text
+  BootstrapTerminalEvidencePath.Text
+  BootstrapNixStoreUri.Text
+  BootstrapSshDestination.Text
+  BootstrapSshIdentityFile.Text
+  BootstrapSshKnownHostsFile.Text
+  BootstrapSystemProfilePath.Text
+  BootstrapBootEntriesDirectory.Text ]
+[]
