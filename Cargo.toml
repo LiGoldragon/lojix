@@ -40,7 +40,7 @@ name = "lojix-bootstrap"
 path = "src/bin/lojix-bootstrap.rs"
 
 [dependencies]
-horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", rev = "fc03733794185aca322cc07ef532e170a975a3c5" }
+horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs.git", rev = "05879e7c1e5f637f78fbe26234b95213c77c59bc" }
 datom-codec       = { git = "https://github.com/LiGoldragon/datom-codec", rev = "41a3c073d5c5" }
 protos            = { git = "https://github.com/LiGoldragon/protos", rev = "2d999f173334" }
 kameo             = "0.20"

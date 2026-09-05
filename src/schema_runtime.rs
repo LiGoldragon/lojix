@@ -1071,6 +1071,7 @@ struct DeployPipeline {
     activation_effect: ordinary::ActivationEffect,
     activation_slot: Option<ordinary::GenerationSlot>,
     source: ordinary::ProposalSource,
+    secrets_input: sema::SecretsInput,
     requested_flake: ordinary::FlakeReference,
     flake: ordinary::FlakeReference,
     /// Exact, request-owned deployment routing. These values are persisted on
@@ -1498,6 +1499,7 @@ impl DeployPipeline {
                 activation_effect: Self::host_activation_effect(deployment.host_deploy_action),
                 activation_slot: None,
                 source: deployment.proposal_source,
+                secrets_input: deployment.secrets_input,
                 requested_flake: deployment.flake_reference.clone(),
                 flake: deployment.flake_reference,
                 deployment_transport: deployment.deployment_transport,
@@ -1528,6 +1530,7 @@ impl DeployPipeline {
                 ),
                 activation_slot: None,
                 source: deployment.proposal_source,
+                secrets_input: deployment.secrets_input,
                 requested_flake: deployment.flake_reference.clone(),
                 flake: deployment.flake_reference,
                 deployment_transport: deployment.deployment_transport,
@@ -1631,6 +1634,7 @@ impl DeployPipeline {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             proposal_source: self.source.clone(),
+            secrets_input: self.secrets_input.clone(),
             materialization_shape: self.materialization_shape(),
         }
     }
@@ -4662,8 +4666,7 @@ impl HorizonMaterialization {
         let horizon = definition.project(self.command.node_name.payload())?;
         let root = MaterializationRoot::new(self.configuration.materialization_root(&self.command));
         root.prepare()?;
-        let secrets_source =
-            ClusterSecretsDirectory::from_proposal_source(&self.command.proposal_source);
+        let secrets_source = ClusterSecretsDirectory::from_input(&self.command.secrets_input)?;
         MaterializedInputSet::new(
             root,
             horizon,
@@ -4977,29 +4980,34 @@ impl DeploymentInput {
     }
 }
 
-/// The cluster repository's `secrets/` directory — the sibling of the deploy
-/// datom source. Each sops-encrypted file there becomes one
+/// The caller-owned secrets authority. Each sops-encrypted file there becomes one
 /// `inputs.secrets.sopsFiles.<stem>` entry the daemon provisions per deploy,
 /// where `<stem>` is the `.sops` filename stem VERBATIM (the file is named with
 /// its exact consumer attribute name; no case transform), overriding CriomOS's
-/// `stubs/no-secrets` stub. The directory may be absent (a bare bootstrap datom
-/// with no cluster secrets), in which case the generated `secrets` input still
-/// exposes an empty `sopsFiles = { }`.
+/// `stubs/no-secrets` stub. `NoSecrets` yields an empty `sopsFiles` input; a
+/// directory is never inferred from the public Horizon definition location.
 #[derive(Debug, Clone)]
 struct ClusterSecretsDirectory {
-    path: PathBuf,
+    path: Option<PathBuf>,
 }
 
 impl ClusterSecretsDirectory {
-    /// `<source-parent>/secrets` — the datom source's sibling secrets directory.
-    fn from_proposal_source(source: &ordinary::ProposalSource) -> Self {
-        let source_path = PathBuf::from(source.payload());
-        let parent = source_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
-        Self {
-            path: parent.join("secrets"),
+    fn from_input(input: &sema::SecretsInput) -> Result<Self> {
+        match input {
+            sema::SecretsInput::NoSecrets => Ok(Self { path: None }),
+            sema::SecretsInput::SecretsDirectory(directory) => {
+                let raw = directory.payload();
+                let path = PathBuf::from(raw);
+                if raw.is_empty()
+                    || raw.chars().any(char::is_control)
+                    || !path.is_absolute()
+                    || path.components().any(|component| !matches!(component, std::path::Component::RootDir | std::path::Component::Normal(_)))
+                    || !path.is_dir()
+                {
+                    return Err(Error::StoreMaintenance("secrets input must be an existing absolute directory".to_string()));
+                }
+                Ok(Self { path: Some(path) })
+            }
         }
     }
 
@@ -5007,11 +5015,11 @@ impl ClusterSecretsDirectory {
     /// generated flake. An absent directory yields an empty list (bootstrap
     /// sources carry no cluster secrets); other read failures propagate.
     fn secret_files(&self) -> Result<Vec<ClusterSecretFile>> {
-        if !self.path.is_dir() {
+        let Some(directory) = &self.path else {
             return Ok(Vec::new());
-        }
+        };
         let mut files = Vec::new();
-        for entry in fs::read_dir(&self.path)? {
+        for entry in fs::read_dir(directory)? {
             let path = entry?.path();
             if path.extension().and_then(|extension| extension.to_str()) == Some("sops") {
                 files.push(ClusterSecretFile::new(path));

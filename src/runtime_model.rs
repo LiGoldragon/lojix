@@ -89,6 +89,12 @@ pub struct TestExecutionProfile {
     pub optional_deployment_transport: Option<DeploymentTransport>,
 }
 runtime_text!(ProposalSource);
+runtime_text!(SecretsDirectory);
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum SecretsInput {
+    NoSecrets,
+    SecretsDirectory(SecretsDirectory),
+}
 runtime_text!(ImmutableRevision);
 runtime_newtype!(DeploymentIdentifier, u64);
 runtime_newtype!(GenerationIdentifier, u64);
@@ -480,6 +486,7 @@ pub struct HostDeployment {
     pub node_name: NodeName,
     pub host_composition: HostComposition,
     pub proposal_source: ProposalSource,
+    pub secrets_input: SecretsInput,
     pub flake_reference: FlakeReference,
     pub deployment_transport: DeploymentTransport,
     pub deployment_input_mode: DeploymentInputMode,
@@ -496,6 +503,7 @@ pub struct UserEnvironmentDeployment {
     pub node_name: NodeName,
     pub user_name: UserName,
     pub proposal_source: ProposalSource,
+    pub secrets_input: SecretsInput,
     pub flake_reference: FlakeReference,
     pub deployment_transport: DeploymentTransport,
     pub deployment_input_mode: DeploymentInputMode,

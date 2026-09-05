@@ -7,7 +7,7 @@
 pub use crate::runtime_model::{
     ActivationEffect, ClosurePath, ClusterName, DeploymentIdentifier, FlakeReference,
     GenerationArtifact, GenerationIdentifier, GenerationSlot, HostComposition, HostDeployAction,
-    MetaEgress, MetaIngress, NodeName, OrdinaryEgress, OrdinaryIngress, ProposalSource,
+    MetaEgress, MetaIngress, NodeName, OrdinaryEgress, OrdinaryIngress, ProposalSource, SecretsInput,
     SemaReadInput, SemaReadOutput, SemaWriteInput, SemaWriteOutput, SourceRevisionPolicy,
     SourceRevisionRecord, TestMode, UserEnvironmentAction, UserName,
 };
@@ -118,6 +118,7 @@ pub struct HorizonMaterializationCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub proposal_source: ProposalSource,
+    pub secrets_input: SecretsInput,
     pub materialization_shape: MaterializationShape,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
