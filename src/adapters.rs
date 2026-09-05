@@ -6,9 +6,9 @@
 //! public alias vocabulary is reproduced here.
 
 use crate::runtime_model as sema;
-use sema::*;
 use datom_codec::{Conceivable, Datom, Incorporable, IncorporationBudget};
 use protos::Situation;
+use sema::*;
 
 /// The daemon's runtime model is independent from the generated public types.
 /// This private structural form is the current Datom grammar at that boundary;
@@ -19,7 +19,10 @@ enum RuntimeDatom {
     Atom(String),
     Vector(Vec<RuntimeDatom>),
     Struct(Vec<RuntimeDatom>),
-    Variant { name: String, body: Box<RuntimeDatom> },
+    Variant {
+        name: String,
+        body: Box<RuntimeDatom>,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -39,18 +42,35 @@ impl RuntimeDatom {
             Datom::Meaning(value) => Self::Text(value.to_string()),
             Datom::Vector(values) => Self::Vector(values.iter().map(Self::from_datom).collect()),
             Datom::Struct(values) => Self::Struct(values.iter().map(Self::from_datom).collect()),
-            Datom::Variant(name, body) => Self::Variant { name: name.as_ref().to_owned(), body: Box::new(Self::from_datom(body)) },
+            Datom::Variant(name, body) => Self::Variant {
+                name: name.as_ref().to_owned(),
+                body: Box::new(Self::from_datom(body)),
+            },
         }
     }
 
     fn into_datom(self) -> Result<Datom, WireShapeError> {
         let symbol = |name: String| protos::Symbol::try_from(name).map_err(|_| WireShapeError);
         match self {
-            Self::Text(value) => Ok(Datom::Text(protos::Text::try_from(value).map_err(|_| WireShapeError)?)),
-            Self::Atom(value) => Ok(Datom::Word(datom_codec::DatomWord::try_from(value.as_str()).map_err(|_| WireShapeError)?)),
-            Self::Vector(values) => values.into_iter().map(Self::into_datom).collect::<Result<Vec<_>, _>>().map(Datom::Vector),
-            Self::Struct(values) => values.into_iter().map(Self::into_datom).collect::<Result<Vec<_>, _>>().map(Datom::Struct),
-            Self::Variant { name, body } => Ok(Datom::Variant(symbol(name)?, Box::new(body.into_datom()?))),
+            Self::Text(value) => Ok(Datom::Text(
+                protos::Text::try_from(value).map_err(|_| WireShapeError)?,
+            )),
+            Self::Atom(value) => Ok(Datom::Word(
+                datom_codec::DatomWord::try_from(value.as_str()).map_err(|_| WireShapeError)?,
+            )),
+            Self::Vector(values) => values
+                .into_iter()
+                .map(Self::into_datom)
+                .collect::<Result<Vec<_>, _>>()
+                .map(Datom::Vector),
+            Self::Struct(values) => values
+                .into_iter()
+                .map(Self::into_datom)
+                .collect::<Result<Vec<_>, _>>()
+                .map(Datom::Struct),
+            Self::Variant { name, body } => {
+                Ok(Datom::Variant(symbol(name)?, Box::new(body.into_datom()?)))
+            }
         }
     }
 
@@ -64,48 +84,110 @@ impl RuntimeDatom {
             Self::Variant { name, body } => format!("{name}.{}", body.into_text()),
             Self::Vector(values) => format!(
                 "[{}]",
-                values.into_iter().map(Self::into_text).collect::<Vec<_>>().join(" ")
+                values
+                    .into_iter()
+                    .map(Self::into_text)
+                    .collect::<Vec<_>>()
+                    .join(" ")
             ),
             Self::Struct(values) => format!(
                 "{{{}}}",
-                values.into_iter().map(Self::into_text).collect::<Vec<_>>().join(" ")
+                values
+                    .into_iter()
+                    .map(Self::into_text)
+                    .collect::<Vec<_>>()
+                    .join(" ")
             ),
         }
     }
 }
 
 impl WireShape for String {
-    fn to_wire(&self) -> RuntimeDatom { RuntimeDatom::Text(self.clone()) }
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> { Ok(value.into_text()) }
+    fn to_wire(&self) -> RuntimeDatom {
+        RuntimeDatom::Text(self.clone())
+    }
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
+        Ok(value.into_text())
+    }
 }
 impl WireShape for u64 {
-    fn to_wire(&self) -> RuntimeDatom { RuntimeDatom::Atom(self.to_string()) }
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> { match value { RuntimeDatom::Atom(value) => value.parse().map_err(|_| WireShapeError), _ => Err(WireShapeError) } }
+    fn to_wire(&self) -> RuntimeDatom {
+        RuntimeDatom::Atom(self.to_string())
+    }
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
+        match value {
+            RuntimeDatom::Atom(value) => value.parse().map_err(|_| WireShapeError),
+            _ => Err(WireShapeError),
+        }
+    }
 }
 impl WireShape for bool {
-    fn to_wire(&self) -> RuntimeDatom { RuntimeDatom::Atom(if *self { "True" } else { "False" }.to_owned()) }
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> { match value { RuntimeDatom::Atom(value) if value == "True" => Ok(true), RuntimeDatom::Atom(value) if value == "False" => Ok(false), _ => Err(WireShapeError) } }
+    fn to_wire(&self) -> RuntimeDatom {
+        RuntimeDatom::Atom(if *self { "True" } else { "False" }.to_owned())
+    }
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
+        match value {
+            RuntimeDatom::Atom(value) if value == "True" => Ok(true),
+            RuntimeDatom::Atom(value) if value == "False" => Ok(false),
+            _ => Err(WireShapeError),
+        }
+    }
 }
 impl<T: WireShape> WireShape for Vec<T> {
-    fn to_wire(&self) -> RuntimeDatom { RuntimeDatom::Vector(self.iter().map(WireShape::to_wire).collect()) }
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> { let RuntimeDatom::Vector(values) = value else { return Err(WireShapeError) }; values.into_iter().map(T::from_wire).collect() }
+    fn to_wire(&self) -> RuntimeDatom {
+        RuntimeDatom::Vector(self.iter().map(WireShape::to_wire).collect())
+    }
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
+        let RuntimeDatom::Vector(values) = value else {
+            return Err(WireShapeError);
+        };
+        values.into_iter().map(T::from_wire).collect()
+    }
 }
 impl<T: WireShape> WireShape for Option<T> {
-    fn to_wire(&self) -> RuntimeDatom { match self { Some(value) => RuntimeDatom::Variant { name: "Some".to_owned(), body: Box::new(value.to_wire()) }, None => RuntimeDatom::Atom("None".to_owned()) } }
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> { match value { RuntimeDatom::Atom(name) if name == "None" => Ok(None), RuntimeDatom::Variant { name, body } if name == "Some" => Ok(Some(T::from_wire(*body)?)), _ => Err(WireShapeError) } }
+    fn to_wire(&self) -> RuntimeDatom {
+        match self {
+            Some(value) => RuntimeDatom::Variant {
+                name: "Some".to_owned(),
+                body: Box::new(value.to_wire()),
+            },
+            None => RuntimeDatom::Atom("None".to_owned()),
+        }
+    }
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
+        match value {
+            RuntimeDatom::Atom(name) if name == "None" => Ok(None),
+            RuntimeDatom::Variant { name, body } if name == "Some" => {
+                Ok(Some(T::from_wire(*body)?))
+            }
+            _ => Err(WireShapeError),
+        }
+    }
 }
 
-fn current_datom<T: Conceivable<Datom, Fault = std::convert::Infallible>>(value: &T) -> RuntimeDatom {
-    let datom = value.conceive().expect("generated Datom ascent is infallible").1;
+fn current_datom<T: Conceivable<Datom, Fault = std::convert::Infallible>>(
+    value: &T,
+) -> RuntimeDatom {
+    let datom = value
+        .conceive()
+        .expect("generated Datom ascent is infallible")
+        .1;
     RuntimeDatom::from_datom(&datom)
 }
 
 fn generated_root<T: datom_codec::Datomic>(value: RuntimeDatom) -> crate::Result<T> {
-    let value = value.into_datom().map_err(|error| crate::Error::Wire(error.to_string()))?;
-    value.incorporate(
-        &Situation { extent: protos::Extent(0, 0), children: Vec::new() },
-        IncorporationBudget::try_from(16_384).expect("positive Datom budget"),
-    ).map_err(|error| crate::Error::Wire(format!("{error:?}")))
+    let value = value
+        .into_datom()
+        .map_err(|error| crate::Error::Wire(error.to_string()))?;
+    value
+        .incorporate(
+            &Situation {
+                extent: protos::Extent(0, 0),
+                children: Vec::new(),
+            },
+            IncorporationBudget::try_from(16_384).expect("positive Datom budget"),
+        )
+        .map_err(|error| crate::Error::Wire(format!("{error:?}")))
 }
 
 macro_rules! wire_newtype {
@@ -601,15 +683,11 @@ pub fn meta_ingress(value: meta_signal_lojix::Request) -> crate::Result<sema::Me
         .map_err(|error| crate::Error::Wire(error.to_string()))
 }
 
-pub fn ordinary_egress(
-    value: sema::OrdinaryEgress,
-) -> crate::Result<signal_lojix::Response> {
+pub fn ordinary_egress(value: sema::OrdinaryEgress) -> crate::Result<signal_lojix::Response> {
     generated_root(value.to_wire())
 }
 
-pub fn meta_egress(
-    value: sema::MetaEgress,
-) -> crate::Result<meta_signal_lojix::Response> {
+pub fn meta_egress(value: sema::MetaEgress) -> crate::Result<meta_signal_lojix::Response> {
     generated_root(value.to_wire())
 }
 

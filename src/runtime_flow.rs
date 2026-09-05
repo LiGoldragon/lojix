@@ -7,9 +7,9 @@
 pub use crate::runtime_model::{
     ActivationEffect, ClosurePath, ClusterName, DeploymentIdentifier, FlakeReference,
     GenerationArtifact, GenerationIdentifier, GenerationSlot, HostComposition, HostDeployAction,
-    MetaEgress, MetaIngress, NodeName, OrdinaryEgress, OrdinaryIngress, ProposalSource, SecretsInput,
-    SemaReadInput, SemaReadOutput, SemaWriteInput, SemaWriteOutput, SourceRevisionPolicy,
-    SourceRevisionRecord, TestMode, UserEnvironmentAction, UserName,
+    MetaEgress, MetaIngress, NodeName, OrdinaryEgress, OrdinaryIngress, ProposalSource,
+    SecretsInput, SemaReadInput, SemaReadOutput, SemaWriteInput, SemaWriteOutput,
+    SourceRevisionPolicy, SourceRevisionRecord, TestMode, UserEnvironmentAction, UserName,
 };
 
 macro_rules! flow_newtype {

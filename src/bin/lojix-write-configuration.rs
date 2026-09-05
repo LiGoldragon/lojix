@@ -1,9 +1,9 @@
 //! `lojix-write-configuration` encodes one generated current Datom request into the daemon's rkyv startup archive.
 use datom_codec::{Actualizable, IncorporationBudget, Potential};
+use lojix::ingress;
 use lojix::{DaemonConfiguration, Error as LojixError, TestDefaults, TestMode};
 use std::path::PathBuf;
 use thiserror::Error;
-use lojix::ingress;
 fn main() {
     if let Err(error) = ConfigurationWriterCli::from_environment().run() {
         eprintln!("lojix-write-configuration: {error}");

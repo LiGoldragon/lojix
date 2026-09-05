@@ -112,7 +112,12 @@ fn fresh_store_daemon_serves_owner_and_ordinary_interfaces_after_restart() {
         "LOJIX_OWNER_SOCKET",
         &owner_socket,
         &inline_datom(&meta_signal_lojix::Request::Pin(
-            meta_signal_lojix::PinRequest(text("fresh-cluster"), text("fresh-node"), 1, text("fresh-pin")),
+            meta_signal_lojix::PinRequest(
+                text("fresh-cluster"),
+                text("fresh-node"),
+                1,
+                text("fresh-pin"),
+            ),
         )),
     );
     assert!(

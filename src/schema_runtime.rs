@@ -4998,25 +4998,7 @@ impl ClusterSecretsDirectory {
             sema::SecretsInput::NoSecrets => Ok(Self { path: None }),
             sema::SecretsInput::SecretsDirectory(directory) => {
                 let raw = directory.payload();
-                let path = PathBuf::from(raw);
-                if raw.is_empty()
-                    || raw.chars().any(char::is_control)
-                    || !path.is_absolute()
-                    || path.components().any(|component| {
-                        !matches!(
-                            component,
-                            std::path::Component::RootDir | std::path::Component::Normal(_)
-                        )
-                    })
-                    || !path.is_dir()
-                    || fs::symlink_metadata(&path)
-                        .map(|metadata| metadata.file_type().is_symlink())
-                        .unwrap_or(true)
-                {
-                    return Err(Error::StoreMaintenance(
-                        "secrets input must be an existing absolute directory".to_string(),
-                    ));
-                }
+                let path = safe_secrets_directory(raw)?;
                 Ok(Self { path: Some(path) })
             }
         }
@@ -5033,12 +5015,29 @@ impl ClusterSecretsDirectory {
         for entry in fs::read_dir(directory)? {
             let path = entry?.path();
             if path.extension().and_then(|extension| extension.to_str()) == Some("sops") {
+                let metadata = fs::symlink_metadata(&path)?;
+                if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                    return Err(Error::StoreMaintenance(format!(
+                        "secret file must be a regular non-symlink file: {}",
+                        path.display()
+                    )));
+                }
                 files.push(ClusterSecretFile::new(path));
             }
         }
         files.sort_by(|left, right| left.sort_key().cmp(right.sort_key()));
         Ok(files)
     }
+}
+
+/// Validate caller-provided secret authority with the same no-symlink path
+/// traversal contract used by bootstrap inputs.  The daemon copies ciphertext
+/// later, so every existing component must be checked through metadata rather
+/// than letting filesystem operations resolve a link after admission.
+fn safe_secrets_directory(value: &str) -> Result<PathBuf> {
+    crate::bootstrap::safe_existing_directory(value).map_err(|_| {
+        Error::StoreMaintenance("secrets input must be an existing absolute directory".to_string())
+    })
 }
 
 /// One sops-encrypted secret file in the cluster `secrets/` directory. Its
@@ -8391,6 +8390,50 @@ mod tests {
         ));
         assert!(matches!(
             ClusterSecretsDirectory::from_input(&input),
+            Err(Error::StoreMaintenance(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secrets_input_rejects_a_symlinked_parent_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary secrets root");
+        let actual_parent = temporary.path().join("actual");
+        let secrets_directory = actual_parent.join("secrets");
+        fs::create_dir_all(&secrets_directory).expect("create actual secrets directory");
+        let linked_parent = temporary.path().join("linked");
+        symlink(&actual_parent, &linked_parent).expect("create linked parent");
+
+        let input = sema::SecretsInput::SecretsDirectory(sema::SecretsDirectory::new(
+            linked_parent.join("secrets").to_string_lossy().to_string(),
+        ));
+        assert!(matches!(
+            ClusterSecretsDirectory::from_input(&input),
+            Err(Error::StoreMaintenance(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secrets_input_rejects_a_symlinked_sops_file_before_copying() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary secrets root");
+        let secrets_directory = temporary.path().join("secrets");
+        fs::create_dir_all(&secrets_directory).expect("create secrets directory");
+        let ciphertext = secrets_directory.join("ciphertext");
+        fs::write(&ciphertext, b"synthetic opaque ciphertext").expect("write ciphertext");
+        symlink(&ciphertext, secrets_directory.join("linked.sops"))
+            .expect("create linked sops file");
+
+        let input = sema::SecretsInput::SecretsDirectory(sema::SecretsDirectory::new(
+            secrets_directory.to_string_lossy().to_string(),
+        ));
+        let cluster = ClusterSecretsDirectory::from_input(&input).expect("directory is valid");
+        assert!(matches!(
+            cluster.secret_files(),
             Err(Error::StoreMaintenance(_))
         ));
     }

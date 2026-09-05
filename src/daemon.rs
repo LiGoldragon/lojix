@@ -16,14 +16,17 @@ use std::time::Duration;
 use kameo::actor::{Actor, ActorRef, Spawn};
 use kameo::error::Infallible;
 use kameo::message::{Context, Message};
+use meta_signal_lojix::WireConversion as MetaWireConversion;
+use signal_frame::{
+    BoundExchangeFrame, ExchangeFrameBody, ExchangeIdentifier, Reply, RootCode, SubReply,
+    VariantCode, WireRoute,
+};
 use triad_runtime::{
     AcceptedConnection, AsyncListenerSocket, AsyncMultiConnectionRuntime, AsyncMultiListenerDaemon,
     AsyncMultiListenerDaemonError, ConnectionContext, FrameBody, LengthPrefixedCodec,
     MaximumFrameLength, PeerIdentity, RequestConcurrencyLimit, RequestErrorLog, SocketMode,
     UnixCredentials,
 };
-use signal_frame::{BoundExchangeFrame, ExchangeFrameBody, ExchangeIdentifier, Reply, SubReply, WireRoute, RootCode, VariantCode};
-use meta_signal_lojix::WireConversion as MetaWireConversion;
 
 /// Maximum inbound request-frame body the daemon accepts (8 MiB). A lojix
 /// request is a few hundred bytes; this bounds a hostile length prefix far
@@ -64,24 +67,45 @@ fn meta_response_route(response: &meta_signal_lojix::Response) -> WireRoute {
 }
 
 fn decode_meta_request(bytes: &[u8]) -> Result<(ExchangeIdentifier, meta_signal_lojix::Request)> {
-    let frame = BoundExchangeFrame::<meta_signal_lojix::MetaLojixWire, meta_signal_lojix::RequestWire, meta_signal_lojix::ResponseWire>::decode_length_prefixed(bytes)?;
+    let frame = BoundExchangeFrame::<
+        meta_signal_lojix::MetaLojixWire,
+        meta_signal_lojix::RequestWire,
+        meta_signal_lojix::ResponseWire,
+    >::decode_length_prefixed(bytes)?;
     let route = frame.short_header().route();
     let ExchangeFrameBody::Request { exchange, request } = frame.into_body() else {
         return Err(Error::UnexpectedFrame);
     };
-    if request.payloads().len() != 1 { return Err(Error::UnexpectedFrame); }
+    if request.payloads().len() != 1 {
+        return Err(Error::UnexpectedFrame);
+    }
     let input = meta_signal_lojix::Request::try_from_wire(request.payloads().clone().into_head())
         .map_err(|fault| Error::Wire(format!("{fault:?}")))?;
-    if route != meta_request_route(&input) { return Err(Error::UnexpectedFrame); }
+    if route != meta_request_route(&input) {
+        return Err(Error::UnexpectedFrame);
+    }
     Ok((exchange, input))
 }
 
-fn encode_meta_response(exchange: ExchangeIdentifier, response: meta_signal_lojix::Response) -> Result<Vec<u8>> {
+fn encode_meta_response(
+    exchange: ExchangeIdentifier,
+    response: meta_signal_lojix::Response,
+) -> Result<Vec<u8>> {
     let route = meta_response_route(&response);
-    Ok(BoundExchangeFrame::<meta_signal_lojix::MetaLojixWire, meta_signal_lojix::RequestWire, meta_signal_lojix::ResponseWire>::new(
+    Ok(BoundExchangeFrame::<
+        meta_signal_lojix::MetaLojixWire,
+        meta_signal_lojix::RequestWire,
+        meta_signal_lojix::ResponseWire,
+    >::new(
         route,
-        ExchangeFrameBody::Reply { exchange, reply: Reply::committed(signal_frame::NonEmpty::single(SubReply::Ok(response.into_wire()))) },
-    ).encode_length_prefixed()?)
+        ExchangeFrameBody::Reply {
+            exchange,
+            reply: Reply::committed(signal_frame::NonEmpty::single(SubReply::Ok(
+                response.into_wire(),
+            ))),
+        },
+    )
+    .encode_length_prefixed()?)
 }
 
 use crate::runtime_flow::{self as nexus, NexusEngine};
@@ -412,10 +436,7 @@ impl RequestWorker {
         let reply = crate::adapters::ordinary_egress(Self::ordinary_reply(output)?)?;
         let frame = signal_lojix::encode_response(exchange, reply)?;
         self.codec
-            .write_body_async(
-                connection.stream_mut(),
-                &FrameBody::new(frame),
-            )
+            .write_body_async(connection.stream_mut(), &FrameBody::new(frame))
             .await?;
         Ok(())
     }
@@ -446,10 +467,7 @@ impl RequestWorker {
         let reply = crate::adapters::meta_egress(reply)?;
         let frame = encode_meta_response(exchange, reply)?;
         self.codec
-            .write_body_async(
-                connection.stream_mut(),
-                &FrameBody::new(frame),
-            )
+            .write_body_async(connection.stream_mut(), &FrameBody::new(frame))
             .await?;
         Ok(())
     }

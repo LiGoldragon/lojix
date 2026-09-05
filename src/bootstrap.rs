@@ -2148,23 +2148,23 @@ fn validate_input(
             validate_name(&input.cluster_name.0)?;
             Ok(BootstrapInputValidated::Horizon(
                 BootstrapHorizonInputValidated {
-                proposal_source: safe_existing_regular_file(
-                    &input.proposal_source.0,
-                    "horizon-definition.datom",
-                )?,
-                node_name: validate_name(&input.node_name.0)?,
-                materialization_shape: input.materialization_shape,
-                secrets_input: match input.secrets_input {
-                    BootstrapSecretsInput::NoSecrets => BootstrapSecretsInputValidated::None,
-                    BootstrapSecretsInput::SecretsDirectory(directory) => {
-                        BootstrapSecretsInputValidated::Directory(safe_existing_directory(
-                            &directory.0,
-                        )?)
-                    }
-                },
-                flake_reference: validate_flake_reference(&input.flake_reference.0)?,
-                nix_system: validate_nix_system(&input.nix_system.0)?,
-                output_selector: validate_output_selector(&input.output_selector.0)?,
+                    proposal_source: safe_existing_regular_file(
+                        &input.proposal_source.0,
+                        "horizon-definition.datom",
+                    )?,
+                    node_name: validate_name(&input.node_name.0)?,
+                    materialization_shape: input.materialization_shape,
+                    secrets_input: match input.secrets_input {
+                        BootstrapSecretsInput::NoSecrets => BootstrapSecretsInputValidated::None,
+                        BootstrapSecretsInput::SecretsDirectory(directory) => {
+                            BootstrapSecretsInputValidated::Directory(safe_existing_directory(
+                                &directory.0,
+                            )?)
+                        }
+                    },
+                    flake_reference: validate_flake_reference(&input.flake_reference.0)?,
+                    nix_system: validate_nix_system(&input.nix_system.0)?,
+                    output_selector: validate_output_selector(&input.output_selector.0)?,
                 },
             ))
         }
@@ -2393,7 +2393,7 @@ fn safe_existing_regular_file(
     Ok(path)
 }
 
-fn safe_existing_directory(value: &str) -> std::result::Result<PathBuf, BootstrapError> {
+pub(crate) fn safe_existing_directory(value: &str) -> std::result::Result<PathBuf, BootstrapError> {
     let path = safe_existing_path(value)?;
     let metadata = fs::symlink_metadata(&path).map_err(BootstrapError::Journal)?;
     if !metadata.file_type().is_dir() {
