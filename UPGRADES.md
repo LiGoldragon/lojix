@@ -15,6 +15,29 @@ also supplies `SecretsInput`: use `NoSecrets` for no secret authority, or an
 existing absolute non-symlink `SecretsDirectory` owned by the caller. Lojix no
 longer derives a sibling secrets directory from the public artifact.
 
+
+### Durable-store cutover
+
+The generated `SecretsInput` is persisted in each in-flight `DeployJob`, so
+0.21.0 opens a v5 store and deliberately refuses a v4 store before any job is
+decoded or resumed. It does not migrate historical deploy jobs, event history,
+or secret authority. In particular, it never substitutes `NoSecrets` for a
+v4 job and never resumes that job under changed meaning.
+
+For a non-destructive cutover, stop `lojix-daemon`; retain its v4 primary store
+at its existing configured absolute path; then generate the next daemon startup
+archive with a distinct, new absolute `store_path` (for example, a `.v5`
+sibling). Start the daemon only with that new archive. The fresh path is
+initialized as v5 while the v4 store remains unchanged and can be examined
+read-only with `lojix-inspect-store 'InspectStore.{ <absolute-v4-store-path> }'`.
+Do not copy a v4 database into the new v5 path and do not point the v5 daemon
+at the old path.
+
+`lojix-reset-store` remains a separate, explicit discard option for a stopped
+daemon: it may replace a recognized v2/v3/v4 Lojix store with an empty v5
+store. That action discards the old store's jobs and history; archive or retain
+the original v4 path first if those records are needed for inspection.
+
 ## 0.20.1 — query lookup wire shape
 
 Lojix 0.20.1 preserves the public one-field product shape of

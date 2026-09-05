@@ -37,8 +37,15 @@ error text, or noncanonical path.
 ## Store reset
 
 Lojix v5 deliberately refuses older Lojix schemas. There is no row migration
-or legacy resume path. After stopping `lojix-daemon`, CriomOS may manually
-start its dedicated reset unit:
+or legacy resume path. An existing v4 store must never be pointed at a v5
+daemon for resume: old deploy jobs and history remain inspectable at their
+original path, but are not mapped to `NoSecrets` and are not resumed. For a
+non-destructive cutover, stop `lojix-daemon`, retain the v4 primary unchanged,
+and generate the next daemon configuration with a new absolute store path
+(such as a distinct `.v5` file). Starting the daemon with that configuration
+creates an empty v5 store; keep the v4 path available to `lojix-inspect-store`
+for offline inspection. After stopping `lojix-daemon`, CriomOS may instead
+manually start its dedicated reset unit:
 
 ```sh
 systemctl start lojix-reset-store.service
@@ -48,9 +55,11 @@ The unit supplies its generated startup archive through
 `LOJIX_CONFIGURATION`; the binary accepts exactly one pathless inline
 `ResetStore` Datom word and never accepts a store path, file, or flag form. The
 archive must be a regular non-symlink file and its configured store must be an
-existing, absolute, traversal-free regular non-symlink file. A recognised v2, v3, or v4 Lojix catalog is removed and recreated as v5; an
-already-current v5 store returns `AlreadyCurrent` without deleting any data. Only then are the
-pre-v4 protocol sidecars
+existing, absolute, traversal-free regular non-symlink file. `ResetStore` is an
+opt-in destructive operation: a recognised v2, v3, or v4 Lojix catalog is
+removed and recreated as v5; it does not migrate jobs or history. An
+already-current v5 store returns `AlreadyCurrent` without deleting any data.
+Only then are the pre-v4 protocol sidecars
 (`.schema-pre-v3.backup`, `.schema-v3.pending`, and
 `.schema-v3.pending.owner`) mechanically derived and removed. It never
 selects, follows, or modifies a Spirit database.
