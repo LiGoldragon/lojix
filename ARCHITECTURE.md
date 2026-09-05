@@ -231,11 +231,11 @@ the workspace actor-systems doctrine. No zero-state holders.
 ## 5 · Constraints
 
 - The daemon binds two Unix sockets from its binary rkyv startup
-  configuration: ordinary and owner/meta. Inline DOTOS and `.dotos` files
+  configuration: ordinary and owner/meta. Inline startup input and files
   are rejected at daemon startup; launch tooling must encode
   configuration before exec. The owner/meta socket refuses any mode with
   "other" access and admits only same-uid/gid owner peers.
-- `lojix-write-configuration` is the launch-only DOTOS boundary: it accepts
+- `lojix-write-configuration` is the launch-only typed Datom boundary: it accepts
   exactly one inline `ConfigurationWriteRequest` object (never a file, raw
   path, or flag) and writes the rkyv signal file from the ordered socket/mode, state-directory,
   daemon-host, test-default, and output-path request. Test defaults
@@ -243,7 +243,7 @@ the workspace actor-systems doctrine. No zero-state holders.
   writes `NoTestDefaults`; the daemon receives only the resulting signal file.
 - A deploy proposal source, when `DeploymentInputMode::Horizon` requires one,
   is an existing, direct, regular absolute canonical artifact named
-  `proposal.datom`, with no traversal, symlink, control, or credential-shaped
+  `horizon-definition.datom`, with no traversal, symlink, control, or credential-shaped
   path and content embodied as `Text<ClusterProposal>`. A closure is usable by an effect or a fresh
   durable v4 row only as a canonical immutable Nix store-item root. Public
   adapters redact every other path and never project raw proposal sources,

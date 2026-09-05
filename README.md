@@ -58,20 +58,20 @@ selects, follows, or modifies a Spirit database.
 
 ## Daemon startup configuration
 
-`lojix-write-configuration` is the only DOTOS-to-startup boundary. It accepts
-exactly one inline `ConfigurationWriteRequest` object—never a `.dotos` file,
-raw path, or flag—containing, in
+`lojix-write-configuration` is the only typed Datom-to-startup boundary. It accepts
+exactly one inline `ConfigurationWriterInput.ConfigurationWriteRequest` object—never a
+file, raw path, or flag—containing, in
 order, ordinary socket and mode, owner socket and mode, state directory, exact
 store path, daemon host, `NoTestDefaults` or `TestDefaults`,
 and output path; it writes the rkyv startup archive. Production uses
 `NoTestDefaults`.
-`lojix-daemon` accepts only that generated signal/rkyv file, never inline
-DOTOS or a `.dotos` startup argument. Service activation invokes the writer
+`lojix-daemon` accepts only that generated signal/rkyv file, never an inline
+Datom startup argument. Service activation invokes the writer
 and passes its output path to the daemon; reset is a separate, manually
 started service that must not run while the daemon is active.
 
 `lojix-inspect-store` is read-only and likewise accepts exactly one inline
-`(InspectStore <path>)` object, never a raw path, file, flag, or extra
+`InspectionRequest.InspectStore` Datom object, never a raw path, file, flag, or extra
 argument.
 
 ## Maintained bootstrap app
