@@ -4731,8 +4731,9 @@ impl ProposalFile {
     fn load(&self) -> Result<HorizonDefinition> {
         let text = fs::read_to_string(&self.path)
             .map_err(|_| Error::Invariant("proposal source is unavailable".to_string()))?;
-        horizon_lib::decode(&text)
-            .map_err(|_| Error::Invariant("proposal source is not a Horizon definition".to_string()))
+        horizon_lib::decode(&text).map_err(|_| {
+            Error::Invariant("proposal source is not a Horizon definition".to_string())
+        })
     }
 }
 
@@ -5001,10 +5002,20 @@ impl ClusterSecretsDirectory {
                 if raw.is_empty()
                     || raw.chars().any(char::is_control)
                     || !path.is_absolute()
-                    || path.components().any(|component| !matches!(component, std::path::Component::RootDir | std::path::Component::Normal(_)))
+                    || path.components().any(|component| {
+                        !matches!(
+                            component,
+                            std::path::Component::RootDir | std::path::Component::Normal(_)
+                        )
+                    })
                     || !path.is_dir()
+                    || fs::symlink_metadata(&path)
+                        .map(|metadata| metadata.file_type().is_symlink())
+                        .unwrap_or(true)
                 {
-                    return Err(Error::StoreMaintenance("secrets input must be an existing absolute directory".to_string()));
+                    return Err(Error::StoreMaintenance(
+                        "secrets input must be an existing absolute directory".to_string(),
+                    ));
                 }
                 Ok(Self { path: Some(path) })
             }
@@ -6503,6 +6514,7 @@ mod tests {
             node_name: ordinary::NodeName::new("node-1"),
             host_composition: ordinary::HostComposition::BaseHost,
             proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            secrets_input: sema::SecretsInput::NoSecrets,
             flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
             deployment_transport: fixture_transport(),
             deployment_input_mode: sema::DeploymentInputMode::Direct,
@@ -6530,6 +6542,7 @@ mod tests {
             node_name: ordinary::NodeName::new("fixture-daemon"),
             user_name: ordinary::UserName::new("fixture-user"),
             proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            secrets_input: sema::SecretsInput::NoSecrets,
             flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
             deployment_transport: fixture_transport(),
             deployment_input_mode: sema::DeploymentInputMode::Direct,
@@ -6700,6 +6713,7 @@ mod tests {
             node_name: node(),
             host_composition: ordinary::HostComposition::BaseHost,
             proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            secrets_input: sema::SecretsInput::NoSecrets,
             flake_reference: ordinary::FlakeReference::new(flake),
             deployment_transport: fixture_transport(),
             deployment_input_mode: sema::DeploymentInputMode::Direct,
@@ -7377,6 +7391,7 @@ mod tests {
                 node_name: node(),
                 host_composition: ordinary::HostComposition::BaseHost,
                 proposal_source: ordinary::ProposalSource::new("/dev/null"),
+                secrets_input: sema::SecretsInput::NoSecrets,
                 flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
                 deployment_transport: fixture_transport(),
                 deployment_input_mode: sema::DeploymentInputMode::Direct,
@@ -7402,6 +7417,7 @@ mod tests {
                 node_name: node(),
                 user_name: ordinary::UserName::new("li"),
                 proposal_source: ordinary::ProposalSource::new("/dev/null"),
+                secrets_input: sema::SecretsInput::NoSecrets,
                 flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
                 deployment_transport: fixture_transport(),
                 deployment_input_mode: sema::DeploymentInputMode::Direct,
@@ -8362,24 +8378,22 @@ mod tests {
     }
 
     #[test]
-    fn secrets_directory_is_the_datom_source_sibling() {
-        let source = ordinary::ProposalSource::new("/fixture/cluster/proposal.datom".to_string());
-        let directory = ClusterSecretsDirectory::from_proposal_source(&source);
-        assert_eq!(directory.path, PathBuf::from("/fixture/cluster/secrets"));
+    fn no_secrets_is_explicit_and_yields_no_files() {
+        let directory = ClusterSecretsDirectory::from_input(&sema::SecretsInput::NoSecrets)
+            .expect("NoSecrets is accepted");
+        assert!(directory.path.is_none());
+        assert!(directory.secret_files().expect("no files").is_empty());
     }
 
     #[test]
-    fn absent_secrets_directory_yields_no_files() {
-        let source = ordinary::ProposalSource::new(
-            "/nonexistent/path/that/has/no/secrets/proposal.datom".to_string(),
-        );
-        let directory = ClusterSecretsDirectory::from_proposal_source(&source);
-        assert!(
-            directory
-                .secret_files()
-                .expect("absent secrets dir is empty, not an error")
-                .is_empty()
-        );
+    fn secrets_input_rejects_nonexistent_directory() {
+        let input = sema::SecretsInput::SecretsDirectory(sema::SecretsDirectory::new(
+            "/nonexistent/path/that/has/no/secrets".to_string(),
+        ));
+        assert!(matches!(
+            ClusterSecretsDirectory::from_input(&input),
+            Err(Error::StoreMaintenance(_))
+        ));
     }
 
     #[test]
@@ -8401,13 +8415,10 @@ mod tests {
         let generated =
             std::env::temp_dir().join(format!("lojix-secrets-gen-{}", std::process::id()));
         let _ = fs::remove_dir_all(&generated);
-        let source = ordinary::ProposalSource::new(
-            source_directory
-                .join("proposal.datom")
-                .to_string_lossy()
-                .to_string(),
-        );
-        let cluster = ClusterSecretsDirectory::from_proposal_source(&source);
+        let input = sema::SecretsInput::SecretsDirectory(sema::SecretsDirectory::new(
+            secrets_directory.to_string_lossy().to_string(),
+        ));
+        let cluster = ClusterSecretsDirectory::from_input(&input).expect("valid secrets directory");
         GeneratedInputDirectory::new(generated.clone())
             .write_secrets(&cluster)
             .expect("write secrets input");
@@ -8456,13 +8467,10 @@ mod tests {
         let generated =
             std::env::temp_dir().join(format!("lojix-secrets-stale-gen-{}", std::process::id()));
         let _ = fs::remove_dir_all(&generated);
-        let source = ordinary::ProposalSource::new(
-            source_directory
-                .join("proposal.datom")
-                .to_string_lossy()
-                .to_string(),
-        );
-        let cluster = ClusterSecretsDirectory::from_proposal_source(&source);
+        let input = sema::SecretsInput::SecretsDirectory(sema::SecretsDirectory::new(
+            secrets_directory.to_string_lossy().to_string(),
+        ));
+        let cluster = ClusterSecretsDirectory::from_input(&input).expect("valid secrets directory");
         GeneratedInputDirectory::new(generated.clone())
             .write_secrets(&cluster)
             .expect("first write");
@@ -8537,9 +8545,8 @@ mod tests {
         let generated =
             std::env::temp_dir().join(format!("lojix-secrets-empty-{}", std::process::id()));
         let _ = fs::remove_dir_all(&generated);
-        let source =
-            ordinary::ProposalSource::new("/nonexistent/bootstrap/proposal.datom".to_string());
-        let cluster = ClusterSecretsDirectory::from_proposal_source(&source);
+        let cluster = ClusterSecretsDirectory::from_input(&sema::SecretsInput::NoSecrets)
+            .expect("NoSecrets is accepted");
         GeneratedInputDirectory::new(generated.clone())
             .write_secrets(&cluster)
             .expect("write empty secrets input");

@@ -910,6 +910,7 @@ mod tests {
             node_name: ordinary::NodeName::new("fixture-daemon"),
             host_composition: ordinary::HostComposition::CompleteHost,
             proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            secrets_input: sema::SecretsInput::NoSecrets,
             flake_reference: ordinary::FlakeReference::new(format!(
                 "github:LiGoldragon/CriomOS?rev={REVISION}"
             )),
