@@ -1,177 +1,100 @@
-//! lojix-write-configuration — the bootstrap/deploy tool that encodes a typed
-//! DOTOS configuration request into the binary rkyv startup file the daemon
-//! consumes. The daemon takes only a pre-generated rkyv argument and never
-//! parses DOTOS, so this tool is the DOTOS-to-binary boundary at deploy time.
-//! Mirrors `spirit-write-configuration`. Per the daemon-binary-startup rule
-//! and Spirit `ur16` (bootstrap-config and runtime-config share one
-//! vocabulary; the meta `Configure` op carries the same shape at runtime).
-
-use std::path::PathBuf;
-
-use dotos::{DotosDecode, DotosDecodeError, DotosSource};
+//! `lojix-write-configuration` encodes one generated current Datom request into the daemon's rkyv startup archive.
+use datom_codec::{Actualizable, IncorporationBudget, Potential};
 use lojix::{DaemonConfiguration, Error as LojixError, TestDefaults, TestMode};
+use std::path::PathBuf;
 use thiserror::Error;
-
+#[path = "../ingress.rs"]
+mod ingress;
 fn main() {
     if let Err(error) = ConfigurationWriterCli::from_environment().run() {
         eprintln!("lojix-write-configuration: {error}");
         std::process::exit(1);
     }
 }
-
 struct ConfigurationWriterCli;
-
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
-struct ConfigurationWriteRequest {
-    ordinary_socket_path: WriterPath,
-    ordinary_socket_mode: WriterMode,
-    owner_socket_path: WriterPath,
-    owner_socket_mode: WriterMode,
-    state_directory_path: WriterPath,
-    store_path: WriterPath,
-    daemon_host: WriterCluster,
-    test_defaults: WriterTestDefaultsChoice,
-    output_path: WriterPath,
-}
-
-/// Whether the daemon's binary startup bakes a test-op fixture at all. A
-/// production node carries the bare `NoTestDefaults`: with no baked fixture the
-/// daemon lowers to `None` and rejects a bare `(Check …)`/`(Run …)` with
-/// `NoTestDefaults` instead of silently building a baked test cluster. Test
-/// fixtures are supplied only by test code, never baked per-node into a
-/// production module (the workspace deployment-independence discipline). A
-/// test/dev daemon carries `(TestDefaults …)` with the explicit fixture.
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
-enum WriterTestDefaultsChoice {
-    NoTestDefaults,
-    TestDefaults(WriterTestDefaults),
-}
-
-/// The test-op defaults authored as typed DOTOS at deploy time and encoded into
-/// the daemon's binary startup — the DOTOS-to-binary boundary for report 54's
-/// `TestDefaults` (never a flag, never a runtime `Configure`).
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
-struct WriterTestDefaults {
-    cluster: WriterCluster,
-    default_vm_host: WriterCluster,
-    default_mode: WriterTestMode,
-    test_flake: WriterCluster,
-    test_nix_system: WriterCluster,
-    test_output_selector: WriterCluster,
-    proposal_source: WriterPath,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
-struct WriterCluster(String);
-
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
-enum WriterTestMode {
-    Hermetic,
-    Live,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
-enum ConfigurationWriterInput {
-    ConfigurationWriteRequest(ConfigurationWriteRequest),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
-struct WriterPath(String);
-
-#[derive(Debug, Clone, PartialEq, Eq, DotosDecode)]
-struct WriterMode(u32);
-
 impl ConfigurationWriterCli {
     fn from_environment() -> Self {
         Self
     }
-
     fn run(&self) -> Result<(), ConfigurationWriterError> {
-        let text = self.source()?;
-        let request = DotosSource::new(&text)
-            .parse::<ConfigurationWriterInput>()?
-            .into_request();
-        let output_path = request.write()?;
-        println!("(ConfigurationWritten [{}])", output_path.display());
+        let request = Potential::<ingress::ConfigurationWriterInput>::from(self.source()?)
+            .actualize(IncorporationBudget::try_from(16_384).expect("static ingress budget"))
+            .map_err(|fault| ConfigurationWriterError::Decode(format!("{fault:?}")))?;
+        let ingress::ConfigurationWriterInput::ConfigurationWriteRequest(request) = request;
+        let output_path = write_configuration(request)?;
+        println!("ConfigurationWritten.{{ {} }}", output_path.display());
         Ok(())
     }
-
     fn source(&self) -> Result<String, ConfigurationWriterError> {
-        lojix::single_inline_dotos_argument(std::env::args_os().skip(1))
+        lojix::single_inline_datom_argument(std::env::args_os().skip(1))
             .map_err(ConfigurationWriterError::Request)
     }
 }
-
-impl ConfigurationWriterInput {
-    fn into_request(self) -> ConfigurationWriteRequest {
-        match self {
-            Self::ConfigurationWriteRequest(request) => request,
-        }
-    }
+fn text(value: protos::Text) -> String {
+    value.to_string()
 }
-
-impl ConfigurationWriteRequest {
-    fn write(self) -> Result<PathBuf, ConfigurationWriterError> {
-        let output_path = self.output_path.path_buf();
-        let configuration = DaemonConfiguration {
-            ordinary_socket_path: self.ordinary_socket_path.0,
-            ordinary_socket_mode: self.ordinary_socket_mode.0,
-            owner_socket_path: self.owner_socket_path.0,
-            owner_socket_mode: self.owner_socket_mode.0,
-            state_directory_path: self.state_directory_path.0,
-            store_path: self.store_path.0,
-            daemon_host: self.daemon_host.0,
-            test_defaults: self.test_defaults.into_config(),
-        };
-        configuration
-            .write_rkyv_file(&output_path)
-            .map_err(ConfigurationWriterError::WriteConfiguration)?;
-        Ok(output_path)
-    }
+fn mode(value: protos::Integer) -> Result<u32, ConfigurationWriterError> {
+    u32::try_from(value).map_err(|_| ConfigurationWriterError::InvalidMode(value))
 }
-
-impl WriterTestDefaultsChoice {
-    /// Lower the authored choice into the daemon's optional config default.
-    /// `NoTestDefaults` becomes `None` — the production posture — so a bare
-    /// `(Check …)`/`(Run …)` is rejected rather than resolved against a baked
-    /// fixture.
-    fn into_config(self) -> Option<TestDefaults> {
-        match self {
-            Self::NoTestDefaults => None,
-            Self::TestDefaults(defaults) => Some(TestDefaults {
-                cluster: defaults.cluster.0,
-                default_vm_host: defaults.default_vm_host.0,
-                default_mode: defaults.default_mode.into(),
-                test_flake: defaults.test_flake.0,
-                test_nix_system: defaults.test_nix_system.0,
-                test_output_selector: defaults.test_output_selector.0,
-                proposal_source: defaults.proposal_source.0,
+fn write_configuration(
+    ingress::ConfigurationWriteRequest(
+        ordinary_socket_path,
+        ordinary_socket_mode,
+        owner_socket_path,
+        owner_socket_mode,
+        state_directory_path,
+        store_path,
+        daemon_host,
+        test_defaults,
+        output_path,
+    ): ingress::ConfigurationWriteRequest,
+) -> Result<PathBuf, ConfigurationWriterError> {
+    let output_path = PathBuf::from(text(output_path));
+    let configuration = DaemonConfiguration {
+        ordinary_socket_path: text(ordinary_socket_path),
+        ordinary_socket_mode: mode(ordinary_socket_mode)?,
+        owner_socket_path: text(owner_socket_path),
+        owner_socket_mode: mode(owner_socket_mode)?,
+        state_directory_path: text(state_directory_path),
+        store_path: text(store_path),
+        daemon_host: text(daemon_host),
+        test_defaults: match test_defaults {
+            ingress::WriterTestDefaultsChoice::NoTestDefaults => None,
+            ingress::WriterTestDefaultsChoice::TestDefaults(ingress::WriterTestDefaults(
+                cluster,
+                default_vm_host,
+                default_mode,
+                test_flake,
+                test_nix_system,
+                test_output_selector,
+                proposal_source,
+            )) => Some(TestDefaults {
+                cluster: text(cluster),
+                default_vm_host: text(default_vm_host),
+                default_mode: match default_mode {
+                    ingress::WriterTestMode::Hermetic => TestMode::Hermetic,
+                    ingress::WriterTestMode::Live => TestMode::Live,
+                },
+                test_flake: text(test_flake),
+                test_nix_system: text(test_nix_system),
+                test_output_selector: text(test_output_selector),
+                proposal_source: text(proposal_source),
             }),
-        }
-    }
+        },
+    };
+    configuration
+        .write_rkyv_file(&output_path)
+        .map_err(ConfigurationWriterError::WriteConfiguration)?;
+    Ok(output_path)
 }
-
-impl WriterPath {
-    fn path_buf(&self) -> PathBuf {
-        PathBuf::from(&self.0)
-    }
-}
-
-impl From<WriterTestMode> for TestMode {
-    fn from(mode: WriterTestMode) -> Self {
-        match mode {
-            WriterTestMode::Hermetic => Self::Hermetic,
-            WriterTestMode::Live => Self::Live,
-        }
-    }
-}
-
 #[derive(Debug, Error)]
 enum ConfigurationWriterError {
-    #[error("configuration request must be one inline DOTOS object: {0}")]
+    #[error("configuration request must be one inline Datom object: {0}")]
     Request(LojixError),
-    #[error(transparent)]
-    Decode(#[from] DotosDecodeError),
+    #[error("configuration request Datom decode failed: {0}")]
+    Decode(String),
+    #[error("socket mode {0} is outside unsigned 32-bit range")]
+    InvalidMode(i64),
     #[error("write configuration archive: {0}")]
     WriteConfiguration(lojix::Error),
 }

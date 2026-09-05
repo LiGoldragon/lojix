@@ -38,5 +38,13 @@ Types
   BootstrapSshIdentityFile.Text
   BootstrapSshKnownHostsFile.Text
   BootstrapSystemProfilePath.Text
-  BootstrapBootEntriesDirectory.Text ]
+  BootstrapBootEntriesDirectory.Text
+  ConfigurationWriterInput.[ ConfigurationWriteRequest.ConfigurationWriteRequest ]
+  ConfigurationWriteRequest.{ WriterPath WriterMode WriterPath WriterMode WriterPath WriterPath WriterCluster WriterTestDefaultsChoice WriterPath }
+  WriterTestDefaultsChoice.[ NoTestDefaults TestDefaults.WriterTestDefaults ]
+  WriterTestDefaults.{ WriterCluster WriterCluster WriterTestMode WriterCluster WriterCluster WriterCluster WriterPath }
+  WriterTestMode.[ Hermetic Live ]
+  WriterPath.Text
+  WriterMode.Integer
+  WriterCluster.Text ]
 []

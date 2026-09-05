@@ -949,3 +949,274 @@ pub type BootstrapSshIdentityFile = protos::Text;
 pub type BootstrapSshKnownHostsFile = protos::Text;
 pub type BootstrapSystemProfilePath = protos::Text;
 pub type BootstrapBootEntriesDirectory = protos::Text;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigurationWriterInput {
+    ConfigurationWriteRequest(ConfigurationWriteRequest),
+}
+impl datom_codec::Datomic for ConfigurationWriterInput {
+    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
+        let v = datom_codec::Sited::variant(site)?;
+        match v.name {
+            "ConfigurationWriteRequest" => std::result::Result::Ok(
+                Self::ConfigurationWriteRequest(datom_codec::Carrying::body(v)?),
+            ),
+            _ => std::result::Result::Err(datom_codec::Headed::reject(
+                &v,
+                datom_codec::Problem::UnknownVariant(
+                    protos::Word::try_from(v.name).expect("variant name"),
+                ),
+            )),
+        }
+    }
+}
+impl protos::Conceivable<datom_codec::Datom> for ConfigurationWriterInput {
+    type Fault = std::convert::Infallible;
+    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
+        std::result::Result::Ok(protos::Situated(
+            protos::Situation {
+                extent: protos::Extent(0, 0),
+                children: vec![],
+            },
+            match self {
+                Self::ConfigurationWriteRequest(p0) => datom_codec::Datom::Variant(
+                    protos::Symbol::try_from("ConfigurationWriteRequest").expect("static variant"),
+                    std::boxed::Box::new(
+                        protos::Conceivable::conceive(p0)
+                            .expect("infallible datom ascent")
+                            .1,
+                    ),
+                ),
+            },
+        ))
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigurationWriteRequest(
+    pub WriterPath,
+    pub WriterMode,
+    pub WriterPath,
+    pub WriterMode,
+    pub WriterPath,
+    pub WriterPath,
+    pub WriterCluster,
+    pub WriterTestDefaultsChoice,
+    pub WriterPath,
+);
+impl datom_codec::Datomic for ConfigurationWriteRequest {
+    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
+        let mut p = datom_codec::Sited::positions(site, 9)?;
+        let p0: WriterPath = datom_codec::Positional::position(&mut p)?;
+        let p1: WriterMode = datom_codec::Positional::position(&mut p)?;
+        let p2: WriterPath = datom_codec::Positional::position(&mut p)?;
+        let p3: WriterMode = datom_codec::Positional::position(&mut p)?;
+        let p4: WriterPath = datom_codec::Positional::position(&mut p)?;
+        let p5: WriterPath = datom_codec::Positional::position(&mut p)?;
+        let p6: WriterCluster = datom_codec::Positional::position(&mut p)?;
+        let p7: WriterTestDefaultsChoice = datom_codec::Positional::position(&mut p)?;
+        let p8: WriterPath = datom_codec::Positional::position(&mut p)?;
+        std::result::Result::Ok(Self(p0, p1, p2, p3, p4, p5, p6, p7, p8))
+    }
+}
+impl protos::Conceivable<datom_codec::Datom> for ConfigurationWriteRequest {
+    type Fault = std::convert::Infallible;
+    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
+        std::result::Result::Ok(protos::Situated(
+            protos::Situation {
+                extent: protos::Extent(0, 0),
+                children: vec![],
+            },
+            datom_codec::Datom::Struct(vec![
+                protos::Conceivable::conceive(&self.0)
+                    .expect("infallible datom ascent")
+                    .1,
+                protos::Conceivable::conceive(&self.1)
+                    .expect("infallible datom ascent")
+                    .1,
+                protos::Conceivable::conceive(&self.2)
+                    .expect("infallible datom ascent")
+                    .1,
+                protos::Conceivable::conceive(&self.3)
+                    .expect("infallible datom ascent")
+                    .1,
+                protos::Conceivable::conceive(&self.4)
+                    .expect("infallible datom ascent")
+                    .1,
+                protos::Conceivable::conceive(&self.5)
+                    .expect("infallible datom ascent")
+                    .1,
+                protos::Conceivable::conceive(&self.6)
+                    .expect("infallible datom ascent")
+                    .1,
+                protos::Conceivable::conceive(&self.7)
+                    .expect("infallible datom ascent")
+                    .1,
+                protos::Conceivable::conceive(&self.8)
+                    .expect("infallible datom ascent")
+                    .1,
+            ]),
+        ))
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WriterTestDefaultsChoice {
+    NoTestDefaults,
+    TestDefaults(WriterTestDefaults),
+}
+impl datom_codec::Datomic for WriterTestDefaultsChoice {
+    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
+        let v = datom_codec::Sited::variant(site)?;
+        match v.name {
+            "NoTestDefaults" => {
+                datom_codec::Headed::nothing(v)?;
+                std::result::Result::Ok(Self::NoTestDefaults)
+            }
+            "TestDefaults" => {
+                std::result::Result::Ok(Self::TestDefaults(datom_codec::Carrying::body(v)?))
+            }
+            _ => std::result::Result::Err(datom_codec::Headed::reject(
+                &v,
+                datom_codec::Problem::UnknownVariant(
+                    protos::Word::try_from(v.name).expect("variant name"),
+                ),
+            )),
+        }
+    }
+}
+impl protos::Conceivable<datom_codec::Datom> for WriterTestDefaultsChoice {
+    type Fault = std::convert::Infallible;
+    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
+        std::result::Result::Ok(protos::Situated(
+            protos::Situation {
+                extent: protos::Extent(0, 0),
+                children: vec![],
+            },
+            match self {
+                Self::NoTestDefaults => datom_codec::Datom::Word(
+                    datom_codec::DatomWord::try_from(
+                        protos::Word::try_from("NoTestDefaults").expect("static variant"),
+                    )
+                    .expect("stable variant"),
+                ),
+                Self::TestDefaults(p0) => datom_codec::Datom::Variant(
+                    protos::Symbol::try_from("TestDefaults").expect("static variant"),
+                    std::boxed::Box::new(
+                        protos::Conceivable::conceive(p0)
+                            .expect("infallible datom ascent")
+                            .1,
+                    ),
+                ),
+            },
+        ))
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WriterTestDefaults(
+    pub WriterCluster,
+    pub WriterCluster,
+    pub WriterTestMode,
+    pub WriterCluster,
+    pub WriterCluster,
+    pub WriterCluster,
+    pub WriterPath,
+);
+impl datom_codec::Datomic for WriterTestDefaults {
+    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
+        let mut p = datom_codec::Sited::positions(site, 7)?;
+        let p0: WriterCluster = datom_codec::Positional::position(&mut p)?;
+        let p1: WriterCluster = datom_codec::Positional::position(&mut p)?;
+        let p2: WriterTestMode = datom_codec::Positional::position(&mut p)?;
+        let p3: WriterCluster = datom_codec::Positional::position(&mut p)?;
+        let p4: WriterCluster = datom_codec::Positional::position(&mut p)?;
+        let p5: WriterCluster = datom_codec::Positional::position(&mut p)?;
+        let p6: WriterPath = datom_codec::Positional::position(&mut p)?;
+        std::result::Result::Ok(Self(p0, p1, p2, p3, p4, p5, p6))
+    }
+}
+impl protos::Conceivable<datom_codec::Datom> for WriterTestDefaults {
+    type Fault = std::convert::Infallible;
+    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
+        std::result::Result::Ok(protos::Situated(
+            protos::Situation {
+                extent: protos::Extent(0, 0),
+                children: vec![],
+            },
+            datom_codec::Datom::Struct(vec![
+                protos::Conceivable::conceive(&self.0)
+                    .expect("infallible datom ascent")
+                    .1,
+                protos::Conceivable::conceive(&self.1)
+                    .expect("infallible datom ascent")
+                    .1,
+                protos::Conceivable::conceive(&self.2)
+                    .expect("infallible datom ascent")
+                    .1,
+                protos::Conceivable::conceive(&self.3)
+                    .expect("infallible datom ascent")
+                    .1,
+                protos::Conceivable::conceive(&self.4)
+                    .expect("infallible datom ascent")
+                    .1,
+                protos::Conceivable::conceive(&self.5)
+                    .expect("infallible datom ascent")
+                    .1,
+                protos::Conceivable::conceive(&self.6)
+                    .expect("infallible datom ascent")
+                    .1,
+            ]),
+        ))
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriterTestMode {
+    Hermetic,
+    Live,
+}
+impl datom_codec::Datomic for WriterTestMode {
+    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
+        let v = datom_codec::Sited::variant(site)?;
+        match v.name {
+            "Hermetic" => {
+                datom_codec::Headed::nothing(v)?;
+                std::result::Result::Ok(Self::Hermetic)
+            }
+            "Live" => {
+                datom_codec::Headed::nothing(v)?;
+                std::result::Result::Ok(Self::Live)
+            }
+            _ => std::result::Result::Err(datom_codec::Headed::reject(
+                &v,
+                datom_codec::Problem::UnknownVariant(
+                    protos::Word::try_from(v.name).expect("variant name"),
+                ),
+            )),
+        }
+    }
+}
+impl protos::Conceivable<datom_codec::Datom> for WriterTestMode {
+    type Fault = std::convert::Infallible;
+    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
+        std::result::Result::Ok(protos::Situated(
+            protos::Situation {
+                extent: protos::Extent(0, 0),
+                children: vec![],
+            },
+            match self {
+                Self::Hermetic => datom_codec::Datom::Word(
+                    datom_codec::DatomWord::try_from(
+                        protos::Word::try_from("Hermetic").expect("static variant"),
+                    )
+                    .expect("stable variant"),
+                ),
+                Self::Live => datom_codec::Datom::Word(
+                    datom_codec::DatomWord::try_from(
+                        protos::Word::try_from("Live").expect("static variant"),
+                    )
+                    .expect("stable variant"),
+                ),
+            },
+        ))
+    }
+}
+pub type WriterPath = protos::Text;
+pub type WriterMode = protos::Integer;
+pub type WriterCluster = protos::Text;
