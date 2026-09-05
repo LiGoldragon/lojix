@@ -53,11 +53,30 @@ impl RuntimeDatom {
             Self::Variant { name, body } => Ok(Datom::Variant(symbol(name)?, Box::new(body.into_datom()?))),
         }
     }
+
+    /// A generated `Text` is conceived through Datom's canonical classifier.
+    /// An address or path containing a dot can consequently arrive here as a
+    /// variant although the public field is still text. Reconstruct that
+    /// canonical text only when lowering to a runtime string.
+    fn into_text(self) -> String {
+        match self {
+            Self::Text(value) | Self::Atom(value) => value,
+            Self::Variant { name, body } => format!("{name}.{}", body.into_text()),
+            Self::Vector(values) => format!(
+                "[{}]",
+                values.into_iter().map(Self::into_text).collect::<Vec<_>>().join(" ")
+            ),
+            Self::Struct(values) => format!(
+                "{{{}}}",
+                values.into_iter().map(Self::into_text).collect::<Vec<_>>().join(" ")
+            ),
+        }
+    }
 }
 
 impl WireShape for String {
     fn to_wire(&self) -> RuntimeDatom { RuntimeDatom::Text(self.clone()) }
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> { match value { RuntimeDatom::Text(value) => Ok(value), _ => Err(WireShapeError) } }
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> { Ok(value.into_text()) }
 }
 impl WireShape for u64 {
     fn to_wire(&self) -> RuntimeDatom { RuntimeDatom::Atom(self.to_string()) }
