@@ -37,7 +37,7 @@
           filter =
             path: type:
             (craneLib.filterCargoSources path type)
-            || (type == "regular" && baseNameOf path == "proposal.datom")
+            || (type == "regular" && baseNameOf path == "horizon-definition.datom")
             || (
               type == "regular"
               && builtins.elem (baseNameOf path) [
@@ -268,7 +268,7 @@
                     Environment = "PATH=${pkgs.lib.makeBinPath [ fake-nix fake-ssh pkgs.systemd pkgs.coreutils candidate ]}";
                   };
                   preStart = ''
-                    printf '%s' '${proposal}' > /var/lib/lojix/proposal.datom
+                    printf '%s' '${proposal}' > /var/lib/lojix/horizon-definition.datom
                   '';
                 };
               };
@@ -278,7 +278,7 @@
                 machine.wait_until_succeeds("test -S /run/lojix/ordinary.sock && test -S /run/lojix/owner.sock")
                 profile_before = machine.succeed("readlink -f /nix/var/nix/profiles/system").strip()
                 predecessor_invocation = machine.succeed("systemctl show lojix.service --property=InvocationID --value").strip()
-                machine.succeed("LOJIX_OWNER_SOCKET=/run/lojix/owner.sock ${package}/bin/meta-lojix 'Deploy.Host.(fixture-cluster atlas BaseHost /var/lib/lojix/proposal.datom github:fixture-owner/fixture-flake?ref=main (ssh-ng://fixture-copy.invalid fixture-login@fixture-activate.invalid) Direct (checks.fixture-a) NixosSystemdBootV1 TestActivation ResolveAndRecord None [])' >/run/lojix-admission")
+                machine.succeed("LOJIX_OWNER_SOCKET=/run/lojix/owner.sock ${package}/bin/meta-lojix 'Deploy.Host.(fixture-cluster atlas BaseHost /var/lib/lojix/horizon-definition.datom github:fixture-owner/fixture-flake?ref=main (ssh-ng://fixture-copy.invalid fixture-login@fixture-activate.invalid) Direct (checks.fixture-a) NixosSystemdBootV1 TestActivation ResolveAndRecord None [])' >/run/lojix-admission")
                 machine.log(machine.succeed("cat /run/lojix-admission"))
                 machine.log(machine.succeed("cat /run/lojix-fake-nix-argv"))
                 machine.succeed("grep -F 'DeployAccepted.' /run/lojix-admission")

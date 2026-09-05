@@ -32,7 +32,7 @@ use zbus::{Connection, Proxy};
 use crate::runtime_flow::{self as nexus, NexusEngine};
 use crate::runtime_model as sema;
 
-const CANONICAL_PROPOSAL_ARTIFACT: &str = "proposal.datom";
+const CANONICAL_PROPOSAL_ARTIFACT: &str = "horizon-definition.datom";
 
 fn canonical_nix_store_root(value: &str) -> bool {
     let Some(item) = value.strip_prefix("/nix/store/") else {
@@ -6919,7 +6919,7 @@ mod tests {
             directory.path().join("missing.datom"),
             directory.path().join("proposal.nota"),
             directory.path().join("proposal.dotos"),
-            directory.path().join("proposal.datomic"),
+            directory.path().join("horizon-definition.datomic"),
             malformed,
             unreadable,
             symlink_path,
@@ -6928,7 +6928,7 @@ mod tests {
                 .path()
                 .join("nested")
                 .join("..")
-                .join("proposal.datom"),
+                .join("horizon-definition.datom"),
         ] {
             let source = ordinary::ProposalSource::new(source.to_string_lossy().to_string());
             assert!(

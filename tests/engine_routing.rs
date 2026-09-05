@@ -112,7 +112,7 @@ fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
 #[test]
 fn accepted_submission_creates_a_correlated_durable_record() {
     let directory = tempfile::tempdir().expect("temporary proposal directory");
-    let proposal_source = directory.path().join("proposal.datom");
+    let proposal_source = directory.path().join("horizon-definition.datom");
     write_proposal(&proposal_source);
     let mut engine = SchemaRuntime::new();
     let accepted = match engine.submit_deploy(host_submission(&proposal_source)) {
@@ -137,7 +137,7 @@ fn accepted_submission_creates_a_correlated_durable_record() {
 #[test]
 fn capacity_rejection_is_a_correlated_terminal_record() {
     let directory = tempfile::tempdir().expect("temporary proposal directory");
-    let proposal_source = directory.path().join("proposal.datom");
+    let proposal_source = directory.path().join("horizon-definition.datom");
     write_proposal(&proposal_source);
     let engine = SchemaRuntime::new();
     let rejected = engine.reject_deployment_in_flight(host_submission(&proposal_source));

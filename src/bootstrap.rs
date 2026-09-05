@@ -1998,7 +1998,7 @@ fn validate_input(
             BootstrapHorizonInputValidated {
                 proposal_source: safe_existing_regular_file(
                     &input.proposal_source.0,
-                    "proposal.datom",
+                    "horizon-definition.datom",
                 )?,
                 cluster_name: validate_name(&input.cluster_name.0)?,
                 node_name: validate_name(&input.node_name.0)?,

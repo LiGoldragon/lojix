@@ -111,7 +111,7 @@ fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
 fn accepted_deploy_job_survives_a_store_reopen_with_its_correlation_identity() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("lojix.sema");
-    let proposal_source = directory.path().join("proposal.datom");
+    let proposal_source = directory.path().join("horizon-definition.datom");
     write_proposal(&proposal_source);
     let store = Arc::new(Store::open(&path).expect("open store"));
     let mut runtime = SchemaRuntime::with_store(store.clone());
