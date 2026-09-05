@@ -22,6 +22,8 @@ use triad_runtime::{
     MaximumFrameLength, PeerIdentity, RequestConcurrencyLimit, RequestErrorLog, SocketMode,
     UnixCredentials,
 };
+use signal_frame::{BoundExchangeFrame, ExchangeFrameBody, ExchangeIdentifier, Reply, SubReply, WireRoute, RootCode, VariantCode};
+use meta_signal_lojix::WireConversion as MetaWireConversion;
 
 /// Maximum inbound request-frame body the daemon accepts (8 MiB). A lojix
 /// request is a few hundred bytes; this bounds a hostile length prefix far
@@ -32,6 +34,55 @@ const MAXIMUM_REQUEST_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// before dropping the stream — bounds the connect-and-never-send wedge of the
 /// serial accept loop (audit R2). A legitimate client sends immediately.
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn meta_request_route(request: &meta_signal_lojix::Request) -> WireRoute {
+    let variant = match request {
+        meta_signal_lojix::Request::Retire(_) => 0,
+        meta_signal_lojix::Request::Pin(_) => 1,
+        meta_signal_lojix::Request::Deploy(_) => 2,
+        meta_signal_lojix::Request::Test(_) => 3,
+        meta_signal_lojix::Request::Unpin(_) => 4,
+    };
+    WireRoute::new(RootCode::new(0), VariantCode::new(variant))
+}
+
+fn meta_response_route(response: &meta_signal_lojix::Response) -> WireRoute {
+    let variant = match response {
+        meta_signal_lojix::Response::PinRejected(_) => 0,
+        meta_signal_lojix::Response::DeployRejected(_) => 1,
+        meta_signal_lojix::Response::DeployAccepted(_) => 2,
+        meta_signal_lojix::Response::TestRejected(_) => 3,
+        meta_signal_lojix::Response::Unpinned(_) => 4,
+        meta_signal_lojix::Response::Tested(_) => 5,
+        meta_signal_lojix::Response::UnpinRejected(_) => 6,
+        meta_signal_lojix::Response::DeployTerminal(_) => 7,
+        meta_signal_lojix::Response::Pinned(_) => 8,
+        meta_signal_lojix::Response::RetireRejected(_) => 9,
+        meta_signal_lojix::Response::Retired(_) => 10,
+    };
+    WireRoute::new(RootCode::new(1), VariantCode::new(variant))
+}
+
+fn decode_meta_request(bytes: &[u8]) -> Result<(ExchangeIdentifier, meta_signal_lojix::Request)> {
+    let frame = BoundExchangeFrame::<meta_signal_lojix::MetaLojixWire, meta_signal_lojix::RequestWire, meta_signal_lojix::ResponseWire>::decode_length_prefixed(bytes)?;
+    let route = frame.short_header().route();
+    let ExchangeFrameBody::Request { exchange, request } = frame.into_body() else {
+        return Err(Error::UnexpectedFrame);
+    };
+    if request.payloads().len() != 1 { return Err(Error::UnexpectedFrame); }
+    let input = meta_signal_lojix::Request::try_from_wire(request.payloads().clone().into_head())
+        .map_err(|fault| Error::Wire(format!("{fault:?}")))?;
+    if route != meta_request_route(&input) { return Err(Error::UnexpectedFrame); }
+    Ok((exchange, input))
+}
+
+fn encode_meta_response(exchange: ExchangeIdentifier, response: meta_signal_lojix::Response) -> Result<Vec<u8>> {
+    let route = meta_response_route(&response);
+    Ok(BoundExchangeFrame::<meta_signal_lojix::MetaLojixWire, meta_signal_lojix::RequestWire, meta_signal_lojix::ResponseWire>::new(
+        route,
+        ExchangeFrameBody::Reply { exchange, reply: Reply::committed(signal_frame::NonEmpty::single(SubReply::Ok(response.into_wire()))) },
+    ).encode_length_prefixed()?)
+}
 
 use crate::runtime_flow::{self as nexus, NexusEngine};
 use crate::runtime_model as sema;
@@ -350,19 +401,20 @@ impl RequestWorker {
 
     async fn serve_ordinary(&self, connection: &mut AcceptedConnection) -> Result<()> {
         let body = self.read_body(connection).await?;
-        let (exchange, input) =
-            signal_lojix::schema::lib::ContractMarker::decode_single_request(body.bytes())?;
+        let (exchange, input) = signal_lojix::decode_request(body.bytes())
+            .map_err(|fault| Error::Wire(format!("{fault:?}")))?;
         let output = self
             .execute_request(
                 ListenerRole::Ordinary,
-                nexus::SignalInput::OrdinaryInput(crate::adapters::ordinary_ingress(input)),
+                nexus::SignalInput::OrdinaryInput(crate::adapters::ordinary_ingress(input)?),
             )
             .await?;
         let reply = crate::adapters::ordinary_egress(Self::ordinary_reply(output)?)?;
+        let frame = signal_lojix::encode_response(exchange, reply)?;
         self.codec
             .write_body_async(
                 connection.stream_mut(),
-                &FrameBody::new(reply.encode_reply_frame(exchange)?),
+                &FrameBody::new(frame),
             )
             .await?;
         Ok(())
@@ -371,9 +423,8 @@ impl RequestWorker {
     async fn serve_owner(&self, connection: &mut AcceptedConnection) -> Result<()> {
         self.owner_authority.authorize(connection.context())?;
         let body = self.read_body(connection).await?;
-        let (exchange, input) =
-            meta_signal_lojix::schema::lib::ContractMarker::decode_single_request(body.bytes())?;
-        let input = crate::adapters::meta_ingress(input);
+        let (exchange, input) = decode_meta_request(body.bytes())?;
+        let input = crate::adapters::meta_ingress(input)?;
         // A `Deploy` decouples from this connection task: the deploy-job actor
         // owns the pipeline, this task only submits and replies the accepted
         // handle. Pin/Unpin/Retire are fast single writes and stay synchronous
@@ -393,10 +444,11 @@ impl RequestWorker {
             }
         };
         let reply = crate::adapters::meta_egress(reply)?;
+        let frame = encode_meta_response(exchange, reply)?;
         self.codec
             .write_body_async(
                 connection.stream_mut(),
-                &FrameBody::new(reply.encode_reply_frame(exchange)?),
+                &FrameBody::new(frame),
             )
             .await?;
         Ok(())

@@ -48,7 +48,7 @@ impl OrdinaryClient {
     pub fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let input = Potential::<signal_lojix::Request>::from(single_inline_datom_argument(arguments)?)
             .actualize(IncorporationBudget::try_from(16_384).expect("positive request budget"))
-            .map_err(|fault| Error::DatomRequestText(fault.to_string()))?;
+            .map_err(|fault| Error::DatomRequestText(format!("{fault:?}")))?;
         Ok(Self { input })
     }
 
@@ -63,7 +63,7 @@ impl OrdinaryClient {
             ExchangeFrameBody::Reply { exchange: found, reply } if found == exchange => match reply {
                 Reply::Accepted { per_operation, .. } => match per_operation.into_head() {
                     SubReply::Ok(wire) | SubReply::Failed { detail: Some(wire), .. } => {
-                        signal_lojix::Response::try_from_wire(wire).map_err(|fault| Error::Wire(fault.to_string()))
+                        signal_lojix::Response::try_from_wire(wire).map_err(|fault| Error::Wire(format!("{fault:?}")))
                     }
                     _ => Err(Error::UnexpectedFrame),
                 },
@@ -85,7 +85,7 @@ impl MetaClient {
     pub fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let input = Potential::<meta_signal_lojix::Request>::from(single_inline_datom_argument(arguments)?)
             .actualize(IncorporationBudget::try_from(16_384).expect("positive request budget"))
-            .map_err(|fault| Error::DatomRequestText(fault.to_string()))?;
+            .map_err(|fault| Error::DatomRequestText(format!("{fault:?}")))?;
         Ok(Self { input })
     }
 
@@ -112,7 +112,7 @@ impl MetaClient {
             ExchangeFrameBody::Reply { exchange: found, reply } if found == exchange => match reply {
                 Reply::Accepted { per_operation, .. } => match per_operation.into_head() {
                     SubReply::Ok(wire) | SubReply::Failed { detail: Some(wire), .. } => {
-                        meta_signal_lojix::Response::try_from_wire(wire).map_err(|fault| Error::Wire(fault.to_string()))
+                        meta_signal_lojix::Response::try_from_wire(wire).map_err(|fault| Error::Wire(format!("{fault:?}")))
                     }
                     _ => Err(Error::UnexpectedFrame),
                 },

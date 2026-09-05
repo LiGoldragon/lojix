@@ -7,15 +7,95 @@
 
 use crate::runtime_model as sema;
 use sema::*;
-use signal_lojix::schema::lib::{WireShape, WireShapeError, WireValue};
+use datom_codec::{Conceivable, Datom, Incorporable, IncorporationBudget};
+use protos::Situation;
+
+/// The daemon's runtime model is independent from the generated public types.
+/// This private structural form is the current Datom grammar at that boundary;
+/// it is never archived, sent, or accepted as a public compatibility protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimeDatom {
+    Text(String),
+    Atom(String),
+    Vector(Vec<RuntimeDatom>),
+    Struct(Vec<RuntimeDatom>),
+    Variant { name: String, body: Box<RuntimeDatom> },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("runtime value does not match the current generated Datom contract")]
+struct WireShapeError;
+
+trait WireShape: Sized {
+    fn to_wire(&self) -> RuntimeDatom;
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError>;
+}
+
+impl RuntimeDatom {
+    fn from_datom(value: &Datom) -> Self {
+        match value {
+            Datom::Text(value) => Self::Text(value.to_string()),
+            Datom::Word(value) => Self::Atom(value.as_ref().to_owned()),
+            Datom::Meaning(value) => Self::Text(value.to_string()),
+            Datom::Vector(values) => Self::Vector(values.iter().map(Self::from_datom).collect()),
+            Datom::Struct(values) => Self::Struct(values.iter().map(Self::from_datom).collect()),
+            Datom::Variant(name, body) => Self::Variant { name: name.as_ref().to_owned(), body: Box::new(Self::from_datom(body)) },
+        }
+    }
+
+    fn into_datom(self) -> Result<Datom, WireShapeError> {
+        let symbol = |name: String| protos::Symbol::try_from(name).map_err(|_| WireShapeError);
+        match self {
+            Self::Text(value) => Ok(Datom::Text(protos::Text::try_from(value).map_err(|_| WireShapeError)?)),
+            Self::Atom(value) => Ok(Datom::Word(datom_codec::DatomWord::try_from(value.as_str()).map_err(|_| WireShapeError)?)),
+            Self::Vector(values) => values.into_iter().map(Self::into_datom).collect::<Result<Vec<_>, _>>().map(Datom::Vector),
+            Self::Struct(values) => values.into_iter().map(Self::into_datom).collect::<Result<Vec<_>, _>>().map(Datom::Struct),
+            Self::Variant { name, body } => Ok(Datom::Variant(symbol(name)?, Box::new(body.into_datom()?))),
+        }
+    }
+}
+
+impl WireShape for String {
+    fn to_wire(&self) -> RuntimeDatom { RuntimeDatom::Text(self.clone()) }
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> { match value { RuntimeDatom::Text(value) => Ok(value), _ => Err(WireShapeError) } }
+}
+impl WireShape for u64 {
+    fn to_wire(&self) -> RuntimeDatom { RuntimeDatom::Atom(self.to_string()) }
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> { match value { RuntimeDatom::Atom(value) => value.parse().map_err(|_| WireShapeError), _ => Err(WireShapeError) } }
+}
+impl WireShape for bool {
+    fn to_wire(&self) -> RuntimeDatom { RuntimeDatom::Atom(if *self { "True" } else { "False" }.to_owned()) }
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> { match value { RuntimeDatom::Atom(value) if value == "True" => Ok(true), RuntimeDatom::Atom(value) if value == "False" => Ok(false), _ => Err(WireShapeError) } }
+}
+impl<T: WireShape> WireShape for Vec<T> {
+    fn to_wire(&self) -> RuntimeDatom { RuntimeDatom::Vector(self.iter().map(WireShape::to_wire).collect()) }
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> { let RuntimeDatom::Vector(values) = value else { return Err(WireShapeError) }; values.into_iter().map(T::from_wire).collect() }
+}
+impl<T: WireShape> WireShape for Option<T> {
+    fn to_wire(&self) -> RuntimeDatom { match self { Some(value) => RuntimeDatom::Variant { name: "Some".to_owned(), body: Box::new(value.to_wire()) }, None => RuntimeDatom::Atom("None".to_owned()) } }
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> { match value { RuntimeDatom::Atom(name) if name == "None" => Ok(None), RuntimeDatom::Variant { name, body } if name == "Some" => Ok(Some(T::from_wire(*body)?)), _ => Err(WireShapeError) } }
+}
+
+fn current_datom<T: Conceivable<Datom, Fault = std::convert::Infallible>>(value: &T) -> RuntimeDatom {
+    let datom = value.conceive().expect("generated Datom ascent is infallible").1;
+    RuntimeDatom::from_datom(&datom)
+}
+
+fn generated_root<T: datom_codec::Datomic>(value: RuntimeDatom) -> crate::Result<T> {
+    let value = value.into_datom().map_err(|error| crate::Error::Wire(error.to_string()))?;
+    value.incorporate(
+        &Situation { extent: protos::Extent(0, 0), children: Vec::new() },
+        IncorporationBudget::try_from(16_384).expect("positive Datom budget"),
+    ).map_err(|error| crate::Error::Wire(format!("{error:?}")))
+}
 
 macro_rules! wire_newtype {
     ($name:ident, $inner:ty) => {
         impl WireShape for sema::$name {
-            fn to_wire(&self) -> WireValue {
+            fn to_wire(&self) -> RuntimeDatom {
                 self.payload().to_wire()
             }
-            fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
+            fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
                 Ok(Self::new(<$inner as WireShape>::from_wire(value)?))
             }
         }
@@ -28,12 +108,12 @@ macro_rules! wire_newtype {
 macro_rules! wire_product_newtype {
     ($name:ident, $inner:ty) => {
         impl WireShape for sema::$name {
-            fn to_wire(&self) -> WireValue {
-                WireValue::Product(vec![self.payload().to_wire()])
+            fn to_wire(&self) -> RuntimeDatom {
+                RuntimeDatom::Struct(vec![self.payload().to_wire()])
             }
 
-            fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
-                let WireValue::Product(mut fields) = value else {
+            fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
+                let RuntimeDatom::Struct(mut fields) = value else {
                     return Err(WireShapeError);
                 };
                 if fields.len() != 1 {
@@ -49,11 +129,11 @@ macro_rules! wire_product_newtype {
 macro_rules! wire_struct {
     ($name:ident { $($field:ident: $field_type:ty),* $(,)? }) => {
         impl WireShape for sema::$name {
-            fn to_wire(&self) -> WireValue {
-                WireValue::Product(vec![$(self.$field.to_wire()),*])
+            fn to_wire(&self) -> RuntimeDatom {
+                RuntimeDatom::Struct(vec![$(self.$field.to_wire()),*])
             }
-            fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
-                let WireValue::Product(fields) = value else { return Err(WireShapeError) };
+            fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
+                let RuntimeDatom::Struct(fields) = value else { return Err(WireShapeError) };
                 let mut fields = fields.into_iter();
                 let result = Self {
                     $($field: <$field_type as WireShape>::from_wire(
@@ -73,26 +153,16 @@ macro_rules! wire_enum {
         unary { $($unary_ordinal:literal => $unary:ident($payload:ty)),* $(,)? }
     }) => {
         impl WireShape for sema::$name {
-            fn to_wire(&self) -> WireValue {
+            fn to_wire(&self) -> RuntimeDatom {
                 match self {
-                    $(Self::$unit => WireValue::Variant { ordinal: $unit_ordinal, fields: Vec::new() },)*
-                    $(Self::$unary(payload) => WireValue::Variant {
-                        ordinal: $unary_ordinal,
-                        fields: vec![payload.to_wire()],
-                    },)*
+                    $(Self::$unit => RuntimeDatom::Atom(stringify!($unit).to_owned()),)*
+                    $(Self::$unary(payload) => RuntimeDatom::Variant { name: stringify!($unary).to_owned(), body: Box::new(payload.to_wire()) },)*
                 }
             }
-            fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
-                let WireValue::Variant { ordinal, fields } = value else {
-                    return Err(WireShapeError);
-                };
-                match ordinal {
-                    $($unit_ordinal if fields.is_empty() => Ok(Self::$unit),)*
-                    $($unary_ordinal if fields.len() == 1 => Ok(Self::$unary(
-                        <$payload as WireShape>::from_wire(
-                            fields.into_iter().next().ok_or(WireShapeError)?,
-                        )?,
-                    )),)*
+            fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
+                match value {
+                    $(RuntimeDatom::Atom(name) if name == stringify!($unit) => Ok(Self::$unit),)*
+                    $(RuntimeDatom::Variant { name, body } if name == stringify!($unary) => Ok(Self::$unary(<$payload as WireShape>::from_wire(*body)?)),)*
                     _ => Err(WireShapeError),
                 }
             }
@@ -176,12 +246,12 @@ wire_enum!(DeploymentLifecycle { unit { 0 => Failed, 1 => Rejected, 2 => Complet
 // as a one-field product.  Keep the readable runtime noun compact, but retain
 // that product boundary when crossing the verified wire contract.
 impl WireShape for sema::DeploymentOutputSelector {
-    fn to_wire(&self) -> WireValue {
-        WireValue::Product(vec![self.payload().to_wire()])
+    fn to_wire(&self) -> RuntimeDatom {
+        RuntimeDatom::Struct(vec![self.payload().to_wire()])
     }
 
-    fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
-        let WireValue::Product(mut fields) = value else {
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
+        let RuntimeDatom::Struct(mut fields) = value else {
             return Err(WireShapeError);
         };
         if fields.len() != 1 {
@@ -240,12 +310,12 @@ wire_struct!(RejectedTest {
 // `RejectedDeploy.{DeploymentRecord}` is a one-field product in the owner
 // contract, even though the runtime keeps the record as a compact newtype.
 impl WireShape for sema::RejectedDeploy {
-    fn to_wire(&self) -> WireValue {
-        WireValue::Product(vec![self.payload().to_wire()])
+    fn to_wire(&self) -> RuntimeDatom {
+        RuntimeDatom::Struct(vec![self.payload().to_wire()])
     }
 
-    fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
-        let WireValue::Product(mut fields) = value else {
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
+        let RuntimeDatom::Struct(mut fields) = value else {
             return Err(WireShapeError);
         };
         if fields.len() != 1 {
@@ -326,76 +396,18 @@ wire_struct!(StateMarker {
     state_digest: sema::StateDigest
 });
 
-impl WireShape for sema::NodeSelector {
-    fn to_wire(&self) -> WireValue {
-        let requested = match self.optional_generation_artifact {
-            None => WireValue::Absent,
-            Some(sema::GenerationArtifact::UserEnvironment) => {
-                WireValue::Present(Box::new(WireValue::Variant {
-                    ordinal: 0,
-                    fields: Vec::new(),
-                }))
-            }
-            Some(sema::GenerationArtifact::CompleteHost) => {
-                WireValue::Present(Box::new(WireValue::Variant {
-                    ordinal: 1,
-                    fields: Vec::new(),
-                }))
-            }
-            Some(sema::GenerationArtifact::BaseHost) => {
-                WireValue::Present(Box::new(WireValue::Variant {
-                    ordinal: 2,
-                    fields: Vec::new(),
-                }))
-            }
-        };
-        WireValue::Product(vec![
-            self.cluster_name.to_wire(),
-            self.node_name.to_wire(),
-            requested,
-        ])
-    }
-
-    fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
-        let WireValue::Product(mut fields) = value else {
-            return Err(WireShapeError);
-        };
-        if fields.len() != 3 {
-            return Err(WireShapeError);
-        }
-        let requested = fields.pop().ok_or(WireShapeError)?;
-        let optional_generation_artifact = match requested {
-            WireValue::Absent => None,
-            WireValue::Present(value) => match *value {
-                WireValue::Variant { ordinal: 0, fields } if fields.is_empty() => {
-                    Some(sema::GenerationArtifact::UserEnvironment)
-                }
-                WireValue::Variant { ordinal: 1, fields } if fields.is_empty() => {
-                    Some(sema::GenerationArtifact::CompleteHost)
-                }
-                WireValue::Variant { ordinal: 2, fields } if fields.is_empty() => {
-                    Some(sema::GenerationArtifact::BaseHost)
-                }
-                _ => return Err(WireShapeError),
-            },
-            _ => return Err(WireShapeError),
-        };
-        let node_name = sema::NodeName::from_wire(fields.pop().ok_or(WireShapeError)?)?;
-        let cluster_name = sema::ClusterName::from_wire(fields.pop().ok_or(WireShapeError)?)?;
-        Ok(Self {
-            cluster_name,
-            node_name,
-            optional_generation_artifact,
-        })
-    }
-}
+wire_struct!(NodeSelector {
+    cluster_name: ClusterName,
+    node_name: NodeName,
+    optional_generation_artifact: Option<GenerationArtifact>
+});
 
 impl WireShape for sema::Generation {
-    fn to_wire(&self) -> WireValue {
+    fn to_wire(&self) -> RuntimeDatom {
         let closure = canonical_nix_store_root(self.closure_path.payload())
             .then(|| self.closure_path.clone())
             .to_wire();
-        WireValue::Product(vec![
+        RuntimeDatom::Struct(vec![
             self.generation_identifier.to_wire(),
             self.deployment_identifier.to_wire(),
             self.cluster_name.to_wire(),
@@ -408,8 +420,8 @@ impl WireShape for sema::Generation {
         ])
     }
 
-    fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
-        let WireValue::Product(fields) = value else {
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
+        let RuntimeDatom::Struct(fields) = value else {
             return Err(WireShapeError);
         };
         let mut fields = fields.into_iter();
@@ -448,13 +460,13 @@ impl WireShape for sema::Generation {
 }
 
 impl WireShape for sema::TestRunRecord {
-    fn to_wire(&self) -> WireValue {
+    fn to_wire(&self) -> RuntimeDatom {
         let closure = self
             .optional_closure_path
             .clone()
             .filter(|path| canonical_nix_store_root(path.payload()))
             .to_wire();
-        WireValue::Product(vec![
+        RuntimeDatom::Struct(vec![
             self.test_run_identifier.to_wire(),
             self.cluster_name.to_wire(),
             self.node.to_wire(),
@@ -466,8 +478,8 @@ impl WireShape for sema::TestRunRecord {
         ])
     }
 
-    fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
-        let WireValue::Product(fields) = value else {
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
+        let RuntimeDatom::Struct(fields) = value else {
             return Err(WireShapeError);
         };
         let mut fields = fields.into_iter();
@@ -493,21 +505,21 @@ impl WireShape for sema::TestRunRecord {
 }
 
 impl WireShape for sema::KeyMaterialReport {
-    fn to_wire(&self) -> WireValue {
-        WireValue::Product(vec![
+    fn to_wire(&self) -> RuntimeDatom {
+        RuntimeDatom::Struct(vec![
             self.node_name.to_wire(),
-            WireValue::Sequence(Vec::new()),
+            RuntimeDatom::Vector(Vec::new()),
             self.state_marker.to_wire(),
         ])
     }
 
-    fn from_wire(value: WireValue) -> Result<Self, WireShapeError> {
-        let WireValue::Product(fields) = value else {
+    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
+        let RuntimeDatom::Struct(fields) = value else {
             return Err(WireShapeError);
         };
         let mut fields = fields.into_iter();
         let node_name = sema::NodeName::from_wire(fields.next().ok_or(WireShapeError)?)?;
-        let WireValue::Sequence(_) = fields.next().ok_or(WireShapeError)? else {
+        let RuntimeDatom::Vector(_) = fields.next().ok_or(WireShapeError)? else {
             return Err(WireShapeError);
         };
         let state_marker = sema::StateMarker::from_wire(fields.next().ok_or(WireShapeError)?)?;
@@ -558,32 +570,26 @@ fn credential_like(value: &str) -> bool {
     .any(|term| value.contains(term))
 }
 
-pub fn ordinary_ingress(value: signal_lojix::schema::lib::z2VTvQ) -> sema::OrdinaryIngress {
-    sema::OrdinaryIngress::from_wire(value.to_wire())
-        .expect("the verified ordinary Interface has the lojix ingress shape")
+pub fn ordinary_ingress(value: signal_lojix::Request) -> crate::Result<sema::OrdinaryIngress> {
+    sema::OrdinaryIngress::from_wire(current_datom(&value))
+        .map_err(|error| crate::Error::Wire(error.to_string()))
 }
 
-pub fn meta_ingress(value: meta_signal_lojix::schema::lib::z2VW7Q) -> sema::MetaIngress {
-    sema::MetaIngress::from_wire(value.to_wire())
-        .expect("the verified owner Interface has the lojix ingress shape")
+pub fn meta_ingress(value: meta_signal_lojix::Request) -> crate::Result<sema::MetaIngress> {
+    sema::MetaIngress::from_wire(current_datom(&value))
+        .map_err(|error| crate::Error::Wire(error.to_string()))
 }
 
 pub fn ordinary_egress(
     value: sema::OrdinaryEgress,
-) -> crate::Result<signal_lojix::schema::lib::z2VcR1> {
-    signal_lojix::schema::lib::z2VcR1::from_wire(value.to_wire()).map_err(|_| {
-        crate::Error::Invariant(
-            "ordinary egress no longer matches its verified Interface".to_owned(),
-        )
-    })
+) -> crate::Result<signal_lojix::Response> {
+    generated_root(value.to_wire())
 }
 
 pub fn meta_egress(
     value: sema::MetaEgress,
-) -> crate::Result<meta_signal_lojix::schema::lib::z2VeCY> {
-    meta_signal_lojix::schema::lib::z2VeCY::from_wire(value.to_wire()).map_err(|_| {
-        crate::Error::Invariant("owner egress no longer matches its verified Interface".to_owned())
-    })
+) -> crate::Result<meta_signal_lojix::Response> {
+    generated_root(value.to_wire())
 }
 
 #[cfg(test)]
