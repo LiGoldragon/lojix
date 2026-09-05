@@ -61,7 +61,7 @@
           commonArguments
           // {
             inherit cargoArtifacts;
-              cargoExtraArgs = "--bin lojix-bootstrap";
+            cargoExtraArgs = "--bin lojix-bootstrap";
           }
         );
         bootstrapPackage = pkgs.symlinkJoin {
@@ -240,17 +240,25 @@
                 for argument in "$@"; do command="$argument"; done
                 exec /bin/sh -c "$command"
               '';
-              startup = pkgs.runCommand "lojix-testactivation-startup.rkyv" {
-                nativeBuildInputs = [ package ];
-              } ''
-                lojix-write-configuration "ConfigurationWriteRequest.{/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix /var/lib/lojix/lojix.sema atlas NoTestDefaults $out}"
-              '';
-              proposal = "{«atlas {EdgeTesting Large Max {Metal Some.X86_64 4 None None None None None None None None []} {Qwerty Uefi «» [] None} {AAA= Some.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA Some.{aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa “200::1” 300:ca41:6b12:fba}} [] None None False False [] False False None None []} beacon {EdgeTesting Large Max {Pod Some.X86_64 4 None None Some.atlas Some.operator None None None None []} {Qwerty Uefi «» [] None} {AAA= Some.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA Some.{aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa “200::1” 300:ca41:6b12:fba}} [] None None False False [] False False None None []}» «» «» {Max «» «» «»} {criome []}}";
+              startup =
+                pkgs.runCommand "lojix-testactivation-startup.rkyv"
+                  {
+                    nativeBuildInputs = [ package ];
+                  }
+                  ''
+                    lojix-write-configuration "ConfigurationWriteRequest.{/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix /var/lib/lojix/lojix.sema atlas NoTestDefaults $out}"
+                  '';
+              proposal = "{ { [] { criome [] } } { alpha [ { atlas Live.{} Max Max Metal.{ X86_64 { 4 None None None None None } } { Qwerty None } { [] None None [] None } { “ssh-ed25519 AAAAfixture” None None } Some.True [] } ] [] [] [] { Max [] [] [] } } }";
             in
             pkgs.testers.nixosTest {
               name = "lojix-same-host-test-activation";
               nodes.machine = { ... }: {
-                environment.systemPackages = [ package fake-nix fake-ssh candidate ];
+                environment.systemPackages = [
+                  package
+                  fake-nix
+                  fake-ssh
+                  candidate
+                ];
                 systemd.services.lojix = {
                   wantedBy = [ "multi-user.target" ];
                   serviceConfig = {
@@ -258,7 +266,15 @@
                     Restart = "always";
                     KillMode = "control-group";
                     StateDirectory = "lojix";
-                    Environment = "PATH=${pkgs.lib.makeBinPath [ fake-nix fake-ssh pkgs.systemd pkgs.coreutils candidate ]}";
+                    Environment = "PATH=${
+                      pkgs.lib.makeBinPath [
+                        fake-nix
+                        fake-ssh
+                        pkgs.systemd
+                        pkgs.coreutils
+                        candidate
+                      ]
+                    }";
                   };
                   preStart = ''
                     printf '%s' '${proposal}' > /var/lib/lojix/horizon-definition.datom
@@ -271,7 +287,7 @@
                 machine.wait_until_succeeds("test -S /run/lojix/ordinary.sock && test -S /run/lojix/owner.sock")
                 profile_before = machine.succeed("readlink -f /nix/var/nix/profiles/system").strip()
                 predecessor_invocation = machine.succeed("systemctl show lojix.service --property=InvocationID --value").strip()
-                machine.succeed("LOJIX_OWNER_SOCKET=/run/lojix/owner.sock ${package}/bin/meta-lojix 'Deploy.Host.(fixture-cluster atlas BaseHost /var/lib/lojix/horizon-definition.datom github:fixture-owner/fixture-flake?ref=main (ssh-ng://fixture-copy.invalid fixture-login@fixture-activate.invalid) Direct (checks.fixture-a) NixosSystemdBootV1 TestActivation ResolveAndRecord None [])' >/run/lojix-admission")
+                machine.succeed("LOJIX_OWNER_SOCKET=/run/lojix/owner.sock ${package}/bin/meta-lojix 'Deploy.Host.{ fixture-cluster atlas BaseHost /var/lib/lojix/horizon-definition.datom NoSecrets github:fixture-owner/fixture-flake?ref=main { ssh-ng://fixture-copy.invalid fixture-login@fixture-activate.invalid } Direct { checks.fixture-a } NixosSystemdBootV1 TestActivation ResolveAndRecord None [] }' >/run/lojix-admission")
                 machine.log(machine.succeed("cat /run/lojix-admission"))
                 machine.log(machine.succeed("cat /run/lojix-fake-nix-argv"))
                 machine.succeed("grep -F 'DeployAccepted.' /run/lojix-admission")
@@ -281,11 +297,11 @@
                 machine.wait_until_succeeds("test -S /run/lojix/ordinary.sock && test -S /run/lojix/owner.sock")
                 machine.wait_until_succeeds("systemctl show lojix-self-switch-deploy-1.service --property=Result --value | grep -Fx success")
                 machine.log(machine.succeed("systemctl show lojix-self-switch-deploy-1.service --property=LoadState --property=ActiveState --property=SubState --property=Result"))
-                machine.succeed("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Query.ByDeployment.(1)' >/run/lojix-deployment-before-wait")
+                machine.succeed("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Query.ByDeployment.{ 1 }' >/run/lojix-deployment-before-wait")
                 machine.log(machine.succeed("cat /run/lojix-deployment-before-wait"))
                 machine.log(machine.succeed("journalctl -u lojix.service --since '2 minutes ago' --no-pager"))
-                machine.wait_until_succeeds("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Query.ByDeployment.(1)' | grep -Fq Succeeded")
-                machine.succeed("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Query.ByDeployment.(1)' >/run/lojix-deployment")
+                machine.wait_until_succeeds("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Query.ByDeployment.{ 1 }' | grep -Fq Succeeded")
+                machine.succeed("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Query.ByDeployment.{ 1 }' >/run/lojix-deployment")
                 machine.succeed("grep -Fq Succeeded /run/lojix-deployment")
                 assert profile_before == machine.succeed("readlink -f /nix/var/nix/profiles/system").strip()
               '';
