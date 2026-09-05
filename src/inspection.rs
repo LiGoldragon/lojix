@@ -25,10 +25,7 @@ use crate::runtime_model::{
     ContainerLifecycleRecord, DeployJob, DeploymentRecord, EventLogEntry, GcRoot,
     IdentifierAllocation, LiveGeneration, StoredTestRun,
 };
-use crate::{Error, Result, single_inline_datom_argument};
-
-#[path = "ingress.rs"]
-mod ingress;
+use crate::{Error, Result, ingress, single_inline_datom_argument};
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");

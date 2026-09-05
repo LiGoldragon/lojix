@@ -111,13 +111,13 @@ streams subscription events.
   for `containers.<name>.service` transitions; mirrors into the
   event log.
 - **Thin CLIs** — `lojix` and `meta-lojix` each read exactly one inline
-  DOTOS/NOTA object per the one-record operator-surface discipline; they reject
-  raw paths, DOTOS files, signal files, and flags. Each forwards its object as a
+  generated Datom object per the one-record operator-surface discipline; they reject
+  raw paths, request files, signal files, and flags. Each forwards its object as a
   `signal-lojix` frame to the daemon, and prints the reply or
   streams events.
 - **Maintained bootstrap app** — `lojix-bootstrap` is a flake package/app,
   not a daemon client. It accepts exactly one inline private `BootstrapRun`
-  DOTOS object. The request explicitly supplies input mode, builder, optional
+  Datom object. The request explicitly supplies input mode, builder, optional
   hermetic test, local-or-remote BootOnce backend, journal parent, GC-root
   path, and terminal-evidence path. It creates a private v5 journal and
   configuration beneath that journal parent. The journal binds a request hash,
@@ -255,11 +255,11 @@ the workspace actor-systems doctrine. No zero-state holders.
   `None`, so a bare `(Check …)`/`(Run …)` is rejected with `NoTestDefaults`
   rather than resolving against a per-node baked test cluster. Test fixtures are
   supplied only by test code (the workspace deployment-independence discipline).
-- Each public CLI sends one inline DOTOS/NOTA object for its own contract per
+- Each public CLI sends one inline generated Datom object for its own contract per
   invocation, never reads a caller-selected request file, and prints one
-  DOTOS-encoded reply (or streams events until the subscription closes).
+  canonical Datom reply (or streams events until the subscription closes).
 - `lojix-inspect-store` is read-only and accepts exactly one inline
-  `(InspectStore <path>)` object. It rejects raw paths, request files, flags,
+  `InspectionRequest.InspectStore` object. It rejects raw paths, request files, flags,
   and extra arguments.
 - Every external operation is a typed `signal-lojix` variant;
   there is no untyped escape hatch on the wire.

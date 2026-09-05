@@ -40,6 +40,7 @@ pub mod adapters;
 pub mod bootstrap;
 pub mod client;
 pub mod daemon;
+pub mod ingress;
 pub mod inspection;
 pub mod reconstruction;
 pub mod runtime_flow;
@@ -200,7 +201,7 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Select one inline DOTOS/NOTA operand without classifying filesystem paths.
+/// Select one inline Datom operand without classifying filesystem paths.
 /// Component operator surfaces use this instead of `ComponentCommand`: that
 /// helper intentionally recognises request files, whereas these bounded CLIs
 /// must never read a caller-selected path.

@@ -5927,13 +5927,12 @@ impl DetachedActivationObserver {
                 deployment_identifier, self.unit.name
             );
             let terminal = DetachedActivationUnit::terminal_outcome(outcome);
-            if let Some((lifecycle, terminal)) = terminal {
-                if store
+            if let Some((lifecycle, terminal)) = terminal
+                && store
                     .terminalize_deployment(deployment_identifier, lifecycle, terminal)
                     .is_ok()
-                {
-                    self.unit.clean().await;
-                }
+            {
+                self.unit.clean().await;
             }
         });
     }

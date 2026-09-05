@@ -2,7 +2,7 @@
 //!
 //! v4 intentionally has no decoder or migration path for older layouts. A
 //! caller that has stopped the daemon may reconstruct a recognised pre-v4
-//! Lojix store with [`StoreResetCommand`]. The reset takes one inline DOTOS
+//! Lojix store with [`StoreResetCommand`]. The reset takes one inline Datom
 //! request with no path. It derives the path only from the generated startup
 //! archive named by the service-owned `LOJIX_CONFIGURATION` environment
 //! variable, then validates the durable Lojix family/schema identity before
@@ -19,10 +19,7 @@ use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use rkyv::rancor;
 use sema_engine::TableRegistration;
 
-use crate::{DaemonConfiguration, Error, Result, Store, single_inline_datom_argument};
-
-#[path = "ingress.rs"]
-mod ingress;
+use crate::{DaemonConfiguration, Error, Result, Store, ingress, single_inline_datom_argument};
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");

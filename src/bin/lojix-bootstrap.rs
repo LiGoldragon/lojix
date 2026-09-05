@@ -1,6 +1,6 @@
 //! Maintained, daemon-free bootstrap entry point.
 //!
-//! The binary accepts one inline `BootstrapRun` DOTOS object.  It never opens
+//! The binary accepts one inline `BootstrapRun` Datom object. It never opens
 //! a Lojix socket or reuses daemon state: its resumable v5 journal is private to the
 //! supplied journal parent and its terminal evidence is durable at the
 //! supplied evidence path.

@@ -24,7 +24,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::Store;
+use crate::{Store, ingress};
 
 const JOURNAL_SCHEMA_VERSION: u32 = 5;
 const JOURNAL_PREFIX: &str = ".lojix-bootstrap-v5-";
@@ -339,9 +339,6 @@ pub fn run_from_environment() -> std::result::Result<BootstrapTerminal, Bootstra
     let mut executor = ProcessBootstrapExecutor;
     run_with_executor(request, &mut executor)
 }
-
-#[path = "ingress.rs"]
-mod ingress;
 
 pub fn decode_single_inline(
     arguments: impl IntoIterator<Item = OsString>,
@@ -1864,7 +1861,6 @@ struct BootstrapDirectInputValidated {
 #[derive(Debug)]
 struct BootstrapHorizonInputValidated {
     proposal_source: PathBuf,
-    cluster_name: String,
     node_name: String,
     materialization_shape: BootstrapMaterializationShape,
     secrets_input: BootstrapSecretsInputValidated,
@@ -2148,13 +2144,14 @@ fn validate_input(
                 output_selector: validate_output_selector(&input.output_selector.0)?,
             },
         )),
-        BootstrapInput::Horizon(input) => Ok(BootstrapInputValidated::Horizon(
-            BootstrapHorizonInputValidated {
+        BootstrapInput::Horizon(input) => {
+            validate_name(&input.cluster_name.0)?;
+            Ok(BootstrapInputValidated::Horizon(
+                BootstrapHorizonInputValidated {
                 proposal_source: safe_existing_regular_file(
                     &input.proposal_source.0,
                     "horizon-definition.datom",
                 )?,
-                cluster_name: validate_name(&input.cluster_name.0)?,
                 node_name: validate_name(&input.node_name.0)?,
                 materialization_shape: input.materialization_shape,
                 secrets_input: match input.secrets_input {
@@ -2168,8 +2165,9 @@ fn validate_input(
                 flake_reference: validate_flake_reference(&input.flake_reference.0)?,
                 nix_system: validate_nix_system(&input.nix_system.0)?,
                 output_selector: validate_output_selector(&input.output_selector.0)?,
-            },
-        )),
+                },
+            ))
+        }
     }
 }
 

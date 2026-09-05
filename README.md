@@ -83,7 +83,7 @@ in its closure; the built system closure receives a caller-selected durable GC
 root before any activation.
 
 Run it through the maintained Lojix app, or the exact re-export in the
-maintained CriomOS/Home flakes, with exactly one inline DOTOS object and no
+maintained CriomOS/Home flakes, with exactly one inline Datom object and no
 flags or request files:
 
 ```text
