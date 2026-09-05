@@ -206,7 +206,7 @@ the workspace actor-systems doctrine. No zero-state holders.
   acknowledged event and outbox together, while the acknowledged intent keeps
   restart from reconstructing or re-delivering that historical transition.
   There is no migration or legacy resume path. With the daemon stopped, the
-  manually started `lojix-reset-store` accepts only inline `(ResetStore)`. Its
+  manually started `lojix-reset-store` accepts only the inline `ResetStore` Datom word. Its
   service-owned `LOJIX_CONFIGURATION` archive supplies the exact store path;
   an existing archive and primary must be absolute, regular, and non-symlinked.
   A recognised v2/v3 Lojix catalog is removed and recreated as v4, while a v4

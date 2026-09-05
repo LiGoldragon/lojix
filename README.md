@@ -46,7 +46,7 @@ systemctl start lojix-reset-store.service
 
 The unit supplies its generated startup archive through
 `LOJIX_CONFIGURATION`; the binary accepts exactly one pathless inline
-`(ResetStore)` object and never accepts a store path, file, or flag form. The
+`ResetStore` Datom word and never accepts a store path, file, or flag form. The
 archive must be a regular non-symlink file and its configured store must be an
 existing, absolute, traversal-free regular non-symlink file. A recognised v2
 or v3 Lojix catalog is removed and recreated as v4; an already-current v4

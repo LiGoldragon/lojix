@@ -180,13 +180,13 @@ fn command_requires_one_inline_inspect_store_object() {
     assert!(StoreInspectionCommand::from_arguments([OsString::from("lojix.sema")]).is_err());
     assert!(
         StoreInspectionCommand::from_arguments([
-            OsString::from("(InspectStore /tmp/lojix.sema)"),
+            OsString::from("InspectStore.{ /tmp/lojix.sema }"),
             OsString::from("extra"),
         ])
         .is_err()
     );
     assert!(
-        StoreInspectionCommand::from_arguments([OsString::from("(InspectStore /tmp/lojix.sema)",)])
+        StoreInspectionCommand::from_arguments([OsString::from("InspectStore.{ /tmp/lojix.sema }",)])
             .is_ok()
     );
 }

@@ -42,7 +42,6 @@ pub mod client;
 pub mod daemon;
 pub mod ingress;
 pub mod inspection;
-pub mod ingress;
 pub mod reconstruction;
 pub mod runtime_flow;
 pub mod runtime_model;
@@ -173,7 +172,7 @@ pub enum Error {
     StoreMaintenance(String),
 
     #[error(
-        "lojix store at {path:?} cannot be used by this daemon's startup schema/layout gate while {stage}; daemon startup stopped before serving requests; inspect it with an inline `lojix-inspect-store '(InspectStore <path>)'` request: {source}"
+        "lojix store at {path:?} cannot be used by this daemon's startup schema/layout gate while {stage}; daemon startup stopped before serving requests; inspect it with an inline `lojix-inspect-store 'InspectStore.{{ <path> }}'` request: {source}"
     )]
     StoreStartupCompatibility {
         path: PathBuf,
