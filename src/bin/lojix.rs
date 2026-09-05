@@ -10,7 +10,7 @@ use lojix::client::OrdinaryClient;
 fn main() {
     match OrdinaryClient::run_from_environment() {
         Ok(output) => {
-            let (_, datom) = output.conceive().expect("generated response is Datom");
+            let datom = output.conceive().expect("generated response is Datom").1;
             println!("{}", datom.textualize());
         }
         Err(error) => {
