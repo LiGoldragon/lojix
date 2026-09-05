@@ -108,11 +108,8 @@ pub enum Error {
     #[error("signal frame error: {0}")]
     SignalFrame(#[from] triad_runtime::FrameError),
 
-    #[error("ordinary signal frame error: {0}")]
-    OrdinaryFrame(signal_lojix::schema::lib::SignalFrameError),
-
-    #[error("meta signal frame error: {0}")]
-    MetaFrame(meta_signal_lojix::schema::lib::SignalFrameError),
+    #[error("bound signal frame error: {0}")]
+    BoundFrame(#[from] signal_frame::FrameError),
 
     #[error("expected exactly one argument")]
     ExpectedSingleArgument,
@@ -120,17 +117,17 @@ pub enum Error {
     #[error("flag-style arguments are not part of component binaries: {0}")]
     FlagArgument(String),
 
-    #[error("this CLI accepts exactly one inline DOTOS/NOTA object")]
-    InlineDotosRequired,
+    #[error("this CLI accepts exactly one inline Datom object")]
+    InlineDatomRequired,
 
     #[error("required runtime configuration environment variable is unset: {0}")]
     MissingRuntimeConfiguration(String),
 
-    #[error("DOTOS request decoding requires the dotos-text feature")]
-    DotosTextUnsupported,
+    #[error("Datom request did not decode: {0}")]
+    DatomRequestText(String),
 
-    #[error("DOTOS request did not decode: {0}")]
-    DotosRequestText(String),
+    #[error("structural wire conversion failed: {0}")]
+    Wire(String),
 
     #[error(
         "owner socket mode {0:#o} grants other-access; refusing to expose the privileged surface"
@@ -201,25 +198,13 @@ pub enum Error {
     },
 }
 
-impl From<signal_lojix::schema::lib::SignalFrameError> for Error {
-    fn from(error: signal_lojix::schema::lib::SignalFrameError) -> Self {
-        Self::OrdinaryFrame(error)
-    }
-}
-
-impl From<meta_signal_lojix::schema::lib::SignalFrameError> for Error {
-    fn from(error: meta_signal_lojix::schema::lib::SignalFrameError) -> Self {
-        Self::MetaFrame(error)
-    }
-}
-
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Select one inline DOTOS/NOTA operand without classifying filesystem paths.
 /// Component operator surfaces use this instead of `ComponentCommand`: that
 /// helper intentionally recognises request files, whereas these bounded CLIs
 /// must never read a caller-selected path.
-pub fn single_inline_dotos_argument(
+pub fn single_inline_datom_argument(
     arguments: impl IntoIterator<Item = OsString>,
 ) -> Result<String> {
     let mut arguments = arguments.into_iter();
@@ -231,7 +216,7 @@ pub fn single_inline_dotos_argument(
     }
     let argument = argument
         .into_string()
-        .map_err(|_| Error::InlineDotosRequired)?;
+        .map_err(|_| Error::InlineDatomRequired)?;
     if argument.starts_with('-') {
         return Err(Error::FlagArgument(argument));
     }

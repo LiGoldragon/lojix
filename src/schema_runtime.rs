@@ -16,13 +16,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
-use datomic::TextEdge;
 use futures_util::StreamExt;
-use horizon_lib::name::{
-    ClusterName as HorizonClusterName, NodeName as HorizonNodeName, UserName as HorizonUserName,
-};
-use horizon_lib::{ClusterProposal, Horizon, Viewpoint};
-use protos::Text;
+use horizon_lib::{Horizon, HorizonDefinition};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use zbus::proxy::{Builder as ProxyBuilder, CacheProperties, SignalStream};
@@ -33,6 +28,30 @@ use crate::runtime_flow::{self as nexus, NexusEngine};
 use crate::runtime_model as sema;
 
 const CANONICAL_PROPOSAL_ARTIFACT: &str = "horizon-definition.datom";
+
+/// A local activation-login noun. Horizon projects users as public strings;
+/// Lojix validates the command-bearing login independently before it reaches
+/// an SSH or shell invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HorizonUserName(String);
+
+impl HorizonUserName {
+    fn try_new(value: String) -> std::result::Result<Self, String> {
+        if value.is_empty()
+            || value.starts_with('-')
+            || value
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        {
+            return Err("user name is empty or contains unsafe characters".to_string());
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 fn canonical_nix_store_root(value: &str) -> bool {
     let Some(item) = value.strip_prefix("/nix/store/") else {
@@ -717,16 +736,13 @@ pub enum TestSubmissionOutcome {
     Rejected(meta::RejectedTest),
 }
 
-/// A projected cluster — the canonical ClusterProposal artifact the daemon reads to validate
-/// `(OnHost h)` against a node's declared host-set and to resolve `All` to the
-/// cluster's test-VM-host nodes (Unit 2b host/node selection). Wraps the parsed
-/// `ClusterProposal`; the host-set is read from each node's `Machine` primary
-/// host (`super_node`), the single-host majority Unit 1 keeps byte-identical
-/// (the additive `super_nodes` extends it the moment Unit 1 lands on horizon
-/// main).
+/// A resolved Horizon definition used to validate `(OnHost h)` and expand an
+/// `All` test selection. Generic node availability becomes membership only
+/// when the materialized definition explicitly selects it; that resolution is
+/// performed by Horizon before Lojix reads this value.
 #[derive(Debug, Clone)]
 struct ClusterProjection {
-    proposal: ClusterProposal,
+    definition: HorizonDefinition,
 }
 
 impl ClusterProjection {
@@ -734,15 +750,13 @@ impl ClusterProjection {
     /// silently disables host-set validation: deploy admission rejects it, and
     /// this optional test-only projection simply has no trustworthy data.
     fn from_source(source: &ordinary::ProposalSource) -> Option<Self> {
-        let proposal = ProposalFile::available(source)?.load().ok()?;
-        Some(Self { proposal })
+        let definition = ProposalFile::available(source)?.load().ok()?;
+        Some(Self { definition })
     }
 
     /// Validate that `host` is in `node`'s declared host-set. Rejects
-    /// `NodeUnknown` if the node is absent from the projection, or
-    /// `VmHostNotDeclaredForNode` if the resolved host is not the node's
-    /// declared primary host (`super_node`). The single-host host-set is
-    /// exactly `{super_node}`; once Unit 1 lands, `∪ super_nodes` widens it.
+    /// `NodeUnknown` if the node is absent from the resolved projection, or
+    /// `VmHostNotDeclaredForNode` if it has no declared VM host.
     fn validate_host_for_node(
         &self,
         host: &ordinary::NodeName,
@@ -758,34 +772,37 @@ impl ClusterProjection {
         }
     }
 
-    /// The declared host-set of a node by name — its primary `super_node`,
-    /// deduped. `None` when the node is not in the projection. (The additive
-    /// `super_nodes` join is the Unit-1-on-main follow-on; today the pinned
-    /// horizon-lib carries only `super_node`.)
+    /// The declared VM host set of one resolved member. A generic catalogue
+    /// entry which the cluster did not select cannot appear here.
     fn host_set_of(&self, node: &ordinary::NodeName) -> Option<Vec<String>> {
-        let name = HorizonNodeName::try_new(node.payload().clone()).ok()?;
-        let proposal = self.proposal.nodes.get(&name)?;
-        Some(
-            proposal
-                .machine
-                .super_node
-                .as_ref()
-                .map(|primary| vec![primary.as_str().to_string()])
-                .unwrap_or_default(),
-        )
+        let horizon = self.definition.project(node.payload()).ok()?;
+        let mut hosts = horizon.node.machine.host.into_iter().collect::<Vec<_>>();
+        hosts.extend(horizon.node.machine.additional_hosts);
+        Some(hosts)
     }
 
-    /// Every Pod node hosted on a vmhost — a node whose declared host-set is
-    /// non-empty (i.e. a `super_node` is set). The `All` selection sweeps these.
-    /// The configured test profile selects its exact output, so a hosted-Pod
-    /// predicate remains the right `All` expansion set.
+    /// Every resolved VM node with a declared host. `MachineSpecies::Pod`
+    /// remains a hosted VM guest; it is not reinterpreted as a container.
     fn hosted_pod_nodes(&self) -> Vec<ordinary::NodeName> {
-        self.proposal
-            .nodes
-            .iter()
-            .filter(|(_, proposal)| proposal.machine.super_node.is_some())
-            .map(|(name, _)| ordinary::NodeName::new(name.as_str().to_string()))
-            .collect()
+        self.definition
+            .resolve()
+            .map(|resolved| {
+                resolved
+                    .nodes
+                    .keys()
+                    .filter_map(|name| {
+                        self.definition.project(name).ok().and_then(|horizon| {
+                            horizon
+                                .node
+                                .machine
+                                .host
+                                .is_some()
+                                .then(|| ordinary::NodeName::new(name.clone()))
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -4639,13 +4656,10 @@ impl HorizonMaterialization {
     }
 
     async fn run_inner(&self) -> Result<nexus::MaterializedInputs> {
-        let proposal = ProjectableProposal::from(
-            ProposalFile::available(&self.command.proposal_source)
-                .ok_or_else(|| Error::Invariant("proposal source is unavailable".to_string()))?
-                .load()?,
-        );
-        let viewpoint = HorizonViewpoint::from_command(&self.command)?;
-        let horizon = proposal.project(&viewpoint)?;
+        let definition = ProposalFile::available(&self.command.proposal_source)
+            .ok_or_else(|| Error::Invariant("proposal source is unavailable".to_string()))?
+            .load()?;
+        let horizon = definition.project(self.command.node_name.payload())?;
         let root = MaterializationRoot::new(self.configuration.materialization_root(&self.command));
         root.prepare()?;
         let secrets_source =
@@ -4711,54 +4725,11 @@ impl ProposalFile {
         proposal.load().ok().map(|_| proposal)
     }
 
-    fn load(&self) -> Result<ClusterProposal> {
+    fn load(&self) -> Result<HorizonDefinition> {
         let text = fs::read_to_string(&self.path)
             .map_err(|_| Error::Invariant("proposal source is unavailable".to_string()))?;
-        Text::<ClusterProposal>::from(text.as_str())
-            .embody()
-            .map_err(|_| Error::Invariant("proposal source is not valid Datomic".to_string()))
-    }
-}
-
-/// Typed Horizon viewpoint derived from the deploy command.
-#[derive(Debug, Clone)]
-struct HorizonViewpoint {
-    cluster: HorizonClusterName,
-    node: HorizonNodeName,
-}
-
-impl HorizonViewpoint {
-    fn from_command(command: &nexus::HorizonMaterializationCommand) -> Result<Self> {
-        Ok(Self {
-            cluster: HorizonClusterName::try_new(command.cluster_name.payload().clone())?,
-            node: HorizonNodeName::try_new(command.node_name.payload().clone())?,
-        })
-    }
-
-    fn as_horizon_viewpoint(&self) -> Viewpoint {
-        Viewpoint {
-            cluster: self.cluster.clone(),
-            node: self.node.clone(),
-        }
-    }
-}
-
-/// Projection model: today's production Horizon shape still has separate
-/// pan-Horizon and cluster proposals to match the old deploy stack.
-#[derive(Debug, Clone)]
-struct ProjectableProposal {
-    cluster: ClusterProposal,
-}
-
-impl ProjectableProposal {
-    fn project(&self, viewpoint: &HorizonViewpoint) -> Result<Horizon> {
-        Ok(self.cluster.project(&viewpoint.as_horizon_viewpoint())?)
-    }
-}
-
-impl From<ClusterProposal> for ProjectableProposal {
-    fn from(cluster: ClusterProposal) -> Self {
-        Self { cluster }
+        horizon_lib::decode(&text)
+            .map_err(|_| Error::Invariant("proposal source is not a Horizon definition".to_string()))
     }
 }
 
@@ -4819,7 +4790,7 @@ impl MaterializedInputSet {
         inputs.push(
             self.root
                 .input_directory(GeneratedInputName::System)
-                .write_system(&self.horizon.node.system)?
+                .write_system(&self.horizon.node.machine.architecture)?
                 .to_override(GeneratedInputName::System, execution)
                 .await?,
         );
@@ -4872,13 +4843,13 @@ impl GeneratedInputDirectory {
         Ok(self.clone())
     }
 
-    fn write_system(&self, system: &horizon_lib::species::System) -> Result<Self> {
+    fn write_system(&self, system: &str) -> Result<Self> {
         self.prepare()?;
         fs::write(
             self.path.join("flake.nix"),
             format!(
                 "{{ outputs = _: {{ system = \"{}\"; }}; }}\n",
-                NixSystemName::from_horizon_system(system).as_str()
+                NixSystemName::from_horizon_architecture(system).as_str()
             ),
         )?;
         Ok(self.clone())
@@ -5109,15 +5080,16 @@ impl ClusterSecretFile {
     }
 }
 
-/// Nix platform string derived from Horizon's typed system.
+/// Nix platform string derived from Horizon's resolved machine architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NixSystemName(&'static str);
 
 impl NixSystemName {
-    fn from_horizon_system(system: &horizon_lib::species::System) -> Self {
-        match system {
-            horizon_lib::species::System::X86_64Linux => Self("x86_64-linux"),
-            horizon_lib::species::System::Aarch64Linux => Self("aarch64-linux"),
+    fn from_horizon_architecture(architecture: &str) -> Self {
+        match architecture {
+            "x86_64" => Self("x86_64-linux"),
+            "aarch64" => Self("aarch64-linux"),
+            _ => Self("unknown-linux"),
         }
     }
 
@@ -8105,109 +8077,14 @@ mod tests {
     }
 
     #[test]
-    fn materialized_horizon_json_preserves_empty_service_vectors() {
-        use std::collections::BTreeMap;
-
-        use horizon_lib::address::{YggAddress, YggSubnet};
-        use horizon_lib::domain::DomainConfiguration;
-        use horizon_lib::io::Io;
-        use horizon_lib::machine::Machine;
-        use horizon_lib::magnitude::Magnitude;
-        use horizon_lib::name::{ClusterName, NodeName};
-        use horizon_lib::proposal::{ClusterTrust, NodeProposal, NodePubKeys, YggPubKeyEntry};
-        use horizon_lib::pub_key::{NixPubKey, SshPubKey, YggPubKey};
-        use horizon_lib::species::{Arch, Bootloader, Keyboard, MachineSpecies, NodeSpecies};
-
-        let node = |services| NodeProposal {
-            species: NodeSpecies::EdgeTesting,
-            size: Magnitude::Large,
-            trust: Magnitude::Max,
-            machine: Machine {
-                species: MachineSpecies::Metal,
-                arch: Some(Arch::X86_64),
-                cores: 4,
-                model: None,
-                mother_board: None,
-                super_node: None,
-                super_user: None,
-                chip_gen: None,
-                ram_gb: None,
-                disk_gb: None,
-                location: None,
-                super_nodes: Vec::new(),
-            },
-            io: Io {
-                keyboard: Keyboard::Qwerty,
-                bootloader: Bootloader::Uefi,
-                disks: BTreeMap::new(),
-                swap_devices: Vec::new(),
-                compressed_swap: None,
-            },
-            pub_keys: NodePubKeys {
-                ssh: SshPubKey::try_new("AAA=").expect("valid SSH public key"),
-                nix: Some(
-                    NixPubKey::try_new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-                        .expect("valid Nix public key"),
-                ),
-                yggdrasil: Some(YggPubKeyEntry {
-                    pub_key: YggPubKey::try_new("a".repeat(64)).expect("valid Yggdrasil key"),
-                    address: YggAddress::try_new("200::1").expect("valid Yggdrasil address"),
-                    subnet: YggSubnet::try_new("300:ca41:6b12:fba")
-                        .expect("valid Yggdrasil subnet"),
-                }),
-            },
-            link_local_ips: Vec::new(),
-            node_ip: None,
-            wireguard_pub_key: None,
-            nordvpn: false,
-            wifi_cert: false,
-            wireguard_untrusted_proxies: Vec::new(),
-            wants_printing: false,
-            wants_hw_video_accel: false,
-            router_interfaces: None,
-            online: None,
-            services,
-        };
-        let mut nodes = BTreeMap::new();
-        nodes.insert(
-            NodeName::try_new("edge").expect("edge node name"),
-            node(vec![]),
-        );
-        nodes.insert(
-            NodeName::try_new("worker").expect("worker node name"),
-            node(vec![]),
-        );
-        let proposal = ClusterProposal {
-            nodes,
-            users: BTreeMap::new(),
-            domains: BTreeMap::new(),
-            trust: ClusterTrust {
-                cluster: Magnitude::Max,
-                clusters: BTreeMap::new(),
-                nodes: BTreeMap::new(),
-                users: BTreeMap::new(),
-            },
-            domain_configuration: DomainConfiguration::default(),
-        };
-        let horizon = proposal
-            .project(&Viewpoint {
-                cluster: ClusterName::try_new("test-cluster").expect("cluster name"),
-                node: NodeName::try_new("edge").expect("edge node name"),
-            })
-            .expect("project empty service vectors");
-        let directory = tempfile::tempdir().expect("materialization directory");
-        GeneratedInputDirectory::new(directory.path().join("horizon"))
-            .write_horizon(&horizon)
-            .expect("write horizon input");
-        let horizon_json: serde_json::Value = serde_json::from_slice(
-            &fs::read(directory.path().join("horizon/horizon.json")).expect("read horizon JSON"),
-        )
-        .expect("parse materialized horizon JSON");
-
-        assert_eq!(horizon_json["node"]["services"], serde_json::json!([]));
+    fn resolved_horizon_architecture_maps_to_nix_system() {
         assert_eq!(
-            horizon_json["exNodes"]["worker"]["services"],
-            serde_json::json!([])
+            NixSystemName::from_horizon_architecture("x86_64").as_str(),
+            "x86_64-linux"
+        );
+        assert_eq!(
+            NixSystemName::from_horizon_architecture("aarch64").as_str(),
+            "aarch64-linux"
         );
     }
 

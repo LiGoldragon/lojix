@@ -18,11 +18,8 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use datomic::TextEdge;
 use dotos::{DotosDecode, DotosDecodeError, DotosSource};
-use horizon_lib::name::{ClusterName as HorizonClusterName, NodeName as HorizonNodeName};
-use horizon_lib::{ClusterProposal, Viewpoint};
-use protos::Text;
+use horizon_lib::HorizonDefinition;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -665,21 +662,13 @@ fn materialize<E: BootstrapExecutor>(
     };
     let proposal_text =
         fs::read_to_string(&input.proposal_source).map_err(|_| BootstrapError::Materialization)?;
-    let proposal: ClusterProposal = Text::<ClusterProposal>::from(proposal_text.as_str())
-        .embody()
+    let definition: HorizonDefinition = horizon_lib::decode(&proposal_text)
         .map_err(|_| BootstrapError::Materialization)?;
-    let cluster = HorizonClusterName::try_new(input.cluster_name.clone())
+    let horizon = definition
+        .project(&input.node_name)
         .map_err(|_| BootstrapError::Materialization)?;
-    let node = HorizonNodeName::try_new(input.node_name.clone())
-        .map_err(|_| BootstrapError::Materialization)?;
-    let horizon = proposal
-        .project(&Viewpoint { cluster, node })
-        .map_err(|_| BootstrapError::Materialization)?;
-    let projected_system = match &horizon.node.system {
-        horizon_lib::species::System::X86_64Linux => "x86_64-linux",
-        horizon_lib::species::System::Aarch64Linux => "aarch64-linux",
-    };
-    if projected_system != input.nix_system {
+    let projected_system = &horizon.node.machine.architecture;
+    if projected_system.as_str() != input.nix_system {
         return Err(BootstrapError::Materialization);
     }
 

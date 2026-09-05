@@ -1,231 +1,124 @@
-//! The lojix CLI clients — text-to-Signal adapters for the daemon, one per
-//! authority-tiered socket.
-//!
-//! Each client takes exactly one inline DOTOS/NOTA object (per the no-flags /
-//! DOTOS-only rule), decodes it into exactly one contract `Input` via the
-//! optional `dotos-text` feature, connects to its socket, and exchanges one
-//! length-prefixed frame. File arguments are deliberately not an input surface:
-//! the public clients never inspect caller-selected files. Because each client
-//! parses only its own contract
-//! there is no cross-tier classification step — the prior unified client's
-//! audit-R7 short-header collision (meta `Deploy` == ordinary `Query` == 0x0)
-//! is avoided structurally rather than disambiguated by rkyv layout. Socket
-//! paths come from the environment (`LOJIX_ORDINARY_SOCKET` /
-//! `LOJIX_OWNER_SOCKET`) — env vars are a DOTOS host, not flags.
+//! Typed Datom clients for the two Lojix authority-tier sockets.
 
 use std::ffi::OsString;
 use std::os::unix::net::UnixStream;
 
-use signal_frame::{ExchangeIdentifier, ExchangeLane, LaneSequence, Reply, SessionEpoch, SubReply};
-use triad_runtime::{ComponentArgument, FrameBody, LengthPrefixedCodec};
+use datom_codec::{Actualizable, IncorporationBudget, Potential};
+use signal_lojix::WireConversion;
+use signal_frame::{
+    BoundExchangeFrame, ExchangeFrameBody, ExchangeIdentifier, ExchangeLane, LaneSequence,
+    Reply, SessionEpoch, SubReply,
+};
+use triad_runtime::{FrameBody, LengthPrefixedCodec};
 
-use crate::{Error, Result, single_inline_dotos_argument};
+use crate::{Error, Result, single_inline_datom_argument};
 
 const ORDINARY_SOCKET_ENV: &str = "LOJIX_ORDINARY_SOCKET";
 const OWNER_SOCKET_ENV: &str = "LOJIX_OWNER_SOCKET";
 
 fn exchange_identifier() -> ExchangeIdentifier {
-    ExchangeIdentifier::new(
-        SessionEpoch::new(1),
-        ExchangeLane::Connector,
-        LaneSequence::first(),
-    )
+    ExchangeIdentifier::new(SessionEpoch::new(1), ExchangeLane::Connector, LaneSequence::first())
 }
 
-/// A length-prefixed framed exchange over one Unix socket: connect, write the
-/// request frame, read the single reply frame. Tier-agnostic at the byte level;
-/// each tier client owns the typed encode/decode around it.
-pub struct SocketExchange {
-    socket_path: String,
-    codec: LengthPrefixedCodec,
-}
+pub struct SocketExchange { socket_path: String, codec: LengthPrefixedCodec }
 
 impl SocketExchange {
-    pub fn for_environment(environment_variable: &str) -> Result<Self> {
-        let socket_path = std::env::var(environment_variable)
-            .map_err(|_| Error::MissingRuntimeConfiguration(environment_variable.to_string()))?;
-        if socket_path.is_empty() {
-            return Err(Error::MissingRuntimeConfiguration(
-                environment_variable.to_string(),
-            ));
-        }
-        Ok(Self {
-            socket_path,
-            codec: LengthPrefixedCodec::default(),
-        })
+    pub fn for_environment(variable: &str) -> Result<Self> {
+        let socket_path = std::env::var(variable)
+            .map_err(|_| Error::MissingRuntimeConfiguration(variable.to_owned()))?;
+        if socket_path.is_empty() { return Err(Error::MissingRuntimeConfiguration(variable.to_owned())); }
+        Ok(Self { socket_path, codec: LengthPrefixedCodec::default() })
     }
 
-    /// Exchange one request frame for one reply frame, returning the reply body
-    /// bytes for the caller to decode against its contract.
     pub fn exchange(&self, request: Vec<u8>) -> Result<Vec<u8>> {
         let mut stream = UnixStream::connect(&self.socket_path)?;
-        let frame = FrameBody::new(request);
-        self.codec.write_body(&mut stream, &frame)?;
-        let reply = self.codec.read_body(&mut stream)?;
-        Ok(reply.bytes().to_vec())
+        self.codec.write_body(&mut stream, &FrameBody::new(request))?;
+        Ok(self.codec.read_body(&mut stream)?.bytes().to_vec())
     }
 }
 
-/// The ordinary-socket CLI client: speaks the peer-callable `signal-lojix`
-/// contract (Query / WatchDeployments / WatchCacheRetention / Unwatch /
-/// CheckHostKeyMaterial).
 #[derive(Debug)]
-pub struct OrdinaryClient {
-    input: signal_lojix::schema::lib::z2VTvQ,
-}
+pub struct OrdinaryClient { input: signal_lojix::Request }
 
 impl OrdinaryClient {
-    pub fn run_from_environment() -> Result<signal_lojix::schema::lib::z2VcR1> {
+    pub fn run_from_environment() -> Result<signal_lojix::Response> {
         Self::from_arguments(std::env::args_os().skip(1))?.run()
     }
 
-    /// Decode exactly one inline DOTOS/NOTA request. This path deliberately
-    /// does not ask `ComponentCommand` to classify the operand: that helper
-    /// treats an existing filesystem path as a Dotos file and ignores
-    /// `--pretty`, while public Lojix clients accept neither.
     pub fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
-        Self::decode_dotos_text(&single_inline_dotos_argument(arguments)?)
-            .map(|input| Self { input })
-    }
-
-    pub fn from_argument(argument: ComponentArgument) -> Result<Self> {
-        let input = match argument {
-            ComponentArgument::DotosFile(_) | ComponentArgument::SignalFile(_) => {
-                return Err(Error::InlineDotosRequired);
-            }
-            ComponentArgument::InlineDotos(inline) => Self::decode_dotos_text(inline.as_str())?,
-        };
+        let input = Potential::<signal_lojix::Request>::from(single_inline_datom_argument(arguments)?)
+            .actualize(IncorporationBudget::try_from(16_384).expect("positive request budget"))
+            .map_err(|fault| Error::DatomRequestText(fault.to_string()))?;
         Ok(Self { input })
     }
 
-    pub fn input(&self) -> &signal_lojix::schema::lib::z2VTvQ {
-        &self.input
-    }
+    pub fn input(&self) -> &signal_lojix::Request { &self.input }
 
-    pub fn run(self) -> Result<signal_lojix::schema::lib::z2VcR1> {
-        let exchange = SocketExchange::for_environment(ORDINARY_SOCKET_ENV)?;
-        let identifier = exchange_identifier();
-        let reply = exchange.exchange(self.input.encode_request_frame(identifier)?)?;
-        Self::decode_reply(&reply, identifier)
-    }
-
-    fn decode_reply(
-        bytes: &[u8],
-        expected_exchange: ExchangeIdentifier,
-    ) -> Result<signal_lojix::schema::lib::z2VcR1> {
-        let frame = signal_lojix::schema::lib::ContractMarker::decode_frame(bytes)?;
+    pub fn run(self) -> Result<signal_lojix::Response> {
+        let exchange = exchange_identifier();
+        let bytes = signal_lojix::encode_request(exchange, self.input)?;
+        let reply = SocketExchange::for_environment(ORDINARY_SOCKET_ENV)?.exchange(bytes)?;
+        let frame = BoundExchangeFrame::<signal_lojix::LojixWire, signal_lojix::RequestWire, signal_lojix::ResponseWire>::decode_length_prefixed(&reply)?;
         match frame.into_body() {
-            signal_lojix::schema::lib::FrameBody::Reply { exchange, reply }
-                if exchange == expected_exchange =>
-            {
-                match reply {
-                    Reply::Accepted { per_operation, .. } => match per_operation.into_head() {
-                        SubReply::Ok(output)
-                        | SubReply::Failed {
-                            detail: Some(output),
-                            ..
-                        } => Ok(output),
-                        SubReply::Invalidated
-                        | SubReply::Skipped
-                        | SubReply::Failed { detail: None, .. } => Err(Error::UnexpectedFrame),
-                    },
-                    Reply::Rejected { .. } => Err(Error::UnexpectedFrame),
-                }
-            }
+            ExchangeFrameBody::Reply { exchange: found, reply } if found == exchange => match reply {
+                Reply::Accepted { per_operation, .. } => match per_operation.into_head() {
+                    SubReply::Ok(wire) | SubReply::Failed { detail: Some(wire), .. } => {
+                        signal_lojix::Response::try_from_wire(wire).map_err(|fault| Error::Wire(fault.to_string()))
+                    }
+                    _ => Err(Error::UnexpectedFrame),
+                },
+                Reply::Rejected { .. } => Err(Error::SignalRequestRejected),
+            },
             _ => Err(Error::UnexpectedFrame),
         }
     }
-
-    #[cfg(feature = "dotos-text")]
-    fn decode_dotos_text(text: &str) -> Result<signal_lojix::schema::lib::z2VTvQ> {
-        dotos::DotosSource::new(text)
-            .parse::<signal_lojix::schema::lib::z2VTvQ>()
-            .map_err(|error| Error::DotosRequestText(error.to_string()))
-    }
-
-    #[cfg(not(feature = "dotos-text"))]
-    fn decode_dotos_text(_text: &str) -> Result<signal_lojix::schema::lib::z2VTvQ> {
-        Err(Error::DotosTextUnsupported)
-    }
 }
 
-/// The owner-only meta-socket CLI client: the privileged sibling of
-/// `OrdinaryClient`. It speaks the `meta-signal-lojix` policy contract (Deploy /
-/// Pin / Unpin / Retire) over the daemon's owner/meta socket.
 #[derive(Debug)]
-pub struct MetaClient {
-    input: meta_signal_lojix::schema::lib::z2VW7Q,
-}
+pub struct MetaClient { input: meta_signal_lojix::Request }
 
 impl MetaClient {
-    pub fn run_from_environment() -> Result<meta_signal_lojix::schema::lib::z2VeCY> {
+    pub fn run_from_environment() -> Result<meta_signal_lojix::Response> {
         Self::from_arguments(std::env::args_os().skip(1))?.run()
     }
 
-    /// Decode exactly one inline DOTOS/NOTA request without accepting either
-    /// file form or presentation flags.
     pub fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
-        Self::decode_dotos_text(&single_inline_dotos_argument(arguments)?)
-            .map(|input| Self { input })
-    }
-
-    pub fn from_argument(argument: ComponentArgument) -> Result<Self> {
-        let input = match argument {
-            ComponentArgument::DotosFile(_) | ComponentArgument::SignalFile(_) => {
-                return Err(Error::InlineDotosRequired);
-            }
-            ComponentArgument::InlineDotos(inline) => Self::decode_dotos_text(inline.as_str())?,
-        };
+        let input = Potential::<meta_signal_lojix::Request>::from(single_inline_datom_argument(arguments)?)
+            .actualize(IncorporationBudget::try_from(16_384).expect("positive request budget"))
+            .map_err(|fault| Error::DatomRequestText(fault.to_string()))?;
         Ok(Self { input })
     }
 
-    pub fn input(&self) -> &meta_signal_lojix::schema::lib::z2VW7Q {
-        &self.input
-    }
+    pub fn input(&self) -> &meta_signal_lojix::Request { &self.input }
 
-    pub fn run(self) -> Result<meta_signal_lojix::schema::lib::z2VeCY> {
-        let exchange = SocketExchange::for_environment(OWNER_SOCKET_ENV)?;
-        let identifier = exchange_identifier();
-        let reply = exchange.exchange(self.input.encode_request_frame(identifier)?)?;
-        Self::decode_reply(&reply, identifier)
-    }
-
-    fn decode_reply(
-        bytes: &[u8],
-        expected_exchange: ExchangeIdentifier,
-    ) -> Result<meta_signal_lojix::schema::lib::z2VeCY> {
-        let frame = meta_signal_lojix::schema::lib::ContractMarker::decode_frame(bytes)?;
+    pub fn run(self) -> Result<meta_signal_lojix::Response> {
+        use meta_signal_lojix::WireConversion;
+        let exchange = exchange_identifier();
+        let input = self.input;
+        let route = match &input {
+            meta_signal_lojix::Request::Retire(_) => 0,
+            meta_signal_lojix::Request::Pin(_) => 1,
+            meta_signal_lojix::Request::Deploy(_) => 2,
+            meta_signal_lojix::Request::Test(_) => 3,
+            meta_signal_lojix::Request::Unpin(_) => 4,
+        };
+        let request = BoundExchangeFrame::<meta_signal_lojix::MetaLojixWire, meta_signal_lojix::RequestWire, meta_signal_lojix::ResponseWire>::new(
+            signal_frame::WireRoute::new(signal_frame::RootCode::new(0), signal_frame::VariantCode::new(route)),
+            ExchangeFrameBody::Request { exchange, request: signal_frame::Request::from_payload(input.into_wire()) },
+        ).encode_length_prefixed()?;
+        let reply = SocketExchange::for_environment(OWNER_SOCKET_ENV)?.exchange(request)?;
+        let frame = BoundExchangeFrame::<meta_signal_lojix::MetaLojixWire, meta_signal_lojix::RequestWire, meta_signal_lojix::ResponseWire>::decode_length_prefixed(&reply)?;
         match frame.into_body() {
-            meta_signal_lojix::schema::lib::FrameBody::Reply { exchange, reply }
-                if exchange == expected_exchange =>
-            {
-                match reply {
-                    Reply::Accepted { per_operation, .. } => match per_operation.into_head() {
-                        SubReply::Ok(output)
-                        | SubReply::Failed {
-                            detail: Some(output),
-                            ..
-                        } => Ok(output),
-                        SubReply::Invalidated
-                        | SubReply::Skipped
-                        | SubReply::Failed { detail: None, .. } => Err(Error::UnexpectedFrame),
-                    },
-                    Reply::Rejected { .. } => Err(Error::UnexpectedFrame),
-                }
-            }
+            ExchangeFrameBody::Reply { exchange: found, reply } if found == exchange => match reply {
+                Reply::Accepted { per_operation, .. } => match per_operation.into_head() {
+                    SubReply::Ok(wire) | SubReply::Failed { detail: Some(wire), .. } => {
+                        meta_signal_lojix::Response::try_from_wire(wire).map_err(|fault| Error::Wire(fault.to_string()))
+                    }
+                    _ => Err(Error::UnexpectedFrame),
+                },
+                Reply::Rejected { .. } => Err(Error::SignalRequestRejected),
+            },
             _ => Err(Error::UnexpectedFrame),
         }
-    }
-
-    #[cfg(feature = "dotos-text")]
-    fn decode_dotos_text(text: &str) -> Result<meta_signal_lojix::schema::lib::z2VW7Q> {
-        dotos::DotosSource::new(text)
-            .parse::<meta_signal_lojix::schema::lib::z2VW7Q>()
-            .map_err(|error| Error::DotosRequestText(error.to_string()))
-    }
-
-    #[cfg(not(feature = "dotos-text"))]
-    fn decode_dotos_text(_text: &str) -> Result<meta_signal_lojix::schema::lib::z2VW7Q> {
-        Err(Error::DotosTextUnsupported)
     }
 }
