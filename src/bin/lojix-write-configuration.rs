@@ -3,8 +3,7 @@ use datom_codec::{Actualizable, IncorporationBudget, Potential};
 use lojix::{DaemonConfiguration, Error as LojixError, TestDefaults, TestMode};
 use std::path::PathBuf;
 use thiserror::Error;
-#[path = "../ingress.rs"]
-mod ingress;
+use lojix::ingress;
 fn main() {
     if let Err(error) = ConfigurationWriterCli::from_environment().run() {
         eprintln!("lojix-write-configuration: {error}");

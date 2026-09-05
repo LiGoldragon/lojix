@@ -41,6 +41,7 @@ pub mod bootstrap;
 pub mod client;
 pub mod daemon;
 pub mod inspection;
+pub mod ingress;
 pub mod reconstruction;
 pub mod runtime_flow;
 pub mod runtime_model;
