@@ -1,7 +1,7 @@
-//! Explicit, configuration-scoped reset support for the v4 Lojix store.
+//! Explicit, configuration-scoped reset support for the v5 Lojix store.
 //!
-//! v4 intentionally has no decoder or migration path for older layouts. A
-//! caller that has stopped the daemon may reconstruct a recognised pre-v4
+//! v5 intentionally has no decoder or migration path for older layouts. A
+//! caller that has stopped the daemon may reconstruct a recognised pre-v5
 //! Lojix store with [`StoreResetCommand`]. The reset takes one inline Datom
 //! request with no path. It derives the path only from the generated startup
 //! archive named by the service-owned `LOJIX_CONFIGURATION` environment
@@ -24,9 +24,9 @@ use crate::{DaemonConfiguration, Error, Result, Store, ingress, single_inline_da
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");
 const SCHEMA_VERSION_KEY: &str = "schema_version";
-const CURRENT_SCHEMA: u64 = 4;
-const RECOGNISED_SCHEMAS: &[u64] = &[2, 3, CURRENT_SCHEMA];
-const RESETTABLE_SCHEMAS: &[u64] = &[2, 3];
+const CURRENT_SCHEMA: u64 = 5;
+const RECOGNISED_SCHEMAS: &[u64] = &[2, 3, 4, CURRENT_SCHEMA];
+const RESETTABLE_SCHEMAS: &[u64] = &[2, 3, 4];
 /// The reset service receives this from the NixOS module. It is deliberately
 /// not inferred from a state directory or accepted as a CLI path.
 pub const CONFIGURATION_ENV: &str = "LOJIX_CONFIGURATION";
@@ -39,9 +39,9 @@ const SIDECAR_SUFFIXES: &[&str] = &[
     ".schema-v3.pending.owner",
 ];
 
-/// Result of a guarded reset. A current v4 store is observed but never
+/// Result of a guarded reset. A current v5 store is observed but never
 /// rewritten: callers receive [`Self::AlreadyCurrent`] without deleting any
-/// data. Only a recognised v2/v3 store is removed and recreated as v4.
+/// data. A recognised v2/v3/v4 store is removed and recreated as v5.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreResetOutcome {
     Recreated {
@@ -61,14 +61,14 @@ impl std::fmt::Display for StoreResetOutcome {
                 removed_sidecars,
             } => write!(
                 formatter,
-                "(LojixStoreReset path={} schema=4 removed_sidecars={})",
+                "(LojixStoreReset path={} schema=5 removed_sidecars={})",
                 path.display(),
                 removed_sidecars.len(),
             ),
             Self::AlreadyCurrent { path } => {
                 write!(
                     formatter,
-                    "(LojixStoreAlreadyCurrent path={} schema=4)",
+                    "(LojixStoreAlreadyCurrent path={} schema=5)",
                     path.display()
                 )
             }
@@ -133,7 +133,7 @@ impl StoreResetCommand {
                 ))
             })?;
         }
-        // Store::open is the sole initializer. It stamps a new v4 schema and
+        // Store::open is the sole initializer. It stamps a new v5 schema and
         // proves that the replacement is usable before this command succeeds.
         drop(Store::open(&path)?);
         Ok(StoreResetOutcome::Recreated {
@@ -282,7 +282,7 @@ fn schema_version_from_database(database: &redb::ReadOnlyDatabase) -> Result<u64
 }
 
 /// Verify the persisted sema-engine catalog belongs wholly to one of the
-/// Lojix store layouts. Schema v2 has the six core families; v3/v4 add the
+/// Lojix store layouts. Schema v2 has the six core families; v3/v4/v5 add the
 /// deployment correlation families (and v3's retired quarantine family). A
 /// valid reset source must contain every core family and no foreign family.
 fn validate_lojix_catalog(database: &redb::ReadOnlyDatabase, version: u64) -> Result<()> {
@@ -430,7 +430,7 @@ mod tests {
         .expect("exact reset command")
     }
 
-    fn mark_pre_v4(path: &Path) {
+    fn mark_pre_v5(path: &Path) {
         let database = redb::Database::open(path).expect("open recognised Lojix store");
         let write = database
             .begin_write()
@@ -439,7 +439,7 @@ mod tests {
             let mut metadata = write.open_table(META_TABLE).expect("metadata table");
             metadata
                 .insert(SCHEMA_VERSION_KEY, 3)
-                .expect("pre-v4 schema marker");
+                .expect("pre-v5 schema marker");
         }
         write.commit().expect("commit schema downgrade fixture");
     }
@@ -479,42 +479,42 @@ mod tests {
     }
 
     #[test]
-    fn reset_returns_already_current_without_touching_v4_data_or_sidecars() {
+    fn reset_returns_already_current_without_touching_v5_data_or_sidecars() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("configured-lojix-store.db");
-        drop(Store::open(&path).expect("create v4 store"));
+        drop(Store::open(&path).expect("create v5 store"));
         let sidecar = sidecars_for(&path)
             .into_iter()
             .next()
             .expect("sidecar path");
-        fs::write(&sidecar, "must survive with v4 primary").expect("sidecar witness");
-        let before = fs::read(&path).expect("read v4 store before reset");
+        fs::write(&sidecar, "must survive with v5 primary").expect("sidecar witness");
+        let before = fs::read(&path).expect("read v5 store before reset");
         let archive = startup_archive(directory.path(), &path);
 
         assert_eq!(
             reset_command(&archive).run().expect("current-store result"),
             StoreResetOutcome::AlreadyCurrent { path: path.clone() }
         );
-        assert_eq!(fs::read(&path).expect("read v4 store after reset"), before);
-        assert!(sidecar.exists(), "v4 sidecars are untouched too");
+        assert_eq!(fs::read(&path).expect("read v5 store after reset"), before);
+        assert!(sidecar.exists(), "v5 sidecars are untouched too");
     }
 
     #[test]
-    fn reset_recreates_only_a_recognised_pre_v4_lojix_store_and_its_sidecars() {
+    fn reset_recreates_only_a_recognised_pre_v5_lojix_store_and_its_sidecars() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("configured-lojix-store.db");
         drop(Store::open(&path).expect("create recognised Lojix source"));
-        mark_pre_v4(&path);
+        mark_pre_v5(&path);
         for sidecar in sidecars_for(&path) {
             fs::write(sidecar, "stale Lojix sidecar").expect("write sidecar");
         }
         let spirit = directory.path().join("spirit.sema");
         fs::write(&spirit, "must survive").expect("write Spirit witness");
         let archive = startup_archive(directory.path(), &path);
-        let outcome = reset_command(&archive).run().expect("reset pre-v4 source");
+        let outcome = reset_command(&archive).run().expect("reset pre-v5 source");
         assert!(matches!(outcome, StoreResetOutcome::Recreated { .. }));
         assert_eq!(
-            schema_version(&path).expect("fresh v4 schema"),
+            schema_version(&path).expect("fresh v5 schema"),
             CURRENT_SCHEMA
         );
         assert_eq!(
@@ -567,7 +567,7 @@ mod tests {
 
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("configured-lojix-store.db");
-        drop(Store::open(&path).expect("create v4 store"));
+        drop(Store::open(&path).expect("create v5 store"));
         let archive = startup_archive(directory.path(), &path);
         let archive_link = directory.path().join("configuration-link.rkyv");
         symlink(&archive, &archive_link).expect("configuration symlink");

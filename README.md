@@ -36,7 +36,7 @@ error text, or noncanonical path.
 
 ## Store reset
 
-Lojix v4 deliberately refuses older Lojix schemas. There is no row migration
+Lojix v5 deliberately refuses older Lojix schemas. There is no row migration
 or legacy resume path. After stopping `lojix-daemon`, CriomOS may manually
 start its dedicated reset unit:
 
@@ -48,9 +48,8 @@ The unit supplies its generated startup archive through
 `LOJIX_CONFIGURATION`; the binary accepts exactly one pathless inline
 `ResetStore` Datom word and never accepts a store path, file, or flag form. The
 archive must be a regular non-symlink file and its configured store must be an
-existing, absolute, traversal-free regular non-symlink file. A recognised v2
-or v3 Lojix catalog is removed and recreated as v4; an already-current v4
-store returns `AlreadyCurrent` without deleting any data. Only then are the
+existing, absolute, traversal-free regular non-symlink file. A recognised v2, v3, or v4 Lojix catalog is removed and recreated as v5; an
+already-current v5 store returns `AlreadyCurrent` without deleting any data. Only then are the
 pre-v4 protocol sidecars
 (`.schema-pre-v3.backup`, `.schema-v3.pending`, and
 `.schema-v3.pending.owner`) mechanically derived and removed. It never

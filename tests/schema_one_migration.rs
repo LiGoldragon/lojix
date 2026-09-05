@@ -1,4 +1,4 @@
-//! Public boundary checks for the v4 reset contract.
+//! Public boundary checks for the v5 reset contract.
 
 use std::ffi::OsString;
 
@@ -73,7 +73,7 @@ fn reset_requires_one_inline_pathless_request() {
 }
 
 #[test]
-fn v4_refuses_an_old_schema_until_the_explicit_reset_replaces_it() {
+fn v5_refuses_the_v4_deploy_submission_layout_until_explicit_reset() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("configured-lojix-store.db");
     drop(Store::open(&path).expect("create a recognised Lojix store"));
@@ -82,16 +82,16 @@ fn v4_refuses_an_old_schema_until_the_explicit_reset_replaces_it() {
     {
         let mut metadata = write.open_table(META_TABLE).expect("metadata table");
         metadata
-            .insert("schema_version", 3)
+            .insert("schema_version", 4)
             .expect("old schema marker");
     }
     write.commit().expect("commit old schema marker");
     drop(database);
 
-    assert!(Store::open(&path).is_err(), "v4 must not decode schema 3");
+    assert!(Store::open(&path).is_err(), "v5 must not decode schema 4");
     let archive = startup_archive(directory.path(), &path);
     reset_command(&archive)
         .run()
         .expect("replace known Lojix schema");
-    Store::open(&path).expect("fresh v4 store opens");
+    Store::open(&path).expect("fresh v5 store opens");
 }

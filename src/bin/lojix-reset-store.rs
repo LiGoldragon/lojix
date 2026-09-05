@@ -1,4 +1,4 @@
-//! Explicit, inline-Datom, path-scoped Lojix v4 store reset CLI.
+//! Explicit, inline-Datom, path-scoped Lojix v5 store reset CLI.
 
 use lojix::reconstruction::StoreResetCommand;
 

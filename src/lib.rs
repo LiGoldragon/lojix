@@ -60,11 +60,11 @@ pub(crate) fn nix_system_from_horizon_architecture(architecture: &str) -> Option
     }
 }
 
-/// The Lojix durable-store schema version. v4 records exact private deployment
-/// routing snapshots and deliberately does not decode or migrate earlier
-/// layouts. Use the path-scoped `lojix-reset-store` primitive while the daemon
-/// is stopped.
-const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(4);
+/// The Lojix durable-store schema version. v5 adds the explicit `SecretsInput`
+/// to the persisted deploy-submission snapshot, so it deliberately does not
+/// decode or migrate v4 or earlier layouts. Use the path-scoped
+/// `lojix-reset-store` primitive while the daemon is stopped.
+const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(5);
 
 /// The ten durable table names. One row per element (a keyed record family),
 /// not one blob per table — the sema-engine model. `deploy-job` is the
@@ -815,7 +815,7 @@ impl Store {
         }
     }
 
-    /// Initialize the one global high-water record once from the durable v4
+    /// Initialize the one global high-water record once from the durable v5
     /// records that can issue identities.
     fn ensure_identifier_allocation(&self) -> Result<()> {
         if !self.identifier_allocations()?.is_empty() {
