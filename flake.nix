@@ -55,18 +55,13 @@
           # `setsid`; package checks need that executable in their sandbox.
           nativeBuildInputs = [ pkgs.util-linux ];
         };
-        cargoArtifacts = craneLib.buildDepsOnly (
-          commonArguments
-          // {
-            cargoExtraArgs = "--features dotos-text";
-          }
-        );
+        cargoArtifacts = craneLib.buildDepsOnly commonArguments;
         daemonCargoArtifacts = craneLib.buildDepsOnly commonArguments;
         bootstrapBinary = craneLib.buildPackage (
           commonArguments
           // {
             inherit cargoArtifacts;
-            cargoExtraArgs = "--bin lojix-bootstrap --features dotos-text";
+              cargoExtraArgs = "--bin lojix-bootstrap";
           }
         );
         bootstrapPackage = pkgs.symlinkJoin {
@@ -92,7 +87,6 @@
             commonArguments
             // {
               inherit cargoArtifacts;
-              cargoExtraArgs = "--features dotos-text";
             }
           );
 
@@ -124,7 +118,6 @@
             commonArguments
             // {
               inherit cargoArtifacts;
-              cargoExtraArgs = "--features dotos-text";
             }
           );
 
@@ -135,21 +128,21 @@
             commonArguments
             // {
               inherit cargoArtifacts;
-              cargoExtraArgs = "--test daemon_configuration --features dotos-text";
+              cargoExtraArgs = "--test daemon_configuration";
             }
           );
 
-          daemon-startup-rejects-dotos =
+          daemon-startup-rejects-inline-input =
             let
               package = self.packages.${system}.default;
             in
-            pkgs.runCommand "lojix-daemon-startup-rejects-dotos" { } ''
+            pkgs.runCommand "lojix-daemon-startup-rejects-inline-input" { } ''
               set +e
               ${package}/bin/lojix-daemon '(NotAStartupArchive)' >stdout 2>stderr
               status=$?
               set -e
               if [ "$status" -eq 0 ]; then
-                echo 'lojix-daemon accepted inline DOTOS startup' >&2
+                echo 'lojix-daemon accepted inline startup input' >&2
                 exit 1
               fi
               if ! grep -Eq 'ExpectedSignalFile|signal file|DaemonRejected' stderr; then
@@ -157,7 +150,7 @@
                 cat stderr >&2
                 exit 1
               fi
-              printf 'lojix daemon rejects DOTOS startup\n' > "$out"
+              printf 'lojix daemon rejects inline startup input\n' > "$out"
             '';
 
           bootstrap-rejects-flags =
@@ -189,7 +182,7 @@
             commonArguments
             // {
               inherit cargoArtifacts;
-              cargoClippyExtraArgs = "--all-targets --features dotos-text -- -D warnings";
+              cargoClippyExtraArgs = "--all-targets -- -D warnings";
             }
           );
 
