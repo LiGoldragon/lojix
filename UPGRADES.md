@@ -27,9 +27,20 @@ v4 job and never resumes that job under changed meaning.
 For a non-destructive cutover, stop `lojix-daemon`; retain its v4 primary store
 at its existing configured absolute path; then generate the next daemon startup
 archive with a distinct, new absolute `store_path` (for example, a `.v5`
-sibling). Start the daemon only with that new archive. The fresh path is
-initialized as v5 while the v4 store remains unchanged and can be examined
-read-only with `lojix-inspect-store 'InspectStore.{ <absolute-v4-store-path> }'`.
+sibling). The typed production writer form is:
+
+```text
+lojix-write-configuration 'ConfigurationWriteRequest.{ <ordinary-socket> <ordinary-mode> <owner-socket> <owner-mode> <state-directory> <new-v5-store-path> <daemon-host> NoTestDefaults <new-startup-archive> }'
+```
+
+Update the service to use that new generated archive, then start the daemon
+only with it. The fresh path is initialized as v5 while the v4 store remains
+unchanged and can be examined read-only with:
+
+```text
+lojix-inspect-store 'InspectStore.{ <absolute-v4-store-path> }'
+```
+
 Do not copy a v4 database into the new v5 path and do not point the v5 daemon
 at the old path.
 
