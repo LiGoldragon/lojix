@@ -28,7 +28,7 @@ acknowledged history is never replayed.
 
 Deploy admission reads a proposal only from an existing, non-symlink absolute
 regular canonical artifact named `horizon-definition.datom`, embodied as
-`Text<ClusterProposal>`. Resolver output,
+`HorizonDefinition`. Resolver output,
 effect output, persisted resume cursors, live generations, and GC roots may
 use a closure only when it is a canonical immutable `/nix/store/<hash>-<name>`
 root. Public replies expose no raw proposal source, flake reference, local
@@ -44,7 +44,11 @@ non-destructive cutover, stop `lojix-daemon`, retain the v4 primary unchanged,
 and generate the next daemon configuration with a new absolute store path
 (such as a distinct `.v5` file). Starting the daemon with that configuration
 creates an empty v5 store; keep the v4 path available to `lojix-inspect-store`
-for offline inspection. After stopping `lojix-daemon`, CriomOS may instead
+from Lojix 0.20.3 (`46585a2c8303bffe885b1722bfebd97d5353ca17`) for offline
+inspection with its legacy inline request
+`'(InspectStore <absolute-v4-store-path>)'`. The current v5 inspector uses a
+different decoded record layout and is not the compatible v4 job/history
+reader. After stopping `lojix-daemon`, CriomOS may instead
 manually start its dedicated reset unit:
 
 ```sh

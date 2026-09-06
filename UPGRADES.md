@@ -35,14 +35,18 @@ lojix-write-configuration 'ConfigurationWriteRequest.{ <ordinary-socket> <ordina
 
 Update the service to use that new generated archive, then start the daemon
 only with it. The fresh path is initialized as v5 while the v4 store remains
-unchanged and can be examined read-only with:
+unchanged. Inspect that retained v4 path read-only with the compatible Lojix
+0.20.3 inspector at `46585a2c8303bffe885b1722bfebd97d5353ca17`, which uses its
+legacy Dotos ingress:
 
 ```text
-lojix-inspect-store 'InspectStore.{ <absolute-v4-store-path> }'
+lojix-inspect-store '(InspectStore <absolute-v4-store-path>)'
 ```
 
-Do not copy a v4 database into the new v5 path and do not point the v5 daemon
-at the old path.
+The v5 `lojix-inspect-store` uses `InspectStore.{ <path> }` and decodes v5
+record types; it is not the compatible reader for retained v4 jobs/history. Do
+not copy a v4 database into the new v5 path and do not point the v5 daemon at
+the old path.
 
 `lojix-reset-store` remains a separate, explicit discard option for a stopped
 daemon: it may replace a recognized v2/v3/v4 Lojix store with an empty v5
