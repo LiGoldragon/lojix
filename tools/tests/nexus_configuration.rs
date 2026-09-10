@@ -2,8 +2,9 @@ use std::fs;
 use std::process::Command;
 
 use lojix::{
-    LegacyConfigurationMigratable as _, LegacyStartupConfiguration, NexusConfiguration,
-    NexusConfigurationState, NexusPersistable as _, Store, TestDefaults, TestMode,
+    LegacyConfigurationArchivable as _, LegacyConfigurationMigratable as _,
+    LegacyStartupConfiguration, NexusConfiguration, NexusConfigurationState, NexusPersistable as _,
+    Store, TestDefaults, TestMode,
 };
 use signal_lojix::{
     DeploymentOutputSelector, LojixNexusConfiguration, TestDefaults as WireTestDefaults,

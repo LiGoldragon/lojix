@@ -114,7 +114,7 @@
           '';
         };
         completePackage = pkgs.symlinkJoin {
-          name = "lojix-1.0.0";
+          name = "lojix-1.0.1";
           paths = [
             nexusPackage
             ordinaryClientPackage

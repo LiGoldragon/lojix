@@ -96,104 +96,84 @@ pub trait Runnable {
     fn run(self) -> Result<()>;
 }
 
-impl Daemon {
-    fn new(
-        configuration: NexusConfiguration,
-        state_database_path: impl Into<std::path::PathBuf>,
-    ) -> Self {
-        Self {
-            configuration,
-            state_database_path: state_database_path.into(),
-        }
-    }
-}
-
 impl Runnable for Daemon {
     fn run(self) -> Result<()> {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
-            .block_on(self.run_async())
+            .block_on(run_daemon(self))
     }
 }
 
-impl Daemon {
-    async fn run_async(self) -> Result<()> {
-        let configuration = self.configuration;
-        configuration.validate()?;
-        let ordinary_socket_mode =
-            u32::try_from(configuration.ordinary_socket_mode).map_err(|_| {
-                Error::InvalidNexusConfiguration("ordinary socket mode is outside u32".into())
-            })?;
-        let owner_socket_mode = u32::try_from(configuration.owner_socket_mode).map_err(|_| {
-            Error::InvalidNexusConfiguration("meta socket mode is outside u32".into())
-        })?;
-        for path in [
-            &configuration.ordinary_socket_path,
-            &configuration.owner_socket_path,
-        ] {
-            if let Some(parent) = std::path::Path::new(path).parent() {
-                std::fs::create_dir_all(parent)?;
-            }
+async fn run_daemon(daemon_configuration: Daemon) -> Result<()> {
+    let configuration = daemon_configuration.configuration;
+    configuration.validate()?;
+    let ordinary_socket_mode = u32::try_from(configuration.ordinary_socket_mode).map_err(|_| {
+        Error::InvalidNexusConfiguration("ordinary socket mode is outside u32".into())
+    })?;
+    let owner_socket_mode = u32::try_from(configuration.owner_socket_mode)
+        .map_err(|_| Error::InvalidNexusConfiguration("meta socket mode is outside u32".into()))?;
+    for path in [
+        &configuration.ordinary_socket_path,
+        &configuration.owner_socket_path,
+    ] {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
         }
-        std::fs::create_dir_all(&configuration.state_directory_path)?;
-        let sockets = vec![
-            AsyncListenerSocket::new(
-                ListenerRole::Ordinary,
-                configuration.ordinary_socket_path.clone(),
-            )
-            .with_socket_mode(SocketMode::new(ordinary_socket_mode)),
-            AsyncListenerSocket::new(ListenerRole::Owner, configuration.owner_socket_path.clone())
-                .with_socket_mode(SocketMode::new(owner_socket_mode)),
-        ];
-        let runtime = LojixRuntime::new(
-            RuntimeConfiguration::from(&configuration),
-            self.state_database_path,
-        )
-        .await?;
-        let request_error_log = RequestErrorLog::new("lojix-nexus");
-        let daemon = AsyncMultiListenerDaemon::new(sockets, runtime, request_error_log)
-            .with_concurrency_limit(RequestConcurrencyLimit::new(MAXIMUM_CONCURRENT_REQUESTS))
-            .bind()
-            .await
-            .map_err(|error| {
-                Self::map_daemon_error(AsyncMultiListenerDaemonError::Listener(error))
-            })?;
-        daemon
-            .start()
-            .await
-            .map_err(|error| Self::map_daemon_error(AsyncMultiListenerDaemonError::Start(error)))?;
-
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        let mut interrupt =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-        loop {
-            tokio::select! {
-                _ = terminate.recv() => break,
-                _ = interrupt.recv() => break,
-                result = daemon.serve_next_connection_at(0) => {
-                    result.map_err(|error| Self::map_daemon_error(AsyncMultiListenerDaemonError::Listener(error)))?;
-                }
-                result = daemon.serve_next_connection_at(1) => {
-                    result.map_err(|error| Self::map_daemon_error(AsyncMultiListenerDaemonError::Listener(error)))?;
-                }
-            }
-        }
-        daemon
-            .stop()
-            .await
-            .map_err(|error| Self::map_daemon_error(AsyncMultiListenerDaemonError::Stop(error)))
     }
+    std::fs::create_dir_all(&configuration.state_directory_path)?;
+    let sockets = vec![
+        AsyncListenerSocket::new(
+            ListenerRole::Ordinary,
+            configuration.ordinary_socket_path.clone(),
+        )
+        .with_socket_mode(SocketMode::new(ordinary_socket_mode)),
+        AsyncListenerSocket::new(ListenerRole::Owner, configuration.owner_socket_path.clone())
+            .with_socket_mode(SocketMode::new(owner_socket_mode)),
+    ];
+    let runtime = LojixRuntime::new(
+        RuntimeConfiguration::from(&configuration),
+        daemon_configuration.state_database_path,
+    )
+    .await?;
+    let request_error_log = RequestErrorLog::new("lojix-nexus");
+    let daemon = AsyncMultiListenerDaemon::new(sockets, runtime, request_error_log)
+        .with_concurrency_limit(RequestConcurrencyLimit::new(MAXIMUM_CONCURRENT_REQUESTS))
+        .bind()
+        .await
+        .map_err(|error| map_daemon_error(AsyncMultiListenerDaemonError::Listener(error)))?;
+    daemon
+        .start()
+        .await
+        .map_err(|error| map_daemon_error(AsyncMultiListenerDaemonError::Start(error)))?;
 
-    fn map_daemon_error(error: AsyncMultiListenerDaemonError<Error>) -> Error {
-        match error {
-            AsyncMultiListenerDaemonError::Listener(listener_error) => Error::SignalFrame(
-                triad_runtime::FrameError::Io(std::io::Error::other(listener_error.to_string())),
-            ),
-            AsyncMultiListenerDaemonError::Start(error)
-            | AsyncMultiListenerDaemonError::Stop(error) => error,
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    loop {
+        tokio::select! {
+            _ = terminate.recv() => break,
+            _ = interrupt.recv() => break,
+            result = daemon.serve_next_connection_at(0) => {
+                result.map_err(|error| map_daemon_error(AsyncMultiListenerDaemonError::Listener(error)))?;
+            }
+            result = daemon.serve_next_connection_at(1) => {
+                result.map_err(|error| map_daemon_error(AsyncMultiListenerDaemonError::Listener(error)))?;
+            }
         }
+    }
+    daemon
+        .stop()
+        .await
+        .map_err(|error| map_daemon_error(AsyncMultiListenerDaemonError::Stop(error)))
+}
+
+fn map_daemon_error(error: AsyncMultiListenerDaemonError<Error>) -> Error {
+    match error {
+        AsyncMultiListenerDaemonError::Listener(listener_error) => Error::SignalFrame(
+            triad_runtime::FrameError::Io(std::io::Error::other(listener_error.to_string())),
+        ),
+        AsyncMultiListenerDaemonError::Start(error)
+        | AsyncMultiListenerDaemonError::Stop(error) => error,
     }
 }
 
@@ -207,7 +187,10 @@ impl EnvironmentConstructible for Daemon {
         let store =
             Store::open_with_default_configuration(&state_database_path, default_configuration)?;
         let configuration = store.nexus_configuration_state()?.desired_configuration;
-        Ok(Self::new(configuration, state_database_path))
+        Ok(Self {
+            configuration,
+            state_database_path,
+        })
     }
 }
 
@@ -407,6 +390,24 @@ struct RequestWorker {
 
 trait RequestServable {
     async fn serve(self, listener: ListenerRole, connection: AcceptedConnection) -> Result<()>;
+    async fn serve_ordinary(&self, connection: &mut AcceptedConnection) -> Result<()>;
+    async fn serve_owner(&self, connection: &mut AcceptedConnection) -> Result<()>;
+    async fn submit_deploy(&self, request: sema::DeploySubmission) -> Result<sema::MetaEgress>;
+    async fn submit_test(&self, request: sema::TestRequest) -> Result<sema::MetaEgress>;
+    async fn read_body(&self, connection: &mut AcceptedConnection) -> Result<FrameBody>;
+    async fn execute_request(
+        &self,
+        listener: ListenerRole,
+        signal_input: nexus::SignalInput,
+    ) -> Result<nexus::SignalOutput>;
+    async fn execute_with_store(
+        store: Arc<Store>,
+        configuration: Arc<RuntimeConfiguration>,
+        listener: ListenerRole,
+        signal_input: nexus::SignalInput,
+    ) -> Result<nexus::SignalOutput>;
+    fn ordinary_reply(output: nexus::SignalOutput) -> Result<sema::OrdinaryEgress>;
+    fn meta_reply(output: nexus::SignalOutput) -> Result<sema::MetaEgress>;
 }
 
 impl RequestServable for RequestWorker {
@@ -416,9 +417,7 @@ impl RequestServable for RequestWorker {
             ListenerRole::Owner => self.serve_owner(&mut connection).await,
         }
     }
-}
 
-impl RequestWorker {
     async fn serve_ordinary(&self, connection: &mut AcceptedConnection) -> Result<()> {
         let body = self.read_body(connection).await?;
         use signal_lojix::{Restorable, Signal};
@@ -606,6 +605,16 @@ trait DeployProcessable {
         configuration: Arc<RuntimeConfiguration>,
         cap: usize,
     ) -> ActorRef<DeployJobs>;
+    fn at_capacity(&self) -> bool;
+    fn launch_pipeline(&self, engine: SchemaRuntime, jobs: ActorRef<DeployJobs>);
+    async fn reconcile_persisted_jobs(&mut self, actor: ActorRef<DeployJobs>);
+    fn daemon_host_system_closure() -> Option<String>;
+    fn persist_reconciled_self_switch(
+        &self,
+        deployment_identifier: u64,
+        generation: crate::runtime_model::LiveGeneration,
+        root: crate::runtime_model::GcRoot,
+    );
 }
 
 impl DeployProcessable for DeployJobs {
@@ -623,9 +632,7 @@ impl DeployProcessable for DeployJobs {
         actor.wait_for_startup().await;
         actor
     }
-}
 
-impl DeployJobs {
     fn at_capacity(&self) -> bool {
         self.active_count >= self.cap
     }
@@ -1136,6 +1143,9 @@ trait TestProcessable {
         configuration: Arc<RuntimeConfiguration>,
         cap: usize,
     ) -> ActorRef<TestJobs>;
+    fn at_capacity(&self) -> bool;
+    fn substrate_unavailable_rejection(&self) -> sema::RejectedTest;
+    fn launch_pipeline(&self, engine: SchemaRuntime, jobs: ActorRef<TestJobs>);
 }
 
 impl TestProcessable for TestJobs {
@@ -1153,9 +1163,7 @@ impl TestProcessable for TestJobs {
         actor.wait_for_startup().await;
         actor
     }
-}
 
-impl TestJobs {
     fn at_capacity(&self) -> bool {
         self.active_count >= self.cap
     }

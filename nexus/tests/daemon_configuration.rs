@@ -7,7 +7,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lojix::LegacyStartupConfiguration;
+use lojix::{LegacyConfigurationArchivable as _, LegacyStartupConfiguration};
 use meta_signal_lojix::{ByteViewable as _, Restorable as _, Signalizable as _};
 use signal_lojix::{ByteViewable as _, Restorable as _, Signalizable as _};
 use triad_runtime::{FrameBody, LengthPrefixedCodec};

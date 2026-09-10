@@ -20,7 +20,8 @@ use rkyv::rancor;
 use sema_engine::TableRegistration;
 
 use crate::{
-    Error, LegacyStartupConfiguration, Result, Store, ingress, single_inline_datom_argument,
+    Error, LegacyConfigurationArchivable as _, LegacyStartupConfiguration, Result, Store, ingress,
+    single_inline_datom_argument,
 };
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");

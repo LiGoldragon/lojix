@@ -1,7 +1,10 @@
 //! `lojix-write-configuration` encodes one generated current Datom request into the daemon's rkyv startup archive.
 use datom_codec::{Actualizing, Potential};
 use lojix::ingress;
-use lojix::{Error as LojixError, LegacyStartupConfiguration, TestDefaults, TestMode};
+use lojix::{
+    Error as LojixError, LegacyConfigurationArchivable as _, LegacyStartupConfiguration,
+    TestDefaults, TestMode,
+};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 fn main() {
@@ -11,7 +14,14 @@ fn main() {
     }
 }
 struct ConfigurationWriterCli;
-impl ConfigurationWriterCli {
+trait ConfigurationWritable {
+    fn from_environment() -> Self
+    where
+        Self: Sized;
+    fn run(&self) -> Result<(), ConfigurationWriterError>;
+    fn source(&self) -> Result<String, ConfigurationWriterError>;
+}
+impl ConfigurationWritable for ConfigurationWriterCli {
     fn from_environment() -> Self {
         Self
     }

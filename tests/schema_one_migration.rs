@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 
 use lojix::reconstruction::StoreResetCommand;
-use lojix::{LegacyStartupConfiguration, Store};
+use lojix::{LegacyConfigurationArchivable as _, LegacyStartupConfiguration, Store};
 use redb::{Database, TableDefinition};
 
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");

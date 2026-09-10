@@ -5,7 +5,7 @@
 
 use std::process::Command;
 
-use lojix::LegacyStartupConfiguration;
+use lojix::{LegacyConfigurationArchivable as _, LegacyStartupConfiguration};
 mod common;
 
 fn write_configuration(request: &str, output: &std::path::Path) -> LegacyStartupConfiguration {

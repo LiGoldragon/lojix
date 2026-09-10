@@ -963,8 +963,8 @@ impl From<&NexusConfiguration> for RuntimeConfiguration {
     }
 }
 
-impl RuntimeConfiguration {
-    pub fn from_daemon_configuration(configuration: &LegacyStartupConfiguration) -> Self {
+impl From<&LegacyStartupConfiguration> for RuntimeConfiguration {
+    fn from(configuration: &LegacyStartupConfiguration) -> Self {
         Self {
             generated_inputs_directory: PathBuf::from(&configuration.state_directory_path)
                 .join("generated-inputs"),
@@ -974,7 +974,9 @@ impl RuntimeConfiguration {
             test_defaults: configuration.test_defaults.as_ref().map(TestDefaults::from),
         }
     }
+}
 
+impl RuntimeConfiguration {
     pub fn test_default() -> Self {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),

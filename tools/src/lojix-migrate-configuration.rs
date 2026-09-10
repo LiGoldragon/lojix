@@ -2,7 +2,10 @@
 
 use std::path::PathBuf;
 
-use lojix::{LegacyConfigurationMigratable as _, LegacyStartupConfiguration, Store};
+use lojix::{
+    LegacyConfigurationArchivable as _, LegacyConfigurationMigratable as _,
+    LegacyStartupConfiguration, Store,
+};
 
 fn main() {
     if let Err(error) = run() {

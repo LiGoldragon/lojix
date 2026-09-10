@@ -415,14 +415,22 @@ impl LojixNexusConfigurable for NexusConfiguration {
     }
 }
 
-impl LegacyStartupConfiguration {
-    pub fn from_rkyv_file(path: &Path) -> Result<Self> {
+/// Capability to read and write the exact historical startup archive offline.
+pub trait LegacyConfigurationArchivable {
+    fn from_rkyv_file(path: &Path) -> Result<Self>
+    where
+        Self: Sized;
+    fn write_rkyv_file(&self, path: &Path) -> Result<()>;
+}
+
+impl LegacyConfigurationArchivable for LegacyStartupConfiguration {
+    fn from_rkyv_file(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
         rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes)
             .map_err(|error| Error::ConfigurationArchive(error.to_string()))
     }
 
-    pub fn write_rkyv_file(&self, path: &Path) -> Result<()> {
+    fn write_rkyv_file(&self, path: &Path) -> Result<()> {
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(self)
             .map_err(|error| Error::ConfigurationArchive(error.to_string()))?;
         std::fs::write(path, bytes)?;

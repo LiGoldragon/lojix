@@ -1,5 +1,12 @@
 # Upgrades
 
+## 1.0.1 — trait-borne runtime operations
+
+The Nexus runner, peer authority, request worker, deploy/test actors, historical
+archive access, and configuration-writer CLI expose their operational methods
+through qualifier-named traits. Nexus startup failures are plain diagnostics.
+Package and wire behavior are unchanged from 1.0.0.
+
 ## 1.0.0 — zero-argument Nexus and separate clients
 
 Lojix now ships `lojix-nexus`, `lojix`, and `lojix-meta` from separate Nexus,
