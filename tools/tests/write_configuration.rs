@@ -1,27 +1,31 @@
 //! Bootstrap config-writer round trip: the Datom-to-rkyv `lojix-write-configuration`
 //! tool produces a startup file that the daemon's
-//! `DaemonConfiguration::from_rkyv_file` reads back unchanged. This is the
+//! `LegacyStartupConfiguration::from_rkyv_file` reads back unchanged. This is the
 //! current Datom-to-binary boundary at deploy time.
 
 use std::process::Command;
 
-use lojix::DaemonConfiguration;
+use lojix::LegacyStartupConfiguration;
+mod common;
 
-fn write_configuration(request: &str, output: &std::path::Path) -> DaemonConfiguration {
+fn write_configuration(request: &str, output: &std::path::Path) -> LegacyStartupConfiguration {
     let status = Command::new(env!("CARGO_BIN_EXE_lojix-write-configuration"))
         .arg(request)
         .status()
         .expect("run lojix-write-configuration");
     assert!(status.success(), "writer exited with failure");
-    DaemonConfiguration::from_rkyv_file(output).expect("daemon reads back the startup file")
+    LegacyStartupConfiguration::from_rkyv_file(output).expect("daemon reads back the startup file")
 }
 
 #[test]
 fn write_configuration_round_trips_through_rkyv() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
+    let horizon = directory.path().join("horizon-definition.datom");
+    common::write_single_node(&horizon);
     let request = format!(
-        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon TestDefaults.{{fixture-cluster fixture-vm-host Hermetic github:fixture-owner/fixture-test-flake x86_64-linux checks.fixture-a /var/lib/fixture-lojix/horizon-definition.datom}} {}}}",
+        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon TestDefaults.{{fixture-cluster fixture-vm-host Hermetic github:fixture-owner/fixture-test-flake x86_64-linux checks.fixture-a {}}} {}}}",
+        horizon.display(),
         output.display()
     );
 
@@ -51,10 +55,10 @@ fn write_configuration_round_trips_through_rkyv() {
         test_defaults.test_flake,
         "github:fixture-owner/fixture-test-flake"
     );
-    assert_eq!(
-        test_defaults.proposal_source,
-        "/var/lib/fixture-lojix/horizon-definition.datom"
-    );
+    let horizon = test_defaults
+        .horizon_definition
+        .expect("configuration writer actualizes the Horizon artifact");
+    assert_eq!(horizon.cluster_definition.cluster_name, "alpha");
 }
 
 /// The production posture: a `NoTestDefaults` choice lowers to `None`, so the

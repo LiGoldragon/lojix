@@ -1,638 +1,760 @@
-//! Structural boundary between encoded public Interfaces and lojix-owned runtime nouns.
+//! Direct typed boundary between generated contracts and the runtime model.
 //!
-//! The public crates own identity, ordering, archive behavior, and Signal roles.
-//! Lojix owns only its readable runtime model. Translation crosses the four
-//! encoded roots through the producer-owned structural behavior; no readable
-//! public alias vocabulary is reproduced here.
+//! The daemon maps named fields without a Datom or textual intermediate.
 
 use crate::runtime_model as sema;
-use datom_codec::{Conceivable, Datom, Incorporable, IncorporationBudget};
-use protos::Situation;
-use sema::*;
-
-/// The daemon's runtime model is independent from the generated public types.
-/// This private structural form is the current Datom grammar at that boundary;
-/// it is never archived, sent, or accepted as a public compatibility protocol.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RuntimeDatom {
-    Text(String),
-    Atom(String),
-    Vector(Vec<RuntimeDatom>),
-    Struct(Vec<RuntimeDatom>),
-    Variant {
-        name: String,
-        body: Box<RuntimeDatom>,
-    },
-}
+use meta_signal_lojix as owner;
+use signal_lojix as ordinary;
 
 #[derive(Debug, thiserror::Error)]
-#[error("runtime value does not match the current generated Datom contract")]
-struct WireShapeError;
+#[error("generated contract value cannot be represented by the lojix runtime model")]
+pub struct WireShapeError;
 
-trait WireShape: Sized {
-    fn to_wire(&self) -> RuntimeDatom;
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError>;
+pub trait Lowerable<T> {
+    fn lower(self) -> Result<T, WireShapeError>;
+}
+pub trait Raisable<T> {
+    fn raise(self) -> Result<T, WireShapeError>;
+}
+impl Lowerable<horizon_lib::HorizonDefinition> for horizon_lib::HorizonDefinition {
+    fn lower(self) -> Result<horizon_lib::HorizonDefinition, WireShapeError> {
+        Ok(self)
+    }
+}
+impl Raisable<horizon_lib::HorizonDefinition> for horizon_lib::HorizonDefinition {
+    fn raise(self) -> Result<horizon_lib::HorizonDefinition, WireShapeError> {
+        Ok(self)
+    }
+}
+impl Lowerable<ordinary::LojixNexusConfiguration> for ordinary::LojixNexusConfiguration {
+    fn lower(self) -> Result<ordinary::LojixNexusConfiguration, WireShapeError> {
+        Ok(self)
+    }
 }
 
-impl RuntimeDatom {
-    fn from_datom(value: &Datom) -> Self {
-        match value {
-            Datom::Text(value) => Self::Text(value.to_string()),
-            Datom::Word(value) => Self::Atom(value.as_ref().to_owned()),
-            Datom::Meaning(value) => Self::Text(value.to_string()),
-            Datom::Vector(values) => Self::Vector(values.iter().map(Self::from_datom).collect()),
-            Datom::Struct(values) => Self::Struct(values.iter().map(Self::from_datom).collect()),
-            Datom::Variant(name, body) => Self::Variant {
-                name: name.as_ref().to_owned(),
-                body: Box::new(Self::from_datom(body)),
-            },
-        }
+impl From<WireShapeError> for crate::Error {
+    fn from(error: WireShapeError) -> Self {
+        Self::Wire(error.to_string())
     }
+}
+impl Lowerable<String> for String {
+    fn lower(self) -> Result<String, WireShapeError> {
+        Ok(self)
+    }
+}
+impl Raisable<String> for String {
+    fn raise(self) -> Result<String, WireShapeError> {
+        Ok(self)
+    }
+}
 
-    fn into_datom(self) -> Result<Datom, WireShapeError> {
-        let symbol = |name: String| protos::Symbol::try_from(name).map_err(|_| WireShapeError);
-        match self {
-            Self::Text(value) => Ok(Datom::Text(
-                protos::Text::try_from(value).map_err(|_| WireShapeError)?,
-            )),
-            Self::Atom(value) => Ok(Datom::Word(
-                datom_codec::DatomWord::try_from(value.as_str()).map_err(|_| WireShapeError)?,
-            )),
-            Self::Vector(values) => values
-                .into_iter()
-                .map(Self::into_datom)
-                .collect::<Result<Vec<_>, _>>()
-                .map(Datom::Vector),
-            Self::Struct(values) => values
-                .into_iter()
-                .map(Self::into_datom)
-                .collect::<Result<Vec<_>, _>>()
-                .map(Datom::Struct),
-            Self::Variant { name, body } => {
-                Ok(Datom::Variant(symbol(name)?, Box::new(body.into_datom()?)))
+impl<P, R> Lowerable<Option<R>> for Option<P>
+where
+    P: Lowerable<R>,
+{
+    fn lower(self) -> Result<Option<R>, WireShapeError> {
+        self.map(Lowerable::lower).transpose()
+    }
+}
+impl<P, R> Raisable<Option<P>> for Option<R>
+where
+    R: Raisable<P>,
+{
+    fn raise(self) -> Result<Option<P>, WireShapeError> {
+        self.map(Raisable::raise).transpose()
+    }
+}
+impl<P, R> Lowerable<Vec<R>> for Vec<P>
+where
+    P: Lowerable<R>,
+{
+    fn lower(self) -> Result<Vec<R>, WireShapeError> {
+        self.into_iter().map(Lowerable::lower).collect()
+    }
+}
+impl<P, R> Raisable<Vec<P>> for Vec<R>
+where
+    R: Raisable<P>,
+{
+    fn raise(self) -> Result<Vec<P>, WireShapeError> {
+        self.into_iter().map(Raisable::raise).collect()
+    }
+}
+
+macro_rules! text_value {
+    ($runtime:ident) => {
+        impl Lowerable<sema::$runtime> for String {
+            fn lower(self) -> Result<sema::$runtime, WireShapeError> {
+                Ok(sema::$runtime::new(self))
             }
         }
-    }
-
-    /// A generated `Text` is conceived through Datom's canonical classifier.
-    /// An address or path containing a dot can consequently arrive here as a
-    /// variant although the public field is still text. Reconstruct that
-    /// canonical text only when lowering to a runtime string.
-    fn into_text(self) -> String {
-        match self {
-            Self::Text(value) | Self::Atom(value) => value,
-            Self::Variant { name, body } => format!("{name}.{}", body.into_text()),
-            Self::Vector(values) => format!(
-                "[{}]",
-                values
-                    .into_iter()
-                    .map(Self::into_text)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
-            Self::Struct(values) => format!(
-                "{{{}}}",
-                values
-                    .into_iter()
-                    .map(Self::into_text)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
-        }
-    }
-}
-
-impl WireShape for String {
-    fn to_wire(&self) -> RuntimeDatom {
-        RuntimeDatom::Text(self.clone())
-    }
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
-        Ok(value.into_text())
-    }
-}
-impl WireShape for u64 {
-    fn to_wire(&self) -> RuntimeDatom {
-        RuntimeDatom::Atom(self.to_string())
-    }
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
-        match value {
-            RuntimeDatom::Atom(value) => value.parse().map_err(|_| WireShapeError),
-            _ => Err(WireShapeError),
-        }
-    }
-}
-impl WireShape for bool {
-    fn to_wire(&self) -> RuntimeDatom {
-        RuntimeDatom::Atom(if *self { "True" } else { "False" }.to_owned())
-    }
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
-        match value {
-            RuntimeDatom::Atom(value) if value == "True" => Ok(true),
-            RuntimeDatom::Atom(value) if value == "False" => Ok(false),
-            _ => Err(WireShapeError),
-        }
-    }
-}
-impl<T: WireShape> WireShape for Vec<T> {
-    fn to_wire(&self) -> RuntimeDatom {
-        RuntimeDatom::Vector(self.iter().map(WireShape::to_wire).collect())
-    }
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
-        let RuntimeDatom::Vector(values) = value else {
-            return Err(WireShapeError);
-        };
-        values.into_iter().map(T::from_wire).collect()
-    }
-}
-impl<T: WireShape> WireShape for Option<T> {
-    fn to_wire(&self) -> RuntimeDatom {
-        match self {
-            Some(value) => RuntimeDatom::Variant {
-                name: "Some".to_owned(),
-                body: Box::new(value.to_wire()),
-            },
-            None => RuntimeDatom::Atom("None".to_owned()),
-        }
-    }
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
-        match value {
-            RuntimeDatom::Atom(name) if name == "None" => Ok(None),
-            RuntimeDatom::Variant { name, body } if name == "Some" => {
-                Ok(Some(T::from_wire(*body)?))
-            }
-            _ => Err(WireShapeError),
-        }
-    }
-}
-
-fn current_datom<T: Conceivable<Datom, Fault = std::convert::Infallible>>(
-    value: &T,
-) -> RuntimeDatom {
-    let datom = value
-        .conceive()
-        .expect("generated Datom ascent is infallible")
-        .1;
-    RuntimeDatom::from_datom(&datom)
-}
-
-fn generated_root<T: datom_codec::Datomic>(value: RuntimeDatom) -> crate::Result<T> {
-    let value = value
-        .into_datom()
-        .map_err(|error| crate::Error::Wire(error.to_string()))?;
-    value
-        .incorporate(
-            &Situation {
-                extent: protos::Extent(0, 0),
-                children: Vec::new(),
-            },
-            IncorporationBudget::try_from(16_384).expect("positive Datom budget"),
-        )
-        .map_err(|error| crate::Error::Wire(format!("{error:?}")))
-}
-
-macro_rules! wire_newtype {
-    ($name:ident, $inner:ty) => {
-        impl WireShape for sema::$name {
-            fn to_wire(&self) -> RuntimeDatom {
-                self.payload().to_wire()
-            }
-            fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
-                Ok(Self::new(<$inner as WireShape>::from_wire(value)?))
+        impl Raisable<String> for sema::$runtime {
+            fn raise(self) -> Result<String, WireShapeError> {
+                Ok(self.into_payload())
             }
         }
     };
 }
-
-// The public contract sometimes gives a one-field product its own noun.  The
-// runtime keeps those nouns as compact newtypes, while this adapter preserves
-// the product boundary at the wire crossing.
-macro_rules! wire_product_newtype {
-    ($name:ident, $inner:ty) => {
-        impl WireShape for sema::$name {
-            fn to_wire(&self) -> RuntimeDatom {
-                RuntimeDatom::Struct(vec![self.payload().to_wire()])
+macro_rules! integer_value {
+    ($runtime:ident) => {
+        impl Lowerable<sema::$runtime> for i64 {
+            fn lower(self) -> Result<sema::$runtime, WireShapeError> {
+                Ok(sema::$runtime::new(
+                    u64::try_from(self).map_err(|_| WireShapeError)?,
+                ))
             }
-
-            fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
-                let RuntimeDatom::Struct(mut fields) = value else {
-                    return Err(WireShapeError);
-                };
-                if fields.len() != 1 {
-                    return Err(WireShapeError);
-                }
-                let field = fields.pop().ok_or(WireShapeError)?;
-                Ok(Self::new(<$inner as WireShape>::from_wire(field)?))
+        }
+        impl Raisable<i64> for sema::$runtime {
+            fn raise(self) -> Result<i64, WireShapeError> {
+                i64::try_from(self.into_payload()).map_err(|_| WireShapeError)
             }
         }
     };
 }
-
-macro_rules! wire_struct {
-    ($name:ident { $($field:ident: $field_type:ty),* $(,)? }) => {
-        impl WireShape for sema::$name {
-            fn to_wire(&self) -> RuntimeDatom {
-                RuntimeDatom::Struct(vec![$(self.$field.to_wire()),*])
+macro_rules! shared_unit_enum { ($name:ident { $($variant:ident),+ $(,)? }) => {
+    impl Lowerable<sema::$name> for ordinary::$name {
+        fn lower(self) -> Result<sema::$name, WireShapeError> { Ok(match self { $(ordinary::$name::$variant => sema::$name::$variant),+ }) }
+    }
+    impl Raisable<ordinary::$name> for sema::$name {
+        fn raise(self) -> Result<ordinary::$name, WireShapeError> { Ok(match self { $(sema::$name::$variant => ordinary::$name::$variant),+ }) }
+    }
+}; }
+macro_rules! owner_unit_enum { ($name:ident { $($variant:ident),+ $(,)? }) => {
+    impl Lowerable<sema::$name> for owner::$name {
+        fn lower(self) -> Result<sema::$name, WireShapeError> { Ok(match self { $(owner::$name::$variant => sema::$name::$variant),+ }) }
+    }
+    impl Raisable<owner::$name> for sema::$name {
+        fn raise(self) -> Result<owner::$name, WireShapeError> { Ok(match self { $(sema::$name::$variant => owner::$name::$variant),+ }) }
+    }
+}; }
+macro_rules! shared_struct { ($public:ident => $runtime:ident { $($pf:ident => $rf:ident),+ $(,)? }) => {
+    impl Lowerable<sema::$runtime> for ordinary::$public {
+        fn lower(self) -> Result<sema::$runtime, WireShapeError> { Ok(sema::$runtime { $($rf: self.$pf.lower()?),+ }) }
+    }
+    impl Raisable<ordinary::$public> for sema::$runtime {
+        fn raise(self) -> Result<ordinary::$public, WireShapeError> { Ok(ordinary::$public { $($pf: self.$rf.raise()?),+ }) }
+    }
+}; }
+macro_rules! owner_struct { ($public:ident => $runtime:ident { $($pf:ident => $rf:ident),+ $(,)? }) => {
+    impl Lowerable<sema::$runtime> for owner::$public {
+        fn lower(self) -> Result<sema::$runtime, WireShapeError> { Ok(sema::$runtime { $($rf: self.$pf.lower()?),+ }) }
+    }
+    impl Raisable<owner::$public> for sema::$runtime {
+        fn raise(self) -> Result<owner::$public, WireShapeError> { Ok(owner::$public { $($pf: self.$rf.raise()?),+ }) }
+    }
+}; }
+macro_rules! owner_struct_with_none {
+    ($public:ident => $runtime:ident { $($pf:ident => $rf:ident),+ $(,)? }, $runtime_only:ident) => {
+        impl Lowerable<sema::$runtime> for owner::$public {
+            fn lower(self) -> Result<sema::$runtime, WireShapeError> {
+                Ok(sema::$runtime {
+                    $($rf: self.$pf.lower()?),+,
+                    $runtime_only: None,
+                })
             }
-            fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
-                let RuntimeDatom::Struct(fields) = value else { return Err(WireShapeError) };
-                let mut fields = fields.into_iter();
-                let result = Self {
-                    $($field: <$field_type as WireShape>::from_wire(
-                        fields.next().ok_or(WireShapeError)?,
-                    )?),*
-                };
-                if fields.next().is_some() { return Err(WireShapeError); }
-                Ok(result)
+        }
+        impl Raisable<owner::$public> for sema::$runtime {
+            fn raise(self) -> Result<owner::$public, WireShapeError> {
+                Ok(owner::$public { $($pf: self.$rf.raise()?),+ })
             }
         }
     };
 }
+macro_rules! shared_raise_struct { ($public:ident => $runtime:ident { $($pf:ident => $rf:ident),+ $(,)? }) => {
+    impl Raisable<ordinary::$public> for sema::$runtime {
+        fn raise(self) -> Result<ordinary::$public, WireShapeError> { Ok(ordinary::$public { $($pf: self.$rf.raise()?),+ }) }
+    }
+}; }
+macro_rules! owner_raise_struct { ($public:ident => $runtime:ident { $($pf:ident => $rf:ident),+ $(,)? }) => {
+    impl Raisable<owner::$public> for sema::$runtime {
+        fn raise(self) -> Result<owner::$public, WireShapeError> { Ok(owner::$public { $($pf: self.$rf.raise()?),+ }) }
+    }
+}; }
 
-macro_rules! wire_enum {
-    ($name:ident {
-        unit { $($unit_ordinal:literal => $unit:ident),* $(,)? }
-        unary { $($unary_ordinal:literal => $unary:ident($payload:ty)),* $(,)? }
-    }) => {
-        impl WireShape for sema::$name {
-            fn to_wire(&self) -> RuntimeDatom {
-                match self {
-                    $(Self::$unit => RuntimeDatom::Atom(stringify!($unit).to_owned()),)*
-                    $(Self::$unary(payload) => RuntimeDatom::Variant { name: stringify!($unary).to_owned(), body: Box::new(payload.to_wire()) },)*
-                }
+text_value!(ClusterName);
+text_value!(NodeName);
+text_value!(UserName);
+text_value!(PinLabel);
+text_value!(ClosurePath);
+text_value!(FlakeReference);
+text_value!(NixStoreUri);
+text_value!(SshDestination);
+text_value!(FlakeAttribute);
+text_value!(NixBuilderSpec);
+text_value!(NixSystem);
+text_value!(ProposalSource);
+text_value!(SecretsDirectory);
+text_value!(ImmutableRevision);
+integer_value!(DeploymentIdentifier);
+integer_value!(GenerationIdentifier);
+integer_value!(TestRunIdentifier);
+integer_value!(SubscriptionToken);
+integer_value!(EventLogPosition);
+integer_value!(CommitSequence);
+integer_value!(StateDigest);
+
+shared_unit_enum!(UserEnvironmentAction {
+    ActivateNow,
+    Realize,
+    SetProfile
+});
+shared_unit_enum!(CacheRetentionTransition {
+    Demoted,
+    Retired,
+    Pinned,
+    Promoted,
+    Unpinned,
+    Evicted
+});
+shared_unit_enum!(KeyMaterialCheckRejectionReason {
+    ProposalSourceUnreachable,
+    HostUnreachable,
+    PublicationMalformed,
+    NodeUnknown
+});
+shared_unit_enum!(FailureStage {
+    HermeticCheck,
+    BringUp,
+    Assert,
+    Deploy,
+    TearDown
+});
+shared_unit_enum!(HostDeployAction {
+    TestActivation,
+    ScheduleBootOnce,
+    Realize,
+    SetBootProfile,
+    Evaluate,
+    ActivateNow
+});
+shared_unit_enum!(UnwatchRejectionReason {
+    SubscriptionTokenUnknown,
+    SubscriptionAlreadyClosed
+});
+shared_unit_enum!(GenerationSlot {
+    Pinned,
+    Recent,
+    Rollback,
+    BootPending,
+    Current
+});
+shared_unit_enum!(HostComposition {
+    CompleteHost,
+    BaseHost
+});
+shared_unit_enum!(DeploymentPhase {
+    Built,
+    Completed,
+    Failed,
+    Copying,
+    Rejected,
+    Activated,
+    Submitted,
+    Building,
+    Activating
+});
+shared_unit_enum!(DeploymentInputMode { Horizon, Direct });
+shared_unit_enum!(TestRunPhase {
+    Submitted,
+    BringingUp,
+    TearingDown,
+    Completed,
+    Deploying,
+    Asserting,
+    Failed
+});
+shared_unit_enum!(WatchRejectionReason {
+    MalformedWatch,
+    SubscriptionLimitReached,
+    StreamUnavailable
+});
+shared_unit_enum!(ActivationBackend {
+    HomeManagerNixProfileV1,
+    NixosSystemdBootV1
+});
+shared_unit_enum!(GenerationArtifact {
+    BaseHost,
+    CompleteHost,
+    UserEnvironment
+});
+shared_unit_enum!(DeploymentLifecycle {
+    Failed,
+    Rejected,
+    Completed,
+    Building,
+    Activating,
+    Submitted,
+    Copying,
+    Activated,
+    Built
+});
+shared_unit_enum!(ActivationEffect {
+    ProfileOnly,
+    BootOnceProfile,
+    TestActivation,
+    LiveActivation,
+    BootProfile
+});
+shared_unit_enum!(TestMode { Hermetic, Live });
+shared_unit_enum!(QueryRejectionReason {
+    MalformedSelector,
+    EventLogPositionOutOfRange,
+    GenerationUnknown,
+    NodeUnknown
+});
+shared_unit_enum!(SourceRevisionPolicy {
+    ResolveAndRecord,
+    RequireImmutable
+});
+shared_unit_enum!(DeploymentFailureStage {
+    Build,
+    Eval,
+    MaterializeHorizon,
+    Daemon,
+    Activate,
+    CopyClosure,
+    Admission,
+    FlakeAuth
+});
+shared_unit_enum!(DeploymentTerminalReason {
+    NodeUnknown,
+    FlakeReferenceMalformed,
+    ProposalSourceUnreachable,
+    DeploymentInFlight,
+    InvalidDeploymentRouting,
+    UnsupportedDeployAction,
+    InternalError,
+    ClusterUnknown,
+    ActivationFailed,
+    BuilderUnreachable,
+    SubstituterUnreachable
+});
+owner_unit_enum!(PinRejectionReason {
+    PinSlotExhausted,
+    InternalError,
+    NodeUnknown,
+    PinLabelInUse,
+    GenerationUnknown
+});
+owner_unit_enum!(RetireRejectionReason {
+    NodeUnknown,
+    GenerationUnknown,
+    GenerationPinned,
+    InternalError,
+    GenerationActive
+});
+owner_unit_enum!(UnpinRejectionReason {
+    GenerationNotPinned,
+    PinLabelUnknown,
+    InternalError,
+    NodeUnknown
+});
+owner_unit_enum!(TestRejectionReason {
+    SubstrateUnavailable,
+    NoTestDefaults,
+    ClusterUnknown,
+    HostDeclaresNoVmHost,
+    LiveNotYetEnabled,
+    NodeUnknown,
+    VmHostNotDeclaredForNode,
+    InternalError
+});
+
+macro_rules! shared_unary_enum { ($name:ident { $($variant:ident($public:ty => $runtime:ty)),+ $(,)? }) => {
+    impl Lowerable<sema::$name> for ordinary::$name {
+        fn lower(self) -> Result<sema::$name, WireShapeError> { Ok(match self { $(ordinary::$name::$variant(value) => sema::$name::$variant(<$public as Lowerable<$runtime>>::lower(value)?)),+ }) }
+    }
+    impl Raisable<ordinary::$name> for sema::$name {
+        fn raise(self) -> Result<ordinary::$name, WireShapeError> { Ok(match self { $(sema::$name::$variant(value) => ordinary::$name::$variant(<$runtime as Raisable<$public>>::raise(value)?)),+ }) }
+    }
+}; }
+macro_rules! owner_unary_enum { ($name:ident { $($variant:ident($public:ty => $runtime:ty)),+ $(,)? }) => {
+    impl Lowerable<sema::$name> for owner::$name {
+        fn lower(self) -> Result<sema::$name, WireShapeError> { Ok(match self { $(owner::$name::$variant(value) => sema::$name::$variant(<$public as Lowerable<$runtime>>::lower(value)?)),+ }) }
+    }
+    impl Raisable<owner::$name> for sema::$name {
+        fn raise(self) -> Result<owner::$name, WireShapeError> { Ok(match self { $(sema::$name::$variant(value) => owner::$name::$variant(<$runtime as Raisable<$public>>::raise(value)?)),+ }) }
+    }
+}; }
+
+impl Lowerable<sema::SecretsInput> for ordinary::SecretsInput {
+    fn lower(self) -> Result<sema::SecretsInput, WireShapeError> {
+        Ok(match self {
+            Self::NoSecrets => sema::SecretsInput::NoSecrets,
+            Self::SecretsDirectory(value) => sema::SecretsInput::SecretsDirectory(value.lower()?),
+        })
+    }
+}
+impl Raisable<ordinary::SecretsInput> for sema::SecretsInput {
+    fn raise(self) -> Result<ordinary::SecretsInput, WireShapeError> {
+        Ok(match self {
+            Self::NoSecrets => ordinary::SecretsInput::NoSecrets,
+            Self::SecretsDirectory(value) => {
+                ordinary::SecretsInput::SecretsDirectory(value.raise()?)
             }
-            fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
-                match value {
-                    $(RuntimeDatom::Atom(name) if name == stringify!($unit) => Ok(Self::$unit),)*
-                    $(RuntimeDatom::Variant { name, body } if name == stringify!($unary) => Ok(Self::$unary(<$payload as WireShape>::from_wire(*body)?)),)*
-                    _ => Err(WireShapeError),
-                }
+        })
+    }
+}
+shared_unary_enum!(RequestedDeploymentAction {
+    Host(ordinary::HostDeployAction => sema::HostDeployAction),
+    UserEnvironment(ordinary::UserEnvironmentAction => sema::UserEnvironmentAction)
+});
+impl Lowerable<sema::TestOutcome> for ordinary::TestOutcome {
+    fn lower(self) -> Result<sema::TestOutcome, WireShapeError> {
+        Ok(match self {
+            Self::Pending => sema::TestOutcome::Pending,
+            Self::Passed => sema::TestOutcome::Passed,
+            Self::Failed(value) => sema::TestOutcome::Failed(value.lower()?),
+        })
+    }
+}
+impl Raisable<ordinary::TestOutcome> for sema::TestOutcome {
+    fn raise(self) -> Result<ordinary::TestOutcome, WireShapeError> {
+        Ok(match self {
+            Self::Pending => ordinary::TestOutcome::Pending,
+            Self::Passed => ordinary::TestOutcome::Passed,
+            Self::Failed(value) => ordinary::TestOutcome::Failed(value.raise()?),
+        })
+    }
+}
+impl Lowerable<sema::DeploymentEnvironment> for ordinary::DeploymentEnvironment {
+    fn lower(self) -> Result<sema::DeploymentEnvironment, WireShapeError> {
+        Ok(match self {
+            Self::HostEnvironment => sema::DeploymentEnvironment::HostEnvironment,
+            Self::UserEnvironment(value) => {
+                sema::DeploymentEnvironment::UserEnvironment(value.lower()?)
             }
-        }
-    };
-}
-
-wire_enum!(UserEnvironmentAction { unit { 0 => ActivateNow, 1 => Realize, 2 => SetProfile } unary {  } });
-wire_enum!(OrdinaryEgress { unit {  } unary { 0 => TestRunsQueried(TestRunListing), 1 => UnwatchRejected(RejectedUnwatch), 2 => QueryRejected(RejectedQuery), 3 => Watching(SubscriptionOpened), 4 => KeyMaterialCheckRejected(RejectedKeyMaterialCheck), 5 => Queried(GenerationListing), 6 => DeploymentEventsQueried(EventLogPage), 7 => Unwatched(SubscriptionClosed), 8 => KeyMaterialChecked(KeyMaterialReport), 9 => WatchRejected(RejectedWatch) } });
-wire_newtype!(GenerationIdentifier, u64);
-wire_enum!(CacheRetentionTransition { unit { 0 => Demoted, 1 => Retired, 2 => Pinned, 3 => Promoted, 4 => Unpinned, 5 => Evicted } unary {  } });
-wire_newtype!(CommitSequence, u64);
-wire_struct!(DeploymentPhaseEvent { deployment_identifier: DeploymentIdentifier, generation_identifier: GenerationIdentifier, cluster_name: ClusterName, node_name: NodeName, deployment_phase: DeploymentPhase, event_log_position: EventLogPosition, state_marker: StateMarker, optional_immutable_revision: Option<ImmutableRevision>, optional_deployment_terminal: Option<DeploymentTerminal> });
-wire_struct!(DeploymentWatch { optional_deployment_identifier: Option<DeploymentIdentifier>, optional_cluster_name: Option<ClusterName>, optional_node_name: Option<NodeName> });
-wire_newtype!(ProposalSource, String);
-wire_newtype!(SecretsDirectory, String);
-wire_enum!(SecretsInput { unit { 0 => NoSecrets } unary { 1 => SecretsDirectory(SecretsDirectory) } });
-wire_enum!(RequestedDeploymentAction { unit {  } unary { 0 => Host(HostDeployAction), 1 => UserEnvironment(UserEnvironmentAction) } });
-wire_newtype!(NodeName, String);
-wire_struct!(RejectedQuery {
-    query_rejection_reason: QueryRejectionReason,
-    state_marker: StateMarker
-});
-wire_product_newtype!(GenerationLookup, GenerationIdentifier);
-wire_enum!(TestOutcome { unit { 1 => Pending, 2 => Passed } unary { 0 => Failed(FailureStage) } });
-wire_enum!(KeyMaterialCheckRejectionReason { unit { 0 => ProposalSourceUnreachable, 1 => HostUnreachable, 2 => PublicationMalformed, 3 => NodeUnknown } unary {  } });
-wire_struct!(TestRunLookup { cluster_name: ClusterName, node_name: NodeName, optional_test_run_identifier: Option<TestRunIdentifier> });
-wire_newtype!(SubscriptionToken, u64);
-wire_newtype!(NixSystem, String);
-wire_struct!(DeploymentRecord { deployment_identifier: DeploymentIdentifier, generation_identifier: GenerationIdentifier, deployment_request_identity: DeploymentRequestIdentity, optional_admission_marker: Option<AdmissionMarker>, deployment_lifecycle: DeploymentLifecycle, optional_terminal_marker: Option<TerminalMarker>, optional_deployment_terminal: Option<DeploymentTerminal> });
-wire_enum!(FailureStage { unit { 0 => HermeticCheck, 1 => BringUp, 2 => Assert, 3 => Deploy, 4 => TearDown } unary {  } });
-wire_enum!(HostDeployAction { unit { 0 => TestActivation, 1 => ScheduleBootOnce, 2 => Realize, 3 => SetBootProfile, 4 => Evaluate, 5 => ActivateNow } unary {  } });
-wire_newtype!(PinLabel, String);
-wire_struct!(GenerationListing { generation_vector: Vec<Generation>, deployment_record_vector: Vec<DeploymentRecord>, state_marker: StateMarker });
-wire_product_newtype!(DeploymentLookup, DeploymentIdentifier);
-wire_enum!(UnwatchRejectionReason { unit { 0 => SubscriptionTokenUnknown, 1 => SubscriptionAlreadyClosed } unary {  } });
-wire_enum!(GenerationSlot { unit { 0 => Pinned, 1 => Recent, 2 => Rollback, 3 => BootPending, 4 => Current } unary {  } });
-wire_newtype!(TestRunIdentifier, u64);
-wire_enum!(HostComposition { unit { 0 => CompleteHost, 1 => BaseHost } unary {  } });
-wire_struct!(CacheRetentionWatch { optional_cluster_name: Option<ClusterName>, optional_node_name: Option<NodeName> });
-wire_newtype!(FlakeAttribute, String);
-wire_enum!(DeploymentPhase { unit { 0 => Built, 1 => Completed, 2 => Failed, 3 => Copying, 4 => Rejected, 5 => Activated, 6 => Submitted, 7 => Building, 8 => Activating } unary {  } });
-wire_newtype!(DatabaseMarker, StateMarker);
-wire_newtype!(AdmissionMarker, StateMarker);
-wire_newtype!(SshDestination, String);
-wire_newtype!(UserName, String);
-wire_struct!(DeploymentRequestIdentity { deployment_environment: DeploymentEnvironment, cluster_name: ClusterName, node_name: NodeName, generation_artifact: GenerationArtifact, requested_deployment_action: RequestedDeploymentAction, activation_effect: ActivationEffect, source_revision_policy: SourceRevisionPolicy, optional_immutable_revision: Option<ImmutableRevision> });
-wire_newtype!(TransitionMarker, StateMarker);
-wire_newtype!(EventLogPosition, u64);
-wire_newtype!(RejectedWatch, WatchRejectionReason);
-wire_struct!(CacheRetentionTransitionEvent { generation_identifier: GenerationIdentifier, cluster_name: ClusterName, node_name: NodeName, cache_retention_transition: CacheRetentionTransition, generation_slot: GenerationSlot, optional_generation_slot: Option<GenerationSlot>, optional_pin_label: Option<PinLabel>, event_log_position: EventLogPosition });
-wire_newtype!(NixBuilderSpec, String);
-wire_enum!(DeploymentInputMode { unit { 0 => Horizon, 1 => Direct } unary {  } });
-wire_enum!(TestRunPhase { unit { 0 => Submitted, 1 => BringingUp, 2 => TearingDown, 3 => Completed, 4 => Deploying, 5 => Asserting, 6 => Failed } unary {  } });
-wire_struct!(DeploymentTransport {
-    nix_store_uri: NixStoreUri,
-    ssh_destination: SshDestination
-});
-wire_struct!(TestExecutionProfile { test_mode: TestMode, nix_system: NixSystem, deployment_output_selector: DeploymentOutputSelector, optional_deployment_transport: Option<DeploymentTransport> });
-wire_struct!(SubscriptionOpened {
-    subscription_token: SubscriptionToken,
-    commit_sequence: CommitSequence
-});
-wire_enum!(WatchRejectionReason { unit { 0 => MalformedWatch, 1 => SubscriptionLimitReached, 2 => StreamUnavailable } unary {  } });
-wire_enum!(ActivationBackend { unit { 0 => HomeManagerNixProfileV1, 1 => NixosSystemdBootV1 } unary {  } });
-wire_enum!(GenerationArtifact { unit { 0 => BaseHost, 1 => CompleteHost, 2 => UserEnvironment } unary {  } });
-wire_struct!(RejectedUnwatch {
-    unwatch_rejection_reason: UnwatchRejectionReason,
-    subscription_token: SubscriptionToken
-});
-wire_struct!(EventLogPage { deployment_phase_event_vector: Vec<DeploymentPhaseEvent>, cache_retention_transition_event_vector: Vec<CacheRetentionTransitionEvent>, state_marker: StateMarker });
-wire_newtype!(SubscriptionClose, SubscriptionToken);
-wire_newtype!(TerminalMarker, StateMarker);
-wire_enum!(DeploymentEnvironment { unit { 0 => HostEnvironment } unary { 1 => UserEnvironment(UserName) } });
-wire_newtype!(ImmutableRevision, String);
-wire_enum!(HostSelection { unit { 1 => DefaultHost } unary { 0 => OnHost(NodeName) } });
-wire_struct!(EventLogRange {
-    from: EventLogPosition,
-    until: EventLogPosition
-});
-wire_enum!(DeploymentLifecycle { unit { 0 => Failed, 1 => Rejected, 2 => Completed, 3 => Building, 4 => Activating, 5 => Submitted, 6 => Copying, 7 => Activated, 8 => Built } unary {  } });
-// The public signal schema declares `DeploymentOutputSelector.{FlakeAttribute}`
-// as a one-field product.  Keep the readable runtime noun compact, but retain
-// that product boundary when crossing the verified wire contract.
-impl WireShape for sema::DeploymentOutputSelector {
-    fn to_wire(&self) -> RuntimeDatom {
-        RuntimeDatom::Struct(vec![self.payload().to_wire()])
-    }
-
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
-        let RuntimeDatom::Struct(mut fields) = value else {
-            return Err(WireShapeError);
-        };
-        if fields.len() != 1 {
-            return Err(WireShapeError);
-        }
-        let field = fields.pop().ok_or(WireShapeError)?;
-        Ok(Self::new(sema::FlakeAttribute::from_wire(field)?))
+        })
     }
 }
-wire_newtype!(ClosurePath, String);
-wire_enum!(ActivationEffect { unit { 0 => ProfileOnly, 1 => BootOnceProfile, 2 => TestActivation, 3 => LiveActivation, 4 => BootProfile } unary {  } });
-wire_newtype!(SubscriptionClosed, SubscriptionToken);
-wire_enum!(OrdinaryIngress { unit {  } unary { 0 => CheckHostKeyMaterial(KeyMaterialQuery), 1 => WatchDeployments(DeploymentWatch), 2 => Query(Selection), 3 => WatchCacheRetention(CacheRetentionWatch), 4 => Unwatch(SubscriptionClose) } });
-wire_enum!(TestMode { unit { 0 => Hermetic, 1 => Live } unary {  } });
-wire_newtype!(StateDigest, u64);
-wire_enum!(QueryRejectionReason { unit { 0 => MalformedSelector, 1 => EventLogPositionOutOfRange, 2 => GenerationUnknown, 3 => NodeUnknown } unary {  } });
-wire_newtype!(NixStoreUri, String);
-wire_struct!(TestRunListing { test_run_record_vector: Vec<TestRunRecord>, database_marker: DatabaseMarker });
-wire_enum!(DeploymentTerminal { unit { 2 => Succeeded } unary { 0 => Failed(DeploymentFailure), 1 => Rejected(DeploymentTerminalReason) } });
-wire_enum!(SourceRevisionPolicy { unit { 0 => ResolveAndRecord, 1 => RequireImmutable } unary {  } });
-wire_struct!(KeyMaterialQuery {
-    cluster_name: ClusterName,
-    node_name: NodeName,
-    proposal_source: ProposalSource
-});
-wire_newtype!(ClusterName, String);
-wire_newtype!(DeploymentIdentifier, u64);
-wire_struct!(DeploymentFailure {
-    deployment_failure_stage: DeploymentFailureStage,
-    deployment_terminal_reason: DeploymentTerminalReason
-});
-wire_enum!(DeploymentFailureStage { unit { 0 => Build, 1 => Eval, 2 => MaterializeHorizon, 3 => Daemon, 4 => Activate, 5 => CopyClosure, 6 => Admission, 7 => FlakeAuth } unary {  } });
-wire_struct!(RejectedKeyMaterialCheck {
-    key_material_check_rejection_reason: KeyMaterialCheckRejectionReason,
-    state_marker: StateMarker
-});
-wire_newtype!(FlakeReference, String);
-wire_enum!(DeploymentTerminalReason { unit { 0 => NodeUnknown, 1 => FlakeReferenceMalformed, 2 => ProposalSourceUnreachable, 3 => DeploymentInFlight, 4 => InvalidDeploymentRouting, 5 => UnsupportedDeployAction, 6 => InternalError, 7 => ClusterUnknown, 8 => ActivationFailed, 9 => BuilderUnreachable, 10 => SubstituterUnreachable } unary {  } });
-wire_enum!(Selection { unit {  } unary { 0 => ByNode(NodeSelector), 1 => ByTestRun(TestRunLookup), 2 => ByDeployment(DeploymentLookup), 3 => ByGeneration(GenerationLookup), 4 => ByEventLog(EventLogRange) } });
-wire_struct!(UserEnvironmentDeployment { cluster_name: ClusterName, node_name: NodeName, user_name: UserName, proposal_source: ProposalSource, secrets_input: SecretsInput, flake_reference: FlakeReference, deployment_transport: DeploymentTransport, deployment_input_mode: DeploymentInputMode, deployment_output_selector: DeploymentOutputSelector, activation_backend: ActivationBackend, user_environment_action: UserEnvironmentAction, source_revision_policy: SourceRevisionPolicy, optional_nix_builder_spec: Option<NixBuilderSpec>, extra_substituter_vector: Vec<ExtraSubstituter> });
-wire_struct!(HostDeployment { cluster_name: ClusterName, node_name: NodeName, host_composition: HostComposition, proposal_source: ProposalSource, secrets_input: SecretsInput, flake_reference: FlakeReference, deployment_transport: DeploymentTransport, deployment_input_mode: DeploymentInputMode, deployment_output_selector: DeploymentOutputSelector, activation_backend: ActivationBackend, host_deploy_action: HostDeployAction, source_revision_policy: SourceRevisionPolicy, optional_nix_builder_spec: Option<NixBuilderSpec>, extra_substituter_vector: Vec<ExtraSubstituter> });
-wire_struct!(AppliedPin {
-    generation_identifier: GenerationIdentifier,
-    pin_label: PinLabel,
-    from_slot: GenerationSlot,
-    to_slot: GenerationSlot,
-    state_marker: StateMarker
-});
-wire_enum!(PinRejectionReason { unit { 0 => PinSlotExhausted, 1 => InternalError, 2 => NodeUnknown, 3 => PinLabelInUse, 4 => GenerationUnknown } unary {  } });
-wire_enum!(NodeSelection { unit { 0 => All } unary { 1 => Nodes(Vec<NodeName>) } });
-wire_enum!(RetireRejectionReason { unit { 0 => NodeUnknown, 1 => GenerationUnknown, 2 => GenerationPinned, 3 => InternalError, 4 => GenerationActive } unary {  } });
-wire_struct!(RejectedTest {
-    test_rejection_reason: TestRejectionReason,
-    state_marker: StateMarker
-});
-// `RejectedDeploy.{DeploymentRecord}` is a one-field product in the owner
-// contract, even though the runtime keeps the record as a compact newtype.
-impl WireShape for sema::RejectedDeploy {
-    fn to_wire(&self) -> RuntimeDatom {
-        RuntimeDatom::Struct(vec![self.payload().to_wire()])
-    }
-
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
-        let RuntimeDatom::Struct(mut fields) = value else {
-            return Err(WireShapeError);
-        };
-        if fields.len() != 1 {
-            return Err(WireShapeError);
-        }
-        let field = fields.pop().ok_or(WireShapeError)?;
-        Ok(Self::new(sema::DeploymentRecord::from_wire(field)?))
+impl Raisable<ordinary::DeploymentEnvironment> for sema::DeploymentEnvironment {
+    fn raise(self) -> Result<ordinary::DeploymentEnvironment, WireShapeError> {
+        Ok(match self {
+            Self::HostEnvironment => ordinary::DeploymentEnvironment::HostEnvironment,
+            Self::UserEnvironment(value) => {
+                ordinary::DeploymentEnvironment::UserEnvironment(value.raise()?)
+            }
+        })
     }
 }
-wire_enum!(UnpinRejectionReason { unit { 0 => GenerationNotPinned, 1 => PinLabelUnknown, 2 => InternalError, 3 => NodeUnknown } unary {  } });
-wire_struct!(PinRequest {
-    cluster_name: ClusterName,
-    node_name: NodeName,
-    generation_identifier: GenerationIdentifier,
-    pin_label: PinLabel
-});
-wire_struct!(RejectedUnpin {
-    unpin_rejection_reason: UnpinRejectionReason,
-    state_marker: StateMarker
-});
-wire_enum!(TestRequest { unit {  } unary { 0 => Run(TestRun), 1 => Check(QuickCheck) } });
-wire_struct!(RejectedPin {
-    pin_rejection_reason: PinRejectionReason,
-    state_marker: StateMarker
-});
-wire_struct!(UnpinRequest {
-    cluster_name: ClusterName,
-    node_name: NodeName,
-    pin_label: PinLabel
-});
-wire_struct!(ExtraSubstituter {
-    url: String,
-    public_key: String
-});
-wire_enum!(MetaEgress { unit {  } unary { 0 => PinRejected(RejectedPin), 1 => DeployRejected(RejectedDeploy), 2 => DeployAccepted(DeployHandle), 3 => TestRejected(RejectedTest), 4 => Unpinned(AppliedUnpin), 5 => Tested(AcceptedTest), 6 => UnpinRejected(RejectedUnpin), 7 => DeployTerminal(DeploymentRecord), 8 => Pinned(AppliedPin), 9 => RetireRejected(RejectedRetire), 10 => Retired(AppliedRetire) } });
-wire_struct!(DeployHandle {
-    deployment_identifier: DeploymentIdentifier,
-    state_marker: StateMarker
-});
-wire_struct!(RetireRequest {
-    cluster_name: ClusterName,
-    node_name: NodeName,
-    generation_identifier: GenerationIdentifier
-});
-wire_enum!(DeploySubmission { unit {  } unary { 0 => UserEnvironment(UserEnvironmentDeployment), 1 => Host(HostDeployment) } });
-wire_newtype!(QuickCheck, Vec<NodeName>);
-wire_struct!(AcceptedTest {
-    test_run_identifier: TestRunIdentifier,
-    state_marker: StateMarker
-});
-wire_struct!(AppliedUnpin {
-    generation_identifier: GenerationIdentifier,
-    pin_label: PinLabel,
-    from_slot: GenerationSlot,
-    to_slot: GenerationSlot,
-    state_marker: StateMarker
-});
-wire_enum!(TestRejectionReason { unit { 0 => SubstrateUnavailable, 1 => NoTestDefaults, 2 => ClusterUnknown, 3 => HostDeclaresNoVmHost, 4 => LiveNotYetEnabled, 5 => NodeUnknown, 6 => VmHostNotDeclaredForNode, 7 => InternalError } unary {  } });
-wire_struct!(RejectedRetire {
-    retire_rejection_reason: RetireRejectionReason,
-    state_marker: StateMarker
-});
-wire_enum!(MetaIngress { unit {  } unary { 0 => Retire(RetireRequest), 1 => Pin(PinRequest), 2 => Deploy(DeploySubmission), 3 => Test(TestRequest), 4 => Unpin(UnpinRequest) } });
-wire_struct!(AppliedRetire {
-    generation_identifier: GenerationIdentifier,
-    generation_slot: GenerationSlot,
-    state_marker: StateMarker
-});
-wire_struct!(TestRun {
-    cluster_name: ClusterName,
-    node_selection: NodeSelection,
-    host_selection: HostSelection,
-    test_execution_profile: TestExecutionProfile
-});
-
-wire_struct!(StateMarker {
-    commit_sequence: sema::CommitSequence,
-    state_digest: sema::StateDigest
-});
-
-wire_struct!(NodeSelector {
-    cluster_name: ClusterName,
-    node_name: NodeName,
-    optional_generation_artifact: Option<GenerationArtifact>
-});
-
-impl WireShape for sema::Generation {
-    fn to_wire(&self) -> RuntimeDatom {
-        let closure = canonical_nix_store_root(self.closure_path.payload())
-            .then(|| self.closure_path.clone())
-            .to_wire();
-        RuntimeDatom::Struct(vec![
-            self.generation_identifier.to_wire(),
-            self.deployment_identifier.to_wire(),
-            self.cluster_name.to_wire(),
-            self.node_name.to_wire(),
-            self.generation_artifact.to_wire(),
-            self.activation_effect.to_wire(),
-            self.generation_slot.to_wire(),
-            closure,
-            self.optional_immutable_revision.to_wire(),
-        ])
+impl Lowerable<sema::HostSelection> for ordinary::HostSelection {
+    fn lower(self) -> Result<sema::HostSelection, WireShapeError> {
+        Ok(match self {
+            Self::DefaultHost => sema::HostSelection::DefaultHost,
+            Self::OnHost(value) => sema::HostSelection::OnHost(value.lower()?),
+        })
     }
-
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
-        let RuntimeDatom::Struct(fields) = value else {
-            return Err(WireShapeError);
-        };
-        let mut fields = fields.into_iter();
-        let generation_identifier =
-            sema::GenerationIdentifier::from_wire(fields.next().ok_or(WireShapeError)?)?;
-        let deployment_identifier =
-            sema::DeploymentIdentifier::from_wire(fields.next().ok_or(WireShapeError)?)?;
-        let cluster_name = sema::ClusterName::from_wire(fields.next().ok_or(WireShapeError)?)?;
-        let node_name = sema::NodeName::from_wire(fields.next().ok_or(WireShapeError)?)?;
-        let generation_artifact =
-            sema::GenerationArtifact::from_wire(fields.next().ok_or(WireShapeError)?)?;
-        let activation_effect =
-            sema::ActivationEffect::from_wire(fields.next().ok_or(WireShapeError)?)?;
-        let generation_slot =
-            sema::GenerationSlot::from_wire(fields.next().ok_or(WireShapeError)?)?;
-        let closure_path =
-            Option::<sema::ClosurePath>::from_wire(fields.next().ok_or(WireShapeError)?)?
-                .ok_or(WireShapeError)?;
-        let optional_immutable_revision =
-            Option::<sema::ImmutableRevision>::from_wire(fields.next().ok_or(WireShapeError)?)?;
-        if fields.next().is_some() {
-            return Err(WireShapeError);
-        }
-        Ok(Self {
-            generation_identifier,
-            deployment_identifier,
-            cluster_name,
-            node_name,
-            generation_artifact,
-            activation_effect,
-            generation_slot,
-            closure_path,
-            optional_immutable_revision,
+}
+impl Raisable<ordinary::HostSelection> for sema::HostSelection {
+    fn raise(self) -> Result<ordinary::HostSelection, WireShapeError> {
+        Ok(match self {
+            Self::DefaultHost => ordinary::HostSelection::DefaultHost,
+            Self::OnHost(value) => ordinary::HostSelection::OnHost(value.raise()?),
+        })
+    }
+}
+impl Lowerable<sema::DeploymentTerminal> for ordinary::DeploymentTerminal {
+    fn lower(self) -> Result<sema::DeploymentTerminal, WireShapeError> {
+        Ok(match self {
+            Self::Succeeded => sema::DeploymentTerminal::Succeeded,
+            Self::Failed(value) => sema::DeploymentTerminal::Failed(value.lower()?),
+            Self::Rejected(value) => sema::DeploymentTerminal::Rejected(value.lower()?),
+        })
+    }
+}
+impl Raisable<ordinary::DeploymentTerminal> for sema::DeploymentTerminal {
+    fn raise(self) -> Result<ordinary::DeploymentTerminal, WireShapeError> {
+        Ok(match self {
+            Self::Succeeded => ordinary::DeploymentTerminal::Succeeded,
+            Self::Failed(value) => ordinary::DeploymentTerminal::Failed(value.raise()?),
+            Self::Rejected(value) => ordinary::DeploymentTerminal::Rejected(value.raise()?),
+        })
+    }
+}
+shared_unary_enum!(Selection {
+    ByNode(ordinary::NodeSelector => sema::NodeSelector),
+    ByTestRun(ordinary::TestRunLookup => sema::TestRunLookup),
+    ByDeployment(ordinary::DeploymentLookup => sema::DeploymentLookup),
+    ByGeneration(ordinary::GenerationLookup => sema::GenerationLookup),
+    ByEventLog(ordinary::EventLogRange => sema::EventLogRange)
+});
+owner_unary_enum!(TestRequest {
+    Run(owner::TestRun => sema::TestRun), Check(owner::QuickCheck => sema::QuickCheck)
+});
+owner_unary_enum!(DeploySubmission {
+    UserEnvironment(owner::UserEnvironmentDeployment => sema::UserEnvironmentDeployment),
+    Host(owner::HostDeployment => sema::HostDeployment)
+});
+impl Lowerable<sema::NodeSelection> for owner::NodeSelection {
+    fn lower(self) -> Result<sema::NodeSelection, WireShapeError> {
+        Ok(match self {
+            Self::All => sema::NodeSelection::All,
+            Self::Nodes(value) => sema::NodeSelection::Nodes(value.lower()?),
+        })
+    }
+}
+impl Raisable<owner::NodeSelection> for sema::NodeSelection {
+    fn raise(self) -> Result<owner::NodeSelection, WireShapeError> {
+        Ok(match self {
+            Self::All => owner::NodeSelection::All,
+            Self::Nodes(value) => owner::NodeSelection::Nodes(value.raise()?),
         })
     }
 }
 
-impl WireShape for sema::TestRunRecord {
-    fn to_wire(&self) -> RuntimeDatom {
-        let closure = self
-            .optional_closure_path
-            .clone()
-            .filter(|path| canonical_nix_store_root(path.payload()))
-            .to_wire();
-        RuntimeDatom::Struct(vec![
-            self.test_run_identifier.to_wire(),
-            self.cluster_name.to_wire(),
-            self.node.to_wire(),
-            self.host.to_wire(),
-            self.test_mode.to_wire(),
-            self.test_run_phase.to_wire(),
-            self.test_outcome.to_wire(),
-            closure,
-        ])
-    }
+shared_struct!(DeploymentTransport => DeploymentTransport { nix_store_uri => nix_store_uri, ssh_destination => ssh_destination });
+shared_struct!(TestExecutionProfile => TestExecutionProfile { test_mode => test_mode, nix_system => nix_system, deployment_output_selector => deployment_output_selector, deployment_transport_option => optional_deployment_transport });
+shared_struct!(DatabaseMarker => StateMarker { commit_sequence => commit_sequence, state_digest => state_digest });
+shared_struct!(NodeSelector => NodeSelector { cluster_name => cluster_name, node_name => node_name, requested_generation_artifact_option => optional_generation_artifact });
+shared_struct!(EventLogRange => EventLogRange { first_event_log_position => from, second_event_log_position => until });
+shared_struct!(TestRunLookup => TestRunLookup { cluster_name => cluster_name, node_name => node_name, test_run_identifier_option => optional_test_run_identifier });
+shared_struct!(DeploymentWatch => DeploymentWatch { deployment_identifier_option => optional_deployment_identifier, cluster_name_option => optional_cluster_name, node_name_option => optional_node_name });
+shared_struct!(CacheRetentionWatch => CacheRetentionWatch { cluster_name_option => optional_cluster_name, node_name_option => optional_node_name });
+shared_struct!(KeyMaterialQuery => KeyMaterialQuery { cluster_name => cluster_name, node_name => node_name, proposal_source => proposal_source });
+shared_struct!(DeploymentFailure => DeploymentFailure { deployment_failure_stage => deployment_failure_stage, deployment_terminal_reason => deployment_terminal_reason });
 
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
-        let RuntimeDatom::Struct(fields) = value else {
-            return Err(WireShapeError);
-        };
-        let mut fields = fields.into_iter();
-        let result = Self {
-            test_run_identifier: sema::TestRunIdentifier::from_wire(
-                fields.next().ok_or(WireShapeError)?,
-            )?,
-            cluster_name: sema::ClusterName::from_wire(fields.next().ok_or(WireShapeError)?)?,
-            node: sema::NodeName::from_wire(fields.next().ok_or(WireShapeError)?)?,
-            host: sema::NodeName::from_wire(fields.next().ok_or(WireShapeError)?)?,
-            test_mode: sema::TestMode::from_wire(fields.next().ok_or(WireShapeError)?)?,
-            test_run_phase: sema::TestRunPhase::from_wire(fields.next().ok_or(WireShapeError)?)?,
-            test_outcome: sema::TestOutcome::from_wire(fields.next().ok_or(WireShapeError)?)?,
-            optional_closure_path: Option::<sema::ClosurePath>::from_wire(
-                fields.next().ok_or(WireShapeError)?,
-            )?,
-        };
-        if fields.next().is_some() {
-            return Err(WireShapeError);
-        }
-        Ok(result)
+impl Lowerable<sema::GenerationLookup> for ordinary::GenerationLookup {
+    fn lower(self) -> Result<sema::GenerationLookup, WireShapeError> {
+        Ok(sema::GenerationLookup::new(
+            self.generation_identifier.lower()?,
+        ))
+    }
+}
+impl Raisable<ordinary::GenerationLookup> for sema::GenerationLookup {
+    fn raise(self) -> Result<ordinary::GenerationLookup, WireShapeError> {
+        Ok(ordinary::GenerationLookup {
+            generation_identifier: self.into_payload().raise()?,
+        })
+    }
+}
+impl Lowerable<sema::DeploymentLookup> for ordinary::DeploymentLookup {
+    fn lower(self) -> Result<sema::DeploymentLookup, WireShapeError> {
+        Ok(sema::DeploymentLookup::new(
+            self.deployment_identifier.lower()?,
+        ))
+    }
+}
+impl Raisable<ordinary::DeploymentLookup> for sema::DeploymentLookup {
+    fn raise(self) -> Result<ordinary::DeploymentLookup, WireShapeError> {
+        Ok(ordinary::DeploymentLookup {
+            deployment_identifier: self.into_payload().raise()?,
+        })
+    }
+}
+impl Lowerable<sema::SubscriptionClose> for ordinary::SubscriptionClose {
+    fn lower(self) -> Result<sema::SubscriptionClose, WireShapeError> {
+        Ok(sema::SubscriptionClose::new(
+            self.subscription_token.lower()?,
+        ))
+    }
+}
+impl Raisable<ordinary::SubscriptionClose> for sema::SubscriptionClose {
+    fn raise(self) -> Result<ordinary::SubscriptionClose, WireShapeError> {
+        Ok(ordinary::SubscriptionClose {
+            subscription_token: self.into_payload().raise()?,
+        })
+    }
+}
+impl Lowerable<sema::DeploymentOutputSelector> for ordinary::DeploymentOutputSelector {
+    fn lower(self) -> Result<sema::DeploymentOutputSelector, WireShapeError> {
+        Ok(sema::DeploymentOutputSelector::new(
+            self.flake_attribute.lower()?,
+        ))
+    }
+}
+impl Raisable<ordinary::DeploymentOutputSelector> for sema::DeploymentOutputSelector {
+    fn raise(self) -> Result<ordinary::DeploymentOutputSelector, WireShapeError> {
+        Ok(ordinary::DeploymentOutputSelector {
+            flake_attribute: self.into_payload().raise()?,
+        })
+    }
+}
+impl Lowerable<sema::QuickCheck> for owner::QuickCheck {
+    fn lower(self) -> Result<sema::QuickCheck, WireShapeError> {
+        Ok(sema::QuickCheck::new(self.lower()?))
+    }
+}
+impl Raisable<owner::QuickCheck> for sema::QuickCheck {
+    fn raise(self) -> Result<owner::QuickCheck, WireShapeError> {
+        self.into_payload().raise()
+    }
+}
+impl Lowerable<sema::GenerationArtifact> for ordinary::RequestedGenerationArtifact {
+    fn lower(self) -> Result<sema::GenerationArtifact, WireShapeError> {
+        Ok(match self {
+            Self::UserEnvironment => sema::GenerationArtifact::UserEnvironment,
+            Self::CompleteHost => sema::GenerationArtifact::CompleteHost,
+            Self::BaseHost => sema::GenerationArtifact::BaseHost,
+        })
+    }
+}
+impl Raisable<ordinary::RequestedGenerationArtifact> for sema::GenerationArtifact {
+    fn raise(self) -> Result<ordinary::RequestedGenerationArtifact, WireShapeError> {
+        Ok(match self {
+            Self::UserEnvironment => ordinary::RequestedGenerationArtifact::UserEnvironment,
+            Self::CompleteHost => ordinary::RequestedGenerationArtifact::CompleteHost,
+            Self::BaseHost => ordinary::RequestedGenerationArtifact::BaseHost,
+        })
     }
 }
 
-impl WireShape for sema::KeyMaterialReport {
-    fn to_wire(&self) -> RuntimeDatom {
-        RuntimeDatom::Struct(vec![
-            self.node_name.to_wire(),
-            RuntimeDatom::Vector(Vec::new()),
-            self.state_marker.to_wire(),
-        ])
-    }
+owner_struct!(PinRequest => PinRequest { cluster_name => cluster_name, node_name => node_name, generation_identifier => generation_identifier, pin_label => pin_label });
+owner_struct!(UnpinRequest => UnpinRequest { cluster_name => cluster_name, node_name => node_name, pin_label => pin_label });
+owner_struct!(RetireRequest => RetireRequest { cluster_name => cluster_name, node_name => node_name, generation_identifier => generation_identifier });
+owner_struct!(TestRun => TestRun { cluster_name => cluster_name, node_selection => node_selection, host_selection => host_selection, test_execution_profile => test_execution_profile });
+owner_struct!(ExtraSubstituter => ExtraSubstituter { first_string => url, second_string => public_key });
+owner_struct_with_none!(HostDeployment => HostDeployment {
+    cluster_name => cluster_name, node_name => node_name, host_composition => host_composition,
+    proposal_source => proposal_source, secrets_input => secrets_input, flake_reference => flake_reference,
+    deployment_transport => deployment_transport, deployment_input_mode => deployment_input_mode,
+    deployment_output_selector => deployment_output_selector, activation_backend => activation_backend,
+    host_deploy_action => host_deploy_action, source_revision_policy => source_revision_policy,
+    nix_builder_spec_option => optional_nix_builder_spec, extra_substituter_vector => extra_substituter_vector
+}, horizon_definition_option);
+owner_struct_with_none!(UserEnvironmentDeployment => UserEnvironmentDeployment {
+    cluster_name => cluster_name, node_name => node_name, user_name => user_name,
+    proposal_source => proposal_source, secrets_input => secrets_input, flake_reference => flake_reference,
+    deployment_transport => deployment_transport, deployment_input_mode => deployment_input_mode,
+    deployment_output_selector => deployment_output_selector, activation_backend => activation_backend,
+    user_environment_action => user_environment_action, source_revision_policy => source_revision_policy,
+    nix_builder_spec_option => optional_nix_builder_spec, extra_substituter_vector => extra_substituter_vector
+}, horizon_definition_option);
 
-    fn from_wire(value: RuntimeDatom) -> Result<Self, WireShapeError> {
-        let RuntimeDatom::Struct(fields) = value else {
-            return Err(WireShapeError);
-        };
-        let mut fields = fields.into_iter();
-        let node_name = sema::NodeName::from_wire(fields.next().ok_or(WireShapeError)?)?;
-        let RuntimeDatom::Vector(_) = fields.next().ok_or(WireShapeError)? else {
-            return Err(WireShapeError);
-        };
-        let state_marker = sema::StateMarker::from_wire(fields.next().ok_or(WireShapeError)?)?;
-        if fields.next().is_some() {
-            return Err(WireShapeError);
+impl Lowerable<sema::DeploySubmission> for owner::ActualizedDeploySubmission {
+    fn lower(self) -> Result<sema::DeploySubmission, WireShapeError> {
+        let mut submission = self.deploy_submission.lower()?;
+        match &mut submission {
+            sema::DeploySubmission::Host(value) => {
+                value.horizon_definition_option = self.horizon_definition_option;
+            }
+            sema::DeploySubmission::UserEnvironment(value) => {
+                value.horizon_definition_option = self.horizon_definition_option;
+            }
         }
-        Ok(Self {
-            node_name,
-            string_vector: Vec::new(),
-            state_marker,
+        Ok(submission)
+    }
+}
+
+macro_rules! marker_wrapper {
+    ($runtime:ident) => {
+        impl Raisable<ordinary::DatabaseMarker> for sema::$runtime {
+            fn raise(self) -> Result<ordinary::DatabaseMarker, WireShapeError> {
+                self.into_payload().raise()
+            }
+        }
+    };
+}
+marker_wrapper!(DatabaseMarker);
+marker_wrapper!(AdmissionMarker);
+marker_wrapper!(TransitionMarker);
+marker_wrapper!(TerminalMarker);
+
+shared_raise_struct!(DeploymentRequestIdentity => DeploymentRequestIdentity {
+    deployment_environment => deployment_environment, cluster_name => cluster_name,
+    node_name => node_name, generation_artifact => generation_artifact,
+    requested_deployment_action => requested_deployment_action, activation_effect => activation_effect,
+    source_revision_policy => source_revision_policy, immutable_revision_option => optional_immutable_revision
+});
+shared_raise_struct!(DeploymentRecord => DeploymentRecord {
+    deployment_identifier => deployment_identifier, generation_identifier => generation_identifier,
+    deployment_request_identity => deployment_request_identity, admission_marker_option => optional_admission_marker,
+    deployment_lifecycle => deployment_lifecycle, terminal_marker_option => optional_terminal_marker,
+    deployment_terminal_option => optional_deployment_terminal
+});
+shared_raise_struct!(DeploymentPhaseEvent => DeploymentPhaseEvent {
+    deployment_identifier => deployment_identifier, generation_identifier => generation_identifier,
+    cluster_name => cluster_name, node_name => node_name, deployment_phase => deployment_phase,
+    event_log_position => event_log_position, transition_marker => state_marker,
+    immutable_revision_option => optional_immutable_revision, deployment_terminal_option => optional_deployment_terminal
+});
+shared_raise_struct!(CacheRetentionTransitionEvent => CacheRetentionTransitionEvent {
+    generation_identifier => generation_identifier, cluster_name => cluster_name, node_name => node_name,
+    cache_retention_transition => cache_retention_transition, generation_slot => generation_slot,
+    generation_slot_option => optional_generation_slot, pin_label_option => optional_pin_label,
+    event_log_position => event_log_position
+});
+shared_raise_struct!(RejectedQuery => RejectedQuery { query_rejection_reason => query_rejection_reason, database_marker => state_marker });
+shared_raise_struct!(RejectedUnwatch => RejectedUnwatch { unwatch_rejection_reason => unwatch_rejection_reason, subscription_token => subscription_token });
+shared_raise_struct!(RejectedKeyMaterialCheck => RejectedKeyMaterialCheck { key_material_check_rejection_reason => key_material_check_rejection_reason, database_marker => state_marker });
+shared_raise_struct!(SubscriptionOpened => SubscriptionOpened { subscription_token => subscription_token, commit_sequence => commit_sequence });
+shared_raise_struct!(GenerationListing => GenerationListing { generation_vector => generation_vector, deployment_record_vector => deployment_record_vector, database_marker => state_marker });
+shared_raise_struct!(EventLogPage => EventLogPage { deployment_phase_event_vector => deployment_phase_event_vector, cache_retention_transition_event_vector => cache_retention_transition_event_vector, database_marker => state_marker });
+shared_raise_struct!(TestRunListing => TestRunListing { test_run_record_vector => test_run_record_vector, database_marker => database_marker });
+
+owner_raise_struct!(DeployHandle => DeployHandle { deployment_identifier => deployment_identifier, database_marker => state_marker });
+owner_raise_struct!(AcceptedTest => AcceptedTest { test_run_identifier => test_run_identifier, database_marker => state_marker });
+owner_raise_struct!(AppliedPin => AppliedPin { generation_identifier => generation_identifier, pin_label => pin_label, first_generation_slot => from_slot, second_generation_slot => to_slot, database_marker => state_marker });
+owner_raise_struct!(AppliedUnpin => AppliedUnpin { generation_identifier => generation_identifier, pin_label => pin_label, first_generation_slot => from_slot, second_generation_slot => to_slot, database_marker => state_marker });
+owner_raise_struct!(AppliedRetire => AppliedRetire { generation_identifier => generation_identifier, generation_slot => generation_slot, database_marker => state_marker });
+owner_raise_struct!(RejectedPin => RejectedPin { pin_rejection_reason => pin_rejection_reason, database_marker => state_marker });
+owner_raise_struct!(RejectedUnpin => RejectedUnpin { unpin_rejection_reason => unpin_rejection_reason, database_marker => state_marker });
+owner_raise_struct!(RejectedRetire => RejectedRetire { retire_rejection_reason => retire_rejection_reason, database_marker => state_marker });
+owner_raise_struct!(RejectedTest => RejectedTest { test_rejection_reason => test_rejection_reason, database_marker => state_marker });
+
+impl Raisable<ordinary::RejectedWatch> for sema::RejectedWatch {
+    fn raise(self) -> Result<ordinary::RejectedWatch, WireShapeError> {
+        Ok(ordinary::RejectedWatch {
+            watch_rejection_reason: self.into_payload().raise()?,
+        })
+    }
+}
+impl Raisable<ordinary::SubscriptionClosed> for sema::SubscriptionClosed {
+    fn raise(self) -> Result<ordinary::SubscriptionClosed, WireShapeError> {
+        Ok(ordinary::SubscriptionClosed {
+            subscription_token: self.into_payload().raise()?,
+        })
+    }
+}
+impl Raisable<owner::RejectedDeploy> for sema::RejectedDeploy {
+    fn raise(self) -> Result<owner::RejectedDeploy, WireShapeError> {
+        Ok(owner::RejectedDeploy {
+            deployment_record: self.into_payload().raise()?,
+        })
+    }
+}
+
+impl Raisable<ordinary::Generation> for sema::Generation {
+    fn raise(self) -> Result<ordinary::Generation, WireShapeError> {
+        let closure_path_option = canonical_nix_store_root(self.closure_path.payload())
+            .then_some(self.closure_path)
+            .raise()?;
+        Ok(ordinary::Generation {
+            generation_identifier: self.generation_identifier.raise()?,
+            deployment_identifier: self.deployment_identifier.raise()?,
+            cluster_name: self.cluster_name.raise()?,
+            node_name: self.node_name.raise()?,
+            generation_artifact: self.generation_artifact.raise()?,
+            activation_effect: self.activation_effect.raise()?,
+            generation_slot: self.generation_slot.raise()?,
+            closure_path_option,
+            immutable_revision_option: self.optional_immutable_revision.raise()?,
+        })
+    }
+}
+impl Raisable<ordinary::TestRunRecord> for sema::TestRunRecord {
+    fn raise(self) -> Result<ordinary::TestRunRecord, WireShapeError> {
+        let closure_path_option = self
+            .optional_closure_path
+            .filter(|path| canonical_nix_store_root(path.payload()))
+            .raise()?;
+        Ok(ordinary::TestRunRecord {
+            test_run_identifier: self.test_run_identifier.raise()?,
+            cluster_name: self.cluster_name.raise()?,
+            first_node_name: self.node.raise()?,
+            second_node_name: self.host.raise()?,
+            test_mode: self.test_mode.raise()?,
+            test_run_phase: self.test_run_phase.raise()?,
+            test_outcome: self.test_outcome.raise()?,
+            closure_path_option,
+        })
+    }
+}
+impl Raisable<ordinary::KeyMaterialReport> for sema::KeyMaterialReport {
+    fn raise(self) -> Result<ordinary::KeyMaterialReport, WireShapeError> {
+        Ok(ordinary::KeyMaterialReport {
+            node_name: self.node_name.raise()?,
+            key_material_mismatch_vector: Vec::new(),
+            database_marker: self.state_marker.raise()?,
         })
     }
 }
@@ -655,7 +777,6 @@ fn canonical_nix_store_root(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'_' | b'-'))
         && !credential_like(value)
 }
-
 fn credential_like(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
     [
@@ -673,22 +794,134 @@ fn credential_like(value: &str) -> bool {
     .any(|term| value.contains(term))
 }
 
-pub fn ordinary_ingress(value: signal_lojix::Request) -> crate::Result<sema::OrdinaryIngress> {
-    sema::OrdinaryIngress::from_wire(current_datom(&value))
-        .map_err(|error| crate::Error::Wire(error.to_string()))
+impl Lowerable<sema::OrdinaryIngress> for ordinary::Query {
+    fn lower(self) -> Result<sema::OrdinaryIngress, WireShapeError> {
+        Ok(match self {
+            ordinary::Query::Configure(value) => sema::OrdinaryIngress::Configure(value.lower()?),
+            ordinary::Query::CheckHostKeyMaterial(value) => {
+                sema::OrdinaryIngress::CheckHostKeyMaterial(value.lower()?)
+            }
+            ordinary::Query::WatchDeployments(value) => {
+                sema::OrdinaryIngress::WatchDeployments(value.lower()?)
+            }
+            ordinary::Query::Query(value) => sema::OrdinaryIngress::Query(value.lower()?),
+            ordinary::Query::WatchCacheRetention(value) => {
+                sema::OrdinaryIngress::WatchCacheRetention(value.lower()?)
+            }
+            ordinary::Query::Unwatch(value) => sema::OrdinaryIngress::Unwatch(value.lower()?),
+        })
+    }
+}
+impl Lowerable<sema::MetaIngress> for owner::Query {
+    fn lower(self) -> Result<sema::MetaIngress, WireShapeError> {
+        Ok(match self {
+            owner::Query::Configure(value) => sema::MetaIngress::Configure(value.lower()?),
+            owner::Query::ReverseConfiguration => sema::MetaIngress::ReverseConfiguration,
+            owner::Query::Retire(value) => sema::MetaIngress::Retire(value.lower()?),
+            owner::Query::Pin(value) => sema::MetaIngress::Pin(value.lower()?),
+            owner::Query::Deploy(value) => sema::MetaIngress::Deploy(value.lower()?),
+            owner::Query::Test(value) => sema::MetaIngress::Test(value.lower()?),
+            owner::Query::Unpin(value) => sema::MetaIngress::Unpin(value.lower()?),
+        })
+    }
 }
 
-pub fn meta_ingress(value: meta_signal_lojix::Request) -> crate::Result<sema::MetaIngress> {
-    sema::MetaIngress::from_wire(current_datom(&value))
-        .map_err(|error| crate::Error::Wire(error.to_string()))
+impl Raisable<ordinary::Response> for sema::OrdinaryEgress {
+    fn raise(self) -> Result<ordinary::Response, WireShapeError> {
+        Ok(match self {
+            sema::OrdinaryEgress::Configured(value) => {
+                ordinary::Response::Configured(ordinary::ConfigurationReceipt {
+                    lojix_nexus_configuration: value.configuration,
+                    meta_configure_occurred: value.meta_configure_occurred,
+                })
+            }
+            sema::OrdinaryEgress::ConfigurationRejected(value) => {
+                ordinary::Response::ConfigurationRejected(configuration_rejection(value))
+            }
+            sema::OrdinaryEgress::TestRunsQueried(value) => {
+                ordinary::Response::TestRunsQueried(value.raise()?)
+            }
+            sema::OrdinaryEgress::UnwatchRejected(value) => {
+                ordinary::Response::UnwatchRejected(value.raise()?)
+            }
+            sema::OrdinaryEgress::QueryRejected(value) => {
+                ordinary::Response::QueryRejected(value.raise()?)
+            }
+            sema::OrdinaryEgress::Watching(value) => ordinary::Response::Watching(value.raise()?),
+            sema::OrdinaryEgress::KeyMaterialCheckRejected(value) => {
+                ordinary::Response::KeyMaterialCheckRejected(value.raise()?)
+            }
+            sema::OrdinaryEgress::Queried(value) => ordinary::Response::Queried(value.raise()?),
+            sema::OrdinaryEgress::DeploymentEventsQueried(value) => {
+                ordinary::Response::DeploymentEventsQueried(value.raise()?)
+            }
+            sema::OrdinaryEgress::Unwatched(value) => ordinary::Response::Unwatched(value.raise()?),
+            sema::OrdinaryEgress::KeyMaterialChecked(value) => {
+                ordinary::Response::KeyMaterialChecked(value.raise()?)
+            }
+            sema::OrdinaryEgress::WatchRejected(value) => {
+                ordinary::Response::WatchRejected(value.raise()?)
+            }
+        })
+    }
+}
+impl Raisable<owner::Response> for sema::MetaEgress {
+    fn raise(self) -> Result<owner::Response, WireShapeError> {
+        Ok(match self {
+            sema::MetaEgress::Configured(value) => {
+                owner::Response::Configured(configuration_receipt(value))
+            }
+            sema::MetaEgress::ConfigurationRejected(value) => {
+                owner::Response::ConfigurationRejected(configuration_rejection(value))
+            }
+            sema::MetaEgress::ConfigurationReversed(value) => {
+                owner::Response::ConfigurationReversed(configuration_receipt(value))
+            }
+            sema::MetaEgress::PinRejected(value) => owner::Response::PinRejected(value.raise()?),
+            sema::MetaEgress::DeployRejected(value) => {
+                owner::Response::DeployRejected(value.raise()?)
+            }
+            sema::MetaEgress::DeployAccepted(value) => {
+                owner::Response::DeployAccepted(value.raise()?)
+            }
+            sema::MetaEgress::TestRejected(value) => owner::Response::TestRejected(value.raise()?),
+            sema::MetaEgress::Unpinned(value) => owner::Response::Unpinned(value.raise()?),
+            sema::MetaEgress::Tested(value) => owner::Response::Tested(value.raise()?),
+            sema::MetaEgress::UnpinRejected(value) => {
+                owner::Response::UnpinRejected(value.raise()?)
+            }
+            sema::MetaEgress::DeployTerminal(value) => {
+                owner::Response::DeployTerminal(value.raise()?)
+            }
+            sema::MetaEgress::Pinned(value) => owner::Response::Pinned(value.raise()?),
+            sema::MetaEgress::RetireRejected(value) => {
+                owner::Response::RetireRejected(value.raise()?)
+            }
+            sema::MetaEgress::Retired(value) => owner::Response::Retired(value.raise()?),
+        })
+    }
 }
 
-pub fn ordinary_egress(value: sema::OrdinaryEgress) -> crate::Result<signal_lojix::Response> {
-    generated_root(value.to_wire())
+fn configuration_receipt(value: sema::ConfigurationReceipt) -> ordinary::ConfigurationReceipt {
+    ordinary::ConfigurationReceipt {
+        lojix_nexus_configuration: value.configuration,
+        meta_configure_occurred: value.meta_configure_occurred,
+    }
 }
 
-pub fn meta_egress(value: sema::MetaEgress) -> crate::Result<meta_signal_lojix::Response> {
-    generated_root(value.to_wire())
+fn configuration_rejection(
+    value: sema::ConfigurationRejection,
+) -> ordinary::ConfigurationRejection {
+    ordinary::ConfigurationRejection {
+        configuration_rejection_reason: match value.reason {
+            sema::ConfigurationRejectionReason::OrdinaryConfigureClosed => {
+                ordinary::ConfigurationRejectionReason::OrdinaryConfigureClosed
+            }
+            sema::ConfigurationRejectionReason::InvalidConfiguration => {
+                ordinary::ConfigurationRejectionReason::InvalidConfiguration
+            }
+        },
+    }
 }
 
 #[cfg(test)]
@@ -701,7 +934,6 @@ mod tests {
             state_digest: sema::StateDigest::new(7),
         }
     }
-
     fn generation(path: &str) -> sema::Generation {
         sema::Generation {
             generation_identifier: sema::GenerationIdentifier::new(1),
@@ -715,44 +947,52 @@ mod tests {
             optional_immutable_revision: None,
         }
     }
-
     #[test]
     fn ordinary_projection_keeps_only_canonical_store_item_roots() {
         let valid = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-system-toplevel";
-        let visible = ordinary_egress(sema::OrdinaryEgress::Queried(sema::GenerationListing {
+        let visible = sema::OrdinaryEgress::Queried(sema::GenerationListing {
             generation_vector: vec![generation(valid)],
             deployment_record_vector: Vec::new(),
             state_marker: marker(),
-        }))
-        .expect("project canonical listing");
+        })
+        .raise()
+        .unwrap();
         assert!(format!("{visible:?}").contains(valid));
-
         for private in [
             "/home/li/private",
             "/nix/store/short-system",
             "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-secret",
         ] {
-            let visible = ordinary_egress(sema::OrdinaryEgress::Queried(sema::GenerationListing {
+            let visible = sema::OrdinaryEgress::Queried(sema::GenerationListing {
                 generation_vector: vec![generation(private)],
                 deployment_record_vector: Vec::new(),
                 state_marker: marker(),
-            }))
-            .expect("project private listing");
+            })
+            .raise()
+            .unwrap();
             assert!(!format!("{visible:?}").contains(private));
         }
     }
-
     #[test]
     fn public_key_report_drops_private_runtime_text() {
         let private = "token=raw-secret path=/srv/private";
-        let visible = ordinary_egress(sema::OrdinaryEgress::KeyMaterialChecked(
-            sema::KeyMaterialReport {
-                node_name: sema::NodeName::new("node-1"),
-                string_vector: vec![private.to_owned()],
-                state_marker: marker(),
-            },
-        ))
-        .expect("project key report");
+        let visible = sema::OrdinaryEgress::KeyMaterialChecked(sema::KeyMaterialReport {
+            node_name: sema::NodeName::new("node-1"),
+            string_vector: vec![private.to_owned()],
+            state_marker: marker(),
+        })
+        .raise()
+        .unwrap();
         assert!(!format!("{visible:?}").contains(private));
+    }
+    #[test]
+    fn negative_public_identifiers_are_rejected_without_wrapping() {
+        assert!(
+            ordinary::Query::Unwatch(ordinary::SubscriptionClose {
+                subscription_token: -1
+            })
+            .lower()
+            .is_err()
+        );
     }
 }

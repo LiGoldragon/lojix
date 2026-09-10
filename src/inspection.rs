@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use datom_codec::{Actualizable, IncorporationBudget, Potential};
+use datom_codec::{Actualizing, Potential};
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use rkyv::api::high::HighDeserializer;
 use rkyv::bytecheck::CheckBytes;
@@ -74,10 +74,10 @@ impl StoreInspectionCommand {
 /// an existing request-like path remains plain rejected text rather than input.
 fn parse_inspect_store_request(text: &str) -> Result<String> {
     let request = Potential::<ingress::InspectionRequest>::from(text.to_owned())
-        .actualize(IncorporationBudget::try_from(16_384).expect("static ingress budget"))
+        .actualize(&mut <crate::Ingress as crate::Budgeted>::budget())
         .map_err(|fault| Error::DatomRequestText(format!("{fault:?}")))?;
-    let ingress::InspectionRequest::InspectStore(ingress::InspectStore(path)) = request;
-    Ok(path.to_string())
+    let ingress::InspectionRequest::InspectStore(ingress::InspectStore { string: path }) = request;
+    Ok(path)
 }
 
 pub struct StoreInspector {

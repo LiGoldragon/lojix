@@ -36,8 +36,11 @@
           src = ./.;
           filter =
             path: type:
-            (craneLib.filterCargoSources path type)
+            (type == "directory")
+            || (craneLib.filterCargoSources path type)
             || (type == "regular" && baseNameOf path == "horizon-definition.datom")
+            || (type == "regular" && pkgs.lib.hasSuffix ".ethos" path)
+            || (type == "regular" && pkgs.lib.hasSuffix ".sema" path)
             || (
               type == "regular"
               && builtins.elem (baseNameOf path) [
@@ -56,12 +59,42 @@
           nativeBuildInputs = [ pkgs.util-linux ];
         };
         cargoArtifacts = craneLib.buildDepsOnly commonArguments;
-        daemonCargoArtifacts = craneLib.buildDepsOnly commonArguments;
+        nexusCargoArtifacts = craneLib.buildDepsOnly (
+          commonArguments // { cargoExtraArgs = "-p lojix-nexus"; }
+        );
+        nexusPackage = craneLib.buildPackage (
+          commonArguments
+          // {
+            cargoArtifacts = nexusCargoArtifacts;
+            cargoExtraArgs = "-p lojix-nexus";
+          }
+        );
+        ordinaryClientPackage = craneLib.buildPackage (
+          commonArguments
+          // {
+            inherit cargoArtifacts;
+            cargoExtraArgs = "-p lojix-client";
+          }
+        );
+        metaClientPackage = craneLib.buildPackage (
+          commonArguments
+          // {
+            inherit cargoArtifacts;
+            cargoExtraArgs = "-p meta-lojix-client";
+          }
+        );
+        offlineToolsPackage = craneLib.buildPackage (
+          commonArguments
+          // {
+            inherit cargoArtifacts;
+            cargoExtraArgs = "-p lojix-offline-tools --bin lojix-write-configuration --bin lojix-inspect-store --bin lojix-reset-store --bin lojix-migrate-configuration";
+          }
+        );
         bootstrapBinary = craneLib.buildPackage (
           commonArguments
           // {
             inherit cargoArtifacts;
-            cargoExtraArgs = "--bin lojix-bootstrap";
+            cargoExtraArgs = "-p lojix-offline-tools --bin lojix-bootstrap";
           }
         );
         bootstrapPackage = pkgs.symlinkJoin {
@@ -80,23 +113,24 @@
               --set LOJIX_BOOTSTRAP_OPENSSH ${pkgs.openssh}/bin/ssh
           '';
         };
+        completePackage = pkgs.symlinkJoin {
+          name = "lojix-1.0.0";
+          paths = [
+            nexusPackage
+            ordinaryClientPackage
+            metaClientPackage
+            offlineToolsPackage
+            bootstrapPackage
+          ];
+        };
       in
       {
         packages = {
-          default = craneLib.buildPackage (
-            commonArguments
-            // {
-              inherit cargoArtifacts;
-            }
-          );
-
-          daemon-binary = craneLib.buildPackage (
-            commonArguments
-            // {
-              cargoArtifacts = daemonCargoArtifacts;
-              cargoExtraArgs = "--bin lojix-daemon";
-            }
-          );
+          default = completePackage;
+          lojix-nexus = nexusPackage;
+          lojix = ordinaryClientPackage;
+          lojix-meta = metaClientPackage;
+          offline-tools = offlineToolsPackage;
 
           # A maintained flake-owned bootstrap program.  The wrapper keeps the
           # exact Nix/systemd executables in the app closure; it never depends
@@ -112,7 +146,7 @@
         checks = {
           build = self.packages.${system}.default;
 
-          daemon-binary = self.packages.${system}.daemon-binary;
+          nexus-binary = self.packages.${system}.lojix-nexus;
 
           test = craneLib.cargoTest (
             commonArguments
@@ -121,36 +155,35 @@
             }
           );
 
-          # Process-level startup witness for the exact CriomOS writer archive,
-          # a missing configured SEMA store, both public authority tiers, and
-          # a service-style terminate/restart cycle.
+          # Process-level zero-argument startup witness with isolated XDG
+          # roots, a fresh Sema, both authority tiers, and restart persistence.
           fresh-daemon-startup = craneLib.cargoTest (
             commonArguments
             // {
               inherit cargoArtifacts;
-              cargoExtraArgs = "--test daemon_configuration";
+              cargoExtraArgs = "-p lojix-nexus --test daemon_configuration";
             }
           );
 
-          daemon-startup-rejects-inline-input =
+          nexus-startup-rejects-arguments =
             let
               package = self.packages.${system}.default;
             in
-            pkgs.runCommand "lojix-daemon-startup-rejects-inline-input" { } ''
+            pkgs.runCommand "lojix-nexus-startup-rejects-arguments" { } ''
               set +e
-              ${package}/bin/lojix-daemon '(NotAStartupArchive)' >stdout 2>stderr
+              ${package}/bin/lojix-nexus unexpected >stdout 2>stderr
               status=$?
               set -e
               if [ "$status" -eq 0 ]; then
-                echo 'lojix-daemon accepted inline startup input' >&2
+                echo 'lojix-nexus accepted a startup argument' >&2
                 exit 1
               fi
-              if ! grep -Eq 'ExpectedSignalFile|signal file|DaemonRejected' stderr; then
-                echo 'lojix-daemon rejection did not name the signal-file startup boundary' >&2
+              if ! grep -q 'starts with no arguments' stderr; then
+                echo 'lojix-nexus rejection did not name the zero-argument boundary' >&2
                 cat stderr >&2
                 exit 1
               fi
-              printf 'lojix daemon rejects inline startup input\n' > "$out"
+              printf 'lojix nexus rejects startup arguments\n' > "$out"
             '';
 
           bootstrap-rejects-flags =
@@ -240,14 +273,6 @@
                 for argument in "$@"; do command="$argument"; done
                 exec /bin/sh -c "$command"
               '';
-              startup =
-                pkgs.runCommand "lojix-testactivation-startup.rkyv"
-                  {
-                    nativeBuildInputs = [ package ];
-                  }
-                  ''
-                    lojix-write-configuration "ConfigurationWriteRequest.{/run/lojix/ordinary.sock 432 /run/lojix/owner.sock 384 /var/lib/lojix /var/lib/lojix/lojix.sema atlas NoTestDefaults $out}"
-                  '';
               proposal = "{ { [] { criome [] } } { alpha [ { atlas Live.{} Max Max Metal.{ X86_64 { 4 None None None None None } } { Qwerty None } { [] None None [] None } { “ssh-ed25519 AAAAfixture” None None } Some.True [] } ] [] [] [] { Max [] [] [] } } }";
             in
             pkgs.testers.nixosTest {
@@ -262,7 +287,7 @@
                 systemd.services.lojix = {
                   wantedBy = [ "multi-user.target" ];
                   serviceConfig = {
-                    ExecStart = "${package}/bin/lojix-daemon ${startup}";
+                    ExecStart = "${package}/bin/lojix-nexus";
                     Restart = "always";
                     KillMode = "control-group";
                     StateDirectory = "lojix";
@@ -284,17 +309,21 @@
               testScript = ''
                 start_all()
                 machine.wait_for_unit("lojix.service")
-                machine.wait_until_succeeds("test -S /run/lojix/ordinary.sock && test -S /run/lojix/owner.sock")
+                machine.wait_until_succeeds("test -S /run/lojix/ordinary.sock && test -S /run/lojix/meta.sock")
+                machine.succeed("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Configure.{ /run/lojix/ordinary.sock 432 /run/lojix/meta.sock 384 /var/lib/lojix atlas NoTestDefaults }' | grep -F Configured")
+                machine.succeed("systemctl restart lojix.service")
+                machine.wait_for_unit("lojix.service")
+                machine.wait_until_succeeds("test -S /run/lojix/ordinary.sock && test -S /run/lojix/meta.sock")
                 profile_before = machine.succeed("readlink -f /nix/var/nix/profiles/system").strip()
                 predecessor_invocation = machine.succeed("systemctl show lojix.service --property=InvocationID --value").strip()
-                machine.succeed("LOJIX_OWNER_SOCKET=/run/lojix/owner.sock ${package}/bin/meta-lojix 'Deploy.Host.{ fixture-cluster atlas BaseHost /var/lib/lojix/horizon-definition.datom NoSecrets github:fixture-owner/fixture-flake?ref=main { ssh-ng://fixture-copy.invalid fixture-login@fixture-activate.invalid } Direct { checks.fixture-a } NixosSystemdBootV1 TestActivation ResolveAndRecord None [] }' >/run/lojix-admission")
+                machine.succeed("LOJIX_OWNER_SOCKET=/run/lojix/meta.sock ${package}/bin/lojix-meta 'Deploy.Host.{ fixture-cluster atlas BaseHost /var/lib/lojix/horizon-definition.datom NoSecrets github:fixture-owner/fixture-flake?ref=main { ssh-ng://fixture-copy.invalid fixture-login@fixture-activate.invalid } Direct { checks.fixture-a } NixosSystemdBootV1 TestActivation ResolveAndRecord None [] }' >/run/lojix-admission")
                 machine.log(machine.succeed("cat /run/lojix-admission"))
                 machine.log(machine.succeed("cat /run/lojix-fake-nix-argv"))
                 machine.succeed("grep -F 'DeployAccepted.' /run/lojix-admission")
                 machine.wait_until_succeeds("test -e /run/lojix-testactivation-candidate-entered")
                 machine.wait_until_succeeds("test \"$(systemctl show lojix.service --property=InvocationID --value)\" != '" + predecessor_invocation + "'")
                 machine.wait_for_unit("lojix.service")
-                machine.wait_until_succeeds("test -S /run/lojix/ordinary.sock && test -S /run/lojix/owner.sock")
+                machine.wait_until_succeeds("test -S /run/lojix/ordinary.sock && test -S /run/lojix/meta.sock")
                 machine.wait_until_succeeds("systemctl show lojix-self-switch-deploy-1.service --property=Result --value | grep -Fx success")
                 machine.log(machine.succeed("systemctl show lojix-self-switch-deploy-1.service --property=LoadState --property=ActiveState --property=SubState --property=Result"))
                 machine.succeed("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Query.ByDeployment.{ 1 }' >/run/lojix-deployment-before-wait")

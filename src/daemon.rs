@@ -16,11 +16,6 @@ use std::time::Duration;
 use kameo::actor::{Actor, ActorRef, Spawn};
 use kameo::error::Infallible;
 use kameo::message::{Context, Message};
-use meta_signal_lojix::WireConversion as MetaWireConversion;
-use signal_frame::{
-    BoundExchangeFrame, ExchangeFrameBody, ExchangeIdentifier, Reply, RootCode, SubReply,
-    VariantCode, WireRoute,
-};
 use triad_runtime::{
     AcceptedConnection, AsyncListenerSocket, AsyncMultiConnectionRuntime, AsyncMultiListenerDaemon,
     AsyncMultiListenerDaemonError, ConnectionContext, FrameBody, LengthPrefixedCodec,
@@ -38,82 +33,28 @@ const MAXIMUM_REQUEST_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// serial accept loop (audit R2). A legitimate client sends immediately.
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn meta_request_route(request: &meta_signal_lojix::Request) -> WireRoute {
-    let variant = match request {
-        meta_signal_lojix::Request::Retire(_) => 0,
-        meta_signal_lojix::Request::Pin(_) => 1,
-        meta_signal_lojix::Request::Deploy(_) => 2,
-        meta_signal_lojix::Request::Test(_) => 3,
-        meta_signal_lojix::Request::Unpin(_) => 4,
-    };
-    WireRoute::new(RootCode::new(0), VariantCode::new(variant))
+fn decode_meta_request(bytes: &[u8]) -> Result<meta_signal_lojix::Query> {
+    use meta_signal_lojix::{Restorable, Signal};
+    Signal::<meta_signal_lojix::Query>::from(bytes.to_vec())
+        .restore()
+        .map_err(|fault| Error::Wire(format!("{fault:?}")))
 }
 
-fn meta_response_route(response: &meta_signal_lojix::Response) -> WireRoute {
-    let variant = match response {
-        meta_signal_lojix::Response::PinRejected(_) => 0,
-        meta_signal_lojix::Response::DeployRejected(_) => 1,
-        meta_signal_lojix::Response::DeployAccepted(_) => 2,
-        meta_signal_lojix::Response::TestRejected(_) => 3,
-        meta_signal_lojix::Response::Unpinned(_) => 4,
-        meta_signal_lojix::Response::Tested(_) => 5,
-        meta_signal_lojix::Response::UnpinRejected(_) => 6,
-        meta_signal_lojix::Response::DeployTerminal(_) => 7,
-        meta_signal_lojix::Response::Pinned(_) => 8,
-        meta_signal_lojix::Response::RetireRejected(_) => 9,
-        meta_signal_lojix::Response::Retired(_) => 10,
-    };
-    WireRoute::new(RootCode::new(1), VariantCode::new(variant))
+fn encode_meta_response(response: meta_signal_lojix::Response) -> Result<Vec<u8>> {
+    use meta_signal_lojix::{ByteViewable, Signalizable};
+    response
+        .signalize()
+        .map(|signal| signal.bytes().to_vec())
+        .map_err(|fault| Error::Wire(format!("{fault:?}")))
 }
 
-fn decode_meta_request(bytes: &[u8]) -> Result<(ExchangeIdentifier, meta_signal_lojix::Request)> {
-    let frame = BoundExchangeFrame::<
-        meta_signal_lojix::MetaLojixWire,
-        meta_signal_lojix::RequestWire,
-        meta_signal_lojix::ResponseWire,
-    >::decode_length_prefixed(bytes)?;
-    let route = frame.short_header().route();
-    let ExchangeFrameBody::Request { exchange, request } = frame.into_body() else {
-        return Err(Error::UnexpectedFrame);
-    };
-    if request.payloads().len() != 1 {
-        return Err(Error::UnexpectedFrame);
-    }
-    let input = meta_signal_lojix::Request::try_from_wire(request.payloads().clone().into_head())
-        .map_err(|fault| Error::Wire(format!("{fault:?}")))?;
-    if route != meta_request_route(&input) {
-        return Err(Error::UnexpectedFrame);
-    }
-    Ok((exchange, input))
-}
-
-fn encode_meta_response(
-    exchange: ExchangeIdentifier,
-    response: meta_signal_lojix::Response,
-) -> Result<Vec<u8>> {
-    let route = meta_response_route(&response);
-    Ok(BoundExchangeFrame::<
-        meta_signal_lojix::MetaLojixWire,
-        meta_signal_lojix::RequestWire,
-        meta_signal_lojix::ResponseWire,
-    >::new(
-        route,
-        ExchangeFrameBody::Reply {
-            exchange,
-            reply: Reply::committed(signal_frame::NonEmpty::single(SubReply::Ok(
-                response.into_wire(),
-            ))),
-        },
-    )
-    .encode_length_prefixed()?)
-}
-
+use crate::adapters::{Lowerable as _, Raisable as _};
 use crate::runtime_flow::{self as nexus, NexusEngine};
 use crate::runtime_model as sema;
 use crate::schema_runtime::{
     DeploySubmissionOutcome, RuntimeConfiguration, SchemaRuntime, TestSubmissionOutcome,
 };
-use crate::{DaemonConfiguration, Error, Result, Store};
+use crate::{Error, LojixNexusConfigurable as _, NexusConfiguration, Result, Store};
 
 /// Which authority-tiered socket an arriving stream belongs to. Ordinary is the
 /// peer-callable `signal-lojix` surface; Owner is the `meta-signal-lojix`
@@ -136,49 +77,81 @@ impl Display for ListenerRole {
 }
 
 /// The lojix daemon: configuration plus the schema engine that decides every
-/// arriving signal. Construct with [`Daemon::new`], then [`Daemon::run`] binds
-/// both sockets and serves forever.
+/// arriving signal. [`EnvironmentConstructible`] discovers its stable state;
+/// [`Runnable`] then binds both sockets and serves forever.
 pub struct Daemon {
-    configuration: DaemonConfiguration,
+    configuration: NexusConfiguration,
+    state_database_path: std::path::PathBuf,
+}
+
+/// Capability to discover the stable Lojix Sema and desired configuration.
+pub trait EnvironmentConstructible {
+    fn from_environment() -> Result<Self>
+    where
+        Self: Sized;
+}
+
+/// Capability to run a configured Nexus until process termination.
+pub trait Runnable {
+    fn run(self) -> Result<()>;
 }
 
 impl Daemon {
-    pub fn new(configuration: DaemonConfiguration) -> Self {
-        Self { configuration }
+    fn new(
+        configuration: NexusConfiguration,
+        state_database_path: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            configuration,
+            state_database_path: state_database_path.into(),
+        }
     }
+}
 
-    pub fn run(self) -> Result<()> {
+impl Runnable for Daemon {
+    fn run(self) -> Result<()> {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
             .block_on(self.run_async())
     }
+}
 
+impl Daemon {
     async fn run_async(self) -> Result<()> {
         let configuration = self.configuration;
-        Self::validate_owner_socket_mode(configuration.owner_socket_mode)?;
+        configuration.validate()?;
+        let ordinary_socket_mode =
+            u32::try_from(configuration.ordinary_socket_mode).map_err(|_| {
+                Error::InvalidNexusConfiguration("ordinary socket mode is outside u32".into())
+            })?;
+        let owner_socket_mode = u32::try_from(configuration.owner_socket_mode).map_err(|_| {
+            Error::InvalidNexusConfiguration("meta socket mode is outside u32".into())
+        })?;
+        for path in [
+            &configuration.ordinary_socket_path,
+            &configuration.owner_socket_path,
+        ] {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        std::fs::create_dir_all(&configuration.state_directory_path)?;
         let sockets = vec![
             AsyncListenerSocket::new(
                 ListenerRole::Ordinary,
                 configuration.ordinary_socket_path.clone(),
             )
-            .with_socket_mode(SocketMode::new(configuration.ordinary_socket_mode)),
+            .with_socket_mode(SocketMode::new(ordinary_socket_mode)),
             AsyncListenerSocket::new(ListenerRole::Owner, configuration.owner_socket_path.clone())
-                .with_socket_mode(SocketMode::new(configuration.owner_socket_mode)),
+                .with_socket_mode(SocketMode::new(owner_socket_mode)),
         ];
-        // Open the exact configured durable sema-engine store. The state
-        // directory still owns generated inputs, but it does not derive a
-        // store basename. Opening doubles as the self-resume: the configured
-        // store resumes its persisted catalog, commit sequence, and records
-        // (ur16). Construction is fallible and its Result propagates through
-        // `run`'s existing Result.
-        let state_database_path = std::path::PathBuf::from(&configuration.store_path);
         let runtime = LojixRuntime::new(
-            RuntimeConfiguration::from_daemon_configuration(&configuration),
-            state_database_path,
+            RuntimeConfiguration::from(&configuration),
+            self.state_database_path,
         )
         .await?;
-        let request_error_log = RequestErrorLog::new("lojix-daemon");
+        let request_error_log = RequestErrorLog::new("lojix-nexus");
         let daemon = AsyncMultiListenerDaemon::new(sockets, runtime, request_error_log)
             .with_concurrency_limit(RequestConcurrencyLimit::new(MAXIMUM_CONCURRENT_REQUESTS))
             .bind()
@@ -191,13 +164,6 @@ impl Daemon {
             .await
             .map_err(|error| Self::map_daemon_error(AsyncMultiListenerDaemonError::Start(error)))?;
 
-        // `systemd` stops the service with SIGTERM.  Bind both listeners before
-        // waiting and keep accepting both concurrently until that signal
-        // arrives; then the triad runtime closes admission, drains active
-        // requests, stops its owned runtime, and drops the socket-file guards.
-        // This is not an owner-wire operation: process lifecycle remains the
-        // service manager's authority, while every domain mutation remains a
-        // typed socket request.
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut interrupt =
@@ -229,16 +195,19 @@ impl Daemon {
             | AsyncMultiListenerDaemonError::Stop(error) => error,
         }
     }
+}
 
-    /// Refuse an owner-socket mode that grants any "other" access. The owner
-    /// socket carries the privileged Deploy/Pin/Unpin/Retire surface; a
-    /// permissive mode from config would silently make that surface
-    /// world-reachable before the per-connection peer credential check runs.
-    fn validate_owner_socket_mode(mode: u32) -> Result<()> {
-        if mode & 0o007 != 0 {
-            return Err(Error::InsecureOwnerSocketMode(mode));
+impl EnvironmentConstructible for Daemon {
+    fn from_environment() -> Result<Self> {
+        let default_configuration = NexusConfiguration::built_in();
+        let state_database_path = NexusConfiguration::store_path();
+        if let Some(parent) = state_database_path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-        Ok(())
+        let store =
+            Store::open_with_default_configuration(&state_database_path, default_configuration)?;
+        let configuration = store.nexus_configuration_state()?.desired_configuration;
+        Ok(Self::new(configuration, state_database_path))
     }
 }
 
@@ -282,7 +251,16 @@ struct LojixRuntime {
     test_jobs: ActorRef<TestJobs>,
 }
 
-impl LojixRuntime {
+trait RuntimeConstructible {
+    async fn new(
+        configuration: RuntimeConfiguration,
+        state_database_path: std::path::PathBuf,
+    ) -> Result<Self>
+    where
+        Self: Sized;
+}
+
+impl RuntimeConstructible for LojixRuntime {
     async fn new(
         configuration: RuntimeConfiguration,
         state_database_path: std::path::PathBuf,
@@ -334,19 +312,31 @@ pub struct OwnerPeerAuthority {
     group_id: u32,
 }
 
-impl OwnerPeerAuthority {
-    pub const fn new(user_id: u32, group_id: u32) -> Self {
+/// Capability to establish and enforce the privileged peer identity.
+pub trait PeerAuthorizable {
+    fn new(user_id: u32, group_id: u32) -> Self
+    where
+        Self: Sized;
+    fn current_process() -> Self
+    where
+        Self: Sized;
+    fn authorize(&self, context: &ConnectionContext) -> Result<()>;
+    fn authorize_unix_credentials(&self, credentials: &UnixCredentials) -> Result<()>;
+}
+
+impl PeerAuthorizable for OwnerPeerAuthority {
+    fn new(user_id: u32, group_id: u32) -> Self {
         Self { user_id, group_id }
     }
 
-    pub fn current_process() -> Self {
+    fn current_process() -> Self {
         Self::new(
             rustix::process::geteuid().as_raw(),
             rustix::process::getegid().as_raw(),
         )
     }
 
-    pub fn authorize(&self, context: &ConnectionContext) -> Result<()> {
+    fn authorize(&self, context: &ConnectionContext) -> Result<()> {
         match context.peer() {
             PeerIdentity::Unix(credentials) => self.authorize_unix_credentials(credentials),
             PeerIdentity::Tcp(address) => Err(Error::UnauthorizedOwnerTcpPeer {
@@ -415,26 +405,39 @@ struct RequestWorker {
     test_jobs: ActorRef<TestJobs>,
 }
 
-impl RequestWorker {
+trait RequestServable {
+    async fn serve(self, listener: ListenerRole, connection: AcceptedConnection) -> Result<()>;
+}
+
+impl RequestServable for RequestWorker {
     async fn serve(self, listener: ListenerRole, mut connection: AcceptedConnection) -> Result<()> {
         match listener {
             ListenerRole::Ordinary => self.serve_ordinary(&mut connection).await,
             ListenerRole::Owner => self.serve_owner(&mut connection).await,
         }
     }
+}
 
+impl RequestWorker {
     async fn serve_ordinary(&self, connection: &mut AcceptedConnection) -> Result<()> {
         let body = self.read_body(connection).await?;
-        let (exchange, input) = signal_lojix::decode_request(body.bytes())
+        use signal_lojix::{Restorable, Signal};
+        let input = Signal::<signal_lojix::Query>::from(body.bytes().to_vec())
+            .restore()
             .map_err(|fault| Error::Wire(format!("{fault:?}")))?;
         let output = self
             .execute_request(
                 ListenerRole::Ordinary,
-                nexus::SignalInput::OrdinaryInput(crate::adapters::ordinary_ingress(input)?),
+                nexus::SignalInput::OrdinaryInput(input.lower()?),
             )
             .await?;
-        let reply = crate::adapters::ordinary_egress(Self::ordinary_reply(output)?)?;
-        let frame = signal_lojix::encode_response(exchange, reply)?;
+        let reply = Self::ordinary_reply(output)?.raise()?;
+        use signal_lojix::{ByteViewable, Signalizable};
+        let frame = reply
+            .signalize()
+            .map_err(|fault| Error::Wire(format!("{fault:?}")))?
+            .bytes()
+            .to_vec();
         self.codec
             .write_body_async(connection.stream_mut(), &FrameBody::new(frame))
             .await?;
@@ -444,8 +447,8 @@ impl RequestWorker {
     async fn serve_owner(&self, connection: &mut AcceptedConnection) -> Result<()> {
         self.owner_authority.authorize(connection.context())?;
         let body = self.read_body(connection).await?;
-        let (exchange, input) = decode_meta_request(body.bytes())?;
-        let input = crate::adapters::meta_ingress(input)?;
+        let input = decode_meta_request(body.bytes())?;
+        let input = input.lower()?;
         // A `Deploy` decouples from this connection task: the deploy-job actor
         // owns the pipeline, this task only submits and replies the accepted
         // handle. Pin/Unpin/Retire are fast single writes and stay synchronous
@@ -464,8 +467,8 @@ impl RequestWorker {
                 Self::meta_reply(output)?
             }
         };
-        let reply = crate::adapters::meta_egress(reply)?;
-        let frame = encode_meta_response(exchange, reply)?;
+        let reply = reply.raise()?;
+        let frame = encode_meta_response(reply)?;
         self.codec
             .write_body_async(connection.stream_mut(), &FrameBody::new(frame))
             .await?;
@@ -597,8 +600,16 @@ pub struct DeployJobs {
     active_count: usize,
 }
 
-impl DeployJobs {
-    pub async fn start(
+trait DeployProcessable {
+    async fn start(
+        store: Arc<Store>,
+        configuration: Arc<RuntimeConfiguration>,
+        cap: usize,
+    ) -> ActorRef<DeployJobs>;
+}
+
+impl DeployProcessable for DeployJobs {
+    async fn start(
         store: Arc<Store>,
         configuration: Arc<RuntimeConfiguration>,
         cap: usize,
@@ -612,7 +623,9 @@ impl DeployJobs {
         actor.wait_for_startup().await;
         actor
     }
+}
 
+impl DeployJobs {
     fn at_capacity(&self) -> bool {
         self.active_count >= self.cap
     }
@@ -937,6 +950,7 @@ mod tests {
                 ssh_destination: sema::SshDestination::new("root@fixture-daemon.invalid"),
             },
             deployment_input_mode: sema::DeploymentInputMode::Direct,
+            horizon_definition_option: None,
             deployment_output_selector: sema::DeploymentOutputSelector::new(
                 sema::FlakeAttribute::new(
                     "nixosConfigurations.fixture-daemon.config.system.build.toplevel",
@@ -1116,8 +1130,16 @@ pub struct TestJobs {
     active_count: usize,
 }
 
-impl TestJobs {
-    pub async fn start(
+trait TestProcessable {
+    async fn start(
+        store: Arc<Store>,
+        configuration: Arc<RuntimeConfiguration>,
+        cap: usize,
+    ) -> ActorRef<TestJobs>;
+}
+
+impl TestProcessable for TestJobs {
+    async fn start(
         store: Arc<Store>,
         configuration: Arc<RuntimeConfiguration>,
         cap: usize,
@@ -1131,7 +1153,9 @@ impl TestJobs {
         actor.wait_for_startup().await;
         actor
     }
+}
 
+impl TestJobs {
     fn at_capacity(&self) -> bool {
         self.active_count >= self.cap
     }

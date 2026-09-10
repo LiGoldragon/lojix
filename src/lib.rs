@@ -36,16 +36,44 @@ use crate::runtime_model::{
     StoredTestRun, TerminalMarker, TransitionIntentState, TransitionMarker, TransitionOrdinal,
 };
 
+pub type NexusConfiguration = signal_lojix::LojixNexusConfiguration;
+pub type NexusConfigurationState = nexus::ConfigurationState<NexusConfiguration>;
+
 pub mod adapters;
+#[cfg(feature = "tools")]
 pub mod bootstrap;
 pub mod client;
 pub mod daemon;
+#[cfg(feature = "tools")]
 pub mod ingress;
+#[cfg(feature = "tools")]
 pub mod inspection;
+#[cfg(feature = "tools")]
 pub mod reconstruction;
 pub mod runtime_flow;
 pub mod runtime_model;
 pub mod schema_runtime;
+
+#[cfg(feature = "tools")]
+pub struct Ingress;
+
+/// Capability to create the bounded budget for one public Datom ingress.
+#[cfg(feature = "tools")]
+pub trait Budgeted {
+    fn budget() -> datom_codec::Budget;
+}
+
+#[cfg(feature = "tools")]
+impl Budgeted for Ingress {
+    fn budget() -> datom_codec::Budget {
+        datom_codec::Budget {
+            remaining: 16_384,
+            reader: protos::ReaderBudget { remaining: 16_384 },
+            depth: 0,
+            maximum_depth: 16_384,
+        }
+    }
+}
 
 /// The supported Nix platform for a resolved Horizon machine architecture.
 ///
@@ -81,6 +109,7 @@ const DEPLOYMENT_RECORD_TABLE: TableName = TableName::new("deployment-record");
 const IDENTIFIER_ALLOCATION_TABLE: TableName = TableName::new("identifier-allocation");
 const DEPLOYMENT_OUTBOX_TABLE: TableName = TableName::new("deployment-outbox");
 const PENDING_TRANSITION_INTENT_TABLE: TableName = TableName::new("pending-transition-intent");
+const NEXUS_CONFIGURATION_TABLE: TableName = TableName::new("nexus-configuration");
 
 /// The stable per-family schema identities. Each table is its own record
 /// family with a distinct, reopen-stable `FamilyName` + `SchemaHash`. The hash
@@ -97,6 +126,7 @@ const DEPLOYMENT_RECORD_FAMILY: &str = "DeploymentRecordFamily";
 const IDENTIFIER_ALLOCATION_FAMILY: &str = "IdentifierAllocationFamily";
 const DEPLOYMENT_OUTBOX_FAMILY: &str = "DeploymentOutboxFamily";
 const PENDING_TRANSITION_INTENT_FAMILY: &str = "PendingTransitionIntentFamily";
+const NEXUS_CONFIGURATION_FAMILY: &str = "NexusConfigurationFamily";
 const LIVE_SET_SCHEMA_HASH: [u8; 32] = [1; 32];
 const GC_ROOTS_SCHEMA_HASH: [u8; 32] = [2; 32];
 const EVENT_LOG_SCHEMA_HASH: [u8; 32] = [3; 32];
@@ -107,6 +137,8 @@ const DEPLOYMENT_RECORD_SCHEMA_HASH: [u8; 32] = [7; 32];
 const IDENTIFIER_ALLOCATION_SCHEMA_HASH: [u8; 32] = [8; 32];
 const DEPLOYMENT_OUTBOX_SCHEMA_HASH: [u8; 32] = [9; 32];
 const PENDING_TRANSITION_INTENT_SCHEMA_HASH: [u8; 32] = [11; 32];
+const NEXUS_CONFIGURATION_SCHEMA_HASH: [u8; 32] = [12; 32];
+static STARTUP_PROBE_IDENTIFIER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -122,11 +154,14 @@ pub enum Error {
     #[error("signal frame error: {0}")]
     SignalFrame(#[from] triad_runtime::FrameError),
 
-    #[error("bound signal frame error: {0}")]
-    BoundFrame(#[from] signal_frame::FrameError),
-
     #[error("expected exactly one argument")]
     ExpectedSingleArgument,
+
+    #[error("the Lojix Nexus starts with no arguments")]
+    UnexpectedNexusArguments,
+
+    #[error("configuration migration expects exactly a legacy archive and a new target path")]
+    ExpectedMigrationArguments,
 
     #[error("flag-style arguments are not part of component binaries: {0}")]
     FlagArgument(String),
@@ -142,6 +177,12 @@ pub enum Error {
 
     #[error("structural wire conversion failed: {0}")]
     Wire(String),
+
+    #[error("ordinary Configure is closed after meta Configure")]
+    OrdinaryConfigureClosed,
+
+    #[error("invalid Nexus configuration: {0}")]
+    InvalidNexusConfiguration(String),
 
     #[error(
         "owner socket mode {0:#o} grants other-access; refusing to expose the privileged surface"
@@ -239,9 +280,9 @@ pub fn single_inline_datom_argument(
 
 /// Daemon configuration: the two authority-tiered socket paths and their unix
 /// permission modes. Decoded only from the single rkyv startup file the daemon
-/// binary receives. Mirrors the `cloud` `DaemonConfiguration` shape.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DaemonConfiguration {
+/// binary receives. Mirrors the `cloud` `LegacyStartupConfiguration` shape.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq)]
+pub struct LegacyStartupConfiguration {
     pub ordinary_socket_path: String,
     pub ordinary_socket_mode: u32,
     pub owner_socket_path: String,
@@ -278,10 +319,9 @@ pub struct DaemonConfiguration {
 ///
 /// `test_flake`, `test_nix_system`, and `test_output_selector` make the
 /// shorthand's hermetic execution profile fully explicit in startup
-/// configuration. `proposal_source` is the canonical ClusterProposal artifact the
-/// daemon projects to validate `(OnHost h)` and resolve `All`; it is empty when
-/// host-set validation is not configured.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+/// configuration. `horizon_definition` is actualized by the configuration
+/// writer before the binary startup archive crosses into the daemon.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq)]
 pub struct TestDefaults {
     pub cluster: String,
     pub default_vm_host: String,
@@ -289,7 +329,7 @@ pub struct TestDefaults {
     pub test_flake: String,
     pub test_nix_system: String,
     pub test_output_selector: String,
-    pub proposal_source: String,
+    pub horizon_definition: Option<horizon_lib::HorizonDefinition>,
 }
 
 /// The rkyv-stored test mode. A daemon-local mirror of the shared
@@ -302,7 +342,80 @@ pub enum TestMode {
     Live,
 }
 
-impl DaemonConfiguration {
+const DEFAULT_RUNTIME_DIRECTORY: &str = "/run/lojix";
+const DEFAULT_STATE_DIRECTORY: &str = "/var/lib/lojix";
+
+fn nexus_runtime_directory() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .map(|path| path.join("lojix"))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_RUNTIME_DIRECTORY))
+}
+
+/// Capability supplied by Lojix's generated Nexus configuration.
+pub trait LojixNexusConfigurable {
+    fn built_in() -> Self;
+    fn state_directory() -> PathBuf;
+    fn store_path() -> PathBuf;
+    fn validate(&self) -> Result<()>;
+}
+
+impl LojixNexusConfigurable for NexusConfiguration {
+    fn built_in() -> Self {
+        let runtime = nexus_runtime_directory();
+        let state = Self::state_directory();
+        Self {
+            ordinary_socket_path: runtime.join("ordinary.sock").to_string_lossy().into_owned(),
+            ordinary_socket_mode: 0o660,
+            owner_socket_path: runtime.join("meta.sock").to_string_lossy().into_owned(),
+            owner_socket_mode: 0o600,
+            state_directory_path: state.to_string_lossy().into_owned(),
+            daemon_host: String::from("localhost"),
+            test_defaults_choice: signal_lojix::TestDefaultsChoice::NoTestDefaults,
+        }
+    }
+
+    fn state_directory() -> PathBuf {
+        std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .map(|path| path.join("lojix"))
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_STATE_DIRECTORY))
+    }
+
+    fn store_path() -> PathBuf {
+        Self::state_directory().join("lojix.sema")
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("ordinary socket path", self.ordinary_socket_path.as_str()),
+            ("meta socket path", self.owner_socket_path.as_str()),
+            ("state directory path", self.state_directory_path.as_str()),
+            ("daemon host", self.daemon_host.as_str()),
+        ] {
+            if value.is_empty() {
+                return Err(Error::InvalidNexusConfiguration(format!("{name} is empty")));
+            }
+        }
+        if self.ordinary_socket_path == self.owner_socket_path {
+            return Err(Error::InvalidNexusConfiguration(
+                "ordinary and meta socket paths are identical".to_string(),
+            ));
+        }
+        let owner_mode = u32::try_from(self.owner_socket_mode).map_err(|_| {
+            Error::InvalidNexusConfiguration("meta socket mode is outside u32".to_string())
+        })?;
+        let _ordinary_mode = u32::try_from(self.ordinary_socket_mode).map_err(|_| {
+            Error::InvalidNexusConfiguration("ordinary socket mode is outside u32".to_string())
+        })?;
+        if owner_mode & 0o007 != 0 {
+            return Err(Error::InsecureOwnerSocketMode(owner_mode));
+        }
+        Ok(())
+    }
+}
+
+impl LegacyStartupConfiguration {
     pub fn from_rkyv_file(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
         rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes)
@@ -315,6 +428,69 @@ impl DaemonConfiguration {
         std::fs::write(path, bytes)?;
         Ok(())
     }
+}
+
+impl From<&LegacyStartupConfiguration> for NexusConfiguration {
+    fn from(configuration: &LegacyStartupConfiguration) -> Self {
+        Self {
+            ordinary_socket_path: configuration.ordinary_socket_path.clone(),
+            ordinary_socket_mode: i64::from(configuration.ordinary_socket_mode),
+            owner_socket_path: configuration.owner_socket_path.clone(),
+            owner_socket_mode: i64::from(configuration.owner_socket_mode),
+            state_directory_path: configuration.state_directory_path.clone(),
+            daemon_host: configuration.daemon_host.clone(),
+            test_defaults_choice: configuration.test_defaults.as_ref().map_or(
+                signal_lojix::TestDefaultsChoice::NoTestDefaults,
+                |defaults| {
+                    signal_lojix::TestDefaultsChoice::TestDefaults(signal_lojix::TestDefaults {
+                        cluster_name: defaults.cluster.clone(),
+                        node_name: defaults.default_vm_host.clone(),
+                        test_mode: match defaults.default_mode {
+                            TestMode::Hermetic => signal_lojix::TestMode::Hermetic,
+                            TestMode::Live => signal_lojix::TestMode::Live,
+                        },
+                        flake_reference: defaults.test_flake.clone(),
+                        nix_system: defaults.test_nix_system.clone(),
+                        deployment_output_selector: signal_lojix::DeploymentOutputSelector {
+                            flake_attribute: defaults.test_output_selector.clone(),
+                        },
+                        horizon_definition_option: defaults.horizon_definition.clone(),
+                    })
+                },
+            ),
+        }
+    }
+}
+
+/// Capability to add the Nexus configuration record to a copied legacy Sema.
+///
+/// The source is only read as bytes. All sema-engine discovery and mutation
+/// occurs on `target`, so an incompatible source cannot be changed by probing.
+pub trait LegacyConfigurationMigratable {
+    fn migrate_configuration_copy(
+        source: &Path,
+        target: &Path,
+        configuration: &LegacyStartupConfiguration,
+    ) -> Result<Self>
+    where
+        Self: Sized;
+}
+
+/// Capability to persist and transition the standard Nexus configuration.
+pub trait NexusPersistable {
+    fn open_with_default_configuration(
+        path: impl Into<PathBuf>,
+        default_configuration: NexusConfiguration,
+    ) -> Result<Self>
+    where
+        Self: Sized;
+    fn nexus_configuration_state(&self) -> Result<NexusConfigurationState>;
+    fn ordinary_configure(
+        &self,
+        configuration: NexusConfiguration,
+    ) -> Result<NexusConfigurationState>;
+    fn meta_configure(&self, configuration: NexusConfiguration) -> Result<NexusConfigurationState>;
+    fn reverse_meta_configuration(&self) -> Result<NexusConfigurationState>;
 }
 
 /// The explicit bounded-history policy for deployment and container events.
@@ -370,6 +546,7 @@ pub struct Store {
     identifier_allocation: TableReference<IdentifierAllocation>,
     deployment_outbox: TableReference<DeploymentOutboxRecord>,
     pending_transition_intents: TableReference<PendingTransitionIntent>,
+    nexus_configuration: TableReference<NexusConfigurationRecord>,
     path: PathBuf,
     write_gate: Mutex<()>,
     /// The ephemeral subscription-token counter. Subscriptions are connection
@@ -389,6 +566,12 @@ struct LojixDirectory {
     identifier_allocation: TableReference<IdentifierAllocation>,
     deployment_outbox: TableReference<DeploymentOutboxRecord>,
     pending_transition_intents: TableReference<PendingTransitionIntent>,
+    nexus_configuration: TableReference<NexusConfigurationRecord>,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Clone, Debug, PartialEq)]
+struct NexusConfigurationRecord {
+    state: NexusConfigurationState,
 }
 
 impl FamilyDirectory for LojixDirectory {
@@ -404,6 +587,7 @@ impl FamilyDirectory for LojixDirectory {
             "identifier-allocation" => row.apply(self.identifier_allocation),
             "deployment-outbox" => row.apply(self.deployment_outbox),
             "pending-transition-intent" => row.apply(self.pending_transition_intents),
+            "nexus-configuration" => row.apply(self.nexus_configuration),
             table => Err(sema_engine::Error::TableNotRegistered {
                 table: table.to_owned(),
             }),
@@ -510,6 +694,65 @@ impl Store {
     /// The six `register_table` calls are idempotent, so opening doubles as the
     /// resume — there is no separate load path (ur16).
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        Self::open_with_default_configuration(path, NexusConfiguration::built_in())
+    }
+
+    fn open_with_default_configuration(
+        path: impl Into<PathBuf>,
+        default_configuration: NexusConfiguration,
+    ) -> Result<Self> {
+        let path = path.into();
+        if path.exists() {
+            let probe_identifier = STARTUP_PROBE_IDENTIFIER.fetch_add(1, Ordering::Relaxed);
+            let probe = path.with_extension(format!(
+                "lojix-open-probe-{}-{probe_identifier}.sema",
+                std::process::id(),
+            ));
+            let mut source = std::fs::File::open(&path)?;
+            let mut target = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&probe)
+                .map_err(|error| {
+                    Error::StoreMaintenance(format!(
+                        "reserve disposable Lojix Sema startup probe {}: {error}",
+                        probe.display()
+                    ))
+                })?;
+            std::io::copy(&mut source, &mut target).map_err(|error| {
+                Error::StoreMaintenance(format!(
+                    "copy Lojix Sema to disposable startup probe {}: {error}",
+                    probe.display()
+                ))
+            })?;
+            drop(target);
+            let probe_store = match Self::open_with_default_configuration_unchecked(
+                &probe,
+                default_configuration.clone(),
+                false,
+            ) {
+                Ok(store) => store,
+                Err(error) => {
+                    let _ = std::fs::remove_file(&probe);
+                    return Err(error);
+                }
+            };
+            drop(probe_store);
+            std::fs::remove_file(&probe).map_err(|error| {
+                Error::StoreMaintenance(format!(
+                    "remove disposable Lojix Sema startup probe {}: {error}",
+                    probe.display()
+                ))
+            })?;
+        }
+        Self::open_with_default_configuration_unchecked(path, default_configuration, false)
+    }
+
+    fn open_with_default_configuration_unchecked(
+        path: impl Into<PathBuf>,
+        default_configuration: NexusConfiguration,
+        seed_existing_state: bool,
+    ) -> Result<Self> {
         let path = path.into();
         let mut database = SemaDatabase::open(
             EngineOpen::new(path.clone(), LOJIX_SCHEMA_VERSION).with_versioning(
@@ -632,6 +875,17 @@ impl Store {
                 stage: "registering pending-transition-intent table",
                 source: Box::new(source),
             })?;
+        let nexus_configuration = database
+            .register_table(TableDescriptor::new(
+                NEXUS_CONFIGURATION_TABLE,
+                FamilyName::new(NEXUS_CONFIGURATION_FAMILY),
+                SchemaHash::new(NEXUS_CONFIGURATION_SCHEMA_HASH),
+            ))
+            .map_err(|source| Error::StoreStartupCompatibility {
+                path: path.clone(),
+                stage: "registering nexus-configuration table",
+                source: Box::new(source),
+            })?;
         let store = Self {
             database,
             live_set,
@@ -644,10 +898,12 @@ impl Store {
             identifier_allocation,
             deployment_outbox,
             pending_transition_intents,
+            nexus_configuration,
             path,
             write_gate: Mutex::new(()),
             subscription_sequence: AtomicU64::new(0),
         };
+        store.ensure_nexus_configuration(default_configuration, seed_existing_state)?;
         store.ensure_identifier_allocation()?;
         store.resume_compaction()?;
         store.validate_startup_compatibility()?;
@@ -706,6 +962,15 @@ impl Store {
                     "validating pending-transition-intent rows",
                     source,
                 )
+            })?;
+        self.nexus_configuration_state()
+            .and_then(|state| state.desired_configuration.validate())
+            .map_err(|source| match source {
+                Error::Database(error) => self.startup_compatibility_error(
+                    "validating nexus-configuration row",
+                    Error::Database(error),
+                ),
+                other => other,
             })?;
         Ok(())
     }
@@ -813,6 +1078,116 @@ impl Store {
                 "identifier allocation table contains more than one row".to_string(),
             )),
         }
+    }
+
+    fn nexus_configuration_records(&self) -> Result<Vec<NexusConfigurationRecord>> {
+        Ok(self
+            .database
+            .match_records(QueryPlan::all(self.nexus_configuration))?
+            .records()
+            .to_vec())
+    }
+
+    fn ensure_nexus_configuration(
+        &self,
+        default_configuration: NexusConfiguration,
+        seed_existing_state: bool,
+    ) -> Result<()> {
+        use nexus::Configurable as _;
+
+        match self.nexus_configuration_records()?.as_slice() {
+            [] => {
+                let legacy_state_exists = !self.live_generations()?.is_empty()
+                    || !self.gc_root_records()?.is_empty()
+                    || !self.event_log_entries()?.is_empty()
+                    || !self.container_lifecycle_records()?.is_empty()
+                    || !self.deploy_jobs()?.is_empty()
+                    || !self.test_runs()?.is_empty()
+                    || !self.deployment_records_unchecked()?.is_empty()
+                    || !self.identifier_allocations()?.is_empty()
+                    || !self.deployment_outbox_records()?.is_empty()
+                    || !self.pending_transition_intents()?.is_empty();
+                if legacy_state_exists && !seed_existing_state {
+                    return Err(Error::StoreMaintenance(
+                        "existing Lojix Sema has no Nexus configuration; migrate its legacy startup archive into a validated copy before opening it"
+                            .to_string(),
+                    ));
+                }
+                default_configuration.validate()?;
+                self.database.assert(Assertion::new(
+                    self.nexus_configuration,
+                    NexusConfigurationRecord {
+                        state: NexusConfigurationState::from_default(default_configuration),
+                    },
+                ))?;
+                Ok(())
+            }
+            [_] => Ok(()),
+            _ => Err(Error::StoreMaintenance(
+                "nexus configuration table contains more than one row".to_string(),
+            )),
+        }
+    }
+
+    fn nexus_configuration_state(&self) -> Result<NexusConfigurationState> {
+        match self.nexus_configuration_records()?.as_slice() {
+            [record] => Ok(record.state.clone()),
+            [] => Err(Error::StoreMaintenance(
+                "nexus configuration row is missing after store initialization".to_string(),
+            )),
+            _ => Err(Error::StoreMaintenance(
+                "nexus configuration table contains more than one row".to_string(),
+            )),
+        }
+    }
+
+    fn ordinary_configure(
+        &self,
+        configuration: NexusConfiguration,
+    ) -> Result<NexusConfigurationState> {
+        use nexus::Configurable as _;
+        configuration.validate()?;
+        let _write = self.lock_write()?;
+        let mut state = self.nexus_configuration_state()?;
+        state
+            .ordinary_configure_if_unset(configuration)
+            .map_err(|_| Error::OrdinaryConfigureClosed)?;
+        self.database.mutate(Mutation::new(
+            self.nexus_configuration,
+            NexusConfigurationRecord {
+                state: state.clone(),
+            },
+        ))?;
+        Ok(state)
+    }
+
+    fn meta_configure(&self, configuration: NexusConfiguration) -> Result<NexusConfigurationState> {
+        use nexus::Configurable as _;
+        configuration.validate()?;
+        let _write = self.lock_write()?;
+        let mut state = self.nexus_configuration_state()?;
+        state.meta_configure(configuration);
+        self.database.mutate(Mutation::new(
+            self.nexus_configuration,
+            NexusConfigurationRecord {
+                state: state.clone(),
+            },
+        ))?;
+        Ok(state)
+    }
+
+    fn reverse_meta_configuration(&self) -> Result<NexusConfigurationState> {
+        use nexus::Configurable as _;
+        let _write = self.lock_write()?;
+        let mut state = self.nexus_configuration_state()?;
+        state.meta_reverse();
+        self.database.mutate(Mutation::new(
+            self.nexus_configuration,
+            NexusConfigurationRecord {
+                state: state.clone(),
+            },
+        ))?;
+        Ok(state)
     }
 
     /// Initialize the one global high-water record once from the durable v5
@@ -1378,6 +1753,7 @@ impl Store {
             identifier_allocation: self.identifier_allocation,
             deployment_outbox: self.deployment_outbox,
             pending_transition_intents: self.pending_transition_intents,
+            nexus_configuration: self.nexus_configuration,
         })?;
         Ok(())
     }
@@ -2339,6 +2715,65 @@ impl Store {
     }
 }
 
+impl LegacyConfigurationMigratable for Store {
+    fn migrate_configuration_copy(
+        source: &Path,
+        target: &Path,
+        legacy_configuration: &LegacyStartupConfiguration,
+    ) -> Result<Self> {
+        if Path::new(&legacy_configuration.store_path) != source {
+            return Err(Error::StoreMaintenance(
+                "legacy startup configuration does not identify the source Sema".to_string(),
+            ));
+        }
+        if target.exists() {
+            return Err(Error::StoreMaintenance(format!(
+                "migration target already exists: {}",
+                target.display()
+            )));
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(source, target)?;
+        let desired_configuration = NexusConfiguration::from(legacy_configuration);
+        let migration =
+            Self::open_with_default_configuration_unchecked(target, desired_configuration, true);
+        if migration.is_err() {
+            let _ = std::fs::remove_file(target);
+        }
+        migration
+    }
+}
+
+impl NexusPersistable for Store {
+    fn open_with_default_configuration(
+        path: impl Into<PathBuf>,
+        default_configuration: NexusConfiguration,
+    ) -> Result<Self> {
+        Store::open_with_default_configuration(path, default_configuration)
+    }
+
+    fn nexus_configuration_state(&self) -> Result<NexusConfigurationState> {
+        Store::nexus_configuration_state(self)
+    }
+
+    fn ordinary_configure(
+        &self,
+        configuration: NexusConfiguration,
+    ) -> Result<NexusConfigurationState> {
+        Store::ordinary_configure(self, configuration)
+    }
+
+    fn meta_configure(&self, configuration: NexusConfiguration) -> Result<NexusConfigurationState> {
+        Store::meta_configure(self, configuration)
+    }
+
+    fn reverse_meta_configuration(&self) -> Result<NexusConfigurationState> {
+        Store::reverse_meta_configuration(self)
+    }
+}
+
 impl EngineRecord for LiveGeneration {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.generation_identifier.payload().to_string())
@@ -2396,6 +2831,12 @@ impl EngineRecord for IdentifierAllocation {
 impl EngineRecord for StoredTestRun {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.test_run_identifier.payload().to_string())
+    }
+}
+
+impl EngineRecord for NexusConfigurationRecord {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new("desired")
     }
 }
 

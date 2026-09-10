@@ -10,8 +10,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
-use datom_codec::Textualizable;
-use horizon_lib::*;
 use lojix::Store;
 use lojix::runtime_model as ordinary;
 use lojix::runtime_model as meta;
@@ -22,52 +20,7 @@ const FLAKE: &str =
     "github:fixture-owner/fixture-flake?rev=0123456789abcdef0123456789abcdef01234567";
 const OUTPUT: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-home-manager-generation";
 
-fn write_fixture_proposal(path: &Path) {
-    fn text(value: &str) -> protos::Text {
-        protos::Text::try_from(value).expect("fixture text")
-    }
-    let hardware = || Hardware(4.into(), None, None, None, None, None);
-    let node = |name: &str, machine| {
-        NodeDefinition(
-            text(name),
-            NodeVariant::Live(LiveDefinition()),
-            Magnitude::Max,
-            Magnitude::Max,
-            machine,
-            NodeEnvironment(Keyboard::Qwerty, None),
-            NodeNetwork(vec![], None, None, vec![], None),
-            NodeKeys(text("ssh-ed25519 AAAAfixture"), None, None),
-            Some(true),
-            vec![],
-        )
-    };
-    let atlas = node(
-        "atlas",
-        MachineDefinition::Metal(Architecture::X86_64, hardware()),
-    );
-    // A current `VirtualMachine` is the hosted guest replacement for the old
-    // Pod fixture; it remains a VM with an explicit cluster host.
-    let beacon = node(
-        "beacon",
-        MachineDefinition::VirtualMachine(
-            VirtualMachineHost::Cluster(text("atlas"), vec![], Some(text("operator")), None),
-            hardware(),
-            Some(20.into()),
-        ),
-    );
-    let definition = HorizonDefinition(
-        HorizonConfiguration(vec![], DomainConfiguration(text("criome"), vec![])),
-        ClusterDefinition(
-            text("alpha"),
-            vec![atlas, beacon],
-            vec![],
-            vec![],
-            vec![],
-            ClusterTrust(Magnitude::Max, vec![], vec![], vec![]),
-        ),
-    );
-    fs::write(path, definition.textualize()).expect("write HorizonDefinition");
-}
+mod common;
 
 fn write_executable(path: &Path, text: &str) {
     fs::write(path, text).expect("write fake command");
@@ -124,6 +77,7 @@ fn user_environment_request_with_secrets(
         flake_reference: ordinary::FlakeReference::new(FLAKE),
         deployment_transport: transport(nix_store_uri, ssh_destination),
         deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
+        horizon_definition_option: Some(common::read_horizon(source)),
         deployment_output_selector: selector("packages.x86_64-linux.fixture-home"),
         activation_backend: ordinary::ActivationBackend::HomeManagerNixProfileV1,
         user_environment_action: meta::UserEnvironmentAction::ActivateNow,
@@ -178,7 +132,7 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
     let programs = directory.path().join("programs");
     fake_programs(&programs, false, false);
     let source = directory.path().join("horizon-definition.datom");
-    write_fixture_proposal(&source);
+    common::write_hosted_pair(&source);
     let mut engine = runtime(directory.path(), &programs);
 
     assert!(matches!(
@@ -274,7 +228,7 @@ async fn explicit_empty_secrets_directory_is_accepted_without_public_path_leakag
     let programs = directory.path().join("programs");
     fake_programs(&programs, false, false);
     let source = directory.path().join("horizon-definition.datom");
-    write_fixture_proposal(&source);
+    common::write_hosted_pair(&source);
     let secrets = directory.path().join("caller-owned-secrets");
     fs::create_dir_all(&secrets).expect("create explicit empty secrets directory");
     let mut engine = runtime(directory.path(), &programs);
@@ -312,7 +266,7 @@ async fn invalid_explicit_secrets_inputs_fail_before_effects() {
 
     let directory = tempfile::tempdir().expect("tempdir");
     let source = directory.path().join("horizon-definition.datom");
-    write_fixture_proposal(&source);
+    common::write_hosted_pair(&source);
     let existing_file = directory.path().join("not-a-directory");
     fs::write(&existing_file, "fixture").expect("write non-directory");
     let existing_directory = directory.path().join("real-directory");
@@ -360,7 +314,7 @@ async fn second_arbitrary_transport_flow_preserves_both_request_values() {
     let programs = directory.path().join("programs");
     fake_programs(&programs, false, false);
     let source = directory.path().join("horizon-definition.datom");
-    write_fixture_proposal(&source);
+    common::write_hosted_pair(&source);
     let mut engine = runtime(directory.path(), &programs);
     let nix_store_uri = "ssh-ng://fixture-copy-b.invalid:2244?compress=true";
     let ssh_destination = "root@fixture-activate-b.invalid";
@@ -398,7 +352,7 @@ async fn matched_user_remote_activation_runs_directly_without_runuser() {
     let programs = directory.path().join("programs");
     fake_programs(&programs, false, false);
     let source = directory.path().join("horizon-definition.datom");
-    write_fixture_proposal(&source);
+    common::write_hosted_pair(&source);
     let mut engine = runtime(directory.path(), &programs);
     let ssh_destination = "bird@fixture-activate-matched.invalid";
 
@@ -435,7 +389,7 @@ fn mismatched_unprivileged_remote_login_is_rejected_before_effects() {
     let programs = directory.path().join("programs");
     fake_programs(&programs, false, false);
     let source = directory.path().join("horizon-definition.datom");
-    write_fixture_proposal(&source);
+    common::write_hosted_pair(&source);
     let mut engine = runtime(directory.path(), &programs);
 
     let outcome = engine.submit_deploy(user_environment_request(
@@ -466,7 +420,7 @@ async fn copy_and_activation_failures_are_terminal_rejections() {
         let programs = directory.path().join("programs");
         fake_programs(&programs, fail_copy, fail_activation);
         let source = directory.path().join("horizon-definition.datom");
-        write_fixture_proposal(&source);
+        common::write_hosted_pair(&source);
         let mut engine = runtime(directory.path(), &programs);
 
         match submit_and_drive(

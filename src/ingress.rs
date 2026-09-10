@@ -1,1223 +1,225 @@
-#![allow(dead_code)]
-#![allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#![allow(dead_code, non_camel_case_types, non_snake_case)]
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
 pub enum InspectionRequest {
     InspectStore(InspectStore),
 }
-impl datom_codec::Datomic for InspectionRequest {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let v = datom_codec::Sited::variant(site)?;
-        match v.name {
-            "InspectStore" => {
-                std::result::Result::Ok(Self::InspectStore(datom_codec::Carrying::body(v)?))
-            }
-            _ => std::result::Result::Err(datom_codec::Headed::reject(
-                &v,
-                datom_codec::Problem::UnknownVariant(
-                    protos::Word::try_from(v.name).expect("variant name"),
-                ),
-            )),
-        }
-    }
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
+pub struct InspectStore {
+    pub string: String,
 }
-impl protos::Conceivable<datom_codec::Datom> for InspectionRequest {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            match self {
-                Self::InspectStore(p0) => datom_codec::Datom::Variant(
-                    protos::Symbol::try_from("InspectStore").expect("static variant"),
-                    std::boxed::Box::new(
-                        protos::Conceivable::conceive(p0)
-                            .expect("infallible datom ascent")
-                            .1,
-                    ),
-                ),
-            },
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InspectStore(pub protos::Text);
-impl datom_codec::Datomic for InspectStore {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let mut p = datom_codec::Sited::positions(site, 1)?;
-        let p0: protos::Text = datom_codec::Positional::position(&mut p)?;
-        std::result::Result::Ok(Self(p0))
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for InspectStore {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            datom_codec::Datom::Struct(vec![
-                protos::Conceivable::conceive(&self.0)
-                    .expect("infallible datom ascent")
-                    .1,
-            ]),
-        ))
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResetStore {
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
+pub enum ResetStoreRequest {
     ResetStore,
 }
-impl datom_codec::Datomic for ResetStore {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let v = datom_codec::Sited::variant(site)?;
-        match v.name {
-            "ResetStore" => {
-                datom_codec::Headed::nothing(v)?;
-                std::result::Result::Ok(Self::ResetStore)
-            }
-            _ => std::result::Result::Err(datom_codec::Headed::reject(
-                &v,
-                datom_codec::Problem::UnknownVariant(
-                    protos::Word::try_from(v.name).expect("variant name"),
-                ),
-            )),
-        }
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for ResetStore {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            match self {
-                Self::ResetStore => datom_codec::Datom::Word(
-                    datom_codec::DatomWord::try_from(
-                        protos::Word::try_from("ResetStore").expect("static variant"),
-                    )
-                    .expect("stable variant"),
-                ),
-            },
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
 pub enum BootstrapRequest {
     BootstrapRun(BootstrapRun),
 }
-impl datom_codec::Datomic for BootstrapRequest {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let v = datom_codec::Sited::variant(site)?;
-        match v.name {
-            "BootstrapRun" => {
-                std::result::Result::Ok(Self::BootstrapRun(datom_codec::Carrying::body(v)?))
-            }
-            _ => std::result::Result::Err(datom_codec::Headed::reject(
-                &v,
-                datom_codec::Problem::UnknownVariant(
-                    protos::Word::try_from(v.name).expect("variant name"),
-                ),
-            )),
-        }
-    }
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
+pub struct BootstrapRun {
+    pub bootstrap_request_id: BootstrapRequestId,
+    pub bootstrap_mode: BootstrapMode,
 }
-impl protos::Conceivable<datom_codec::Datom> for BootstrapRequest {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            match self {
-                Self::BootstrapRun(p0) => datom_codec::Datom::Variant(
-                    protos::Symbol::try_from("BootstrapRun").expect("static variant"),
-                    std::boxed::Box::new(
-                        protos::Conceivable::conceive(p0)
-                            .expect("infallible datom ascent")
-                            .1,
-                    ),
-                ),
-            },
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BootstrapRun(pub BootstrapRequestId, pub BootstrapMode);
-impl datom_codec::Datomic for BootstrapRun {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let mut p = datom_codec::Sited::positions(site, 2)?;
-        let p0: BootstrapRequestId = datom_codec::Positional::position(&mut p)?;
-        let p1: BootstrapMode = datom_codec::Positional::position(&mut p)?;
-        std::result::Result::Ok(Self(p0, p1))
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for BootstrapRun {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            datom_codec::Datom::Struct(vec![
-                protos::Conceivable::conceive(&self.0)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.1)
-                    .expect("infallible datom ascent")
-                    .1,
-            ]),
-        ))
-    }
-}
-pub type BootstrapRequestId = protos::Text;
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub type BootstrapRequestId = String;
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
 pub enum BootstrapMode {
     BuildOnly(BootstrapBuildOnly),
     BootOnce(BootstrapBootOnce),
 }
-impl datom_codec::Datomic for BootstrapMode {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let v = datom_codec::Sited::variant(site)?;
-        match v.name {
-            "BuildOnly" => {
-                std::result::Result::Ok(Self::BuildOnly(datom_codec::Carrying::body(v)?))
-            }
-            "BootOnce" => std::result::Result::Ok(Self::BootOnce(datom_codec::Carrying::body(v)?)),
-            _ => std::result::Result::Err(datom_codec::Headed::reject(
-                &v,
-                datom_codec::Problem::UnknownVariant(
-                    protos::Word::try_from(v.name).expect("variant name"),
-                ),
-            )),
-        }
-    }
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
+pub struct BootstrapBuildOnly {
+    pub bootstrap_input: BootstrapInput,
+    pub bootstrap_builder: BootstrapBuilder,
+    pub bootstrap_journal_parent: BootstrapJournalParent,
+    pub bootstrap_gc_root_path: BootstrapGcRootPath,
+    pub bootstrap_terminal_evidence_path: BootstrapTerminalEvidencePath,
 }
-impl protos::Conceivable<datom_codec::Datom> for BootstrapMode {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            match self {
-                Self::BuildOnly(p0) => datom_codec::Datom::Variant(
-                    protos::Symbol::try_from("BuildOnly").expect("static variant"),
-                    std::boxed::Box::new(
-                        protos::Conceivable::conceive(p0)
-                            .expect("infallible datom ascent")
-                            .1,
-                    ),
-                ),
-                Self::BootOnce(p0) => datom_codec::Datom::Variant(
-                    protos::Symbol::try_from("BootOnce").expect("static variant"),
-                    std::boxed::Box::new(
-                        protos::Conceivable::conceive(p0)
-                            .expect("infallible datom ascent")
-                            .1,
-                    ),
-                ),
-            },
-        ))
-    }
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
+pub struct BootstrapBootOnce {
+    pub bootstrap_input: BootstrapInput,
+    pub bootstrap_builder: BootstrapBuilder,
+    pub bootstrap_test_plan: BootstrapTestPlan,
+    pub bootstrap_activation_backend: BootstrapActivationBackend,
+    pub bootstrap_journal_parent: BootstrapJournalParent,
+    pub bootstrap_gc_root_path: BootstrapGcRootPath,
+    pub bootstrap_terminal_evidence_path: BootstrapTerminalEvidencePath,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BootstrapBuildOnly(
-    pub BootstrapInput,
-    pub BootstrapBuilder,
-    pub BootstrapJournalParent,
-    pub BootstrapGcRootPath,
-    pub BootstrapTerminalEvidencePath,
-);
-impl datom_codec::Datomic for BootstrapBuildOnly {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let mut p = datom_codec::Sited::positions(site, 5)?;
-        let p0: BootstrapInput = datom_codec::Positional::position(&mut p)?;
-        let p1: BootstrapBuilder = datom_codec::Positional::position(&mut p)?;
-        let p2: BootstrapJournalParent = datom_codec::Positional::position(&mut p)?;
-        let p3: BootstrapGcRootPath = datom_codec::Positional::position(&mut p)?;
-        let p4: BootstrapTerminalEvidencePath = datom_codec::Positional::position(&mut p)?;
-        std::result::Result::Ok(Self(p0, p1, p2, p3, p4))
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for BootstrapBuildOnly {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            datom_codec::Datom::Struct(vec![
-                protos::Conceivable::conceive(&self.0)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.1)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.2)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.3)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.4)
-                    .expect("infallible datom ascent")
-                    .1,
-            ]),
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BootstrapBootOnce(
-    pub BootstrapInput,
-    pub BootstrapBuilder,
-    pub BootstrapTestPlan,
-    pub BootstrapActivationBackend,
-    pub BootstrapJournalParent,
-    pub BootstrapGcRootPath,
-    pub BootstrapTerminalEvidencePath,
-);
-impl datom_codec::Datomic for BootstrapBootOnce {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let mut p = datom_codec::Sited::positions(site, 7)?;
-        let p0: BootstrapInput = datom_codec::Positional::position(&mut p)?;
-        let p1: BootstrapBuilder = datom_codec::Positional::position(&mut p)?;
-        let p2: BootstrapTestPlan = datom_codec::Positional::position(&mut p)?;
-        let p3: BootstrapActivationBackend = datom_codec::Positional::position(&mut p)?;
-        let p4: BootstrapJournalParent = datom_codec::Positional::position(&mut p)?;
-        let p5: BootstrapGcRootPath = datom_codec::Positional::position(&mut p)?;
-        let p6: BootstrapTerminalEvidencePath = datom_codec::Positional::position(&mut p)?;
-        std::result::Result::Ok(Self(p0, p1, p2, p3, p4, p5, p6))
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for BootstrapBootOnce {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            datom_codec::Datom::Struct(vec![
-                protos::Conceivable::conceive(&self.0)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.1)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.2)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.3)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.4)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.5)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.6)
-                    .expect("infallible datom ascent")
-                    .1,
-            ]),
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
 pub enum BootstrapInput {
     Direct(BootstrapDirectInput),
     Horizon(BootstrapHorizonInput),
 }
-impl datom_codec::Datomic for BootstrapInput {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let v = datom_codec::Sited::variant(site)?;
-        match v.name {
-            "Direct" => std::result::Result::Ok(Self::Direct(datom_codec::Carrying::body(v)?)),
-            "Horizon" => std::result::Result::Ok(Self::Horizon(datom_codec::Carrying::body(v)?)),
-            _ => std::result::Result::Err(datom_codec::Headed::reject(
-                &v,
-                datom_codec::Problem::UnknownVariant(
-                    protos::Word::try_from(v.name).expect("variant name"),
-                ),
-            )),
-        }
-    }
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
+pub struct BootstrapDirectInput {
+    pub bootstrap_flake_reference: BootstrapFlakeReference,
+    pub bootstrap_nix_system: BootstrapNixSystem,
+    pub bootstrap_output_selector: BootstrapOutputSelector,
 }
-impl protos::Conceivable<datom_codec::Datom> for BootstrapInput {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            match self {
-                Self::Direct(p0) => datom_codec::Datom::Variant(
-                    protos::Symbol::try_from("Direct").expect("static variant"),
-                    std::boxed::Box::new(
-                        protos::Conceivable::conceive(p0)
-                            .expect("infallible datom ascent")
-                            .1,
-                    ),
-                ),
-                Self::Horizon(p0) => datom_codec::Datom::Variant(
-                    protos::Symbol::try_from("Horizon").expect("static variant"),
-                    std::boxed::Box::new(
-                        protos::Conceivable::conceive(p0)
-                            .expect("infallible datom ascent")
-                            .1,
-                    ),
-                ),
-            },
-        ))
-    }
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
+pub struct BootstrapHorizonInput {
+    pub bootstrap_proposal_source: BootstrapProposalSource,
+    pub bootstrap_cluster_name: BootstrapClusterName,
+    pub bootstrap_node_name: BootstrapNodeName,
+    pub bootstrap_materialization_shape: BootstrapMaterializationShape,
+    pub bootstrap_secrets_input: BootstrapSecretsInput,
+    pub bootstrap_flake_reference: BootstrapFlakeReference,
+    pub bootstrap_nix_system: BootstrapNixSystem,
+    pub bootstrap_output_selector: BootstrapOutputSelector,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BootstrapDirectInput(
-    pub BootstrapFlakeReference,
-    pub BootstrapNixSystem,
-    pub BootstrapOutputSelector,
-);
-impl datom_codec::Datomic for BootstrapDirectInput {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let mut p = datom_codec::Sited::positions(site, 3)?;
-        let p0: BootstrapFlakeReference = datom_codec::Positional::position(&mut p)?;
-        let p1: BootstrapNixSystem = datom_codec::Positional::position(&mut p)?;
-        let p2: BootstrapOutputSelector = datom_codec::Positional::position(&mut p)?;
-        std::result::Result::Ok(Self(p0, p1, p2))
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for BootstrapDirectInput {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            datom_codec::Datom::Struct(vec![
-                protos::Conceivable::conceive(&self.0)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.1)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.2)
-                    .expect("infallible datom ascent")
-                    .1,
-            ]),
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BootstrapHorizonInput(
-    pub BootstrapProposalSource,
-    pub BootstrapClusterName,
-    pub BootstrapNodeName,
-    pub BootstrapMaterializationShape,
-    pub BootstrapSecretsInput,
-    pub BootstrapFlakeReference,
-    pub BootstrapNixSystem,
-    pub BootstrapOutputSelector,
-);
-impl datom_codec::Datomic for BootstrapHorizonInput {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let mut p = datom_codec::Sited::positions(site, 8)?;
-        let p0: BootstrapProposalSource = datom_codec::Positional::position(&mut p)?;
-        let p1: BootstrapClusterName = datom_codec::Positional::position(&mut p)?;
-        let p2: BootstrapNodeName = datom_codec::Positional::position(&mut p)?;
-        let p3: BootstrapMaterializationShape = datom_codec::Positional::position(&mut p)?;
-        let p4: BootstrapSecretsInput = datom_codec::Positional::position(&mut p)?;
-        let p5: BootstrapFlakeReference = datom_codec::Positional::position(&mut p)?;
-        let p6: BootstrapNixSystem = datom_codec::Positional::position(&mut p)?;
-        let p7: BootstrapOutputSelector = datom_codec::Positional::position(&mut p)?;
-        std::result::Result::Ok(Self(p0, p1, p2, p3, p4, p5, p6, p7))
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for BootstrapHorizonInput {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            datom_codec::Datom::Struct(vec![
-                protos::Conceivable::conceive(&self.0)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.1)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.2)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.3)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.4)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.5)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.6)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.7)
-                    .expect("infallible datom ascent")
-                    .1,
-            ]),
-        ))
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
 pub enum BootstrapMaterializationShape {
     CompleteHost,
     BaseHost,
 }
-impl datom_codec::Datomic for BootstrapMaterializationShape {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let v = datom_codec::Sited::variant(site)?;
-        match v.name {
-            "CompleteHost" => {
-                datom_codec::Headed::nothing(v)?;
-                std::result::Result::Ok(Self::CompleteHost)
-            }
-            "BaseHost" => {
-                datom_codec::Headed::nothing(v)?;
-                std::result::Result::Ok(Self::BaseHost)
-            }
-            _ => std::result::Result::Err(datom_codec::Headed::reject(
-                &v,
-                datom_codec::Problem::UnknownVariant(
-                    protos::Word::try_from(v.name).expect("variant name"),
-                ),
-            )),
-        }
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for BootstrapMaterializationShape {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            match self {
-                Self::CompleteHost => datom_codec::Datom::Word(
-                    datom_codec::DatomWord::try_from(
-                        protos::Word::try_from("CompleteHost").expect("static variant"),
-                    )
-                    .expect("stable variant"),
-                ),
-                Self::BaseHost => datom_codec::Datom::Word(
-                    datom_codec::DatomWord::try_from(
-                        protos::Word::try_from("BaseHost").expect("static variant"),
-                    )
-                    .expect("stable variant"),
-                ),
-            },
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
 pub enum BootstrapSecretsInput {
     NoSecrets,
     SecretsDirectory(BootstrapSecretsDirectory),
 }
-impl datom_codec::Datomic for BootstrapSecretsInput {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let v = datom_codec::Sited::variant(site)?;
-        match v.name {
-            "NoSecrets" => {
-                datom_codec::Headed::nothing(v)?;
-                std::result::Result::Ok(Self::NoSecrets)
-            }
-            "SecretsDirectory" => {
-                std::result::Result::Ok(Self::SecretsDirectory(datom_codec::Carrying::body(v)?))
-            }
-            _ => std::result::Result::Err(datom_codec::Headed::reject(
-                &v,
-                datom_codec::Problem::UnknownVariant(
-                    protos::Word::try_from(v.name).expect("variant name"),
-                ),
-            )),
-        }
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for BootstrapSecretsInput {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            match self {
-                Self::NoSecrets => datom_codec::Datom::Word(
-                    datom_codec::DatomWord::try_from(
-                        protos::Word::try_from("NoSecrets").expect("static variant"),
-                    )
-                    .expect("stable variant"),
-                ),
-                Self::SecretsDirectory(p0) => datom_codec::Datom::Variant(
-                    protos::Symbol::try_from("SecretsDirectory").expect("static variant"),
-                    std::boxed::Box::new(
-                        protos::Conceivable::conceive(p0)
-                            .expect("infallible datom ascent")
-                            .1,
-                    ),
-                ),
-            },
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
 pub enum BootstrapBuilder {
     NoBuilder,
     NixBuilder(BootstrapBuilderSpec),
 }
-impl datom_codec::Datomic for BootstrapBuilder {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let v = datom_codec::Sited::variant(site)?;
-        match v.name {
-            "NoBuilder" => {
-                datom_codec::Headed::nothing(v)?;
-                std::result::Result::Ok(Self::NoBuilder)
-            }
-            "NixBuilder" => {
-                std::result::Result::Ok(Self::NixBuilder(datom_codec::Carrying::body(v)?))
-            }
-            _ => std::result::Result::Err(datom_codec::Headed::reject(
-                &v,
-                datom_codec::Problem::UnknownVariant(
-                    protos::Word::try_from(v.name).expect("variant name"),
-                ),
-            )),
-        }
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for BootstrapBuilder {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            match self {
-                Self::NoBuilder => datom_codec::Datom::Word(
-                    datom_codec::DatomWord::try_from(
-                        protos::Word::try_from("NoBuilder").expect("static variant"),
-                    )
-                    .expect("stable variant"),
-                ),
-                Self::NixBuilder(p0) => datom_codec::Datom::Variant(
-                    protos::Symbol::try_from("NixBuilder").expect("static variant"),
-                    std::boxed::Box::new(
-                        protos::Conceivable::conceive(p0)
-                            .expect("infallible datom ascent")
-                            .1,
-                    ),
-                ),
-            },
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
 pub enum BootstrapTestPlan {
     NoTest,
     RunHermeticTest(BootstrapHermeticTest),
 }
-impl datom_codec::Datomic for BootstrapTestPlan {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let v = datom_codec::Sited::variant(site)?;
-        match v.name {
-            "NoTest" => {
-                datom_codec::Headed::nothing(v)?;
-                std::result::Result::Ok(Self::NoTest)
-            }
-            "RunHermeticTest" => {
-                std::result::Result::Ok(Self::RunHermeticTest(datom_codec::Carrying::body(v)?))
-            }
-            _ => std::result::Result::Err(datom_codec::Headed::reject(
-                &v,
-                datom_codec::Problem::UnknownVariant(
-                    protos::Word::try_from(v.name).expect("variant name"),
-                ),
-            )),
-        }
-    }
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
+pub struct BootstrapHermeticTest {
+    pub bootstrap_flake_reference: BootstrapFlakeReference,
+    pub bootstrap_nix_system: BootstrapNixSystem,
+    pub bootstrap_output_selector: BootstrapOutputSelector,
 }
-impl protos::Conceivable<datom_codec::Datom> for BootstrapTestPlan {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            match self {
-                Self::NoTest => datom_codec::Datom::Word(
-                    datom_codec::DatomWord::try_from(
-                        protos::Word::try_from("NoTest").expect("static variant"),
-                    )
-                    .expect("stable variant"),
-                ),
-                Self::RunHermeticTest(p0) => datom_codec::Datom::Variant(
-                    protos::Symbol::try_from("RunHermeticTest").expect("static variant"),
-                    std::boxed::Box::new(
-                        protos::Conceivable::conceive(p0)
-                            .expect("infallible datom ascent")
-                            .1,
-                    ),
-                ),
-            },
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BootstrapHermeticTest(
-    pub BootstrapFlakeReference,
-    pub BootstrapNixSystem,
-    pub BootstrapOutputSelector,
-);
-impl datom_codec::Datomic for BootstrapHermeticTest {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let mut p = datom_codec::Sited::positions(site, 3)?;
-        let p0: BootstrapFlakeReference = datom_codec::Positional::position(&mut p)?;
-        let p1: BootstrapNixSystem = datom_codec::Positional::position(&mut p)?;
-        let p2: BootstrapOutputSelector = datom_codec::Positional::position(&mut p)?;
-        std::result::Result::Ok(Self(p0, p1, p2))
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for BootstrapHermeticTest {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            datom_codec::Datom::Struct(vec![
-                protos::Conceivable::conceive(&self.0)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.1)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.2)
-                    .expect("infallible datom ascent")
-                    .1,
-            ]),
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
 pub enum BootstrapActivationBackend {
     RemoteNixosSystemdBootV1(BootstrapRemoteNixosSystemdBootV1),
     LocalBootstrapV1(BootstrapLocalBootstrapV1),
 }
-impl datom_codec::Datomic for BootstrapActivationBackend {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let v = datom_codec::Sited::variant(site)?;
-        match v.name {
-            "RemoteNixosSystemdBootV1" => std::result::Result::Ok(Self::RemoteNixosSystemdBootV1(
-                datom_codec::Carrying::body(v)?,
-            )),
-            "LocalBootstrapV1" => {
-                std::result::Result::Ok(Self::LocalBootstrapV1(datom_codec::Carrying::body(v)?))
-            }
-            _ => std::result::Result::Err(datom_codec::Headed::reject(
-                &v,
-                datom_codec::Problem::UnknownVariant(
-                    protos::Word::try_from(v.name).expect("variant name"),
-                ),
-            )),
-        }
-    }
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
+pub struct BootstrapRemoteNixosSystemdBootV1 {
+    pub bootstrap_nix_store_uri: BootstrapNixStoreUri,
+    pub bootstrap_ssh_destination: BootstrapSshDestination,
+    pub bootstrap_ssh_policy: BootstrapSshPolicy,
+    pub bootstrap_system_profile_path: BootstrapSystemProfilePath,
+    pub bootstrap_boot_entries_directory: BootstrapBootEntriesDirectory,
 }
-impl protos::Conceivable<datom_codec::Datom> for BootstrapActivationBackend {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            match self {
-                Self::RemoteNixosSystemdBootV1(p0) => datom_codec::Datom::Variant(
-                    protos::Symbol::try_from("RemoteNixosSystemdBootV1").expect("static variant"),
-                    std::boxed::Box::new(
-                        protos::Conceivable::conceive(p0)
-                            .expect("infallible datom ascent")
-                            .1,
-                    ),
-                ),
-                Self::LocalBootstrapV1(p0) => datom_codec::Datom::Variant(
-                    protos::Symbol::try_from("LocalBootstrapV1").expect("static variant"),
-                    std::boxed::Box::new(
-                        protos::Conceivable::conceive(p0)
-                            .expect("infallible datom ascent")
-                            .1,
-                    ),
-                ),
-            },
-        ))
-    }
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
+pub struct BootstrapSshPolicy {
+    pub bootstrap_ssh_identity_file: BootstrapSshIdentityFile,
+    pub bootstrap_ssh_known_hosts_file: BootstrapSshKnownHostsFile,
+    pub bootstrap_strict_host_key_mode: BootstrapStrictHostKeyMode,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BootstrapRemoteNixosSystemdBootV1(
-    pub BootstrapNixStoreUri,
-    pub BootstrapSshDestination,
-    pub BootstrapSshPolicy,
-    pub BootstrapSystemProfilePath,
-    pub BootstrapBootEntriesDirectory,
-);
-impl datom_codec::Datomic for BootstrapRemoteNixosSystemdBootV1 {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let mut p = datom_codec::Sited::positions(site, 5)?;
-        let p0: BootstrapNixStoreUri = datom_codec::Positional::position(&mut p)?;
-        let p1: BootstrapSshDestination = datom_codec::Positional::position(&mut p)?;
-        let p2: BootstrapSshPolicy = datom_codec::Positional::position(&mut p)?;
-        let p3: BootstrapSystemProfilePath = datom_codec::Positional::position(&mut p)?;
-        let p4: BootstrapBootEntriesDirectory = datom_codec::Positional::position(&mut p)?;
-        std::result::Result::Ok(Self(p0, p1, p2, p3, p4))
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for BootstrapRemoteNixosSystemdBootV1 {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            datom_codec::Datom::Struct(vec![
-                protos::Conceivable::conceive(&self.0)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.1)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.2)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.3)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.4)
-                    .expect("infallible datom ascent")
-                    .1,
-            ]),
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BootstrapSshPolicy(
-    pub BootstrapSshIdentityFile,
-    pub BootstrapSshKnownHostsFile,
-    pub BootstrapStrictHostKeyMode,
-);
-impl datom_codec::Datomic for BootstrapSshPolicy {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let mut p = datom_codec::Sited::positions(site, 3)?;
-        let p0: BootstrapSshIdentityFile = datom_codec::Positional::position(&mut p)?;
-        let p1: BootstrapSshKnownHostsFile = datom_codec::Positional::position(&mut p)?;
-        let p2: BootstrapStrictHostKeyMode = datom_codec::Positional::position(&mut p)?;
-        std::result::Result::Ok(Self(p0, p1, p2))
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for BootstrapSshPolicy {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            datom_codec::Datom::Struct(vec![
-                protos::Conceivable::conceive(&self.0)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.1)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.2)
-                    .expect("infallible datom ascent")
-                    .1,
-            ]),
-        ))
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
 pub enum BootstrapStrictHostKeyMode {
     RequireKnownHost,
 }
-impl datom_codec::Datomic for BootstrapStrictHostKeyMode {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let v = datom_codec::Sited::variant(site)?;
-        match v.name {
-            "RequireKnownHost" => {
-                datom_codec::Headed::nothing(v)?;
-                std::result::Result::Ok(Self::RequireKnownHost)
-            }
-            _ => std::result::Result::Err(datom_codec::Headed::reject(
-                &v,
-                datom_codec::Problem::UnknownVariant(
-                    protos::Word::try_from(v.name).expect("variant name"),
-                ),
-            )),
-        }
-    }
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
+pub struct BootstrapLocalBootstrapV1 {
+    pub bootstrap_system_profile_path: BootstrapSystemProfilePath,
+    pub bootstrap_boot_entries_directory: BootstrapBootEntriesDirectory,
 }
-impl protos::Conceivable<datom_codec::Datom> for BootstrapStrictHostKeyMode {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            match self {
-                Self::RequireKnownHost => datom_codec::Datom::Word(
-                    datom_codec::DatomWord::try_from(
-                        protos::Word::try_from("RequireKnownHost").expect("static variant"),
-                    )
-                    .expect("stable variant"),
-                ),
-            },
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BootstrapLocalBootstrapV1(
-    pub BootstrapSystemProfilePath,
-    pub BootstrapBootEntriesDirectory,
-);
-impl datom_codec::Datomic for BootstrapLocalBootstrapV1 {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let mut p = datom_codec::Sited::positions(site, 2)?;
-        let p0: BootstrapSystemProfilePath = datom_codec::Positional::position(&mut p)?;
-        let p1: BootstrapBootEntriesDirectory = datom_codec::Positional::position(&mut p)?;
-        std::result::Result::Ok(Self(p0, p1))
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for BootstrapLocalBootstrapV1 {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            datom_codec::Datom::Struct(vec![
-                protos::Conceivable::conceive(&self.0)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.1)
-                    .expect("infallible datom ascent")
-                    .1,
-            ]),
-        ))
-    }
-}
-pub type BootstrapFlakeReference = protos::Text;
-pub type BootstrapNixSystem = protos::Text;
-pub type BootstrapOutputSelector = protos::Text;
-pub type BootstrapProposalSource = protos::Text;
-pub type BootstrapClusterName = protos::Text;
-pub type BootstrapNodeName = protos::Text;
-pub type BootstrapSecretsDirectory = protos::Text;
-pub type BootstrapBuilderSpec = protos::Text;
-pub type BootstrapJournalParent = protos::Text;
-pub type BootstrapGcRootPath = protos::Text;
-pub type BootstrapTerminalEvidencePath = protos::Text;
-pub type BootstrapNixStoreUri = protos::Text;
-pub type BootstrapSshDestination = protos::Text;
-pub type BootstrapSshIdentityFile = protos::Text;
-pub type BootstrapSshKnownHostsFile = protos::Text;
-pub type BootstrapSystemProfilePath = protos::Text;
-pub type BootstrapBootEntriesDirectory = protos::Text;
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub type BootstrapFlakeReference = String;
+#[rustfmt::skip]
+pub type BootstrapNixSystem = String;
+#[rustfmt::skip]
+pub type BootstrapOutputSelector = String;
+#[rustfmt::skip]
+pub type BootstrapProposalSource = String;
+#[rustfmt::skip]
+pub type BootstrapClusterName = String;
+#[rustfmt::skip]
+pub type BootstrapNodeName = String;
+#[rustfmt::skip]
+pub type BootstrapSecretsDirectory = String;
+#[rustfmt::skip]
+pub type BootstrapBuilderSpec = String;
+#[rustfmt::skip]
+pub type BootstrapJournalParent = String;
+#[rustfmt::skip]
+pub type BootstrapGcRootPath = String;
+#[rustfmt::skip]
+pub type BootstrapTerminalEvidencePath = String;
+#[rustfmt::skip]
+pub type BootstrapNixStoreUri = String;
+#[rustfmt::skip]
+pub type BootstrapSshDestination = String;
+#[rustfmt::skip]
+pub type BootstrapSshIdentityFile = String;
+#[rustfmt::skip]
+pub type BootstrapSshKnownHostsFile = String;
+#[rustfmt::skip]
+pub type BootstrapSystemProfilePath = String;
+#[rustfmt::skip]
+pub type BootstrapBootEntriesDirectory = String;
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
 pub enum ConfigurationWriterInput {
     ConfigurationWriteRequest(ConfigurationWriteRequest),
 }
-impl datom_codec::Datomic for ConfigurationWriterInput {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let v = datom_codec::Sited::variant(site)?;
-        match v.name {
-            "ConfigurationWriteRequest" => std::result::Result::Ok(
-                Self::ConfigurationWriteRequest(datom_codec::Carrying::body(v)?),
-            ),
-            _ => std::result::Result::Err(datom_codec::Headed::reject(
-                &v,
-                datom_codec::Problem::UnknownVariant(
-                    protos::Word::try_from(v.name).expect("variant name"),
-                ),
-            )),
-        }
-    }
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
+pub struct ConfigurationWriteRequest {
+    pub first_writer_path: WriterPath,
+    pub first_writer_mode: WriterMode,
+    pub second_writer_path: WriterPath,
+    pub second_writer_mode: WriterMode,
+    pub third_writer_path: WriterPath,
+    pub fourth_writer_path: WriterPath,
+    pub writer_cluster: WriterCluster,
+    pub writer_test_defaults_choice: WriterTestDefaultsChoice,
+    pub fifth_writer_path: WriterPath,
 }
-impl protos::Conceivable<datom_codec::Datom> for ConfigurationWriterInput {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            match self {
-                Self::ConfigurationWriteRequest(p0) => datom_codec::Datom::Variant(
-                    protos::Symbol::try_from("ConfigurationWriteRequest").expect("static variant"),
-                    std::boxed::Box::new(
-                        protos::Conceivable::conceive(p0)
-                            .expect("infallible datom ascent")
-                            .1,
-                    ),
-                ),
-            },
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConfigurationWriteRequest(
-    pub WriterPath,
-    pub WriterMode,
-    pub WriterPath,
-    pub WriterMode,
-    pub WriterPath,
-    pub WriterPath,
-    pub WriterCluster,
-    pub WriterTestDefaultsChoice,
-    pub WriterPath,
-);
-impl datom_codec::Datomic for ConfigurationWriteRequest {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let mut p = datom_codec::Sited::positions(site, 9)?;
-        let p0: WriterPath = datom_codec::Positional::position(&mut p)?;
-        let p1: WriterMode = datom_codec::Positional::position(&mut p)?;
-        let p2: WriterPath = datom_codec::Positional::position(&mut p)?;
-        let p3: WriterMode = datom_codec::Positional::position(&mut p)?;
-        let p4: WriterPath = datom_codec::Positional::position(&mut p)?;
-        let p5: WriterPath = datom_codec::Positional::position(&mut p)?;
-        let p6: WriterCluster = datom_codec::Positional::position(&mut p)?;
-        let p7: WriterTestDefaultsChoice = datom_codec::Positional::position(&mut p)?;
-        let p8: WriterPath = datom_codec::Positional::position(&mut p)?;
-        std::result::Result::Ok(Self(p0, p1, p2, p3, p4, p5, p6, p7, p8))
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for ConfigurationWriteRequest {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            datom_codec::Datom::Struct(vec![
-                protos::Conceivable::conceive(&self.0)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.1)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.2)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.3)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.4)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.5)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.6)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.7)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.8)
-                    .expect("infallible datom ascent")
-                    .1,
-            ]),
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
 pub enum WriterTestDefaultsChoice {
     NoTestDefaults,
     TestDefaults(WriterTestDefaults),
 }
-impl datom_codec::Datomic for WriterTestDefaultsChoice {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let v = datom_codec::Sited::variant(site)?;
-        match v.name {
-            "NoTestDefaults" => {
-                datom_codec::Headed::nothing(v)?;
-                std::result::Result::Ok(Self::NoTestDefaults)
-            }
-            "TestDefaults" => {
-                std::result::Result::Ok(Self::TestDefaults(datom_codec::Carrying::body(v)?))
-            }
-            _ => std::result::Result::Err(datom_codec::Headed::reject(
-                &v,
-                datom_codec::Problem::UnknownVariant(
-                    protos::Word::try_from(v.name).expect("variant name"),
-                ),
-            )),
-        }
-    }
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
+pub struct WriterTestDefaults {
+    pub first_writer_cluster: WriterCluster,
+    pub second_writer_cluster: WriterCluster,
+    pub writer_test_mode: WriterTestMode,
+    pub third_writer_cluster: WriterCluster,
+    pub fourth_writer_cluster: WriterCluster,
+    pub fifth_writer_cluster: WriterCluster,
+    pub writer_path: WriterPath,
 }
-impl protos::Conceivable<datom_codec::Datom> for WriterTestDefaultsChoice {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            match self {
-                Self::NoTestDefaults => datom_codec::Datom::Word(
-                    datom_codec::DatomWord::try_from(
-                        protos::Word::try_from("NoTestDefaults").expect("static variant"),
-                    )
-                    .expect("stable variant"),
-                ),
-                Self::TestDefaults(p0) => datom_codec::Datom::Variant(
-                    protos::Symbol::try_from("TestDefaults").expect("static variant"),
-                    std::boxed::Box::new(
-                        protos::Conceivable::conceive(p0)
-                            .expect("infallible datom ascent")
-                            .1,
-                    ),
-                ),
-            },
-        ))
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WriterTestDefaults(
-    pub WriterCluster,
-    pub WriterCluster,
-    pub WriterTestMode,
-    pub WriterCluster,
-    pub WriterCluster,
-    pub WriterCluster,
-    pub WriterPath,
-);
-impl datom_codec::Datomic for WriterTestDefaults {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let mut p = datom_codec::Sited::positions(site, 7)?;
-        let p0: WriterCluster = datom_codec::Positional::position(&mut p)?;
-        let p1: WriterCluster = datom_codec::Positional::position(&mut p)?;
-        let p2: WriterTestMode = datom_codec::Positional::position(&mut p)?;
-        let p3: WriterCluster = datom_codec::Positional::position(&mut p)?;
-        let p4: WriterCluster = datom_codec::Positional::position(&mut p)?;
-        let p5: WriterCluster = datom_codec::Positional::position(&mut p)?;
-        let p6: WriterPath = datom_codec::Positional::position(&mut p)?;
-        std::result::Result::Ok(Self(p0, p1, p2, p3, p4, p5, p6))
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for WriterTestDefaults {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            datom_codec::Datom::Struct(vec![
-                protos::Conceivable::conceive(&self.0)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.1)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.2)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.3)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.4)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.5)
-                    .expect("infallible datom ascent")
-                    .1,
-                protos::Conceivable::conceive(&self.6)
-                    .expect("infallible datom ascent")
-                    .1,
-            ]),
-        ))
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+#[derive(datom_codec::Datomizable, datom_codec::Compositional, Clone, Debug, PartialEq)]
 pub enum WriterTestMode {
     Hermetic,
     Live,
 }
-impl datom_codec::Datomic for WriterTestMode {
-    fn incorporate(site: datom_codec::Site<'_>) -> std::result::Result<Self, datom_codec::Fault> {
-        let v = datom_codec::Sited::variant(site)?;
-        match v.name {
-            "Hermetic" => {
-                datom_codec::Headed::nothing(v)?;
-                std::result::Result::Ok(Self::Hermetic)
-            }
-            "Live" => {
-                datom_codec::Headed::nothing(v)?;
-                std::result::Result::Ok(Self::Live)
-            }
-            _ => std::result::Result::Err(datom_codec::Headed::reject(
-                &v,
-                datom_codec::Problem::UnknownVariant(
-                    protos::Word::try_from(v.name).expect("variant name"),
-                ),
-            )),
-        }
-    }
-}
-impl protos::Conceivable<datom_codec::Datom> for WriterTestMode {
-    type Fault = std::convert::Infallible;
-    fn conceive(&self) -> std::result::Result<protos::Situated<datom_codec::Datom>, Self::Fault> {
-        std::result::Result::Ok(protos::Situated(
-            protos::Situation {
-                extent: protos::Extent(0, 0),
-                children: vec![],
-            },
-            match self {
-                Self::Hermetic => datom_codec::Datom::Word(
-                    datom_codec::DatomWord::try_from(
-                        protos::Word::try_from("Hermetic").expect("static variant"),
-                    )
-                    .expect("stable variant"),
-                ),
-                Self::Live => datom_codec::Datom::Word(
-                    datom_codec::DatomWord::try_from(
-                        protos::Word::try_from("Live").expect("static variant"),
-                    )
-                    .expect("stable variant"),
-                ),
-            },
-        ))
-    }
-}
-pub type WriterPath = protos::Text;
-pub type WriterMode = protos::Integer;
-pub type WriterCluster = protos::Text;
+#[rustfmt::skip]
+pub type WriterPath = String;
+#[rustfmt::skip]
+pub type WriterMode = i64;
+#[rustfmt::skip]
+pub type WriterCluster = String;

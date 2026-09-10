@@ -7,7 +7,7 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use lojix::Error;
-use lojix::daemon::OwnerPeerAuthority;
+use lojix::daemon::{OwnerPeerAuthority, PeerAuthorizable as _};
 use triad_runtime::{ConnectionContext, UnixCredentials};
 
 #[test]

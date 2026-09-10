@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 
 use lojix::reconstruction::StoreResetCommand;
-use lojix::{DaemonConfiguration, Store};
+use lojix::{LegacyStartupConfiguration, Store};
 use redb::{Database, TableDefinition};
 
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");
@@ -13,7 +13,7 @@ fn startup_archive(
     store_path: &std::path::Path,
 ) -> std::path::PathBuf {
     let archive = directory.join("startup.rkyv");
-    DaemonConfiguration {
+    LegacyStartupConfiguration {
         ordinary_socket_path: directory.join("ordinary.sock").display().to_string(),
         ordinary_socket_mode: 0o660,
         owner_socket_path: directory.join("owner.sock").display().to_string(),
@@ -76,7 +76,11 @@ fn reset_requires_one_inline_pathless_request() {
 fn v5_refuses_the_v4_deploy_submission_layout_until_explicit_reset() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("configured-lojix-store.db");
-    drop(Store::open(&path).expect("create a recognised Lojix store"));
+    std::fs::write(
+        &path,
+        include_bytes!("fixtures/lojix-v5-pre-nexus-cf231859.sema"),
+    )
+    .expect("materialize the exact pre-Nexus v5 layout");
     let database = Database::open(&path).expect("open disposable legacy-shaped store");
     let write = database.begin_write().expect("begin write");
     {
@@ -88,7 +92,13 @@ fn v5_refuses_the_v4_deploy_submission_layout_until_explicit_reset() {
     write.commit().expect("commit old schema marker");
     drop(database);
 
+    let before = std::fs::read(&path).expect("read schema 4 source");
     assert!(Store::open(&path).is_err(), "v5 must not decode schema 4");
+    assert_eq!(
+        std::fs::read(&path).expect("read source after rejected open"),
+        before,
+        "startup probing must not mutate an incompatible store"
+    );
     let archive = startup_archive(directory.path(), &path);
     reset_command(&archive)
         .run()

@@ -58,12 +58,12 @@ macro_rules! flow_text {
     };
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SignalInput {
     OrdinaryInput(OrdinaryIngress),
     MetaInput(MetaIngress),
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SignalOutput {
     OrdinaryOutput(OrdinaryEgress),
     MetaOutput(MetaEgress),
@@ -101,7 +101,6 @@ pub struct ExtraSubstituter {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlakeAuthRequest {
-    pub proposal_source: ProposalSource,
     pub flake_reference: FlakeReference,
     pub source_revision_policy: SourceRevisionPolicy,
 }
@@ -113,11 +112,11 @@ pub enum MaterializationShape {
     BaseHost,
     UserEnvironment(UserEnvironmentMaterialization),
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct HorizonMaterializationCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub proposal_source: ProposalSource,
+    pub horizon_definition: horizon_lib::HorizonDefinition,
     pub secrets_input: SecretsInput,
     pub materialization_shape: MaterializationShape,
 }
@@ -233,7 +232,7 @@ pub struct TestVmTornDown {
     pub node: NodeName,
     pub host: NodeName,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum EffectCommand {
     ResolveFlakeAuth(FlakeAuthRequest),
     MaterializeHorizon(HorizonMaterializationCommand),
@@ -310,14 +309,14 @@ pub enum EffectResult {
     TestVmStopped(TestVmTornDown),
     EffectFailed(EffectFailure),
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum NexusWork {
     SignalArrived(SignalInput),
     SemaReadCompleted(SemaReadOutput),
     SemaWriteCompleted(SemaWriteOutput),
     EffectCompleted(EffectResult),
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum NexusAction {
     CommandSemaRead(SemaReadInput),
     CommandSemaWrite(SemaWriteInput),
@@ -325,11 +324,11 @@ pub enum NexusAction {
     ReplyToSignal(SignalOutput),
     Continue(NexusWork),
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Input {
     Work(NexusWork),
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Output {
     Action(NexusAction),
 }

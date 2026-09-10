@@ -4,17 +4,18 @@ Daemon-based deploy stack for CriomOS hosts and user environments. This
 crate ships the long-lived orchestrator plus thin CLI clients for the two
 authority surfaces.
 
-- **`lojix-daemon`** — owns durable deploy state, the live generation
+- **`lojix-nexus`** — owns durable deploy state, the live generation
   set, GC roots, deployment event log, test-run state, and activation
   pipeline. It binds ordinary and owner/meta Unix sockets.
 - **`lojix`** — ordinary socket client for typed queries, watches,
   unwatch requests, and host-key-material checks.
-- **`meta-lojix`** — owner/meta socket client for typed deploy, pin,
+- **`lojix-meta`** — owner/meta socket client for typed deploy, pin,
   unpin, retire, and test requests. A `DeployAccepted` reply is an
   admission handle, not proof that build/copy/activation finished. Use
   ordinary event-log or generation queries for status.
 
-Storage lives in `sema-engine`; wire framing uses `signal-frame`. The
+Storage lives in `sema-engine`; transport length-prefixes portable rkyv
+`Signal<Query>` and `Signal<Response>` bytes directly. The
 ordinary contract repo is `signal-lojix`; the owner/meta contract repo is
 `meta-signal-lojix`.
 
@@ -40,7 +41,7 @@ Lojix v5 deliberately refuses older Lojix schemas. There is no row migration
 or legacy resume path. An existing v4 store must never be pointed at a v5
 daemon for resume: old deploy jobs and history remain inspectable at their
 original path, but are not mapped to `NoSecrets` and are not resumed. For a
-non-destructive cutover, stop `lojix-daemon`, retain the v4 primary unchanged,
+non-destructive cutover, stop `lojix-nexus`, retain the v4 primary unchanged,
 and generate the next daemon configuration with a new absolute store path
 (such as a distinct `.v5` file). Starting the daemon with that configuration
 creates an empty v5 store; keep the v4 path available to `lojix-inspect-store`
@@ -48,7 +49,7 @@ from Lojix 0.20.3 (`46585a2c8303bffe885b1722bfebd97d5353ca17`) for offline
 inspection with its legacy inline request
 `'(InspectStore <absolute-v4-store-path>)'`. The current v5 inspector uses a
 different decoded record layout and is not the compatible v4 job/history
-reader. After stopping `lojix-daemon`, CriomOS may instead
+reader. After stopping `lojix-nexus`, CriomOS may instead
 manually start its dedicated reset unit:
 
 ```sh
@@ -68,19 +69,20 @@ Only then are the pre-v4 protocol sidecars
 `.schema-v3.pending.owner`) mechanically derived and removed. It never
 selects, follows, or modifies a Spirit database.
 
-## Daemon startup configuration
+## Nexus configuration
 
-`lojix-write-configuration` is the only typed Datom-to-startup boundary. It accepts
-exactly one inline `ConfigurationWriterInput.ConfigurationWriteRequest` object—never a
-file, raw path, or flag—containing, in
-order, ordinary socket and mode, owner socket and mode, state directory, exact
-store path, daemon host, `NoTestDefaults` or `TestDefaults`,
-and output path; it writes the rkyv startup archive. Production uses
-`NoTestDefaults`.
-`lojix-daemon` accepts only that generated signal/rkyv file, never an inline
-Datom startup argument. Service activation invokes the writer
-and passes its output path to the daemon; reset is a separate, manually
-started service that must not run while the daemon is active.
+`lojix-nexus` takes zero arguments. It discovers `lojix/lojix.sema` below
+`XDG_STATE_HOME` when set, otherwise `/var/lib/lojix/lojix.sema`, and seeds a
+fresh Sema with its executable default. Ordinary `Configure` remains available
+until a successful meta `Configure`; only `lojix-meta` can reverse that marker.
+The desired configuration persists beside domain state and applies on the next
+restart, while the Sema path itself remains stable and is never configurable.
+
+`lojix-write-configuration` and the exact legacy startup archive remain only
+for an offline one-shot cutover. `lojix-migrate-configuration <archive>
+<new-store>` copies the archive-selected pre-Nexus v5 Sema, adds the desired
+configuration record to the copy, and validates it. It never opens or mutates
+the source Sema and is not a daemon compatibility path.
 
 `lojix-inspect-store` is read-only and likewise accepts exactly one inline
 `InspectionRequest.InspectStore` Datom object, never a raw path, file, flag, or extra
@@ -158,7 +160,7 @@ until every deletion can be made inode-handle-bound.
 
 - `signal-lojix` — ordinary peer-callable wire contract.
 - `meta-signal-lojix` — owner/meta policy wire contract.
-- `signal-frame` — wire kernel that both contracts build on.
+- `nexus` — universal persisted configuration lifecycle ontology.
 - `sema-engine` — typed database engine library used for durable state.
 - `horizon-rs` — cluster-proposal projection (read-only per request).
 - a deployment-specific cluster proposal source, supplied by each request.

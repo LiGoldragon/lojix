@@ -1,5 +1,25 @@
 # Upgrades
 
+## 1.0.0 — zero-argument Nexus and separate clients
+
+Lojix now ships `lojix-nexus`, `lojix`, and `lojix-meta` from separate Nexus,
+ordinary-client, and meta-client packages. The Nexus discovers its stable Sema,
+persists desired configuration plus the meta-Configure marker, and has no Datom
+dependency in its package dependency graph; Datom-enabled maintenance programs
+live in the separate `lojix-offline-tools` package. Its old startup archive is accepted
+only by `lojix-migrate-configuration`, which migrates an exact pre-Nexus v5
+store on a byte copy and leaves the source unchanged.
+
+The older upgrade notes below describe their named historical releases. Their
+startup-archive instructions do not apply to 1.0.0.
+
+## 0.22.0 — final Protos and Datom composition chain
+
+Lojix 0.22.0 regenerates its private ingress schema as an Ethos Library over
+the final `String` and `Integer` data model. Every inline maintenance and
+bootstrap request now traverses the bounded Protos → Datom → corporate-value
+chain, including canonical bare dotted paths and colon URLs.
+
 ## 0.21.0 — generated Datom and materialized Horizon definition
 
 Lojix 0.21.0 replaces the retired text/DOTOS ingress and legacy schema roots
@@ -24,7 +44,7 @@ decoded or resumed. It does not migrate historical deploy jobs, event history,
 or secret authority. In particular, it never substitutes `NoSecrets` for a
 v4 job and never resumes that job under changed meaning.
 
-For a non-destructive cutover, stop `lojix-daemon`; retain its v4 primary store
+For a non-destructive cutover, stop `lojix-nexus`; retain its v4 primary store
 at its existing configured absolute path; then generate the next daemon startup
 archive with a distinct, new absolute `store_path` (for example, a `.v5`
 sibling). The typed production writer form is:

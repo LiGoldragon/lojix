@@ -2,46 +2,12 @@
 //! of the generated Datom boundary so they can prove durable state without a
 //! shell effect.
 
-use std::fs;
 use std::path::Path;
 
-use datom_codec::Textualizable;
-use horizon_lib::*;
 use lojix::runtime_model as sema;
 use lojix::schema_runtime::{DeploySubmissionOutcome, SchemaRuntime};
 
-fn write_proposal(path: &Path) {
-    fn text(value: &str) -> protos::Text {
-        protos::Text::try_from(value).expect("fixture text")
-    }
-    let node = NodeDefinition(
-        text("node-1"),
-        NodeVariant::Live(LiveDefinition()),
-        Magnitude::Max,
-        Magnitude::Max,
-        MachineDefinition::Metal(
-            Architecture::X86_64,
-            Hardware(4.into(), None, None, None, None, None),
-        ),
-        NodeEnvironment(Keyboard::Qwerty, None),
-        NodeNetwork(vec![], None, None, vec![], None),
-        NodeKeys(text("ssh-ed25519 AAAAfixture"), None, None),
-        Some(true),
-        vec![],
-    );
-    let definition = HorizonDefinition(
-        HorizonConfiguration(vec![], DomainConfiguration(text("criome"), vec![])),
-        ClusterDefinition(
-            text("alpha"),
-            vec![node],
-            vec![],
-            vec![],
-            vec![],
-            ClusterTrust(Magnitude::Max, vec![], vec![], vec![]),
-        ),
-    );
-    fs::write(path, definition.textualize()).expect("write HorizonDefinition");
-}
+mod common;
 
 fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
     sema::DeploySubmission::Host(sema::HostDeployment {
@@ -56,6 +22,7 @@ fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
             ssh_destination: sema::SshDestination::new("fixture-login@fixture-activate.invalid"),
         },
         deployment_input_mode: sema::DeploymentInputMode::Horizon,
+        horizon_definition_option: Some(common::read_horizon(proposal_source)),
         deployment_output_selector: sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new(
             "checks.fixture-a",
         )),
@@ -71,7 +38,7 @@ fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
 fn accepted_submission_creates_a_correlated_durable_record() {
     let directory = tempfile::tempdir().expect("temporary proposal directory");
     let proposal_source = directory.path().join("horizon-definition.datom");
-    write_proposal(&proposal_source);
+    common::write_single_node(&proposal_source);
     let mut engine = SchemaRuntime::new();
     let accepted = match engine.submit_deploy(host_submission(&proposal_source)) {
         DeploySubmissionOutcome::Accepted(handle) => handle,
@@ -96,7 +63,7 @@ fn accepted_submission_creates_a_correlated_durable_record() {
 fn capacity_rejection_is_a_correlated_terminal_record() {
     let directory = tempfile::tempdir().expect("temporary proposal directory");
     let proposal_source = directory.path().join("horizon-definition.datom");
-    write_proposal(&proposal_source);
+    common::write_single_node(&proposal_source);
     let engine = SchemaRuntime::new();
     let rejected = engine.reject_deployment_in_flight(host_submission(&proposal_source));
     let record = rejected.into_payload();

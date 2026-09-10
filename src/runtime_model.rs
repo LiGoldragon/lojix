@@ -480,7 +480,7 @@ pub struct ExtraSubstituter {
     pub url: String,
     pub public_key: String,
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub struct HostDeployment {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
@@ -490,6 +490,7 @@ pub struct HostDeployment {
     pub flake_reference: FlakeReference,
     pub deployment_transport: DeploymentTransport,
     pub deployment_input_mode: DeploymentInputMode,
+    pub horizon_definition_option: Option<horizon_lib::HorizonDefinition>,
     pub deployment_output_selector: DeploymentOutputSelector,
     pub activation_backend: ActivationBackend,
     pub host_deploy_action: HostDeployAction,
@@ -497,7 +498,7 @@ pub struct HostDeployment {
     pub optional_nix_builder_spec: Option<NixBuilderSpec>,
     pub extra_substituter_vector: Vec<ExtraSubstituter>,
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub struct UserEnvironmentDeployment {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
@@ -507,6 +508,7 @@ pub struct UserEnvironmentDeployment {
     pub flake_reference: FlakeReference,
     pub deployment_transport: DeploymentTransport,
     pub deployment_input_mode: DeploymentInputMode,
+    pub horizon_definition_option: Option<horizon_lib::HorizonDefinition>,
     pub deployment_output_selector: DeploymentOutputSelector,
     pub activation_backend: ActivationBackend,
     pub user_environment_action: UserEnvironmentAction,
@@ -586,8 +588,11 @@ pub struct EventLogPage {
     pub cache_retention_transition_event_vector: Vec<CacheRetentionTransitionEvent>,
     pub state_marker: StateMarker,
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum SemaWriteInput {
+    OrdinaryConfigure(crate::NexusConfiguration),
+    MetaConfigure(crate::NexusConfiguration),
+    ReverseConfiguration,
     RecordDeploySubmitted(DeploySubmission),
     RecordPhaseTransition(DeploymentPhaseEvent),
     RecordGenerationActivated(ActivationCommit),
@@ -597,7 +602,7 @@ pub enum SemaWriteInput {
     RecordContainerTransition(ContainerTransition),
     RecordTestRun(TestRunRecord),
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum DeploySubmission {
     Host(HostDeployment),
     UserEnvironment(UserEnvironmentDeployment),
@@ -628,8 +633,13 @@ pub enum ContainerState {
     Stopped,
     Failed,
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum SemaWriteOutput {
+    OrdinaryConfigured(ConfigurationReceipt),
+    MetaConfigured(ConfigurationReceipt),
+    ConfigurationReversed(ConfigurationReceipt),
+    OrdinaryConfigurationRejected(ConfigurationRejection),
+    MetaConfigurationRejected(ConfigurationRejection),
     DeploySubmitted(DeployHandle),
     PhaseRecorded(PhaseReceipt),
     GenerationActivated(AppliedActivation),
@@ -770,16 +780,33 @@ pub struct RejectedTest {
     pub test_rejection_reason: TestRejectionReason,
     pub state_marker: StateMarker,
 }
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
+pub struct ConfigurationReceipt {
+    pub configuration: crate::NexusConfiguration,
+    pub meta_configure_occurred: bool,
+}
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ConfigurationRejectionReason {
+    OrdinaryConfigureClosed,
+    InvalidConfiguration,
+}
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ConfigurationRejection {
+    pub reason: ConfigurationRejectionReason,
+}
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum OrdinaryIngress {
+    Configure(crate::NexusConfiguration),
     Query(Selection),
     WatchDeployments(DeploymentWatch),
     WatchCacheRetention(CacheRetentionWatch),
     Unwatch(SubscriptionClose),
     CheckHostKeyMaterial(KeyMaterialQuery),
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum OrdinaryEgress {
+    Configured(ConfigurationReceipt),
+    ConfigurationRejected(ConfigurationRejection),
     Queried(GenerationListing),
     DeploymentEventsQueried(EventLogPage),
     TestRunsQueried(TestRunListing),
@@ -791,16 +818,21 @@ pub enum OrdinaryEgress {
     UnwatchRejected(RejectedUnwatch),
     KeyMaterialCheckRejected(RejectedKeyMaterialCheck),
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum MetaIngress {
+    Configure(crate::NexusConfiguration),
+    ReverseConfiguration,
     Deploy(DeploySubmission),
     Pin(PinRequest),
     Unpin(UnpinRequest),
     Retire(RetireRequest),
     Test(TestRequest),
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum MetaEgress {
+    Configured(ConfigurationReceipt),
+    ConfigurationRejected(ConfigurationRejection),
+    ConfigurationReversed(ConfigurationReceipt),
     DeployAccepted(DeployHandle),
     DeployRejected(RejectedDeploy),
     DeployTerminal(DeploymentRecord),
@@ -862,7 +894,6 @@ pub struct ContainerLifecycleRecord {
     pub container_state: ContainerState,
     pub event_log_position: EventLogPosition,
 }
-runtime_newtype!(DeployJobTable, Vec<DeployJob>);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PersistedFlakeInputReference {
     pub url: String,
@@ -885,7 +916,7 @@ pub enum DeployResumeStage {
     RecordGenerationActivated,
     FinishDeployment,
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub struct DeployJob {
     pub deployment_identifier: DeploymentIdentifier,
     pub generation_identifier: GenerationIdentifier,
@@ -931,12 +962,12 @@ pub struct StoredTestRun {
     pub test_outcome: TestOutcome,
     pub optional_closure_path: Option<ClosurePath>,
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum Input {
     Read(SemaReadInput),
     Write(SemaWriteInput),
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum Output {
     ReadCompleted(SemaReadOutput),
     WriteCompleted(SemaWriteOutput),

@@ -1,8 +1,8 @@
 # lojix — skills
 
-The new deploy stack: one crate, two binaries (`lojix-daemon` long-lived
-orchestrator + `lojix` thin CLI client). The live crate is at the
-repo root.
+The deploy stack is a workspace with a distinct Datom-free `lojix-nexus`
+package, ordinary `lojix` and privileged `lojix-meta` client packages, the
+shared `lojix` library, and a Datom-enabled offline-tools package.
 
 ## Repo intent
 
@@ -12,8 +12,9 @@ what remains is implementation and validation.
 
 The library half (`lojix`) holds shared types, handwritten
 Nexus/SEMA runtime code, the actor-native socket shell, and
-request/reply plumbing. The two binaries (`lojix-daemon`, `lojix`) are
-thin entry points.
+request/reply plumbing. The three runtime/client binaries are thin entry
+points; migration, inspection, reset, configuration writing, and bootstrap
+remain explicit offline tools in their own package.
 
 ## Required reading when implementation starts
 
@@ -38,15 +39,14 @@ these):
 
 ## Storage and wire defaults
 
-- **Storage:** handwritten runtime nouns in SEMA tables over one durable, configured
-  exact store path. The startup archive carries that path to the daemon and
-  reset service; no component derives `lojix.sema`. The reset service supplies
+- **Storage:** handwritten runtime nouns in SEMA tables at the stable
+  executable-discovered `lojix/lojix.sema` path. Desired configuration and the
+  meta-Configure marker live beside domain state. The offline reset service supplies
   its archive through `LOJIX_CONFIGURATION` and calls only pathless inline
   `(ResetStore)`: it recreates recognised pre-v4 Lojix stores, reports v4 as
   `AlreadyCurrent`, and never selects a caller-named file.
-- **Wire:** `signal-frame` records from `signal-lojix` and
-  `meta-signal-lojix`. Length-prefixed rkyv archives over two Unix
-  sockets. Don't invent parallel framing or envelope mechanisms.
+- **Wire:** raw portable rkyv Signals from `signal-lojix` and
+  `meta-signal-lojix`, length-prefixed by the transport over two Unix sockets.
 - **Horizon materialization:** an explicit `DeploymentInputMode::Horizon`
   selects proposal projection. The daemon projects the request's cluster proposal
   through `horizon-rs`, writes generated flake inputs under its state
@@ -58,7 +58,7 @@ these):
 
 - `signal-lojix` — ordinary peer-callable wire contract.
 - `meta-signal-lojix` — owner/meta policy wire contract.
-- `signal-frame` — wire kernel; the substrate both contracts build on.
+- `nexus` — universal persisted configuration lifecycle ontology.
 - `sema-engine` — typed database engine; depend on this rather than
   `sema` directly.
 - `horizon-rs` — cluster proposal projection; read-only per request.
@@ -66,7 +66,7 @@ these):
   horizon-rs).
 - `clavifaber` — per-host key material; separate component.
 - `meta-signal-lojix` — owner/meta deploy and retention mutation
-  contract consumed by `meta-lojix` and `lojix-daemon`.
+  contract consumed by `lojix-meta` and `lojix-nexus`.
 
 ## Status (2026-08-04)
 

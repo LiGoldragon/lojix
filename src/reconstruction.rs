@@ -14,12 +14,14 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use datom_codec::{Actualizable, IncorporationBudget, Potential};
+use datom_codec::{Actualizing, Potential};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use rkyv::rancor;
 use sema_engine::TableRegistration;
 
-use crate::{DaemonConfiguration, Error, Result, Store, ingress, single_inline_datom_argument};
+use crate::{
+    Error, LegacyStartupConfiguration, Result, Store, ingress, single_inline_datom_argument,
+};
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");
@@ -113,7 +115,7 @@ impl StoreResetCommand {
 
     pub fn run(&self) -> Result<StoreResetOutcome> {
         let configuration_path = canonical_regular_file(&self.configuration_path, "configuration")?;
-        let configuration = DaemonConfiguration::from_rkyv_file(&configuration_path)?;
+        let configuration = LegacyStartupConfiguration::from_rkyv_file(&configuration_path)?;
         let path = canonical_regular_file(Path::new(&configuration.store_path), "store")?;
         let schema = recognised_lojix_schema(&path)?;
         if schema == CURRENT_SCHEMA {
@@ -148,10 +150,10 @@ impl StoreResetCommand {
 /// another delimiter, and a malformed document are all rejected at the same
 /// boundary.
 fn parse_reset_request(text: &str) -> Result<()> {
-    let request = Potential::<ingress::ResetStore>::from(text.to_owned())
-        .actualize(IncorporationBudget::try_from(16_384).expect("static ingress budget"))
+    let request = Potential::<ingress::ResetStoreRequest>::from(text.to_owned())
+        .actualize(&mut <crate::Ingress as crate::Budgeted>::budget())
         .map_err(|fault| Error::DatomRequestText(format!("{fault:?}")))?;
-    let ingress::ResetStore::ResetStore = request;
+    let ingress::ResetStoreRequest::ResetStore = request;
     Ok(())
 }
 
@@ -384,6 +386,11 @@ fn recognised_lojix_identities() -> BTreeSet<StoreFamilyIdentity> {
             crate::PENDING_TRANSITION_INTENT_SCHEMA_HASH,
         ),
         (
+            crate::NEXUS_CONFIGURATION_TABLE.as_str(),
+            crate::NEXUS_CONFIGURATION_FAMILY,
+            crate::NEXUS_CONFIGURATION_SCHEMA_HASH,
+        ),
+        (
             "legacy-deployment-event-quarantine",
             "LegacyDeploymentEventQuarantineFamily",
             [10; 32],
@@ -407,7 +414,7 @@ mod tests {
 
     fn startup_archive(directory: &Path, store_path: &Path) -> PathBuf {
         let archive = directory.join("lojix-startup.rkyv");
-        DaemonConfiguration {
+        LegacyStartupConfiguration {
             ordinary_socket_path: directory.join("ordinary.sock").display().to_string(),
             ordinary_socket_mode: 0o660,
             owner_socket_path: directory.join("owner.sock").display().to_string(),

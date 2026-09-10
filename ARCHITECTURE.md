@@ -1,8 +1,8 @@
 # lojix — architecture
 
-`lojix` is the new deploy stack: one crate that ships a long-lived
-deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
-(`lojix`) that speaks the daemon over a Unix socket.
+`lojix` is the deploy stack: a workspace with the long-lived
+`lojix-nexus`, the ordinary `lojix` client, and the privileged `lojix-meta`
+client. Both clients speak portable typed Signals over Unix sockets.
 
 > **Status (2026-08-04):** implemented Rust crate at the repo root.
 > The daemon uses the actor-native `triad-runtime` multi-listener for
@@ -37,7 +37,7 @@ deploy orchestrator daemon (`lojix-daemon`) plus a thin CLI client
 
 ## 0.6 · Direction
 
-`lojix` is the production deploy stack: a daemon-based orchestrator with direct typed ordinary and owner/meta contracts. The active goalpost is production cutover so the cluster runs on `lojix-daemon` and all consumers use the direct contracts without compatibility translation layers or aliases.
+`lojix` is the production deploy stack: a daemon-based orchestrator with direct typed ordinary and owner/meta contracts. The active goalpost is production cutover so the cluster runs on `lojix-nexus` and all consumers use the direct contracts without compatibility translation layers or aliases.
 
 The production cutover bar is specific: complete-host and user-environment deploys (not eval/build only), deploys that survive SSH disconnect (job actor decoupled from the request stream so a dropped client does not abort the deploy), every operation described in schema types with no untyped escape hatch, durable-first state built and self-resuming before the first cutover, and end-to-end validation against a full routed microVM with its own Criome domain and reachable IP (Spirit `se72`).
 
@@ -45,20 +45,26 @@ This stack sits on today's substrate as a realization step toward the Sema-on-Se
 
 ## 0 · Crate shape
 
-One crate, daemon/client binaries, and one maintained flake bootstrap app (per the workspace agent instructions' "Binary naming
-— `-daemon` suffix" rule):
+Five packages separate the Datom-free Nexus, two Datom clients, the shared
+runtime library, and Datom-enabled offline tools:
 
 ```
 Cargo.toml:
   [lib] name = "lojix"
-  [[bin]] name = "lojix-daemon"   # long-lived orchestrator
-  [[bin]] name = "lojix"          # thin CLI client
+nexus/Cargo.toml:
+  [[bin]] name = "lojix-nexus"   # long-lived orchestrator
+clients/ordinary/Cargo.toml:
+  [[bin]] name = "lojix"          # ordinary CLI client
+clients/meta/Cargo.toml:
+  [[bin]] name = "lojix-meta"      # privileged CLI client
+tools/Cargo.toml:
   [[bin]] name = "lojix-bootstrap" # daemon-free, explicit bootstrap
+  # configuration, inspection, migration, and reset tools live here too
 ```
 
 The library half (`lojix`) holds the shared types, the daemon's
 actor implementations, and the CLI's request/reply plumbing. The
-daemon/client binaries are thin entry points: `lojix-daemon` brings up the
+daemon/client binaries are thin entry points: `lojix-nexus` brings up the
 actor supervisor and binds the socket; `lojix` opens the socket,
 sends one `signal-lojix` request, and prints one reply or
 streams subscription events.
@@ -110,7 +116,7 @@ streams subscription events.
 - **Container lifecycle observation** — systemd dbus subscriptions
   for `containers.<name>.service` transitions; mirrors into the
   event log.
-- **Thin CLIs** — `lojix` and `meta-lojix` each read exactly one inline
+- **Thin CLIs** — `lojix` and `lojix-meta` each read exactly one inline
   generated Datom object per the one-record operator-surface discipline; they reject
   raw paths, request files, signal files, and flags. Each forwards its object as a
   `signal-lojix` frame to the daemon, and prints the reply or
@@ -175,10 +181,10 @@ src/
   runtime_model.rs      # hand-written durable and operational nouns
   runtime_flow.rs       # hand-written Nexus effects, work, and runner logic
   schema_runtime.rs     # async hand-written Nexus decision engine
-  bin/
-    lojix-daemon.rs     # daemon entry
-    lojix.rs            # CLI entry
-    lojix-bootstrap.rs  # maintained flake bootstrap entry
+nexus/src/main.rs             # Datom-free daemon entry
+clients/ordinary/src/main.rs  # ordinary CLI entry
+clients/meta/src/main.rs      # privileged CLI entry
+tools/src/                    # explicit offline maintenance entries
 ```
 
 Each daemon actor is a Kameo actor per
@@ -213,9 +219,8 @@ the workspace actor-systems doctrine. No zero-state holders.
   catalog returns `AlreadyCurrent` without any data deletion. Protocol
   sidecars are derived only from a proven pre-v4 primary; the reset never
   selects a Spirit store.
-- **Wire:** `signal-frame` records carrying `signal-lojix` on the
-  ordinary socket and `meta-signal-lojix` on the owner/meta socket.
-  Length-prefixed rkyv archives over Unix sockets.
+- **Wire:** typed `Signal<Query>` and `Signal<Response>` portable rkyv bytes
+  from the ordinary and meta contracts, length-prefixed over Unix sockets.
 - **Generated Nix inputs:** production deploys materialize projected
   Horizon data into tiny flake inputs under
   `<state-directory>/generated-inputs/<cluster>/<node>/<shape>/`.
@@ -230,17 +235,16 @@ the workspace actor-systems doctrine. No zero-state holders.
 
 ## 5 · Constraints
 
-- The daemon binds two Unix sockets from its binary rkyv startup
-  configuration: ordinary and owner/meta. Inline startup input and files
-  are rejected at daemon startup; launch tooling must encode
-  configuration before exec. The owner/meta socket refuses any mode with
+- The zero-argument Nexus discovers its stable Sema, loads persisted desired
+  configuration, and binds ordinary and owner/meta Unix sockets. The owner/meta socket refuses any mode with
   "other" access and admits only same-uid/gid owner peers.
-- `lojix-write-configuration` is the launch-only typed Datom boundary: it accepts
+- `lojix-write-configuration` is an offline migration input tool: it accepts
   exactly one inline `ConfigurationWriteRequest` object (never a file, raw
   path, or flag) and writes the rkyv signal file from the ordered socket/mode, state-directory,
   daemon-host, test-default, and output-path request. Test defaults
   include their exact Nix system and output selector. Production
-  writes `NoTestDefaults`; the daemon receives only the resulting signal file.
+  writes `NoTestDefaults`; only `lojix-migrate-configuration` consumes the
+  resulting legacy archive while migrating a copied pre-Nexus store.
 - A deploy proposal source, when `DeploymentInputMode::Horizon` requires one,
   is an existing, direct, regular absolute canonical artifact named
   `horizon-definition.datom`, with no traversal, symlink, control, or credential-shaped
@@ -248,13 +252,9 @@ the workspace actor-systems doctrine. No zero-state holders.
   durable v4 row only as a canonical immutable Nix store-item root. Public
   adapters redact every other path and never project raw proposal sources,
   flake references, or daemon error text.
-- The startup configuration carries the test-op defaults as an OPTIONAL
-  fixture: `DaemonConfiguration.test_defaults` is `Option<TestDefaults>` and the
-  writer's `WriterTestDefaultsChoice` is `NoTestDefaults` (production)
-  or `(TestDefaults …)` (test/dev). A production node bakes `NoTestDefaults` →
-  `None`, so a bare `(Check …)`/`(Run …)` is rejected with `NoTestDefaults`
-  rather than resolving against a per-node baked test cluster. Test fixtures are
-  supplied only by test code (the workspace deployment-independence discipline).
+- The persisted Nexus configuration carries optional typed test defaults.
+  Production starts from `NoTestDefaults`; tests may Configure explicit typed
+  defaults through the ordinary or meta Signal surface.
 - Each public CLI sends one inline generated Datom object for its own contract per
   invocation, never reads a caller-selected request file, and prints one
   canonical Datom reply (or streams events until the subscription closes).
@@ -330,13 +330,13 @@ the workspace actor-systems doctrine. No zero-state holders.
   criome rather than borrowing the operator's logged-in session
   (GPG/SSH agent). This builds on agents holding cryptographic
   identity via criome (Spirit `h03z`).
-- **`lojix-daemon` owns GitHub-authenticated flake input resolution.**
+- **`lojix-nexus` owns GitHub-authenticated flake input resolution.**
   The GitHub API rate-limit stale-activation failure is a deploy-path
-  problem owned by `lojix-daemon`, not a package problem: an
+  problem owned by `lojix-nexus`, not a package problem: an
   authenticated execution environment for the nix invocation fetches the GitHub
   API key from the secret store and injects it into the nix call
   (via `NIX_CONFIG` access-tokens). A small Rust library encapsulates
-  the secret-fetch and auth-injection so the rest of `lojix-daemon`
+  the secret-fetch and auth-injection so the rest of `lojix-nexus`
   never handles the token directly. The credential value and its
   store path stay out of source, logs, and the nix store (Spirit
   `2qhw`).

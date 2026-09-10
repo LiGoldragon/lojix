@@ -164,9 +164,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "bitflags"
-version = "2.13.1"
+version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
+checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "blake3"
@@ -311,10 +311,21 @@ dependencies = [
 
 [[package]]
 name = "datom-codec"
-version = "0.21.0"
-source = "git+https://github.com/LiGoldragon/datom-codec?rev=41a3c073d5c5#41a3c073d5c5cdcb3ebb1a5c842e8c068145fdb2"
+version = "0.25.6"
+source = "git+https://github.com/LiGoldragon/datom-codec?rev=f2cc06858d38a4028c928d33323a6d682e7c222f#f2cc06858d38a4028c928d33323a6d682e7c222f"
 dependencies = [
+ "datom-codec-derive",
  "protos",
+]
+
+[[package]]
+name = "datom-codec-derive"
+version = "0.25.6"
+source = "git+https://github.com/LiGoldragon/datom-codec?rev=f2cc06858d38a4028c928d33323a6d682e7c222f#f2cc06858d38a4028c928d33323a6d682e7c222f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -384,27 +395,15 @@ dependencies = [
 
 [[package]]
 name = "ethos-zero"
-version = "5.0.0"
-source = "git+https://github.com/LiGoldragon/ethos-zero?rev=341c5c57e45d98ee7d8a88d9b5746d3f50b16683#341c5c57e45d98ee7d8a88d9b5746d3f50b16683"
+version = "6.1.6"
+source = "git+https://github.com/LiGoldragon/ethos-zero?rev=4695ee0c1f5d00dcf5cceba08f5fa00412b92184#4695ee0c1f5d00dcf5cceba08f5fa00412b92184"
 dependencies = [
  "datom-codec",
  "prettyplease",
  "proc-macro2",
  "protos",
  "quote",
- "syn 3.0.5",
-]
-
-[[package]]
-name = "ethos-zero"
-version = "5.0.0"
-source = "git+https://github.com/LiGoldragon/ethos-zero.git?rev=bcf728bbe4521e663f4773d3c1fd4ebb643df32e#bcf728bbe4521e663f4773d3c1fd4ebb643df32e"
-dependencies = [
- "datom-codec",
- "prettyplease",
- "proc-macro2",
- "protos",
- "quote",
+ "rkyv",
  "syn 3.0.5",
 ]
 
@@ -599,12 +598,13 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "horizon-lib"
-version = "0.6.0"
-source = "git+https://github.com/LiGoldragon/horizon-rs.git?rev=05879e7c1e5f637f78fbe26234b95213c77c59bc#05879e7c1e5f637f78fbe26234b95213c77c59bc"
+version = "0.8.0"
+source = "git+https://github.com/LiGoldragon/horizon-rs?rev=e48712203b7aad4bfb03088a4bda0a87ae064692#e48712203b7aad4bfb03088a4bda0a87ae064692"
 dependencies = [
  "datom-codec",
- "ethos-zero 5.0.0 (git+https://github.com/LiGoldragon/ethos-zero?rev=341c5c57e45d98ee7d8a88d9b5746d3f50b16683)",
+ "ethos-zero",
  "protos",
+ "rkyv",
  "serde",
  "thiserror",
 ]
@@ -702,13 +702,15 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lojix"
-version = "0.21.1"
+version = "1.0.0"
 dependencies = [
  "datom-codec",
+ "ethos-zero",
  "futures-util",
  "horizon-lib",
  "kameo 0.20.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "meta-signal-lojix",
+ "nexus",
  "protos",
  "redb",
  "rkyv",
@@ -716,13 +718,47 @@ dependencies = [
  "sema-engine",
  "serde_json",
  "sha2",
- "signal-frame 0.3.2",
  "signal-lojix",
  "tempfile",
  "thiserror",
  "tokio",
  "triad-runtime",
  "zbus",
+]
+
+[[package]]
+name = "lojix-client"
+version = "1.0.0"
+dependencies = [
+ "datom-codec",
+ "lojix",
+ "protos",
+ "signal-lojix",
+]
+
+[[package]]
+name = "lojix-nexus"
+version = "1.0.0"
+dependencies = [
+ "lojix",
+ "meta-signal-lojix",
+ "rustix",
+ "signal-lojix",
+ "tempfile",
+ "triad-runtime",
+]
+
+[[package]]
+name = "lojix-offline-tools"
+version = "1.0.0"
+dependencies = [
+ "datom-codec",
+ "horizon-lib",
+ "lojix",
+ "protos",
+ "signal-lojix",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -741,15 +777,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "meta-signal-lojix"
-version = "0.8.2"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix.git?rev=55c1df20ddfa6ae99e0f4bca57b803bf366b781f#55c1df20ddfa6ae99e0f4bca57b803bf366b781f"
+name = "meta-lojix-client"
+version = "1.0.0"
 dependencies = [
  "datom-codec",
- "ethos-zero 5.0.0 (git+https://github.com/LiGoldragon/ethos-zero.git?rev=bcf728bbe4521e663f4773d3c1fd4ebb643df32e)",
+ "horizon-lib",
+ "lojix",
+ "meta-signal-lojix",
+ "protos",
+ "signal-lojix",
+ "tempfile",
+]
+
+[[package]]
+name = "meta-signal-lojix"
+version = "2.2.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix?rev=901e5da6c8a58993479b7ba2ed1d0d62908d53b1#901e5da6c8a58993479b7ba2ed1d0d62908d53b1"
+dependencies = [
+ "datom-codec",
+ "ethos-zero",
+ "horizon-lib",
  "protos",
  "rkyv",
- "signal-frame 0.3.2",
  "signal-lojix",
 ]
 
@@ -782,6 +831,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "nexus"
+version = "0.1.1"
+source = "git+https://github.com/LiGoldragon/nexus?rev=a84bfa960c0d5c02d30048c4bbbc67dfef79a67c#a84bfa960c0d5c02d30048c4bbbc67dfef79a67c"
+dependencies = [
+ "rkyv",
+ "thiserror",
 ]
 
 [[package]]
@@ -895,8 +953,8 @@ dependencies = [
 
 [[package]]
 name = "protos"
-version = "0.26.0"
-source = "git+https://github.com/LiGoldragon/protos?rev=2d999f173334#2d999f1733347b7e64e24b2f75ba889ad7182bc0"
+version = "0.29.1"
+source = "git+https://github.com/LiGoldragon/protos?rev=b543678cfc8609529cea7174eb4af8a64daa54ad#b543678cfc8609529cea7174eb4af8a64daa54ad"
 
 [[package]]
 name = "ptr_meta"
@@ -1057,7 +1115,7 @@ dependencies = [
  "blake3",
  "rkyv",
  "sema",
- "signal-frame 0.3.1",
+ "signal-frame",
  "signal-sema",
  "thiserror",
 ]
@@ -1151,29 +1209,8 @@ source = "git+https://github.com/LiGoldragon/signal-frame.git?rev=8aa0bcaeb29fe9
 dependencies = [
  "paste",
  "rkyv",
- "signal-frame-macros 0.1.2 (git+https://github.com/LiGoldragon/signal-frame.git?rev=8aa0bcaeb29fe9e461a11706a469638d2fd109ac)",
+ "signal-frame-macros",
  "thiserror",
-]
-
-[[package]]
-name = "signal-frame"
-version = "0.3.2"
-source = "git+https://github.com/LiGoldragon/signal-frame.git?rev=80f70d929ae6d72707052f097be2264872913983#80f70d929ae6d72707052f097be2264872913983"
-dependencies = [
- "paste",
- "rkyv",
- "signal-frame-macros 0.1.2 (git+https://github.com/LiGoldragon/signal-frame.git?rev=80f70d929ae6d72707052f097be2264872913983)",
- "thiserror",
-]
-
-[[package]]
-name = "signal-frame-macros"
-version = "0.1.2"
-source = "git+https://github.com/LiGoldragon/signal-frame.git?rev=80f70d929ae6d72707052f097be2264872913983#80f70d929ae6d72707052f097be2264872913983"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -1198,14 +1235,14 @@ dependencies = [
 
 [[package]]
 name = "signal-lojix"
-version = "0.8.3"
-source = "git+https://github.com/LiGoldragon/signal-lojix.git?rev=5ce3f11feac22a0ddbed028dec2a60385f77fa55#5ce3f11feac22a0ddbed028dec2a60385f77fa55"
+version = "1.1.0"
+source = "git+https://github.com/LiGoldragon/signal-lojix?rev=3a57717e5a09591aecbaafd88bd138647a1d872d#3a57717e5a09591aecbaafd88bd138647a1d872d"
 dependencies = [
  "datom-codec",
- "ethos-zero 5.0.0 (git+https://github.com/LiGoldragon/ethos-zero.git?rev=bcf728bbe4521e663f4773d3c1fd4ebb643df32e)",
+ "ethos-zero",
+ "horizon-lib",
  "protos",
  "rkyv",
- "signal-frame 0.3.2",
 ]
 
 [[package]]
@@ -1412,7 +1449,7 @@ dependencies = [
  "kameo 0.20.0 (git+https://github.com/LiGoldragon/kameo.git?rev=f491b45d7dcb55e5837eddde3d5d7ca8ceaa9f01)",
  "rkyv",
  "rustix",
- "signal-frame 0.3.1",
+ "signal-frame",
  "thiserror",
  "tokio",
 ]
@@ -1442,9 +1479,9 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "uuid"
-version = "1.26.0"
+version = "1.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
+checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -1687,18 +1724,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.56"
+version = "0.8.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "556764e583adb45a9f8d413c2a147fa7e8d821e48e12b14fd560b607998b75eb"
+checksum = "d35102a9f36d089ccae9e4c6802bc118be4487b80aaffc0ab4e0cf5ce92d2873"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.56"
+version = "0.8.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2ab42fc20575779bd240faa45f94a74256f755c0fa9e89f0ede20d91d0cdfc1"
+checksum = "146c01f5ab44258da43cf276c74a2763db2ff3969c9c652c3f2de07041d0b2bc"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -27,8 +27,6 @@ use zbus::{Connection, Proxy};
 use crate::runtime_flow::{self as nexus, NexusEngine};
 use crate::runtime_model as sema;
 
-const CANONICAL_PROPOSAL_ARTIFACT: &str = "horizon-definition.datom";
-
 /// A local activation-login noun. Horizon projects users as public strings;
 /// Lojix validates the command-bearing login independently before it reaches
 /// an SSH or shell invocation.
@@ -241,7 +239,7 @@ mod meta {
         }
     }
 }
-use crate::{DaemonConfiguration, Error, Result, Store};
+use crate::{Error, LegacyStartupConfiguration, NexusConfiguration, Result, Store};
 
 /// The lojix engine noun. Carries the durable `Store` (the four sema tables)
 /// and, while a deploy is in flight, the pipeline cursor that threads the
@@ -345,11 +343,9 @@ pub struct TestDefaults {
     /// Exact hermetic system and output selector for a configured shorthand.
     test_nix_system: sema::NixSystem,
     test_output_selector: sema::DeploymentOutputSelector,
-    /// The canonical ClusterProposal artifact projected to validate `(OnHost h)`
-    /// against the node's declared host-set and to resolve `All` to the
-    /// cluster's test-VM nodes. Empty when host-set validation is not
-    /// configured.
-    proposal_source: ordinary::ProposalSource,
+    /// The already-actualized Horizon definition used to validate `(OnHost h)`
+    /// and resolve `All`. The configuration writer owns authored-file input.
+    horizon_definition: Option<HorizonDefinition>,
 }
 
 impl TestDefaults {
@@ -430,7 +426,7 @@ impl TestDefaults {
     /// i.e. a Pod hosted on a vmhost. Empty when no proposal source is
     /// configured or it fails to project.
     fn all_test_vm_nodes(&self) -> Vec<ordinary::NodeName> {
-        ClusterProjection::from_source(&self.proposal_source)
+        self.projection()
             .map(|projection| projection.hosted_pod_nodes())
             .unwrap_or_default()
     }
@@ -447,7 +443,7 @@ impl TestDefaults {
             test_output_selector: sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new(
                 "checks.fixture-a",
             )),
-            proposal_source: ordinary::ProposalSource::new(""),
+            horizon_definition: None,
         }
     }
 
@@ -464,7 +460,9 @@ impl TestDefaults {
     /// host-set validation and the `All` sweep both read it; absent (empty)
     /// when host-set validation is not configured.
     fn projection(&self) -> Option<ClusterProjection> {
-        ClusterProjection::from_source(&self.proposal_source)
+        self.horizon_definition
+            .clone()
+            .map(ClusterProjection::from_definition)
     }
 }
 
@@ -482,7 +480,7 @@ impl From<&crate::TestDefaults> for TestDefaults {
             test_output_selector: sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new(
                 defaults.test_output_selector.clone(),
             )),
-            proposal_source: ordinary::ProposalSource::new(defaults.proposal_source.clone()),
+            horizon_definition: defaults.horizon_definition.clone(),
         }
     }
 }
@@ -746,12 +744,8 @@ struct ClusterProjection {
 }
 
 impl ClusterProjection {
-    /// Load + parse the configured proposal.  An unavailable source never
-    /// silently disables host-set validation: deploy admission rejects it, and
-    /// this optional test-only projection simply has no trustworthy data.
-    fn from_source(source: &ordinary::ProposalSource) -> Option<Self> {
-        let definition = ProposalFile::available(source)?.load().ok()?;
-        Some(Self { definition })
+    fn from_definition(definition: HorizonDefinition) -> Self {
+        Self { definition }
     }
 
     /// Validate that `host` is in `node`'s declared host-set. Rejects
@@ -951,8 +945,26 @@ pub enum DeploySubmissionOutcome {
     Rejected(meta::RejectedDeploy),
 }
 
+impl From<&NexusConfiguration> for RuntimeConfiguration {
+    fn from(configuration: &NexusConfiguration) -> Self {
+        Self {
+            generated_inputs_directory: PathBuf::from(&configuration.state_directory_path)
+                .join("generated-inputs"),
+            daemon_host: ordinary::NodeName::new(configuration.daemon_host.clone()),
+            effect_execution: EffectExecution::production(),
+            effect_barrier: None,
+            test_defaults: match &configuration.test_defaults_choice {
+                signal_lojix::TestDefaultsChoice::NoTestDefaults => None,
+                signal_lojix::TestDefaultsChoice::TestDefaults(defaults) => {
+                    Some(TestDefaults::from(defaults))
+                }
+            },
+        }
+    }
+}
+
 impl RuntimeConfiguration {
-    pub fn from_daemon_configuration(configuration: &DaemonConfiguration) -> Self {
+    pub fn from_daemon_configuration(configuration: &LegacyStartupConfiguration) -> Self {
         Self {
             generated_inputs_directory: PathBuf::from(&configuration.state_directory_path)
                 .join("generated-inputs"),
@@ -1040,6 +1052,27 @@ impl RuntimeConfiguration {
     }
 }
 
+impl From<&signal_lojix::TestDefaults> for TestDefaults {
+    fn from(defaults: &signal_lojix::TestDefaults) -> Self {
+        Self {
+            cluster: ordinary::ClusterName::new(defaults.cluster_name.clone()),
+            default_vm_host: ordinary::NodeName::new(defaults.node_name.clone()),
+            default_mode: match defaults.test_mode {
+                signal_lojix::TestMode::Hermetic => ordinary::TestMode::Hermetic,
+                signal_lojix::TestMode::Live => ordinary::TestMode::Live,
+            },
+            test_flake: ordinary::FlakeReference::new(defaults.flake_reference.clone()),
+            test_nix_system: ordinary::NixSystem::new(defaults.nix_system.clone()),
+            test_output_selector: ordinary::DeploymentOutputSelector::new(
+                ordinary::FlakeAttribute::new(
+                    defaults.deployment_output_selector.flake_attribute.clone(),
+                ),
+            ),
+            horizon_definition: defaults.horizon_definition_option.clone(),
+        }
+    }
+}
+
 /// The BootOnce transient unit name a deployment owns. Defined here (not on the
 /// foreign schema-emitted `DeploymentIdentifier`) and implemented on that type
 /// so the activation-side `HostActivation::unit_name` and the resume-side
@@ -1070,7 +1103,6 @@ struct DeployPipeline {
     generation_artifact: ordinary::GenerationArtifact,
     activation_effect: ordinary::ActivationEffect,
     activation_slot: Option<ordinary::GenerationSlot>,
-    source: ordinary::ProposalSource,
     secrets_input: sema::SecretsInput,
     requested_flake: ordinary::FlakeReference,
     flake: ordinary::FlakeReference,
@@ -1079,6 +1111,7 @@ struct DeployPipeline {
     /// supplies an implicit route or output name.
     deployment_transport: sema::DeploymentTransport,
     deployment_input_mode: sema::DeploymentInputMode,
+    horizon_definition_option: Option<HorizonDefinition>,
     deployment_output_selector: sema::DeploymentOutputSelector,
     activation_backend: sema::ActivationBackend,
     /// The deploy action (host action, or user-environment action + user). Owns the
@@ -1498,12 +1531,12 @@ impl DeployPipeline {
                 generation_artifact: Self::host_generation_artifact(deployment.host_composition),
                 activation_effect: Self::host_activation_effect(deployment.host_deploy_action),
                 activation_slot: None,
-                source: deployment.proposal_source,
                 secrets_input: deployment.secrets_input,
                 requested_flake: deployment.flake_reference.clone(),
                 flake: deployment.flake_reference,
                 deployment_transport: deployment.deployment_transport,
                 deployment_input_mode: deployment.deployment_input_mode,
+                horizon_definition_option: deployment.horizon_definition_option,
                 deployment_output_selector: deployment.deployment_output_selector,
                 activation_backend: deployment.activation_backend,
                 action: DeployAction::Host(deployment.host_deploy_action),
@@ -1529,12 +1562,12 @@ impl DeployPipeline {
                     deployment.user_environment_action,
                 ),
                 activation_slot: None,
-                source: deployment.proposal_source,
                 secrets_input: deployment.secrets_input,
                 requested_flake: deployment.flake_reference.clone(),
                 flake: deployment.flake_reference,
                 deployment_transport: deployment.deployment_transport,
                 deployment_input_mode: deployment.deployment_input_mode,
+                horizon_definition_option: deployment.horizon_definition_option,
                 deployment_output_selector: deployment.deployment_output_selector,
                 activation_backend: deployment.activation_backend,
                 action: DeployAction::UserEnvironment {
@@ -1616,7 +1649,6 @@ impl DeployPipeline {
 
     fn flake_auth_request(&self) -> nexus::FlakeAuthRequest {
         nexus::FlakeAuthRequest {
-            proposal_source: self.source.clone(),
             flake_reference: self.flake.clone(),
             source_revision_policy: self.source_revision_policy,
         }
@@ -1633,7 +1665,10 @@ impl DeployPipeline {
         nexus::HorizonMaterializationCommand {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
-            proposal_source: self.source.clone(),
+            horizon_definition: self
+                .horizon_definition_option
+                .clone()
+                .expect("Horizon admission requires an actualized definition"),
             secrets_input: self.secrets_input.clone(),
             materialization_shape: self.materialization_shape(),
         }
@@ -2627,6 +2662,9 @@ impl SchemaRuntime {
 
     fn decide_ordinary_input(&mut self, input: ordinary::Input) -> nexus::NexusAction {
         match input {
+            ordinary::Input::Configure(configuration) => nexus::NexusAction::CommandSemaWrite(
+                sema::SemaWriteInput::OrdinaryConfigure(configuration),
+            ),
             ordinary::Input::Query(selection) => {
                 // A (ByTestRun …) selection reads the durable test-run table;
                 // every other selection reads the generation set. Routing here
@@ -2678,6 +2716,12 @@ impl SchemaRuntime {
 
     fn decide_meta_input(&mut self, input: meta::Input) -> nexus::NexusAction {
         match input {
+            meta::Input::Configure(configuration) => nexus::NexusAction::CommandSemaWrite(
+                sema::SemaWriteInput::MetaConfigure(configuration),
+            ),
+            meta::Input::ReverseConfiguration => {
+                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::ReverseConfiguration)
+            }
             meta::Input::Deploy(request) => {
                 if let Some(reason) = Self::unsupported_deploy_reason(&request) {
                     return Self::reply_meta(meta::Output::DeployRejected(
@@ -2950,19 +2994,33 @@ impl SchemaRuntime {
             .then_some(meta::DeployRejectionReason::InvalidDeploymentRouting)
     }
 
-    /// Reject an unusable proposal source before admitting a deploy or firing
-    /// FlakeAuth/Horizon effects.  The public reason is deliberately stable
-    /// and path-free; detailed filesystem/parser failures remain local.
+    /// Require the client-actualized Horizon definition exactly when the
+    /// selected input mode consumes it, and prove the target projection before
+    /// admitting any effect.
     fn proposal_source_rejection(
         request: &meta::DeployRequest,
     ) -> Option<meta::DeployRejectionReason> {
-        let source = match request {
-            meta::DeployRequest::Host(deployment) => &deployment.proposal_source,
-            meta::DeployRequest::UserEnvironment(deployment) => &deployment.proposal_source,
+        let (mode, definition, node) = match request {
+            meta::DeployRequest::Host(deployment) => (
+                deployment.deployment_input_mode,
+                deployment.horizon_definition_option.as_ref(),
+                &deployment.node_name,
+            ),
+            meta::DeployRequest::UserEnvironment(deployment) => (
+                deployment.deployment_input_mode,
+                deployment.horizon_definition_option.as_ref(),
+                &deployment.node_name,
+            ),
         };
-        ProposalFile::available(source)
-            .is_none()
-            .then_some(meta::DeployRejectionReason::ProposalSourceUnreachable)
+        match (mode, definition) {
+            (sema::DeploymentInputMode::Direct, None) => None,
+            (sema::DeploymentInputMode::Horizon, Some(definition))
+                if definition.project(node.payload()).is_ok() =>
+            {
+                None
+            }
+            _ => Some(meta::DeployRejectionReason::ProposalSourceUnreachable),
+        }
     }
 
     // ---- decide: sema read completion -----------------------------------
@@ -2995,6 +3053,25 @@ impl SchemaRuntime {
 
     fn decide_write_completion(&mut self, output: sema::SemaWriteOutput) -> nexus::NexusAction {
         match output {
+            sema::SemaWriteOutput::OrdinaryConfigured(receipt) => {
+                nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(
+                    ordinary::Output::Configured(receipt),
+                ))
+            }
+            sema::SemaWriteOutput::MetaConfigured(receipt) => {
+                Self::reply_meta(meta::Output::Configured(receipt))
+            }
+            sema::SemaWriteOutput::ConfigurationReversed(receipt) => {
+                Self::reply_meta(meta::Output::ConfigurationReversed(receipt))
+            }
+            sema::SemaWriteOutput::OrdinaryConfigurationRejected(rejection) => {
+                nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(
+                    ordinary::Output::ConfigurationRejected(rejection),
+                ))
+            }
+            sema::SemaWriteOutput::MetaConfigurationRejected(rejection) => {
+                Self::reply_meta(meta::Output::ConfigurationRejected(rejection))
+            }
             sema::SemaWriteOutput::DeploySubmitted(accepted) => {
                 self.begin_deploy_pipeline(accepted)
             }
@@ -3833,6 +3910,13 @@ impl SchemaRuntime {
 
     fn apply_sema(&mut self, input: sema::SemaWriteInput) -> sema::SemaWriteOutput {
         match input {
+            sema::SemaWriteInput::OrdinaryConfigure(configuration) => {
+                self.apply_ordinary_configuration(configuration)
+            }
+            sema::SemaWriteInput::MetaConfigure(configuration) => {
+                self.apply_meta_configuration(configuration)
+            }
+            sema::SemaWriteInput::ReverseConfiguration => self.reverse_meta_configuration(),
             sema::SemaWriteInput::RecordDeploySubmitted(submission) => {
                 self.record_deploy_submitted(submission)
             }
@@ -3849,6 +3933,61 @@ impl SchemaRuntime {
                 self.record_container_transition(transition)
             }
             sema::SemaWriteInput::RecordTestRun(record) => self.record_test_run(record),
+        }
+    }
+
+    fn configuration_receipt(state: crate::NexusConfigurationState) -> sema::ConfigurationReceipt {
+        sema::ConfigurationReceipt {
+            configuration: state.desired_configuration,
+            meta_configure_occurred: state.meta_configure_occurred,
+        }
+    }
+
+    fn configuration_rejection(error: crate::Error) -> sema::ConfigurationRejection {
+        sema::ConfigurationRejection {
+            reason: match error {
+                crate::Error::OrdinaryConfigureClosed => {
+                    sema::ConfigurationRejectionReason::OrdinaryConfigureClosed
+                }
+                _ => sema::ConfigurationRejectionReason::InvalidConfiguration,
+            },
+        }
+    }
+
+    fn apply_ordinary_configuration(
+        &self,
+        configuration: crate::NexusConfiguration,
+    ) -> sema::SemaWriteOutput {
+        match self.store.ordinary_configure(configuration) {
+            Ok(state) => {
+                sema::SemaWriteOutput::OrdinaryConfigured(Self::configuration_receipt(state))
+            }
+            Err(error) => sema::SemaWriteOutput::OrdinaryConfigurationRejected(
+                Self::configuration_rejection(error),
+            ),
+        }
+    }
+
+    fn apply_meta_configuration(
+        &self,
+        configuration: crate::NexusConfiguration,
+    ) -> sema::SemaWriteOutput {
+        match self.store.meta_configure(configuration) {
+            Ok(state) => sema::SemaWriteOutput::MetaConfigured(Self::configuration_receipt(state)),
+            Err(error) => sema::SemaWriteOutput::MetaConfigurationRejected(
+                Self::configuration_rejection(error),
+            ),
+        }
+    }
+
+    fn reverse_meta_configuration(&self) -> sema::SemaWriteOutput {
+        match self.store.reverse_meta_configuration() {
+            Ok(state) => {
+                sema::SemaWriteOutput::ConfigurationReversed(Self::configuration_receipt(state))
+            }
+            Err(error) => sema::SemaWriteOutput::MetaConfigurationRejected(
+                Self::configuration_rejection(error),
+            ),
         }
     }
 
@@ -4660,10 +4799,10 @@ impl HorizonMaterialization {
     }
 
     async fn run_inner(&self) -> Result<nexus::MaterializedInputs> {
-        let definition = ProposalFile::available(&self.command.proposal_source)
-            .ok_or_else(|| Error::Invariant("proposal source is unavailable".to_string()))?
-            .load()?;
-        let horizon = definition.project(self.command.node_name.payload())?;
+        let horizon = self
+            .command
+            .horizon_definition
+            .project(self.command.node_name.payload())?;
         let root = MaterializationRoot::new(self.configuration.materialization_root(&self.command));
         root.prepare()?;
         let secrets_source = ClusterSecretsDirectory::from_input(&self.command.secrets_input)?;
@@ -4675,65 +4814,6 @@ impl HorizonMaterialization {
         )
         .write(self.configuration.effect_execution())
         .await
-    }
-}
-
-/// The cluster proposal file path carried by `signal-lojix::ProposalSource`.
-#[derive(Debug, Clone)]
-struct ProposalFile {
-    path: PathBuf,
-}
-
-impl ProposalFile {
-    /// The proposal source is a privileged local configuration input.  Its
-    /// path must name the canonical regular proposal artifact directly; redirects,
-    /// traversal, controls, and credential-shaped locations are not admitted
-    /// into either Horizon projection or Nix materialization.
-    fn checked(source: &ordinary::ProposalSource) -> Option<Self> {
-        let raw = source.payload();
-        if raw.is_empty() || raw.chars().any(char::is_control) || credential_like(raw) {
-            return None;
-        }
-        let path = PathBuf::from(raw);
-        if !path.is_absolute()
-            || path.file_name().and_then(|name| name.to_str()) != Some(CANONICAL_PROPOSAL_ARTIFACT)
-            || path.components().any(|component| {
-                !matches!(
-                    component,
-                    std::path::Component::RootDir | std::path::Component::Normal(_)
-                )
-            })
-        {
-            return None;
-        }
-        let mut prefix = PathBuf::from("/");
-        for component in path.components() {
-            let std::path::Component::Normal(part) = component else {
-                continue;
-            };
-            prefix.push(part);
-            let metadata = fs::symlink_metadata(&prefix).ok()?;
-            if metadata.file_type().is_symlink() {
-                return None;
-            }
-        }
-        let metadata = fs::symlink_metadata(&path).ok()?;
-        metadata.file_type().is_file().then_some(Self { path })
-    }
-
-    /// Prove that the source is both safe to address and parsable as the
-    /// actual proposal shape before a deploy is admitted or an effect starts.
-    fn available(source: &ordinary::ProposalSource) -> Option<Self> {
-        let proposal = Self::checked(source)?;
-        proposal.load().ok().map(|_| proposal)
-    }
-
-    fn load(&self) -> Result<HorizonDefinition> {
-        let text = fs::read_to_string(&self.path)
-            .map_err(|_| Error::Invariant("proposal source is unavailable".to_string()))?;
-        horizon_lib::decode(&text).map_err(|_| {
-            Error::Invariant("proposal source is not a Horizon definition".to_string())
-        })
     }
 }
 
@@ -5038,9 +5118,38 @@ impl ClusterSecretsDirectory {
 /// later, so every existing component must be checked through metadata rather
 /// than letting filesystem operations resolve a link after admission.
 fn safe_secrets_directory(value: &str) -> Result<PathBuf> {
-    crate::bootstrap::safe_existing_directory(value).map_err(|_| {
+    use std::path::Component;
+
+    let invalid = || {
         Error::StoreMaintenance("secrets input must be an existing absolute directory".to_string())
-    })
+    };
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(invalid());
+    }
+    let path = PathBuf::from(value);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(invalid());
+    }
+    let mut prefix = PathBuf::from("/");
+    for component in path.components() {
+        let Component::Normal(component) = component else {
+            continue;
+        };
+        prefix.push(component);
+        let metadata = fs::symlink_metadata(&prefix).map_err(|_| invalid())?;
+        if metadata.file_type().is_symlink() {
+            return Err(invalid());
+        }
+    }
+    let metadata = fs::symlink_metadata(&path).map_err(|_| invalid())?;
+    if !metadata.file_type().is_dir() {
+        return Err(invalid());
+    }
+    Ok(path)
 }
 
 /// One sops-encrypted secret file in the cluster `secrets/` directory. Its
@@ -6502,6 +6611,7 @@ mod tests {
             flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
             deployment_transport: fixture_transport(),
             deployment_input_mode: sema::DeploymentInputMode::Direct,
+            horizon_definition_option: None,
             deployment_output_selector: fixture_output_selector(),
             activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
             host_deploy_action: action,
@@ -6530,6 +6640,7 @@ mod tests {
             flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
             deployment_transport: fixture_transport(),
             deployment_input_mode: sema::DeploymentInputMode::Direct,
+            horizon_definition_option: None,
             deployment_output_selector: fixture_output_selector(),
             activation_backend: sema::ActivationBackend::HomeManagerNixProfileV1,
             user_environment_action: meta::UserEnvironmentAction::ActivateNow,
@@ -6701,6 +6812,7 @@ mod tests {
             flake_reference: ordinary::FlakeReference::new(flake),
             deployment_transport: fixture_transport(),
             deployment_input_mode: sema::DeploymentInputMode::Direct,
+            horizon_definition_option: None,
             deployment_output_selector: fixture_output_selector(),
             activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
             host_deploy_action: ordinary::HostDeployAction::Evaluate,
@@ -6877,54 +6989,16 @@ mod tests {
     }
 
     #[test]
-    fn proposal_source_is_the_safe_canonical_artifact_before_deploy_admission() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let directory = tempfile::tempdir().expect("temporary proposal directory");
-        let malformed = directory.path().join("malformed.datom");
-        fs::write(&malformed, "not a cluster proposal").expect("write malformed proposal");
-        let unreadable = directory.path().join("unreadable.datom");
-        fs::write(&unreadable, "not used").expect("write unreadable proposal");
-        let mut permissions = fs::metadata(&unreadable)
-            .expect("unreadable proposal metadata")
-            .permissions();
-        permissions.set_mode(0o000);
-        fs::set_permissions(&unreadable, permissions).expect("make proposal unreadable");
-        let symlink_path = directory.path().join("linked.datom");
-        symlink(&malformed, &symlink_path).expect("create proposal symlink");
-
-        for source in [
-            directory.path().join("missing.datom"),
-            directory.path().join("proposal.nota"),
-            directory.path().join("proposal.dotos"),
-            directory.path().join("horizon-definition.datomic"),
-            malformed,
-            unreadable,
-            symlink_path,
-            directory.path().join("private-secret.datom"),
-            directory
-                .path()
-                .join("nested")
-                .join("..")
-                .join("horizon-definition.datom"),
-        ] {
-            let source = ordinary::ProposalSource::new(source.to_string_lossy().to_string());
-            assert!(
-                ProposalFile::available(&source).is_none(),
-                "unsafe or unavailable proposal source must fail admission"
-            );
-        }
-        let control = ordinary::ProposalSource::new("/tmp/proposal\n.datom");
-        assert!(ProposalFile::available(&control).is_none());
-    }
-
-    #[test]
-    fn unavailable_proposal_source_returns_a_safe_correlated_rejection_before_effects() {
+    fn horizon_mode_without_an_actualized_definition_rejects_before_effects() {
         let mut engine = SchemaRuntime::new();
-        let request = deployment_request(
+        let mut request = deployment_request(
             meta::SourceRevisionPolicy::ResolveAndRecord,
             "github:owner/repo",
         );
+        let meta::DeployRequest::Host(deployment) = &mut request else {
+            unreachable!()
+        };
+        deployment.deployment_input_mode = sema::DeploymentInputMode::Horizon;
         match engine.submit_deploy(request) {
             DeploySubmissionOutcome::Rejected(record) => {
                 assert!(matches!(
@@ -6934,7 +7008,7 @@ mod tests {
                     ))
                 ));
             }
-            other => panic!("unavailable proposal must reject before effects, got {other:?}"),
+            other => panic!("unactualized Horizon input must reject before effects, got {other:?}"),
         }
         assert!(engine.active_deploy.is_none());
         assert!(engine.active_operation.is_none());
@@ -7379,6 +7453,7 @@ mod tests {
                 flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
                 deployment_transport: fixture_transport(),
                 deployment_input_mode: sema::DeploymentInputMode::Direct,
+                horizon_definition_option: None,
                 deployment_output_selector: fixture_output_selector(),
                 activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
                 host_deploy_action: action,
@@ -7405,6 +7480,7 @@ mod tests {
                 flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
                 deployment_transport: fixture_transport(),
                 deployment_input_mode: sema::DeploymentInputMode::Direct,
+                horizon_definition_option: None,
                 deployment_output_selector: fixture_output_selector(),
                 activation_backend: sema::ActivationBackend::HomeManagerNixProfileV1,
                 user_environment_action: mode,

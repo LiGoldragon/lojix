@@ -1,11 +1,11 @@
-Types
-[ protos:[ Text ] ]
+Library
+[]
 [ InspectionRequest.[ InspectStore.InspectStore ]
-  InspectStore.{ Text }
-  ResetStore.[ ResetStore ]
+  InspectStore.{ String }
+  ResetStoreRequest.[ ResetStore ]
   BootstrapRequest.[ BootstrapRun.BootstrapRun ]
   BootstrapRun.{ BootstrapRequestId BootstrapMode }
-  BootstrapRequestId.Text
+  BootstrapRequestId.String
   BootstrapMode.[ BuildOnly.BootstrapBuildOnly BootOnce.BootstrapBootOnce ]
   BootstrapBuildOnly.{ BootstrapInput BootstrapBuilder BootstrapJournalParent BootstrapGcRootPath BootstrapTerminalEvidencePath }
   BootstrapBootOnce.{ BootstrapInput BootstrapBuilder BootstrapTestPlan BootstrapActivationBackend BootstrapJournalParent BootstrapGcRootPath BootstrapTerminalEvidencePath }
@@ -22,29 +22,30 @@ Types
   BootstrapSshPolicy.{ BootstrapSshIdentityFile BootstrapSshKnownHostsFile BootstrapStrictHostKeyMode }
   BootstrapStrictHostKeyMode.[ RequireKnownHost ]
   BootstrapLocalBootstrapV1.{ BootstrapSystemProfilePath BootstrapBootEntriesDirectory }
-  BootstrapFlakeReference.Text
-  BootstrapNixSystem.Text
-  BootstrapOutputSelector.Text
-  BootstrapProposalSource.Text
-  BootstrapClusterName.Text
-  BootstrapNodeName.Text
-  BootstrapSecretsDirectory.Text
-  BootstrapBuilderSpec.Text
-  BootstrapJournalParent.Text
-  BootstrapGcRootPath.Text
-  BootstrapTerminalEvidencePath.Text
-  BootstrapNixStoreUri.Text
-  BootstrapSshDestination.Text
-  BootstrapSshIdentityFile.Text
-  BootstrapSshKnownHostsFile.Text
-  BootstrapSystemProfilePath.Text
-  BootstrapBootEntriesDirectory.Text
+  BootstrapFlakeReference.String
+  BootstrapNixSystem.String
+  BootstrapOutputSelector.String
+  BootstrapProposalSource.String
+  BootstrapClusterName.String
+  BootstrapNodeName.String
+  BootstrapSecretsDirectory.String
+  BootstrapBuilderSpec.String
+  BootstrapJournalParent.String
+  BootstrapGcRootPath.String
+  BootstrapTerminalEvidencePath.String
+  BootstrapNixStoreUri.String
+  BootstrapSshDestination.String
+  BootstrapSshIdentityFile.String
+  BootstrapSshKnownHostsFile.String
+  BootstrapSystemProfilePath.String
+  BootstrapBootEntriesDirectory.String
   ConfigurationWriterInput.[ ConfigurationWriteRequest.ConfigurationWriteRequest ]
   ConfigurationWriteRequest.{ WriterPath WriterMode WriterPath WriterMode WriterPath WriterPath WriterCluster WriterTestDefaultsChoice WriterPath }
   WriterTestDefaultsChoice.[ NoTestDefaults TestDefaults.WriterTestDefaults ]
   WriterTestDefaults.{ WriterCluster WriterCluster WriterTestMode WriterCluster WriterCluster WriterCluster WriterPath }
   WriterTestMode.[ Hermetic Live ]
-  WriterPath.Text
+  WriterPath.String
   WriterMode.Integer
-  WriterCluster.Text ]
+  WriterCluster.String ]
+[]
 []

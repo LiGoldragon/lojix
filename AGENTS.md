@@ -1,7 +1,7 @@
 # lojix — agent carve-outs
 
 - **Status: implemented crate (2026-06-10).** The live
-  Rust crate is at the repo root and ships `lojix-daemon` plus the
+  Rust crate is at the repo root and ships `lojix-nexus` plus the
   thin `lojix` CLI. Production host and user-environment build requests without
   `build_attribute` materialize Horizon-derived flake inputs before
   `nix eval`; activating deploys enter the copy/activate pipeline. The
