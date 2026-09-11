@@ -13,9 +13,9 @@ path = "src/main.rs"
 lojix = { path = "../..", default-features = false }
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "f2cc06858d38a4028c928d33323a6d682e7c222f" }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "b543678cfc8609529cea7174eb4af8a64daa54ad" }
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "901e5da6c8a58993479b7ba2ed1d0d62908d53b1", features = ["datom"] }
-signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "3a57717e5a09591aecbaafd88bd138647a1d872d" }
-horizon-lib = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "e48712203b7aad4bfb03088a4bda0a87ae064692", package = "horizon-lib" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "712487a386af18b03f4b9cb0cff484ac0558238a", features = ["datom"] }
+signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "79b43f3fdfb787535dd23ca1a83a406724de1790" }
+horizon-lib = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "cd3c8a944609f97b0ff800a54fb384c9f21be9ca", package = "horizon-lib" }
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -1,5 +1,12 @@
 # Upgrades
 
+## Horizon 0.9 fixed location
+
+Lojix now decodes Horizon 0.9 definitions, whose nodes end with an optional
+declared fixed location. Deployment continues to accept only the composed
+`horizon-definition.datom` artifact. A fixed location is authored cluster data
+and does not represent a device-derived position measurement.
+
 ## 1.0.1 — trait-borne runtime operations
 
 The Nexus runner, peer authority, request worker, deploy/test actors, historical

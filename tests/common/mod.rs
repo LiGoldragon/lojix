@@ -47,6 +47,7 @@ fn node(name: &str, machine_definition: MachineDefinition) -> NodeDefinition {
         },
         boolean_option: Some(true),
         capabilities: vec![],
+        fixed_location_option: None,
     }
 }
 
