@@ -321,10 +321,29 @@ dependencies = [
 [[package]]
 name = "datom-codec"
 version = "0.25.7"
+source = "git+https://github.com/LiGoldragon/datom-codec?rev=99a9e8c9cbdb88650cc2511644b89428c22129e2#99a9e8c9cbdb88650cc2511644b89428c22129e2"
+dependencies = [
+ "datom-codec-derive 0.25.6 (git+https://github.com/LiGoldragon/datom-codec?rev=99a9e8c9cbdb88650cc2511644b89428c22129e2)",
+ "protos",
+]
+
+[[package]]
+name = "datom-codec"
+version = "0.25.7"
 source = "git+https://github.com/LiGoldragon/datom-codec?rev=9bffbf14f8de54a9d8f25a9fcf9120061401ded2#9bffbf14f8de54a9d8f25a9fcf9120061401ded2"
 dependencies = [
  "datom-codec-derive 0.25.6 (git+https://github.com/LiGoldragon/datom-codec?rev=9bffbf14f8de54a9d8f25a9fcf9120061401ded2)",
  "protos",
+]
+
+[[package]]
+name = "datom-codec-derive"
+version = "0.25.6"
+source = "git+https://github.com/LiGoldragon/datom-codec?rev=99a9e8c9cbdb88650cc2511644b89428c22129e2#99a9e8c9cbdb88650cc2511644b89428c22129e2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -620,7 +639,20 @@ name = "horizon-lib"
 version = "0.9.0"
 source = "git+https://github.com/LiGoldragon/horizon-rs?rev=28614f33cc7f8c5be07a5dcd788fff1fc00872aa#28614f33cc7f8c5be07a5dcd788fff1fc00872aa"
 dependencies = [
- "datom-codec 0.25.7",
+ "datom-codec 0.25.7 (git+https://github.com/LiGoldragon/datom-codec?rev=9bffbf14f8de54a9d8f25a9fcf9120061401ded2)",
+ "ethos-zero",
+ "protos",
+ "rkyv",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "horizon-lib"
+version = "0.9.0"
+source = "git+https://github.com/LiGoldragon/horizon-rs?rev=8f4240ef23024c2d3b55f803d96d3c6e7aa5b433#8f4240ef23024c2d3b55f803d96d3c6e7aa5b433"
+dependencies = [
+ "datom-codec 0.25.7 (git+https://github.com/LiGoldragon/datom-codec?rev=99a9e8c9cbdb88650cc2511644b89428c22129e2)",
  "ethos-zero",
  "protos",
  "rkyv",
@@ -726,9 +758,9 @@ dependencies = [
  "datom-codec 0.25.6",
  "ethos-zero",
  "futures-util",
- "horizon-lib",
+ "horizon-lib 0.9.0 (git+https://github.com/LiGoldragon/horizon-rs?rev=8f4240ef23024c2d3b55f803d96d3c6e7aa5b433)",
  "kameo 0.20.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "meta-signal-lojix",
+ "meta-signal-lojix 2.3.0 (git+https://github.com/LiGoldragon/meta-signal-lojix?rev=7e98d8855e74)",
  "nexus",
  "protos",
  "redb",
@@ -737,7 +769,7 @@ dependencies = [
  "sema-engine",
  "serde_json",
  "sha2",
- "signal-lojix",
+ "signal-lojix 1.2.0 (git+https://github.com/LiGoldragon/signal-lojix?rev=4c88a67cedcc)",
  "tempfile",
  "thiserror",
  "tokio",
@@ -752,7 +784,7 @@ dependencies = [
  "datom-codec 0.25.6",
  "lojix",
  "protos",
- "signal-lojix",
+ "signal-lojix 1.2.0 (git+https://github.com/LiGoldragon/signal-lojix?rev=e7067832dec3a446e023aa8196431fe174f46c84)",
 ]
 
 [[package]]
@@ -760,9 +792,9 @@ name = "lojix-nexus"
 version = "1.0.1"
 dependencies = [
  "lojix",
- "meta-signal-lojix",
+ "meta-signal-lojix 2.3.0 (git+https://github.com/LiGoldragon/meta-signal-lojix?rev=ea103304602fb149717d40517c6f6611a5e8c2bf)",
  "rustix",
- "signal-lojix",
+ "signal-lojix 1.2.0 (git+https://github.com/LiGoldragon/signal-lojix?rev=e7067832dec3a446e023aa8196431fe174f46c84)",
  "tempfile",
  "triad-runtime",
 ]
@@ -772,10 +804,10 @@ name = "lojix-offline-tools"
 version = "1.0.1"
 dependencies = [
  "datom-codec 0.25.6",
- "horizon-lib",
+ "horizon-lib 0.9.0 (git+https://github.com/LiGoldragon/horizon-rs?rev=28614f33cc7f8c5be07a5dcd788fff1fc00872aa)",
  "lojix",
  "protos",
- "signal-lojix",
+ "signal-lojix 1.2.0 (git+https://github.com/LiGoldragon/signal-lojix?rev=e7067832dec3a446e023aa8196431fe174f46c84)",
  "tempfile",
  "thiserror",
 ]
@@ -800,25 +832,38 @@ name = "meta-lojix-client"
 version = "1.0.1"
 dependencies = [
  "datom-codec 0.25.6",
- "horizon-lib",
+ "horizon-lib 0.9.0 (git+https://github.com/LiGoldragon/horizon-rs?rev=28614f33cc7f8c5be07a5dcd788fff1fc00872aa)",
  "lojix",
- "meta-signal-lojix",
+ "meta-signal-lojix 2.3.0 (git+https://github.com/LiGoldragon/meta-signal-lojix?rev=ea103304602fb149717d40517c6f6611a5e8c2bf)",
  "protos",
- "signal-lojix",
+ "signal-lojix 1.2.0 (git+https://github.com/LiGoldragon/signal-lojix?rev=e7067832dec3a446e023aa8196431fe174f46c84)",
  "tempfile",
 ]
 
 [[package]]
 name = "meta-signal-lojix"
 version = "2.3.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix?rev=ea103304602fb149717d40517c6f6611a5e8c2bf#ea103304602fb149717d40517c6f6611a5e8c2bf"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix?rev=7e98d8855e74#7e98d8855e74661bd925e650456a14dd73e0f615"
 dependencies = [
  "datom-codec 0.25.6",
  "ethos-zero",
- "horizon-lib",
+ "horizon-lib 0.9.0 (git+https://github.com/LiGoldragon/horizon-rs?rev=8f4240ef23024c2d3b55f803d96d3c6e7aa5b433)",
  "protos",
  "rkyv",
- "signal-lojix",
+ "signal-lojix 1.2.0 (git+https://github.com/LiGoldragon/signal-lojix?rev=4c88a67cedcc)",
+]
+
+[[package]]
+name = "meta-signal-lojix"
+version = "2.3.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix?rev=ea103304602fb149717d40517c6f6611a5e8c2bf#7e98d8855e74661bd925e650456a14dd73e0f615"
+dependencies = [
+ "datom-codec 0.25.6",
+ "ethos-zero",
+ "horizon-lib 0.9.0 (git+https://github.com/LiGoldragon/horizon-rs?rev=8f4240ef23024c2d3b55f803d96d3c6e7aa5b433)",
+ "protos",
+ "rkyv",
+ "signal-lojix 1.2.0 (git+https://github.com/LiGoldragon/signal-lojix?rev=4c88a67cedcc)",
 ]
 
 [[package]]
@@ -1255,11 +1300,23 @@ dependencies = [
 [[package]]
 name = "signal-lojix"
 version = "1.2.0"
+source = "git+https://github.com/LiGoldragon/signal-lojix?rev=4c88a67cedcc#4c88a67cedccc84fd4754de4443cd87e08e740d6"
+dependencies = [
+ "datom-codec 0.25.6",
+ "ethos-zero",
+ "horizon-lib 0.9.0 (git+https://github.com/LiGoldragon/horizon-rs?rev=8f4240ef23024c2d3b55f803d96d3c6e7aa5b433)",
+ "protos",
+ "rkyv",
+]
+
+[[package]]
+name = "signal-lojix"
+version = "1.2.0"
 source = "git+https://github.com/LiGoldragon/signal-lojix?rev=e7067832dec3a446e023aa8196431fe174f46c84#e7067832dec3a446e023aa8196431fe174f46c84"
 dependencies = [
  "datom-codec 0.25.6",
  "ethos-zero",
- "horizon-lib",
+ "horizon-lib 0.9.0 (git+https://github.com/LiGoldragon/horizon-rs?rev=28614f33cc7f8c5be07a5dcd788fff1fc00872aa)",
  "protos",
  "rkyv",
 ]
