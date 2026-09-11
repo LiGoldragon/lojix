@@ -14,7 +14,7 @@ lojix = { path = "../..", default-features = false }
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "99a9e8c9cbdb88650cc2511644b89428c22129e2" }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "b543678cfc8609529cea7174eb4af8a64daa54ad" }
 meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "7e98d8855e74661bd925e650456a14dd73e0f615", features = ["datom"] }
-signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "4c88a67cedccc84fd4754de4443cd87e08e740d6" }
+signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "3322cf02f379" }
 horizon-lib = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "8f4240ef23024c2d3b55f803d96d3c6e7aa5b433", package = "horizon-lib" }
 
 [lints.rust]

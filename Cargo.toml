@@ -31,8 +31,8 @@ datom-codec       = { git = "https://github.com/LiGoldragon/datom-codec", rev = 
 protos            = { git = "https://github.com/LiGoldragon/protos", rev = "b543678cfc8609529cea7174eb4af8a64daa54ad", optional = true }
 kameo             = "0.20"
 nexus             = { git = "https://github.com/LiGoldragon/nexus", rev = "a84bfa960c0d5c02d30048c4bbbc67dfef79a67c" }
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "72e5aad54183" }
-signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "4c88a67cedccc84fd4754de4443cd87e08e740d6" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "6302a9128cd2" }
+signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "3322cf02f379" }
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 redb              = "4"
 rustix            = { version = "1", default-features = false, features = ["fs", "process"] }
