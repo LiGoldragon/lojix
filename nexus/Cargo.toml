@@ -13,8 +13,8 @@ path = "src/main.rs"
 lojix = { path = "..", default-features = false }
 
 [dev-dependencies]
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "683ad0421580add419bb3ab33c9ecd6abe62eecd" }
-signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "90933a46a66adc3d272fd5ce780091eab784f0ab" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "ea103304602fb149717d40517c6f6611a5e8c2bf" }
+signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "e7067832dec3a446e023aa8196431fe174f46c84" }
 tempfile = "3"
 triad-runtime = { git = "https://github.com/LiGoldragon/triad-runtime.git", branch = "main" }
 rustix = { version = "1", default-features = false, features = ["process"] }
