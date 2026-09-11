@@ -26,7 +26,7 @@ name = "lojix-bootstrap"
 path = "src/lojix-bootstrap.rs"
 
 [dependencies]
-datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "f2cc06858d38a4028c928d33323a6d682e7c222f" }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "99a9e8c9cbdb88650cc2511644b89428c22129e2" }
 horizon-lib = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "8f4240ef23024c2d3b55f803d96d3c6e7aa5b433", package = "horizon-lib" }
 lojix = { path = "..", features = ["tools"] }
 thiserror = "2"
