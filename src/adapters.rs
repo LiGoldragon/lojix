@@ -726,7 +726,7 @@ impl Raisable<owner::RejectedDeploy> for sema::RejectedDeploy {
 
 impl Raisable<ordinary::Generation> for sema::Generation {
     fn raise(self) -> Result<ordinary::Generation, WireShapeError> {
-        let closure_path_option = NixStorePath::new(self.closure_path.payload())
+        let closure_path_option = NixStorePath::from(self.closure_path.payload().as_str())
             .is_canonical_item_root()
             .then_some(self.closure_path)
             .raise()?;
@@ -747,7 +747,7 @@ impl Raisable<ordinary::TestRunRecord> for sema::TestRunRecord {
     fn raise(self) -> Result<ordinary::TestRunRecord, WireShapeError> {
         let closure_path_option = self
             .optional_closure_path
-            .filter(|path| NixStorePath::new(path.payload()).is_canonical_item_root())
+            .filter(|path| NixStorePath::from(path.payload().as_str()).is_canonical_item_root())
             .raise()?;
         Ok(ordinary::TestRunRecord {
             test_run_identifier: self.test_run_identifier.raise()?,

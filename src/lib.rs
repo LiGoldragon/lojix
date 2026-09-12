@@ -678,7 +678,7 @@ impl SourceRevisionText for str {
     }
 
     fn validate_as_closure_path(&self, record_kind: &str) -> Result<()> {
-        if NixStorePath::new(self).is_canonical_item_root() {
+        if NixStorePath::from(self).is_canonical_item_root() {
             Ok(())
         } else {
             Err(Error::Invariant(format!(
@@ -2501,7 +2501,8 @@ impl Store {
     /// Append one live generation, keyed by its generation identifier
     /// (decision 4).
     pub fn append_live_generation(&self, generation: LiveGeneration) -> Result<()> {
-        if !NixStorePath::new(generation.closure_path.payload()).is_canonical_item_root() {
+        if !NixStorePath::from(generation.closure_path.payload().as_str()).is_canonical_item_root()
+        {
             return Err(Error::Invariant(
                 "fresh live generation requires a canonical immutable store-item root".to_string(),
             ));
@@ -2532,8 +2533,8 @@ impl Store {
 
     /// Record the live generation and its GC root as one durable commit.
     pub fn record_activation(&self, generation: LiveGeneration, root: GcRoot) -> Result<()> {
-        if !NixStorePath::new(generation.closure_path.payload()).is_canonical_item_root()
-            || !NixStorePath::new(root.closure_path.payload()).is_canonical_item_root()
+        if !NixStorePath::from(generation.closure_path.payload().as_str()).is_canonical_item_root()
+            || !NixStorePath::from(root.closure_path.payload().as_str()).is_canonical_item_root()
         {
             return Err(Error::Invariant(
                 "fresh activation requires a canonical immutable store-item root".to_string(),

@@ -109,7 +109,7 @@ pub(crate) trait Witnessing {
     fn bounded_redaction(detail: &str) -> (String, bool) {
         let retained: Vec<&str> = detail
             .lines()
-            .filter(|line| !InspectedText::new(line).names_credential_material())
+            .filter(|line| !InspectedText::from(*line).names_credential_material())
             .collect();
         let redacted = retained.join("\n");
         let dropped_a_line = retained.len() != detail.lines().count();
@@ -779,7 +779,7 @@ impl HermeticCheck {
             .run(execution)
             .await?;
         let closure_path = NixCommand::first_line(&output);
-        NixStorePath::new(&closure_path)
+        NixStorePath::from(closure_path.as_str())
             .is_canonical_item_root()
             .then(|| ordinary::ClosurePath::new(closure_path))
             .ok_or_else(|| {
@@ -1205,8 +1205,8 @@ impl<'a> FlakeReferencePolicy<'a> {
             if key.is_empty()
                 || value.is_empty()
                 || value.contains('=')
-                || PercentEncodedText::new(key).names_credential_material()
-                || PercentEncodedText::new(value).names_credential_material()
+                || PercentEncodedText::from(key).names_credential_material()
+                || PercentEncodedText::from(value).names_credential_material()
             {
                 return false;
             }
@@ -1235,8 +1235,8 @@ impl<'a> FlakeReferencePolicy<'a> {
             if key.is_empty()
                 || value.is_empty()
                 || value.contains('=')
-                || PercentEncodedText::new(key).names_credential_material()
-                || PercentEncodedText::new(value).names_credential_material()
+                || PercentEncodedText::from(key).names_credential_material()
+                || PercentEncodedText::from(value).names_credential_material()
             {
                 return false;
             }
@@ -2147,7 +2147,7 @@ impl SchemaRuntime {
             .optional_closure_path
             .as_ref()
             .is_some_and(|closure_path| {
-                !NixStorePath::new(closure_path.payload()).is_canonical_item_root()
+                !NixStorePath::from(closure_path.payload().as_str()).is_canonical_item_root()
             })
         {
             return Err(Error::Invariant(
@@ -3180,7 +3180,8 @@ impl SchemaRuntime {
                 // activation (risk R2). Fail the pipeline rather than activate "".
                 let closure_path = match pipeline.closure_path.clone() {
                     Some(closure_path)
-                        if NixStorePath::new(closure_path.payload()).is_canonical_item_root() =>
+                        if NixStorePath::from(closure_path.payload().as_str())
+                            .is_canonical_item_root() =>
                     {
                         closure_path
                     }
@@ -3639,7 +3640,7 @@ impl SchemaRuntime {
     /// This is intentionally independent of Nix-command parsing: an injected
     /// `EffectResult` must not reach a later build, copy, or activation command.
     fn set_closure_path(&mut self, closure_path: ordinary::ClosurePath) -> bool {
-        if !NixStorePath::new(closure_path.payload()).is_canonical_item_root() {
+        if !NixStorePath::from(closure_path.payload().as_str()).is_canonical_item_root() {
             return false;
         }
         if let Some(pipeline) = self.active_deploy.as_mut() {
@@ -4484,7 +4485,7 @@ impl SchemaRuntime {
         {
             Ok(output) => {
                 let closure_path = NixCommand::first_line(&output);
-                if !NixStorePath::new(&closure_path).is_canonical_item_root() {
+                if !NixStorePath::from(closure_path.as_str()).is_canonical_item_root() {
                     return Self::effect_failed(
                         nexus::EffectStage::Eval,
                         "nix eval returned a noncanonical closure path".to_string(),
@@ -4519,7 +4520,7 @@ impl SchemaRuntime {
             Ok(output) => {
                 let closure_path =
                     NixCommand::first_line_or(&output, command.closure_path.payload());
-                if !NixStorePath::new(&closure_path).is_canonical_item_root() {
+                if !NixStorePath::from(closure_path.as_str()).is_canonical_item_root() {
                     return Self::effect_failed(
                         nexus::EffectStage::Build,
                         "nix build returned a noncanonical closure path".to_string(),
@@ -5007,11 +5008,13 @@ impl ClusterSecretsDirectory {
                 // no-symlink contract as every other lojix path: the daemon
                 // copies ciphertext later, so a link must not be resolvable
                 // after admission.
-                let path = OfferedPath::new(raw).existing_directory().map_err(|_| {
-                    Error::StoreMaintenance(
-                        "secrets input must be an existing absolute directory".to_string(),
-                    )
-                })?;
+                let path = OfferedPath::from(raw.as_str())
+                    .existing_directory()
+                    .map_err(|_| {
+                        Error::StoreMaintenance(
+                            "secrets input must be an existing absolute directory".to_string(),
+                        )
+                    })?;
                 Ok(Self { path: Some(path) })
             }
         }

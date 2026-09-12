@@ -1523,9 +1523,11 @@ impl TryFrom<BootstrapRun> for ValidatedBootstrapRun {
                     input: BootstrapInputValidated::try_from(build_only.input)?,
                     builder: build_only.builder.validated()?,
                 },
-                OfferedPath::new(&build_only.journal_parent.0).private_existing_directory()?,
-                OfferedPath::new(&build_only.gc_root_path.0).private_output_path()?,
-                OfferedPath::new(&build_only.terminal_evidence_path.0).private_output_path()?,
+                OfferedPath::from(build_only.journal_parent.0.as_str())
+                    .private_existing_directory()?,
+                OfferedPath::from(build_only.gc_root_path.0.as_str()).private_output_path()?,
+                OfferedPath::from(build_only.terminal_evidence_path.0.as_str())
+                    .private_output_path()?,
             ),
             BootstrapMode::BootOnce(boot_once) => (
                 BootstrapModeValidated::BootOnce(BootstrapBootOnceValidated {
@@ -1536,9 +1538,11 @@ impl TryFrom<BootstrapRun> for ValidatedBootstrapRun {
                         boot_once.activation_backend,
                     )?,
                 }),
-                OfferedPath::new(&boot_once.journal_parent.0).private_existing_directory()?,
-                OfferedPath::new(&boot_once.gc_root_path.0).private_output_path()?,
-                OfferedPath::new(&boot_once.terminal_evidence_path.0).private_output_path()?,
+                OfferedPath::from(boot_once.journal_parent.0.as_str())
+                    .private_existing_directory()?,
+                OfferedPath::from(boot_once.gc_root_path.0.as_str()).private_output_path()?,
+                OfferedPath::from(boot_once.terminal_evidence_path.0.as_str())
+                    .private_output_path()?,
             ),
         };
         if gc_root_path == terminal_evidence_path {
@@ -1838,7 +1842,7 @@ impl TryFrom<BootstrapInput> for BootstrapInputValidated {
             BootstrapInput::Horizon(input) => {
                 input.cluster_name.0.validated_horizon_name()?;
                 Ok(Self::Horizon(BootstrapHorizonInputValidated {
-                    proposal_source: OfferedPath::new(&input.proposal_source.0)
+                    proposal_source: OfferedPath::from(input.proposal_source.0.as_str())
                         .existing_regular_file("horizon-definition.datom")?,
                     node_name: input.node_name.0.validated_horizon_name()?,
                     materialization_shape: input.materialization_shape,
@@ -1846,7 +1850,7 @@ impl TryFrom<BootstrapInput> for BootstrapInputValidated {
                         BootstrapSecretsInput::NoSecrets => BootstrapSecretsInputValidated::None,
                         BootstrapSecretsInput::SecretsDirectory(directory) => {
                             BootstrapSecretsInputValidated::Directory(
-                                OfferedPath::new(&directory.0).existing_directory()?,
+                                OfferedPath::from(directory.0.as_str()).existing_directory()?,
                             )
                         }
                     },
@@ -1894,18 +1898,22 @@ impl TryFrom<BootstrapActivationBackend> for BootstrapActivationBackendValidated
                     nix_store_uri,
                     ssh_identity,
                     ssh_policy: BootstrapSshPolicyValidated::try_from(remote.ssh_policy)?,
-                    system_profile_path: OfferedPath::new(&remote.system_profile_path.0)
+                    system_profile_path: OfferedPath::from(remote.system_profile_path.0.as_str())
                         .absolute_normal()?,
-                    boot_entries_directory: OfferedPath::new(&remote.boot_entries_directory.0)
-                        .absolute_normal()?,
+                    boot_entries_directory: OfferedPath::from(
+                        remote.boot_entries_directory.0.as_str(),
+                    )
+                    .absolute_normal()?,
                 }))
             }
             BootstrapActivationBackend::LocalBootstrapV1(local) => {
                 Ok(Self::Local(BootstrapLocalBackendValidated {
-                    system_profile_path: OfferedPath::new(&local.system_profile_path.0)
+                    system_profile_path: OfferedPath::from(local.system_profile_path.0.as_str())
                         .existing_parent()?,
-                    boot_entries_directory: OfferedPath::new(&local.boot_entries_directory.0)
-                        .existing_directory()?,
+                    boot_entries_directory: OfferedPath::from(
+                        local.boot_entries_directory.0.as_str(),
+                    )
+                    .existing_directory()?,
                 }))
             }
         }
@@ -1917,8 +1925,9 @@ impl TryFrom<BootstrapSshPolicy> for BootstrapSshPolicyValidated {
 
     fn try_from(policy: BootstrapSshPolicy) -> std::result::Result<Self, Self::Error> {
         Ok(Self {
-            identity_file: OfferedPath::new(&policy.identity_file.0).private_regular_file()?,
-            known_hosts_file: OfferedPath::new(&policy.known_hosts_file.0)
+            identity_file: OfferedPath::from(policy.identity_file.0.as_str())
+                .private_regular_file()?,
+            known_hosts_file: OfferedPath::from(policy.known_hosts_file.0.as_str())
                 .private_regular_file()?,
             strict_host_key_mode: policy.strict_host_key_mode,
         })
@@ -1971,7 +1980,7 @@ impl PrivatePathAdmission for OfferedPath<'_> {
         let parent = path
             .parent()
             .ok_or(BootstrapError::Validation("private file has no parent"))?;
-        OfferedPath::new(
+        OfferedPath::from(
             parent
                 .to_str()
                 .ok_or(BootstrapError::Validation("path is not utf8"))?,
@@ -1993,7 +2002,7 @@ impl PrivatePathAdmission for OfferedPath<'_> {
         let parent = path
             .parent()
             .ok_or(BootstrapError::Validation("output path has no parent"))?;
-        OfferedPath::new(
+        OfferedPath::from(
             parent
                 .to_str()
                 .ok_or(BootstrapError::Validation("path is not utf8"))?,
@@ -2007,7 +2016,7 @@ impl PrivatePathAdmission for OfferedPath<'_> {
         let parent = path
             .parent()
             .ok_or(BootstrapError::Validation("path has no parent"))?;
-        OfferedPath::new(
+        OfferedPath::from(
             parent
                 .to_str()
                 .ok_or(BootstrapError::Validation("path is not utf8"))?,
@@ -2510,7 +2519,9 @@ impl BootstrapExecution for ValidatedBootstrapRun {
             environment: Vec::new(),
         })?)
         .first_line()?;
-        if !NixStorePath::new(&derivation).is_canonical_item() || !derivation.ends_with(".drv") {
+        if !NixStorePath::from(derivation.as_str()).is_canonical_item()
+            || !derivation.ends_with(".drv")
+        {
             return Err(BootstrapError::Effect(BootstrapEffectStage::Built));
         }
 
@@ -2537,7 +2548,7 @@ impl BootstrapExecution for ValidatedBootstrapRun {
             environment: Vec::new(),
         })?)
         .first_line()?;
-        if !NixStorePath::new(&closure).is_canonical_item() || closure.ends_with(".drv") {
+        if !NixStorePath::from(closure.as_str()).is_canonical_item() || closure.ends_with(".drv") {
             return Err(BootstrapError::Effect(BootstrapEffectStage::Built));
         }
         Ok(closure)

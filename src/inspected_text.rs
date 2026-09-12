@@ -36,8 +36,8 @@ pub(crate) trait CredentialBearing {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct InspectedText<'text>(&'text str);
 
-impl<'text> InspectedText<'text> {
-    pub(crate) fn new(text: &'text str) -> Self {
+impl<'text> From<&'text str> for InspectedText<'text> {
+    fn from(text: &'text str) -> Self {
         Self(text)
     }
 }
@@ -58,15 +58,22 @@ impl CredentialBearing for InspectedText<'_> {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PercentEncodedText<'text>(&'text str);
 
-impl<'text> PercentEncodedText<'text> {
-    pub(crate) fn new(text: &'text str) -> Self {
+impl<'text> From<&'text str> for PercentEncodedText<'text> {
+    fn from(text: &'text str) -> Self {
         Self(text)
     }
+}
 
+/// Undoing one layer of percent encoding.
+pub(crate) trait PercentDecoding {
     /// Decode percent escapes exactly once. `None` when the text is not
     /// singly-decodable: a malformed escape, a non-UTF-8 result, or a `%`
     /// surviving the decode.
-    pub(crate) fn decoded_once(&self) -> Option<String> {
+    fn decoded_once(&self) -> Option<String>;
+}
+
+impl PercentDecoding for PercentEncodedText<'_> {
+    fn decoded_once(&self) -> Option<String> {
         let bytes = self.0.as_bytes();
         let mut decoded = Vec::with_capacity(bytes.len());
         let mut index = 0;
@@ -97,7 +104,7 @@ impl CredentialBearing for PercentEncodedText<'_> {
         let Some(decoded) = self.decoded_once() else {
             return true;
         };
-        InspectedText::new(&decoded).names_credential_material()
+        InspectedText::from(decoded.as_str()).names_credential_material()
     }
 }
 
@@ -105,8 +112,8 @@ impl CredentialBearing for PercentEncodedText<'_> {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct NixStorePath<'text>(&'text str);
 
-impl<'text> NixStorePath<'text> {
-    pub(crate) fn new(text: &'text str) -> Self {
+impl<'text> From<&'text str> for NixStorePath<'text> {
+    fn from(text: &'text str) -> Self {
         Self(text)
     }
 }
@@ -150,7 +157,7 @@ impl StoreItemShape for NixStorePath<'_> {
 
 impl CredentialBearing for NixStorePath<'_> {
     fn names_credential_material(&self) -> bool {
-        InspectedText::new(self.0).names_credential_material()
+        InspectedText::from(self.0).names_credential_material()
     }
 }
 
@@ -173,8 +180,8 @@ pub(crate) enum PathFault {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct OfferedPath<'text>(&'text str);
 
-impl<'text> OfferedPath<'text> {
-    pub(crate) fn new(text: &'text str) -> Self {
+impl<'text> From<&'text str> for OfferedPath<'text> {
+    fn from(text: &'text str) -> Self {
         Self(text)
     }
 }
