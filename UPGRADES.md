@@ -7,6 +7,33 @@ is a Nix check.** The wire is unchanged: `signal-lojix` 5.0.0 and
 `meta-signal-lojix` 6.0.0 are the same pins, the store schema is still v4, and
 no request or reply gained or lost a word. What changed is the Rust surface.
 
+## The Nexus announces its readiness
+
+After both listeners are bound and started and before anything is accepted, the
+Nexus now writes one line to its standard output:
+
+```
+(LojixNexusReady /run/lojix/ordinary.sock /run/lojix/meta.sock)
+```
+
+`daemon::NexusReadiness` owns it: `READY` is the head a waiter matches on, and
+the two bound socket paths follow. Nothing else about startup changed, and the
+line goes to standard output, never to a socket — the wire is still pure signal.
+
+**Why.** `nexus/tests/daemon_configuration.rs` waited on a clock: a five-second
+deadline polled every ten milliseconds until a connect succeeded. That deadline
+holds on a developer's machine and lies on a loaded remote builder, where the
+same test failed while passing locally. The test now waits on the announcement,
+and on the child's standard output closing — which is what a Nexus that dies
+before readiness does, so a real startup failure is reported at once instead of
+after a deadline. The only clock left is a 300-second backstop that exists so a
+wedged Nexus cannot take the harness down, and the success path never reaches
+it: the same test went from timing out at 300.00s to passing in 0.26s.
+
+**A supervisor should use it.** A systemd unit for `lojix-nexus` can treat this
+line as the readiness event rather than assuming the socket appears at some
+point after the process starts.
+
 ## Bring the traits into scope
 
 Nothing was renamed and no signature moved except where this file says so, but
@@ -19,6 +46,7 @@ use lojix::{DurableStore, DeploymentLedger, GenerationLedger, EventHistory,
             NexusPersistable, Payload, Named};
 use lojix::schema_runtime::{RuntimeCore, DeployDriving, TestDriving};
 use lojix::client::NexusSocket;
+use lojix::daemon::NexusReadiness;
 ```
 
 ## The store is read by record kind, not by method name
