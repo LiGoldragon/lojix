@@ -11,6 +11,9 @@
 
 use crate::Payload;
 use crate::runtime_flow::{Routable, Routed};
+use crate::schema_runtime::{
+    DaemonRuntime as _, DeployJobResuming as _, DetachedActivation as _, DetachedObserving as _,
+};
 use crate::{
     DeploymentLedger as _, DurableStore as _, GenerationLedger as _, NexusPersistable as _,
 };

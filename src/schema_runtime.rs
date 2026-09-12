@@ -11,7 +11,6 @@
 //! so actor-native request tasks await child processes directly instead of
 //! routing Nexus execution through a blocking-pool bridge.
 
-use crate::Payload;
 use crate::inspected_text::{
     CredentialBearing, InspectedText, NixStorePath, OfferedPath, PathAdmission, PercentEncodedText,
     StoreItemShape,
@@ -22,6 +21,7 @@ use crate::{
     IdentifierAllocating as _, NexusPersistable as _, TestRunLedger as _,
 };
 use crate::{HorizonArchitecture as _, SourceRevisionText as _};
+use crate::{Named as _, Payload};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -44,8 +44,10 @@ use crate::runtime_model as sema;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HorizonUserName(String);
 
-impl HorizonUserName {
-    fn try_new(value: String) -> std::result::Result<Self, String> {
+impl TryFrom<String> for HorizonUserName {
+    type Error = String;
+
+    fn try_from(value: String) -> std::result::Result<Self, String> {
         if value.is_empty()
             || value.starts_with('-')
             || value
@@ -56,7 +58,9 @@ impl HorizonUserName {
         }
         Ok(Self(value))
     }
+}
 
+impl crate::Named for HorizonUserName {
     fn as_str(&self) -> &str {
         &self.0
     }
@@ -225,12 +229,6 @@ pub struct RuntimeConfiguration {
     /// effect. Production uses the declarative service PATH; focused tests use
     /// an isolated fixture directory.
     effect_execution: EffectExecution,
-    /// A test-only gate that the deploy pipeline awaits before its first effect
-    /// runs. `None` in production (the pipeline runs straight through). A test
-    /// holds the barrier closed to prove the daemon replies the accepted handle
-    /// while the pipeline is still parked, then opens it to let the pipeline
-    /// complete on the daemon-owned executor — the up9b decoupling witness.
-    effect_barrier: Option<EffectBarrier>,
     /// The test-op defaults, projected from the daemon's binary startup
     /// configuration (report 54). `decide_meta_input` reads these to lower a
     /// `(Check …)` shorthand into a full `TestRun` — cluster, host, and mode
@@ -247,11 +245,26 @@ pub struct RuntimeConfiguration {
 /// `nix` and `ssh` programs in their own directory without modifying process
 /// environment shared by other tests.
 #[derive(Debug, Clone)]
-struct EffectExecution {
+pub struct EffectExecution {
     program_directory: Option<PathBuf>,
 }
 
-impl EffectExecution {
+/// Where an external program comes from. Production resolves against the
+/// declarative service PATH; a focused test resolves against an isolated
+/// fixture directory, and nothing else distinguishes the two.
+pub trait ProgramResolution {
+    fn production() -> Self
+    where
+        Self: Sized;
+
+    fn test(program_directory: PathBuf) -> Self
+    where
+        Self: Sized;
+
+    fn program(&self, program: &str) -> PathBuf;
+}
+
+impl ProgramResolution for EffectExecution {
     fn production() -> Self {
         Self {
             program_directory: None,
@@ -294,7 +307,9 @@ pub struct TestDefaults {
     horizon_definition: Option<HorizonDefinition>,
 }
 
-impl TestDefaults {
+/// Lowering an operator's test request onto the runs it actually means, using
+/// the cluster the daemon was configured with.
+pub(crate) trait TestLowering {
     /// Lower one `TestRequest` to the resolved test targets it names. A
     /// `(Run …)` carries cluster/host/mode explicitly; a `(Check …)` fills all
     /// three from these defaults — the routine `(Check mercury)` form (report
@@ -303,6 +318,51 @@ impl TestDefaults {
     /// targets here (the caller rejects an empty resolution honestly rather
     /// than faking a run). Returns the resolved targets so the caller mints an
     /// identifier and records a Pending row per target.
+    fn lower(&self, request: meta::TestRequest) -> Vec<ResolvedTestRun>;
+
+    /// Lower a full `(Run …)`: explicit cluster + host selection + mode, one
+    /// resolved run per node in the selection.
+    fn lower_run(&self, run: meta::TestRun) -> Vec<ResolvedTestRun>;
+
+    /// Lower a routine `(Check [n …])`: cluster, host, and mode all from these
+    /// defaults; one resolved run per named node.
+    fn lower_check(&self, check: meta::QuickCheck) -> Vec<ResolvedTestRun>;
+
+    /// Resolve a `HostSelection` against these defaults: `DefaultHost` reads
+    /// the config default vm-host; `(OnHost h)` overrides to the named host
+    /// (the declared-host-set membership check is a Unit-2b projection gate).
+    fn resolve_host(&self, selection: ordinary::HostSelection) -> ordinary::NodeName;
+
+    /// The explicit node list of a `NodeSelection`. `All` resolves to the
+    /// cluster's test-VM nodes by projecting the configured proposal source
+    /// (Unit 2b): every Pod node whose primary host (`super_node`) declares a
+    /// `VmHost` service. An unconfigured or unreadable proposal source resolves
+    /// `All` to no nodes, so the caller rejects an empty resolution honestly
+    /// rather than faking a sweep.
+    fn nodes_of(&self, selection: meta::NodeSelection) -> Vec<ordinary::NodeName>;
+
+    /// Sweep the configured proposal for the cluster's test-VM-host nodes —
+    /// every node whose `Machine::host_set` (its primary `super_node`, plus the
+    /// additive `super_nodes` once Unit 1 lands on horizon main) is non-empty,
+    /// i.e. a Pod hosted on a vmhost. Empty when no proposal source is
+    /// configured or it fails to project.
+    fn all_test_vm_nodes(&self) -> Vec<ordinary::NodeName>;
+
+    /// Synthetic defaults used only by in-process tests. Production startup
+    /// configuration supplies no test fixture.
+    fn test_default() -> Self
+    where
+        Self: Sized;
+
+    fn default_profile(&self) -> sema::TestExecutionProfile;
+
+    /// The configured proposal projection, if a proposal source is set. The
+    /// host-set validation and the `All` sweep both read it; absent (empty)
+    /// when host-set validation is not configured.
+    fn projection(&self) -> Option<ClusterProjection>;
+}
+
+impl TestLowering for TestDefaults {
     fn lower(&self, request: meta::TestRequest) -> Vec<ResolvedTestRun> {
         match request {
             meta::TestRequest::Run(run) => self.lower_run(run),
@@ -310,8 +370,6 @@ impl TestDefaults {
         }
     }
 
-    /// Lower a full `(Run …)`: explicit cluster + host selection + mode, one
-    /// resolved run per node in the selection.
     fn lower_run(&self, run: meta::TestRun) -> Vec<ResolvedTestRun> {
         let host = self.resolve_host(run.host_selection);
         let profile = run.test_execution_profile;
@@ -327,8 +385,6 @@ impl TestDefaults {
             .collect()
     }
 
-    /// Lower a routine `(Check [n …])`: cluster, host, and mode all from these
-    /// defaults; one resolved run per named node.
     fn lower_check(&self, check: meta::QuickCheck) -> Vec<ResolvedTestRun> {
         check
             .into_payload()
@@ -343,9 +399,6 @@ impl TestDefaults {
             .collect()
     }
 
-    /// Resolve a `HostSelection` against these defaults: `DefaultHost` reads
-    /// the config default vm-host; `(OnHost h)` overrides to the named host
-    /// (the declared-host-set membership check is a Unit-2b projection gate).
     fn resolve_host(&self, selection: ordinary::HostSelection) -> ordinary::NodeName {
         match selection {
             ordinary::HostSelection::DefaultHost => self.default_vm_host.clone(),
@@ -353,12 +406,6 @@ impl TestDefaults {
         }
     }
 
-    /// The explicit node list of a `NodeSelection`. `All` resolves to the
-    /// cluster's test-VM nodes by projecting the configured proposal source
-    /// (Unit 2b): every Pod node whose primary host (`super_node`) declares a
-    /// `VmHost` service. An unconfigured or unreadable proposal source resolves
-    /// `All` to no nodes, so the caller rejects an empty resolution honestly
-    /// rather than faking a sweep.
     fn nodes_of(&self, selection: meta::NodeSelection) -> Vec<ordinary::NodeName> {
         match selection {
             meta::NodeSelection::Nodes(nodes) => nodes,
@@ -366,19 +413,12 @@ impl TestDefaults {
         }
     }
 
-    /// Sweep the configured proposal for the cluster's test-VM-host nodes —
-    /// every node whose `Machine::host_set` (its primary `super_node`, plus the
-    /// additive `super_nodes` once Unit 1 lands on horizon main) is non-empty,
-    /// i.e. a Pod hosted on a vmhost. Empty when no proposal source is
-    /// configured or it fails to project.
     fn all_test_vm_nodes(&self) -> Vec<ordinary::NodeName> {
         self.projection()
             .map(|projection| projection.hosted_pod_nodes())
             .unwrap_or_default()
     }
 
-    /// Synthetic defaults used only by in-process tests. Production startup
-    /// configuration supplies no test fixture.
     fn test_default() -> Self {
         Self {
             cluster: ordinary::ClusterName::from("fixture-cluster"),
@@ -402,9 +442,6 @@ impl TestDefaults {
         }
     }
 
-    /// The configured proposal projection, if a proposal source is set. The
-    /// host-set validation and the `All` sweep both read it; absent (empty)
-    /// when host-set validation is not configured.
     fn projection(&self) -> Option<ClusterProjection> {
         self.horizon_definition
             .clone()
@@ -431,46 +468,6 @@ impl From<&crate::TestDefaults> for TestDefaults {
     }
 }
 
-/// A pipeline-pause gate the deploy job awaits once before its first effect.
-/// Test-only: production [`RuntimeConfiguration`] carries `None`. Backed by a
-/// semaphore that starts with zero permits (the pipeline parks on `acquire`)
-/// until the test `open`s it. Lets a test prove ordering deterministically
-/// without shelling out to `nix`.
-#[derive(Debug, Clone)]
-pub struct EffectBarrier {
-    gate: Arc<tokio::sync::Semaphore>,
-}
-
-impl Default for EffectBarrier {
-    fn default() -> Self {
-        Self::held()
-    }
-}
-
-impl EffectBarrier {
-    /// A barrier that starts CLOSED — the pipeline parks at its first effect
-    /// until [`Self::open`] is called.
-    pub fn held() -> Self {
-        Self {
-            gate: Arc::new(tokio::sync::Semaphore::new(0)),
-        }
-    }
-
-    /// Release the barrier so the parked pipeline proceeds. Idempotent enough
-    /// for a test: adds a generous permit budget so every awaiter passes.
-    pub fn open(&self) {
-        self.gate.add_permits(1024);
-    }
-
-    /// Park until the barrier opens. The acquired permit is forgotten so the
-    /// budget is not returned, keeping the barrier open for any later awaiter.
-    async fn wait(&self) {
-        if let Ok(permit) = self.gate.acquire().await {
-            permit.forget();
-        }
-    }
-}
-
 /// Which single-write meta mutation is in flight, so a `WriteRejected` from the
 /// SEMA engine routes back to the matching typed rejection reply
 /// (`PinRejected` / `UnpinRejected` / `RetireRejected` / `DeployRejected`).
@@ -491,7 +488,7 @@ enum MetaOperation {
 /// spirit `State`->`Record` precedent: a distinct typed lowering, never an
 /// under-filled wire struct.
 #[derive(Debug, Clone)]
-struct ResolvedTestRun {
+pub(crate) struct ResolvedTestRun {
     cluster: ordinary::ClusterName,
     node: ordinary::NodeName,
     host: ordinary::NodeName,
@@ -501,11 +498,34 @@ struct ResolvedTestRun {
     flake: ordinary::FlakeReference,
 }
 
-impl ResolvedTestRun {
+/// A test run that knows its target: the durable row it starts as and the
+/// effect commands that carry it through.
+trait TestRunCommands {
     /// The durable test-run row at acceptance: phase `Submitted`, outcome
     /// `Pending`, no closure yet. The decoupled executor rewrites it through
     /// the real phases (`BringingUp`/`Deploying`/…) to a terminal `Passed`
     /// (with the built closure) or `Failed(stage)` — never a faked pass.
+    fn pending_record(&self, identifier: ordinary::TestRunIdentifier) -> ordinary::TestRunRecord;
+
+    /// The hermetic-check effect command for this run: build
+    /// `<flake>#<request selector>`. The execution profile supplies the exact
+    /// selector and Nix system; the daemon does not infer a node-shaped output.
+    fn hermetic_check_command(&self) -> nexus::HermeticCheckCommand;
+
+    fn nexus_test_execution_profile(&self) -> nexus::TestExecutionProfile;
+
+    /// The live bring-up command for this run: the report-51 host-untouched
+    /// user-namespace bring-up of the built microVM runner on the resolved
+    /// vmhost. The runner closure and guest IP are filled by the live path's
+    /// preceding build; BUILT but not run live here (gated).
+    fn bring_up_command(&self, runner: ordinary::ClosurePath) -> nexus::BringUpTestVmCommand;
+
+    /// The live teardown command for this run: stop the user units so the tap +
+    /// route vanish with the namespace, host netns byte-identical.
+    fn tear_down_command(&self) -> nexus::TearDownTestVmCommand;
+}
+
+impl TestRunCommands for ResolvedTestRun {
     fn pending_record(&self, identifier: ordinary::TestRunIdentifier) -> ordinary::TestRunRecord {
         ordinary::TestRunRecord {
             test_run_identifier: identifier,
@@ -519,9 +539,6 @@ impl ResolvedTestRun {
         }
     }
 
-    /// The hermetic-check effect command for this run: build
-    /// `<flake>#<request selector>`. The execution profile supplies the exact
-    /// selector and Nix system; the daemon does not infer a node-shaped output.
     fn hermetic_check_command(&self) -> nexus::HermeticCheckCommand {
         nexus::HermeticCheckCommand {
             cluster_name: self.cluster.clone(),
@@ -557,10 +574,6 @@ impl ResolvedTestRun {
         }
     }
 
-    /// The live bring-up command for this run: the report-51 host-untouched
-    /// user-namespace bring-up of the built microVM runner on the resolved
-    /// vmhost. The runner closure and guest IP are filled by the live path's
-    /// preceding build; BUILT but not run live here (gated).
     fn bring_up_command(&self, runner: ordinary::ClosurePath) -> nexus::BringUpTestVmCommand {
         nexus::BringUpTestVmCommand {
             cluster_name: self.cluster.clone(),
@@ -575,8 +588,6 @@ impl ResolvedTestRun {
         }
     }
 
-    /// The live teardown command for this run: stop the user units so the tap +
-    /// route vanish with the namespace, host netns byte-identical.
     fn tear_down_command(&self) -> nexus::TearDownTestVmCommand {
         nexus::TearDownTestVmCommand {
             cluster_name: self.cluster.clone(),
@@ -618,9 +629,34 @@ enum TestStage {
     Asserted,
 }
 
-impl TestPipeline {
+/// The in-flight test cursor: what run is being driven, what it has reached,
+/// and the durable rows each step writes.
+trait TestCursor {
     /// The cursor at acceptance — stage `Submitted`, the marker stand-in filled
     /// at the durable write.
+    fn accepted(run: ResolvedTestRun, identifier: ordinary::TestRunIdentifier) -> Self
+    where
+        Self: Sized;
+
+    /// The durable row at a given phase/outcome, carrying the run identity and
+    /// (once built) the closure under test. Rewritten at every transition so a
+    /// `(Query (ByTestRun …))` reads the latest committed step (Unit 2b
+    /// observability).
+    fn record_at(
+        &self,
+        phase: ordinary::TestRunPhase,
+        outcome: ordinary::TestOutcome,
+        closure_path: Option<ordinary::ClosurePath>,
+    ) -> ordinary::TestRunRecord;
+
+    /// The container-lifecycle transition for a live bring-up/teardown state
+    /// change — the driver the report-47 §2 `ContainerLifecycleRecord` table
+    /// was scaffolded for. The container is named `vm-<node>`, the on-demand
+    /// microVM this test brings up.
+    fn container_transition(&self, state: sema::ContainerState) -> sema::ContainerTransition;
+}
+
+impl TestCursor for TestPipeline {
     fn accepted(run: ResolvedTestRun, identifier: ordinary::TestRunIdentifier) -> Self {
         Self {
             run,
@@ -633,10 +669,6 @@ impl TestPipeline {
         }
     }
 
-    /// The durable row at a given phase/outcome, carrying the run identity and
-    /// (once built) the closure under test. Rewritten at every transition so a
-    /// `(Query (ByTestRun …))` reads the latest committed step (Unit 2b
-    /// observability).
     fn record_at(
         &self,
         phase: ordinary::TestRunPhase,
@@ -655,10 +687,6 @@ impl TestPipeline {
         }
     }
 
-    /// The container-lifecycle transition for a live bring-up/teardown state
-    /// change — the driver the report-47 §2 `ContainerLifecycleRecord` table
-    /// was scaffolded for. The container is named `vm-<node>`, the on-demand
-    /// microVM this test brings up.
     fn container_transition(&self, state: sema::ContainerState) -> sema::ContainerTransition {
         sema::ContainerTransition {
             cluster_name: self.run.cluster.clone(),
@@ -685,18 +713,40 @@ pub enum TestSubmissionOutcome {
 /// when the materialized definition explicitly selects it; that resolution is
 /// performed by Horizon before Lojix reads this value.
 #[derive(Debug, Clone)]
-struct ClusterProjection {
+pub(crate) struct ClusterProjection {
     definition: HorizonDefinition,
 }
 
-impl ClusterProjection {
-    fn from_definition(definition: HorizonDefinition) -> Self {
-        Self { definition }
-    }
+/// What the projected cluster says about where a node may run and which hosts
+/// carry it.
+trait ClusterTopology {
+    fn from_definition(definition: HorizonDefinition) -> Self
+    where
+        Self: Sized;
 
     /// Validate that `host` is in `node`'s declared host-set. Rejects
     /// `NodeUnknown` if the node is absent from the resolved projection, or
     /// `VmHostNotDeclaredForNode` if it has no declared VM host.
+    fn validate_host_for_node(
+        &self,
+        host: &ordinary::NodeName,
+        node: &ordinary::NodeName,
+    ) -> std::result::Result<(), meta::TestRejectionReason>;
+
+    /// The declared VM host set of one resolved member. A generic catalogue
+    /// entry which the cluster did not select cannot appear here.
+    fn host_set_of(&self, node: &ordinary::NodeName) -> Option<Vec<String>>;
+
+    /// Every resolved VM node with a declared host. `MachineSpecies::Pod`
+    /// remains a hosted VM guest; it is not reinterpreted as a container.
+    fn hosted_pod_nodes(&self) -> Vec<ordinary::NodeName>;
+}
+
+impl ClusterTopology for ClusterProjection {
+    fn from_definition(definition: HorizonDefinition) -> Self {
+        Self { definition }
+    }
+
     fn validate_host_for_node(
         &self,
         host: &ordinary::NodeName,
@@ -712,8 +762,6 @@ impl ClusterProjection {
         }
     }
 
-    /// The declared VM host set of one resolved member. A generic catalogue
-    /// entry which the cluster did not select cannot appear here.
     fn host_set_of(&self, node: &ordinary::NodeName) -> Option<Vec<String>> {
         let horizon = self.definition.project(node.payload()).ok()?;
         let mut hosts = horizon.node.machine.host.into_iter().collect::<Vec<_>>();
@@ -721,8 +769,6 @@ impl ClusterProjection {
         Some(hosts)
     }
 
-    /// Every resolved VM node with a declared host. `MachineSpecies::Pod`
-    /// remains a hosted VM guest; it is not reinterpreted as a container.
     fn hosted_pod_nodes(&self) -> Vec<ordinary::NodeName> {
         self.definition
             .resolve()
@@ -756,12 +802,28 @@ struct HermeticCheck {
     command: nexus::HermeticCheckCommand,
 }
 
-impl HermeticCheck {
-    fn new(command: nexus::HermeticCheckCommand) -> Self {
-        Self { command }
-    }
+/// Something lojix does to the world outside itself: a process is run, a file
+/// system is written, a remote host is reached. Every effect runs through one
+/// [`EffectExecution`], which decides where the program comes from, and every
+/// failure comes back as a [`StageFailure`] carrying what the stage reported —
+/// the stage classification is the pipeline's business, not the effect's.
+pub(crate) trait Effect {
+    /// What the world hands back when the effect succeeds.
+    type Product;
 
+    async fn run(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<Self::Product, StageFailure>;
+}
+
+/// The one installable a hermetic check builds.
+trait CheckInstallable {
     /// The exact `<flake>#<selector>` installable from the execution profile.
+    fn installable(&self) -> String;
+}
+
+impl CheckInstallable for HermeticCheck {
     fn installable(&self) -> String {
         format!(
             "{}#{}",
@@ -773,6 +835,10 @@ impl HermeticCheck {
                 .payload(),
         )
     }
+}
+
+impl Effect for HermeticCheck {
+    type Product = ordinary::ClosurePath;
 
     /// Run the real `nix build <installable> --print-out-paths`. On exit 0 the
     /// first printed line is the realised check out-path (the closure under
@@ -814,7 +880,39 @@ struct LiveTestVm {
     guest_ip: String,
 }
 
-impl LiveTestVm {
+/// A live test VM as a systemd transient unit: its name and the invocations
+/// that bring it up and tear it down.
+trait TestVmCommands {
+    fn from_bring_up(command: &nexus::BringUpTestVmCommand) -> std::result::Result<Self, String>
+    where
+        Self: Sized;
+
+    fn from_tear_down(command: &nexus::TearDownTestVmCommand) -> std::result::Result<Self, String>
+    where
+        Self: Sized;
+
+    /// The durable `--user` unit name for this guest's namespace bring-up
+    /// (`lojix-test-vm-<node>`), the unit teardown stops.
+    fn unit_name(&self) -> String;
+
+    /// The host-untouched bring-up invocation (report 51 §3): a `--user`
+    /// systemd-run unit that `unshare -rn`s a private netns, brings up the
+    /// additive tap inside it, and `nsenter`s the built runner. Constructed
+    /// here; on a live (gated) run this is `.run().await`'d.
+    fn bring_up_invocation(&self) -> NixCommand;
+
+    /// The in-namespace bring-up body: create the tap, route to the guest IP,
+    /// then `nsenter` the built runner. The tap design maps one-to-one onto
+    /// the C2-emitted `.network` content (report 51 §2), applied in the netns
+    /// instead of host networkd.
+    fn bring_up_body(&self) -> String;
+
+    /// The host-untouched teardown invocation: stop the user units so the tap +
+    /// route vanish with the namespace (host netns byte-identical).
+    fn tear_down_invocation(&self) -> NixCommand;
+}
+
+impl TestVmCommands for LiveTestVm {
     fn from_bring_up(command: &nexus::BringUpTestVmCommand) -> std::result::Result<Self, String> {
         Ok(Self {
             target: SshTarget::from_transport(&command.deployment_transport)?,
@@ -833,16 +931,10 @@ impl LiveTestVm {
         })
     }
 
-    /// The durable `--user` unit name for this guest's namespace bring-up
-    /// (`lojix-test-vm-<node>`), the unit teardown stops.
     fn unit_name(&self) -> String {
         format!("lojix-test-vm-{}", self.node.payload())
     }
 
-    /// The host-untouched bring-up invocation (report 51 §3): a `--user`
-    /// systemd-run unit that `unshare -rn`s a private netns, brings up the
-    /// additive tap inside it, and `nsenter`s the built runner. Constructed
-    /// here; on a live (gated) run this is `.run().await`'d.
     fn bring_up_invocation(&self) -> NixCommand {
         let script = format!(
             "set -eu\n\
@@ -855,10 +947,6 @@ impl LiveTestVm {
             .remote_invocation(ShellCommand::from_raw(script))
     }
 
-    /// The in-namespace bring-up body: create the tap, route to the guest IP,
-    /// then `nsenter` the built runner. The tap design maps one-to-one onto
-    /// the C2-emitted `.network` content (report 51 §2), applied in the netns
-    /// instead of host networkd.
     fn bring_up_body(&self) -> String {
         format!(
             "ip tuntap add dev vmt0 mode tap; \
@@ -871,8 +959,6 @@ impl LiveTestVm {
         )
     }
 
-    /// The host-untouched teardown invocation: stop the user units so the tap +
-    /// route vanish with the namespace (host netns byte-identical).
     fn tear_down_invocation(&self) -> NixCommand {
         self.target
             .remote_invocation(ShellCommand::from_raw(format!(
@@ -905,7 +991,6 @@ impl From<&NexusConfiguration> for RuntimeConfiguration {
                 .join("generated-inputs"),
             daemon_host: ordinary::NodeName::new(configuration.daemon_host.clone()),
             effect_execution: EffectExecution::production(),
-            effect_barrier: None,
             test_defaults: match &configuration.test_defaults_choice {
                 signal_lojix::TestDefaultsChoice::NoTestDefaults => None,
                 signal_lojix::TestDefaultsChoice::TestDefaults(defaults) => {
@@ -923,40 +1008,55 @@ impl From<&LegacyStartupConfiguration> for RuntimeConfiguration {
                 .join("generated-inputs"),
             daemon_host: ordinary::NodeName::new(configuration.daemon_host.clone()),
             effect_execution: EffectExecution::production(),
-            effect_barrier: None,
             test_defaults: configuration.test_defaults.as_ref().map(TestDefaults::from),
         }
     }
 }
 
-impl RuntimeConfiguration {
-    pub fn test_default() -> Self {
-        Self {
-            generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
-            daemon_host: ordinary::NodeName::from("daemon-host"),
-            effect_execution: EffectExecution::production(),
-            effect_barrier: None,
-            test_defaults: Some(TestDefaults::test_default()),
-        }
-    }
-
-    /// A test configuration whose deploy pipeline parks at its first effect on
-    /// the given barrier — the seam the up9b decoupling tests drive.
-    pub fn test_with_effect_barrier(barrier: EffectBarrier) -> Self {
-        Self {
-            generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
-            daemon_host: ordinary::NodeName::from("daemon-host"),
-            effect_execution: EffectExecution::production(),
-            effect_barrier: Some(barrier),
-            test_defaults: Some(TestDefaults::test_default()),
-        }
-    }
+/// The immutable runtime facts one daemon process was started with, shared
+/// across every per-request engine value.
+pub trait DaemonRuntime {
+    fn test_default() -> Self
+    where
+        Self: Sized;
 
     /// A hermetic focused-test configuration whose external command names are
     /// resolved from `program_directory`.
     /// Production configuration cannot set this directory; it resolves command
     /// names through the declarative service PATH.
-    pub fn test_with_effect_program_directory(
+    fn test_with_effect_program_directory(
+        generated_inputs_directory: PathBuf,
+        program_directory: PathBuf,
+    ) -> Self
+    where
+        Self: Sized;
+
+    fn effect_execution(&self) -> &EffectExecution;
+
+    /// The node this daemon runs on — used to detect a self-targeting deploy so
+    /// activation routes around the self-Switch deadlock (a foreground ssh that
+    /// `switch-to-configuration switch` kills by restarting the daemon).
+    fn daemon_host(&self) -> &ordinary::NodeName;
+
+    /// The configured test-op defaults, if the daemon was started with them.
+    fn test_defaults(&self) -> Option<&TestDefaults>;
+
+    fn materialization_root(&self, command: &nexus::HorizonMaterializationCommand) -> PathBuf;
+
+    fn shape_name(shape: &nexus::MaterializationShape) -> &'static str;
+}
+
+impl DaemonRuntime for RuntimeConfiguration {
+    fn test_default() -> Self {
+        Self {
+            generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
+            daemon_host: ordinary::NodeName::from("daemon-host"),
+            effect_execution: EffectExecution::production(),
+            test_defaults: Some(TestDefaults::test_default()),
+        }
+    }
+
+    fn test_with_effect_program_directory(
         generated_inputs_directory: PathBuf,
         program_directory: PathBuf,
     ) -> Self {
@@ -964,27 +1064,18 @@ impl RuntimeConfiguration {
             generated_inputs_directory,
             daemon_host: ordinary::NodeName::from("daemon-host"),
             effect_execution: EffectExecution::test(program_directory),
-            effect_barrier: None,
             test_defaults: Some(TestDefaults::test_default()),
         }
-    }
-
-    fn effect_barrier(&self) -> Option<&EffectBarrier> {
-        self.effect_barrier.as_ref()
     }
 
     fn effect_execution(&self) -> &EffectExecution {
         &self.effect_execution
     }
 
-    /// The node this daemon runs on — used to detect a self-targeting deploy so
-    /// activation routes around the self-Switch deadlock (a foreground ssh that
-    /// `switch-to-configuration switch` kills by restarting the daemon).
-    pub fn daemon_host(&self) -> &ordinary::NodeName {
+    fn daemon_host(&self) -> &ordinary::NodeName {
         &self.daemon_host
     }
 
-    /// The configured test-op defaults, if the daemon was started with them.
     fn test_defaults(&self) -> Option<&TestDefaults> {
         self.test_defaults.as_ref()
     }
@@ -1122,9 +1213,26 @@ enum DeployAction {
     },
 }
 
-impl DeployAction {
+/// What a deploy action implies about the pipeline: whether it produces a
+/// closure, whether it activates, and what activation profile it uses.
+trait DeployActionShape {
     /// `false` only for host `Evaluate` (derivation path only, no realised
     /// closure). User-environment actions always build a closure.
+    fn produces_closure(&self) -> bool;
+
+    /// Whether the action copies + activates after the build: host
+    /// SetBootProfile/ActivateNow/TestActivation/ScheduleBootOnce, or
+    /// user-environment SetProfile/ActivateNow. Host Evaluate/Realize and
+    /// user-environment Realize stop at the realised closure.
+    fn activates(&self) -> bool;
+
+    /// The activation profile carried on the activate command — the shape that
+    /// decides which target-side activation runs (host switch-to-configuration
+    /// vs user-environment home-manager profile/activate).
+    fn activation_profile(&self) -> nexus::ActivationProfile;
+}
+
+impl DeployActionShape for DeployAction {
     fn produces_closure(&self) -> bool {
         match self {
             Self::Host(action) => !matches!(action, ordinary::HostDeployAction::Evaluate),
@@ -1132,10 +1240,6 @@ impl DeployAction {
         }
     }
 
-    /// Whether the action copies + activates after the build: host
-    /// SetBootProfile/ActivateNow/TestActivation/ScheduleBootOnce, or
-    /// user-environment SetProfile/ActivateNow. Host Evaluate/Realize and
-    /// user-environment Realize stop at the realised closure.
     fn activates(&self) -> bool {
         match self {
             Self::Host(action) => matches!(
@@ -1155,9 +1259,6 @@ impl DeployAction {
         }
     }
 
-    /// The activation profile carried on the activate command — the shape that
-    /// decides which target-side activation runs (host switch-to-configuration
-    /// vs user-environment home-manager profile/activate).
     fn activation_profile(&self) -> nexus::ActivationProfile {
         match self {
             Self::Host(action) => nexus::ActivationProfile::Host(*action),
@@ -1175,7 +1276,30 @@ struct FlakeReferencePolicy<'a> {
     reference: &'a str,
 }
 
-impl<'a> FlakeReferencePolicy<'a> {
+/// What lojix will admit as a flake reference, and what it reads out of one.
+/// Every answer is about the caller's text exactly as written: nothing is
+/// rewritten into acceptability.
+trait FlakeAdmission<'a> {
+    fn new(reference: &'a str) -> Self
+    where
+        Self: Sized;
+
+    fn common_locator_and_query(&self) -> Option<(&str, Option<&str>)>;
+
+    fn is_immutable(&self) -> bool;
+
+    fn is_resolve_and_record(&self) -> bool;
+
+    fn safe_locator_component(value: &str) -> bool;
+
+    fn safe_relative_dir(value: &str) -> bool;
+
+    fn safe_ref(value: &str) -> bool;
+
+    fn immutable_revision(&self) -> Option<sema::ImmutableRevision>;
+}
+
+impl<'a> FlakeAdmission<'a> for FlakeReferencePolicy<'a> {
     fn new(reference: &'a str) -> Self {
         Self { reference }
     }
@@ -1310,11 +1434,20 @@ enum EvalRefresh {
     TrustImmutablePin,
 }
 
-impl EvalRefresh {
+/// Whether a flake evaluation must refuse Nix's cached resolution.
+trait EvalFreshness {
     /// The refresh decision for one eval, from the deploy's source-revision
     /// policy and its resolved flake reference. Only a `RequireImmutable`
     /// deploy whose reference actually carries an immutable identity may trust
     /// the eval cache; every other case refreshes.
+    fn for_source(policy: ordinary::SourceRevisionPolicy, flake: &str) -> Self
+    where
+        Self: Sized;
+
+    fn adds_refresh_flag(self) -> bool;
+}
+
+impl EvalFreshness for EvalRefresh {
     fn for_source(policy: ordinary::SourceRevisionPolicy, flake: &str) -> Self {
         match policy {
             ordinary::SourceRevisionPolicy::RequireImmutable
@@ -1335,7 +1468,24 @@ struct NixFlakeMetadata {
     value: serde_json::Value,
 }
 
-impl NixFlakeMetadata {
+/// Reading the source identity out of what `nix flake metadata` answered.
+trait FlakeMetadataReading {
+    fn parse(text: &str) -> std::result::Result<Self, String>
+    where
+        Self: Sized;
+
+    fn source_revision(
+        &self,
+        policy: ordinary::SourceRevisionPolicy,
+        requested_ref: ordinary::FlakeReference,
+    ) -> ordinary::SourceRevisionRecord;
+
+    fn resolved_revision(&self) -> String;
+
+    fn string_at(&self, path: &[&str]) -> Option<String>;
+}
+
+impl FlakeMetadataReading for NixFlakeMetadata {
     fn parse(text: &str) -> std::result::Result<Self, String> {
         serde_json::from_str(text)
             .map(|value| Self { value })
@@ -1378,7 +1528,99 @@ impl NixFlakeMetadata {
     }
 }
 
-impl DeployPipeline {
+/// The in-flight deploy cursor: what was submitted, what has been resolved so
+/// far, and the effect command each next step needs.
+trait DeployCursor {
+    fn deployment_request_identity(
+        submission: &sema::DeploySubmission,
+    ) -> sema::DeploymentRequestIdentity;
+
+    fn from_submission(
+        deployment_identifier: ordinary::DeploymentIdentifier,
+        generation_identifier: ordinary::GenerationIdentifier,
+        accepted_marker: ordinary::StateMarker,
+        submission: sema::DeploySubmission,
+    ) -> Self
+    where
+        Self: Sized;
+
+    fn host_generation_artifact(
+        composition: ordinary::HostComposition,
+    ) -> ordinary::GenerationArtifact;
+
+    fn host_activation_effect(action: ordinary::HostDeployAction) -> ordinary::ActivationEffect;
+
+    fn user_environment_activation_effect(
+        action: meta::UserEnvironmentAction,
+    ) -> ordinary::ActivationEffect;
+
+    fn convert_substituters(
+        substituters: Vec<meta::ExtraSubstituter>,
+    ) -> Vec<nexus::ExtraSubstituter>;
+
+    /// The build command runs through the local daemon Nix client. An explicit
+    /// builder specification is passed verbatim to Nix; its result is imported
+    /// locally before the explicit transport copies the exact closure onward.
+    fn build_target(&self) -> nexus::BuildTarget;
+
+    fn flake_auth_request(&self) -> nexus::FlakeAuthRequest;
+
+    fn needs_horizon_materialization(&self) -> bool;
+
+    fn horizon_materialization_command(&self) -> nexus::HorizonMaterializationCommand;
+
+    fn materialization_shape(&self) -> nexus::MaterializationShape;
+
+    fn nix_eval_command(&self) -> nexus::NixEvalCommand;
+
+    fn nix_build_command(&self, closure_path: ordinary::ClosurePath) -> nexus::NixBuildCommand;
+
+    fn copy_closure_command(
+        &self,
+        closure_path: ordinary::ClosurePath,
+    ) -> nexus::CopyClosureCommand;
+
+    fn activate_generation_command(
+        &self,
+        closure_path: ordinary::ClosurePath,
+    ) -> nexus::ActivateGenerationCommand;
+
+    fn source_revision_record(&self) -> ordinary::SourceRevisionRecord;
+
+    /// The activation-record write. The closure path, resolved source revision,
+    /// and computed activation slot are mandatory: by the time the pipeline
+    /// records activation they have been captured on the cursor (the activate
+    /// command already required the closure and returned the slot), so `None`
+    /// here is an internal invariant failure surfaced through
+    /// `activation_commit` returning `None` rather than committing incomplete
+    /// state into the live set.
+    fn activation_commit(&self) -> Option<sema::ActivationCommit>;
+
+    fn phase_event(
+        &self,
+        phase: ordinary::DeploymentPhase,
+        event_log_position: ordinary::EventLogPosition,
+    ) -> ordinary::DeploymentPhaseEvent;
+
+    fn deployment_environment(&self) -> sema::DeploymentEnvironment;
+
+    /// The BootOnce transient-unit name a resumed `Activating` job polls via
+    /// `journalctl -u <unit>` instead of re-activating. Deterministic in the
+    /// deployment identifier so the resumed daemon computes the same name that
+    /// was persisted at submit, rather than a time/pid value it cannot
+    /// reconstruct. `None` for non-BootOnce actions (which have no transient
+    /// unit to poll; copy is idempotent and activation re-runs safely).
+    fn boot_once_unit(&self) -> Option<String>;
+
+    /// The durable in-flight job row at the given phase. Written on submit and
+    /// rewritten at every phase transition (up9q): the persisted phase cursor,
+    /// closure path (once built), exact private routing snapshot, and BootOnce
+    /// unit name let a restarted daemon read the row without recomputing a
+    /// route or selector.
+    fn deploy_job(&self, phase: sema::DeployJobPhase) -> sema::DeployJob;
+}
+
+impl DeployCursor for DeployPipeline {
     fn deployment_request_identity(
         submission: &sema::DeploySubmission,
     ) -> sema::DeploymentRequestIdentity {
@@ -1542,9 +1784,6 @@ impl DeployPipeline {
             .collect()
     }
 
-    /// The build command runs through the local daemon Nix client. An explicit
-    /// builder specification is passed verbatim to Nix; its result is imported
-    /// locally before the explicit transport copies the exact closure onward.
     fn build_target(&self) -> nexus::BuildTarget {
         match &self.builder {
             Some(builder) => {
@@ -1691,13 +1930,6 @@ impl DeployPipeline {
             })
     }
 
-    /// The activation-record write. The closure path, resolved source revision,
-    /// and computed activation slot are mandatory: by the time the pipeline
-    /// records activation they have been captured on the cursor (the activate
-    /// command already required the closure and returned the slot), so `None`
-    /// here is an internal invariant failure surfaced through
-    /// `activation_commit` returning `None` rather than committing incomplete
-    /// state into the live set.
     fn activation_commit(&self) -> Option<sema::ActivationCommit> {
         Some(sema::ActivationCommit {
             generation_identifier: self.generation_identifier.clone(),
@@ -1740,12 +1972,6 @@ impl DeployPipeline {
         }
     }
 
-    /// The BootOnce transient-unit name a resumed `Activating` job polls via
-    /// `journalctl -u <unit>` instead of re-activating. Deterministic in the
-    /// deployment identifier so the resumed daemon computes the same name that
-    /// was persisted at submit, rather than a time/pid value it cannot
-    /// reconstruct. `None` for non-BootOnce actions (which have no transient
-    /// unit to poll; copy is idempotent and activation re-runs safely).
     fn boot_once_unit(&self) -> Option<String> {
         match &self.action {
             DeployAction::Host(ordinary::HostDeployAction::ScheduleBootOnce) => {
@@ -1755,11 +1981,6 @@ impl DeployPipeline {
         }
     }
 
-    /// The durable in-flight job row at the given phase. Written on submit and
-    /// rewritten at every phase transition (up9q): the persisted phase cursor,
-    /// closure path (once built), exact private routing snapshot, and BootOnce
-    /// unit name let a restarted daemon read the row without recomputing a
-    /// route or selector.
     fn deploy_job(&self, phase: sema::DeployJobPhase) -> sema::DeployJob {
         sema::DeployJob {
             deployment_identifier: self.deployment_identifier.clone(),
@@ -1831,49 +2052,22 @@ pub enum DeployJobResumption {
     AlreadyTerminal,
 }
 
-impl sema::DeployJob {
+/// What a persisted deploy-job row says about resuming the deployment it
+/// belongs to after the connection that submitted it is gone.
+pub(crate) trait DeployJobResuming {
     /// Reconstruct the retained PID-1 receipt for exactly a same-host host
     /// `TestActivation`. The durable submission already binds the deployment
     /// id, action, backend, and target node, so a second BootOnce-shaped field
     /// would be redundant and misleading.
-    pub(crate) fn detached_test_activation_unit(
+    fn detached_test_activation_unit(
         &self,
         daemon_host: &ordinary::NodeName,
-    ) -> Option<DetachedActivationUnit> {
-        if self.deploy_job_phase != sema::DeployJobPhase::Activating
-            || self.node_name != *daemon_host
-            || self.activation_backend != sema::ActivationBackend::NixosSystemdBootV1
-            || !matches!(
-                self.optional_deploy_submission.as_ref(),
-                Some(sema::DeploySubmission::Host(host))
-                    if host.host_deploy_action == ordinary::HostDeployAction::TestActivation
-                        && host.activation_backend == sema::ActivationBackend::NixosSystemdBootV1
-            )
-        {
-            return None;
-        }
-        Some(DetachedActivationUnit::for_deployment(
-            &self.deployment_identifier,
-        ))
-    }
+    ) -> Option<DetachedActivationUnit>;
 
     /// The reconcile decision for this persisted job, read on daemon start. A
     /// pure projection of the persisted phase cursor — the daemon calls it once
     /// per resumed row and acts on the typed verdict (up9q resume scaffolding).
-    pub fn resumption(&self) -> DeployJobResumption {
-        match self.deploy_job_phase {
-            sema::DeployJobPhase::Activating => DeployJobResumption::PollActivationUnit {
-                unit: self.boot_once_unit.clone(),
-            },
-            sema::DeployJobPhase::Submitted
-            | sema::DeployJobPhase::Building
-            | sema::DeployJobPhase::Built
-            | sema::DeployJobPhase::Copying => DeployJobResumption::RestartPipeline,
-            sema::DeployJobPhase::Activated | sema::DeployJobPhase::Failed => {
-                DeployJobResumption::AlreadyTerminal
-            }
-        }
-    }
+    fn resumption(&self) -> DeployJobResumption;
 
     /// The live-set + gc-root rows a restarted daemon persists for a detached
     /// self-switch it could not record before its own activation restarted it
@@ -1903,7 +2097,52 @@ impl sema::DeployJob {
     /// returns `None`, so it is left for S5 rather than mis-recorded as a
     /// Current complete-host generation. Also `None` when the job never captured
     /// a built closure path, so there is nothing to record.
-    pub fn self_switch_activation_record(
+    fn self_switch_activation_record(
+        &self,
+        daemon_host_system_closure: Option<&str>,
+    ) -> Option<(sema::LiveGeneration, sema::GcRoot)>;
+
+    fn is_persisted_host_activate_now(&self) -> bool;
+}
+
+impl DeployJobResuming for sema::DeployJob {
+    fn detached_test_activation_unit(
+        &self,
+        daemon_host: &ordinary::NodeName,
+    ) -> Option<DetachedActivationUnit> {
+        if self.deploy_job_phase != sema::DeployJobPhase::Activating
+            || self.node_name != *daemon_host
+            || self.activation_backend != sema::ActivationBackend::NixosSystemdBootV1
+            || !matches!(
+                self.optional_deploy_submission.as_ref(),
+                Some(sema::DeploySubmission::Host(host))
+                    if host.host_deploy_action == ordinary::HostDeployAction::TestActivation
+                        && host.activation_backend == sema::ActivationBackend::NixosSystemdBootV1
+            )
+        {
+            return None;
+        }
+        Some(DetachedActivationUnit::for_deployment(
+            &self.deployment_identifier,
+        ))
+    }
+
+    fn resumption(&self) -> DeployJobResumption {
+        match self.deploy_job_phase {
+            sema::DeployJobPhase::Activating => DeployJobResumption::PollActivationUnit {
+                unit: self.boot_once_unit.clone(),
+            },
+            sema::DeployJobPhase::Submitted
+            | sema::DeployJobPhase::Building
+            | sema::DeployJobPhase::Built
+            | sema::DeployJobPhase::Copying => DeployJobResumption::RestartPipeline,
+            sema::DeployJobPhase::Activated | sema::DeployJobPhase::Failed => {
+                DeployJobResumption::AlreadyTerminal
+            }
+        }
+    }
+
+    fn self_switch_activation_record(
         &self,
         daemon_host_system_closure: Option<&str>,
     ) -> Option<(sema::LiveGeneration, sema::GcRoot)> {
@@ -2850,7 +3089,7 @@ impl SchemaRuntime {
                 ) {
                     true
                 } else {
-                    HorizonUserName::try_new(deployment.user_name.payload().clone())
+                    HorizonUserName::try_from(deployment.user_name.payload().clone())
                         .ok()
                         .zip(target.as_ref().ok())
                         .is_some_and(|(user, target)| {
@@ -4502,13 +4741,6 @@ impl SchemaRuntime {
     // ---- real nix IO (port plan §4.3) -----------------------------------
 
     async fn resolve_flake_auth(&self, request: nexus::FlakeAuthRequest) -> nexus::EffectResult {
-        // Park on the test effect barrier (if any) before the first real effect
-        // runs. Production carries no barrier and falls straight through; a
-        // decoupling test holds it closed to prove the accepted handle is
-        // replied while the pipeline is still parked here (up9b).
-        if let Some(barrier) = self.configuration.effect_barrier() {
-            barrier.wait().await;
-        }
         // Resolve the flake metadata to a locked revision through Nix. The
         // typed SourceRevisionRecord produced here is carried through the
         // eval/build path, event log, deploy-job row, and live-generation state.
@@ -4531,9 +4763,14 @@ impl SchemaRuntime {
         &self,
         command: nexus::HorizonMaterializationCommand,
     ) -> nexus::EffectResult {
-        let materialization =
-            HorizonMaterialization::new(self.configuration.as_ref().clone(), command);
-        match materialization.run().await {
+        let materialization = HorizonMaterialization {
+            configuration: self.configuration.as_ref().clone(),
+            command,
+        };
+        match materialization
+            .run(self.configuration.effect_execution())
+            .await
+        {
             Ok(inputs) => nexus::EffectResult::HorizonMaterialized(inputs),
             Err(detail) => Self::effect_failed(nexus::EffectStage::MaterializeHorizon, detail),
         }
@@ -4698,7 +4935,7 @@ impl SchemaRuntime {
     ) -> nexus::EffectResult {
         let cluster_name = command.cluster_name.clone();
         let node_name = command.node_name.clone();
-        match HermeticCheck::new(command)
+        match (HermeticCheck { command })
             .run(self.configuration.effect_execution())
             .await
         {
@@ -4779,24 +5016,27 @@ struct HorizonMaterialization {
     command: nexus::HorizonMaterializationCommand,
 }
 
-impl HorizonMaterialization {
-    fn new(
-        configuration: RuntimeConfiguration,
-        command: nexus::HorizonMaterializationCommand,
-    ) -> Self {
-        Self {
-            configuration,
-            command,
-        }
-    }
+impl Effect for HorizonMaterialization {
+    type Product = nexus::MaterializedInputs;
 
-    async fn run(&self) -> std::result::Result<nexus::MaterializedInputs, StageFailure> {
-        self.run_inner()
+    async fn run(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<nexus::MaterializedInputs, StageFailure> {
+        self.materialize(execution)
             .await
             .map_err(|error| StageFailure::from(error.to_string()))
     }
+}
 
-    async fn run_inner(&self) -> Result<nexus::MaterializedInputs> {
+/// Projecting cluster data through horizon-rs and writing it out as the flake
+/// inputs one deployment's evaluation overrides.
+trait HorizonMaterializing {
+    async fn materialize(&self, execution: &EffectExecution) -> Result<nexus::MaterializedInputs>;
+}
+
+impl HorizonMaterializing for HorizonMaterialization {
+    async fn materialize(&self, execution: &EffectExecution) -> Result<nexus::MaterializedInputs> {
         let horizon = self
             .command
             .horizon_definition
@@ -4810,7 +5050,7 @@ impl HorizonMaterialization {
             self.command.materialization_shape.clone(),
             secrets_source,
         )
-        .write(self.configuration.effect_execution())
+        .write(execution)
         .await
     }
 }
@@ -4821,7 +5061,19 @@ struct MaterializationRoot {
     path: PathBuf,
 }
 
-impl MaterializationRoot {
+/// The directory one materialization result is written under, and the
+/// per-input directories inside it.
+trait MaterializationLayout {
+    fn new(path: PathBuf) -> Self
+    where
+        Self: Sized;
+
+    fn prepare(&self) -> Result<()>;
+
+    fn input_directory(&self, name: GeneratedInputName) -> GeneratedInputDirectory;
+}
+
+impl MaterializationLayout for MaterializationRoot {
     fn new(path: PathBuf) -> Self {
         Self { path }
     }
@@ -4845,7 +5097,22 @@ struct MaterializedInputSet {
     secrets_source: ClusterSecretsDirectory,
 }
 
-impl MaterializedInputSet {
+/// Writing a projected Horizon, its system, its deployment shape and its
+/// secrets out as the flake inputs a Nix evaluation will override.
+trait InputSetWriting {
+    fn new(
+        root: MaterializationRoot,
+        horizon: Horizon,
+        shape: nexus::MaterializationShape,
+        secrets_source: ClusterSecretsDirectory,
+    ) -> Self
+    where
+        Self: Sized;
+
+    async fn write(&self, execution: &EffectExecution) -> Result<nexus::MaterializedInputs>;
+}
+
+impl InputSetWriting for MaterializedInputSet {
     fn new(
         root: MaterializationRoot,
         horizon: Horizon,
@@ -4902,7 +5169,48 @@ struct GeneratedInputDirectory {
     path: PathBuf,
 }
 
-impl GeneratedInputDirectory {
+/// One generated flake input directory: what is written into it, and the
+/// override that points the evaluation at the result.
+trait GeneratedInputWriting: Sized {
+    fn new(path: PathBuf) -> Self
+    where
+        Self: Sized;
+
+    fn prepare(&self) -> Result<()>;
+
+    fn write_horizon(&self, horizon: &Horizon) -> Result<Self>;
+
+    fn write_system(&self, system: &str) -> Result<Self>;
+
+    fn write_deployment(&self, deployment: &DeploymentInput) -> Result<Self>;
+
+    /// Generate the per-deploy `secrets` override: copy each cluster sops file
+    /// into this directory as opaque bytes and emit a self-contained flake
+    /// mapping each CriomOS `sopsFiles` attribute to its local `./<file>.sops`
+    /// path. When the cluster has no secrets directory (or it is empty) the
+    /// flake still exposes `sopsFiles = { }`, matching the CriomOS stub so
+    /// non-cluster sources stay buildable.
+    ///
+    /// The directory is wiped and recreated EACH call before copying, so it
+    /// holds exactly the current secrets — a removed cluster secret leaves no
+    /// stale ciphertext that would drift the narHash (audit fix). Two files that
+    /// map to the same `sopsFiles` attribute name are a real conflict and return
+    /// a typed `Error::SecretAttributeCollision`, never a silent last-writer-wins.
+    fn write_secrets(&self, secrets: &ClusterSecretsDirectory) -> Result<Self>;
+
+    /// Remove the generated directory (ignoring an absent one) and recreate it
+    /// empty, so a regenerated `secrets` input contains exactly the current
+    /// files with no stale leftovers from a prior deploy.
+    fn reset_directory(&self) -> Result<()>;
+
+    async fn to_override(
+        &self,
+        name: GeneratedInputName,
+        execution: &EffectExecution,
+    ) -> Result<nexus::FlakeInputOverride>;
+}
+
+impl GeneratedInputWriting for GeneratedInputDirectory {
     fn new(path: PathBuf) -> Self {
         Self { path }
     }
@@ -4946,18 +5254,6 @@ impl GeneratedInputDirectory {
         Ok(self.clone())
     }
 
-    /// Generate the per-deploy `secrets` override: copy each cluster sops file
-    /// into this directory as opaque bytes and emit a self-contained flake
-    /// mapping each CriomOS `sopsFiles` attribute to its local `./<file>.sops`
-    /// path. When the cluster has no secrets directory (or it is empty) the
-    /// flake still exposes `sopsFiles = { }`, matching the CriomOS stub so
-    /// non-cluster sources stay buildable.
-    ///
-    /// The directory is wiped and recreated EACH call before copying, so it
-    /// holds exactly the current secrets — a removed cluster secret leaves no
-    /// stale ciphertext that would drift the narHash (audit fix). Two files that
-    /// map to the same `sopsFiles` attribute name are a real conflict and return
-    /// a typed `Error::SecretAttributeCollision`, never a silent last-writer-wins.
     fn write_secrets(&self, secrets: &ClusterSecretsDirectory) -> Result<Self> {
         self.reset_directory()?;
         let files = secrets.secret_files()?;
@@ -4984,9 +5280,6 @@ impl GeneratedInputDirectory {
         Ok(self.clone())
     }
 
-    /// Remove the generated directory (ignoring an absent one) and recreate it
-    /// empty, so a regenerated `secrets` input contains exactly the current
-    /// files with no stale leftovers from a prior deploy.
     fn reset_directory(&self) -> Result<()> {
         match fs::remove_dir_all(&self.path) {
             Ok(()) => {}
@@ -5021,8 +5314,8 @@ enum GeneratedInputName {
     Secrets,
 }
 
-impl GeneratedInputName {
-    fn as_str(self) -> &'static str {
+impl crate::Named for GeneratedInputName {
+    fn as_str(&self) -> &str {
         match self {
             Self::Horizon => "horizon",
             Self::System => "system",
@@ -5039,7 +5332,14 @@ struct DeploymentInput {
     include_all_firmware: bool,
 }
 
-impl DeploymentInput {
+/// The deployment shape as the generated flake that expresses it.
+trait DeploymentFlakeText: Sized {
+    fn from_shape(shape: &nexus::MaterializationShape) -> Option<Self>;
+
+    fn flake_text(&self) -> String;
+}
+
+impl DeploymentFlakeText for DeploymentInput {
     fn from_shape(shape: &nexus::MaterializationShape) -> Option<Self> {
         match shape {
             nexus::MaterializationShape::CompleteHost => Some(Self {
@@ -5073,7 +5373,19 @@ struct ClusterSecretsDirectory {
     path: Option<PathBuf>,
 }
 
-impl ClusterSecretsDirectory {
+/// The caller-supplied secrets directory a materialization copies from.
+trait SecretsSource {
+    fn from_input(input: &sema::SecretsInput) -> Result<Self>
+    where
+        Self: Sized;
+
+    /// The `*.sops` files in this directory, sorted by file name for a stable
+    /// generated flake. An absent directory yields an empty list (bootstrap
+    /// sources carry no cluster secrets); other read failures propagate.
+    fn secret_files(&self) -> Result<Vec<ClusterSecretFile>>;
+}
+
+impl SecretsSource for ClusterSecretsDirectory {
     fn from_input(input: &sema::SecretsInput) -> Result<Self> {
         match input {
             sema::SecretsInput::NoSecrets => Ok(Self { path: None }),
@@ -5095,9 +5407,6 @@ impl ClusterSecretsDirectory {
         }
     }
 
-    /// The `*.sops` files in this directory, sorted by file name for a stable
-    /// generated flake. An absent directory yields an empty list (bootstrap
-    /// sources carry no cluster secrets); other read failures propagate.
     fn secret_files(&self) -> Result<Vec<ClusterSecretFile>> {
         let Some(directory) = &self.path else {
             return Ok(Vec::new());
@@ -5130,24 +5439,49 @@ struct ClusterSecretFile {
     path: PathBuf,
 }
 
-impl ClusterSecretFile {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
+/// One secret file: how it sorts, what it is called, and how it is copied
+/// into a generated input.
+trait SecretFileCopying {
+    fn new(path: PathBuf) -> Self
+    where
+        Self: Sized;
 
     /// The full path, used as the stable sort key for a deterministic generated
     /// flake. Within one secrets directory it orders identically to the file
     /// name, and unlike `file_name` it is infallible so the sort comparator
     /// stays total even for a (later-rejected) non-UTF-8 name.
-    fn sort_key(&self) -> &Path {
-        &self.path
-    }
+    fn sort_key(&self) -> &Path;
 
     /// The bare file name (`fixtureCamelCase.sops`) used both for the copy
     /// destination and the generated `./<file>.sops` Nix path. A non-UTF-8 file
     /// name is a real error (it cannot name a Nix path), not an empty string, so
     /// it returns a typed `Error::SecretFileNameNotUtf8` per the typed-error
     /// discipline.
+    fn file_name(&self) -> Result<String>;
+
+    /// The CriomOS `sopsFiles` attribute name: the `.sops` filename stem
+    /// VERBATIM (only the `.sops` suffix stripped), with NO case transform. The
+    /// coordinated design renames each cluster secret file to its exact
+    /// camelCase consumer name (`fixtureCamelCase.sops`), so the attribute
+    /// name is the stem as written — no hidden, lossy kebab-to-camel coupling. A
+    /// non-UTF-8 stem returns a typed `Error::SecretFileNameNotUtf8`.
+    fn attribute_name(&self) -> Result<String>;
+
+    /// Copy the opaque ciphertext into the generated input directory so the
+    /// flake is self-contained (its narHash covers the file). The contents are
+    /// never read into the daemon.
+    fn copy_into(&self, directory: &Path) -> Result<()>;
+}
+
+impl SecretFileCopying for ClusterSecretFile {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn sort_key(&self) -> &Path {
+        &self.path
+    }
+
     fn file_name(&self) -> Result<String> {
         self.path
             .file_name()
@@ -5156,12 +5490,6 @@ impl ClusterSecretFile {
             .ok_or_else(|| crate::Error::SecretFileNameNotUtf8(self.path.clone()))
     }
 
-    /// The CriomOS `sopsFiles` attribute name: the `.sops` filename stem
-    /// VERBATIM (only the `.sops` suffix stripped), with NO case transform. The
-    /// coordinated design renames each cluster secret file to its exact
-    /// camelCase consumer name (`fixtureCamelCase.sops`), so the attribute
-    /// name is the stem as written — no hidden, lossy kebab-to-camel coupling. A
-    /// non-UTF-8 stem returns a typed `Error::SecretFileNameNotUtf8`.
     fn attribute_name(&self) -> Result<String> {
         self.path
             .file_stem()
@@ -5170,9 +5498,6 @@ impl ClusterSecretFile {
             .ok_or_else(|| crate::Error::SecretFileNameNotUtf8(self.path.clone()))
     }
 
-    /// Copy the opaque ciphertext into the generated input directory so the
-    /// flake is self-contained (its narHash covers the file). The contents are
-    /// never read into the daemon.
     fn copy_into(&self, directory: &Path) -> Result<()> {
         fs::copy(&self.path, directory.join(self.file_name()?))?;
         Ok(())
@@ -5183,12 +5508,20 @@ impl ClusterSecretFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NixSystemName(&'static str);
 
-impl NixSystemName {
+/// Naming a Nix platform from what Horizon resolved the machine's architecture
+/// to be.
+trait NixPlatform: Sized {
+    fn from_horizon_architecture(architecture: &str) -> Option<Self>;
+}
+
+impl NixPlatform for NixSystemName {
     fn from_horizon_architecture(architecture: &str) -> Option<Self> {
         (architecture).nix_system().map(Self)
     }
+}
 
-    fn as_str(self) -> &'static str {
+impl crate::Named for NixSystemName {
+    fn as_str(&self) -> &str {
         self.0
     }
 }
@@ -5197,7 +5530,17 @@ impl NixSystemName {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NarHash(String);
 
-impl NarHash {
+/// The NAR hash of a store path, as Nix reports it and as a flake URL carries
+/// it.
+trait NarHashing {
+    async fn from_path(path: &Path, execution: &EffectExecution) -> Result<Self>
+    where
+        Self: Sized;
+
+    fn as_url_query_value(&self) -> String;
+}
+
+impl NarHashing for NarHash {
     async fn from_path(path: &Path, execution: &EffectExecution) -> Result<Self> {
         let output = NixCommand::hash_path(path)
             .run(execution)
@@ -5245,7 +5588,30 @@ enum RemoteUserActivationAuthority {
     UnprivilegedMismatch,
 }
 
-impl SshTarget {
+/// The explicit store URI and SSH destination a deployment was given. Lojix
+/// never derives a route from cluster, node or user names.
+trait SshRouting {
+    fn from_transport(transport: &nexus::DeploymentTransport) -> std::result::Result<Self, String>
+    where
+        Self: Sized;
+
+    fn validate_nix_store_uri(value: &str) -> std::result::Result<(), String>;
+
+    fn validate_ssh_destination(value: &str) -> std::result::Result<(), String>;
+
+    /// Classify the explicit SSH login for a Home Manager target. Only the
+    /// literal `root` login carries mediation authority; Lojix never promotes
+    /// another login or derives a root route from node or user identity.
+    fn user_environment_activation_authority(
+        &self,
+        user: &HorizonUserName,
+    ) -> RemoteUserActivationAuthority;
+
+    /// `ssh -o BatchMode=yes <user>@<domain> <remote_command>`.
+    fn remote_invocation(&self, remote_command: ShellCommand) -> NixCommand;
+}
+
+impl SshRouting for SshTarget {
     fn from_transport(transport: &nexus::DeploymentTransport) -> std::result::Result<Self, String> {
         let nix_store_uri = transport.nix_store_uri.payload().clone();
         let ssh_destination = transport.ssh_destination.payload().clone();
@@ -5292,9 +5658,6 @@ impl SshTarget {
         Ok(())
     }
 
-    /// Classify the explicit SSH login for a Home Manager target. Only the
-    /// literal `root` login carries mediation authority; Lojix never promotes
-    /// another login or derives a root route from node or user identity.
     fn user_environment_activation_authority(
         &self,
         user: &HorizonUserName,
@@ -5312,7 +5675,6 @@ impl SshTarget {
         }
     }
 
-    /// `ssh -o BatchMode=yes <user>@<domain> <remote_command>`.
     fn remote_invocation(&self, remote_command: ShellCommand) -> NixCommand {
         NixCommand::new(
             "ssh",
@@ -5331,7 +5693,16 @@ impl SshTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShellCommand(String);
 
-impl ShellCommand {
+/// A remote shell script body, admitted as raw text and handed over unchanged.
+trait ShellScript {
+    fn from_raw(script: impl Into<String>) -> Self
+    where
+        Self: Sized;
+
+    fn into_text(self) -> String;
+}
+
+impl ShellScript for ShellCommand {
     fn from_raw(script: impl Into<String>) -> Self {
         Self(script.into())
     }
@@ -5349,7 +5720,16 @@ struct ShellArgument {
     text: String,
 }
 
-impl ShellArgument {
+/// One argument as it must appear inside a shell command line.
+trait ShellQuoting {
+    fn new(text: impl Into<String>) -> Self
+    where
+        Self: Sized;
+
+    fn to_command_text(&self) -> String;
+}
+
+impl ShellQuoting for ShellArgument {
     fn new(text: impl Into<String>) -> Self {
         Self { text: text.into() }
     }
@@ -5391,7 +5771,14 @@ struct ClosureCopy {
     store_uri: String,
 }
 
-impl ClosureCopy {
+/// Copying one closure to the store the deployment names.
+trait ClosureCopying: Sized {
+    fn from_command(command: &nexus::CopyClosureCommand) -> std::result::Result<Self, String>;
+
+    fn invocation(&self) -> NixCommand;
+}
+
+impl ClosureCopying for ClosureCopy {
     fn from_command(command: &nexus::CopyClosureCommand) -> std::result::Result<Self, String> {
         let target = SshTarget::from_transport(&command.deployment_transport)?;
         Ok(Self {
@@ -5412,6 +5799,10 @@ impl ClosureCopy {
         ];
         NixCommand::new("nix", arguments)
     }
+}
+
+impl Effect for ClosureCopy {
+    type Product = ();
 
     async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
         self.invocation().run(execution).await.map(|_| ())
@@ -5427,7 +5818,23 @@ enum Activation {
     UserEnvironment(UserEnvironmentActivation),
 }
 
-impl Activation {
+/// Turning an activation command into the activation it names, and saying when
+/// that activation must be handed to PID 1 rather than run in the daemon.
+/// Turning an activation command into the activation it names, and saying when
+/// that activation must be handed to PID 1 rather than run in the daemon.
+trait Activating: Sized {
+    /// `daemon_host` is the node the dispatching daemon runs on, so a host
+    /// activation can detect a self-targeting deploy and route around the
+    /// self-Switch deadlock; `None` when no daemon host context is available.
+    fn from_command(
+        command: &nexus::ActivateGenerationCommand,
+        daemon_host: Option<&ordinary::NodeName>,
+    ) -> std::result::Result<Self, String>;
+
+    fn detached_test_activation_unit(&self) -> Option<DetachedActivationUnit>;
+}
+
+impl Activating for Activation {
     /// `daemon_host` is the node the dispatching daemon runs on, so a host
     /// activation can detect a self-targeting deploy and route around the
     /// self-Switch deadlock; `None` when no daemon host context is available.
@@ -5453,7 +5860,7 @@ impl Activation {
                 nexus::ActivationBackend::HomeManagerNixProfileV1,
                 nexus::ActivationProfile::UserEnvironment(profile),
             ) => {
-                let user = HorizonUserName::try_new(profile.user_name.payload().clone())
+                let user = HorizonUserName::try_from(profile.user_name.payload().clone())
                     .map_err(|error| format!("invalid user name for home activation: {error}"))?;
                 Ok(Self::UserEnvironment(UserEnvironmentActivation {
                     node_name: command.node_name.clone(),
@@ -5469,14 +5876,6 @@ impl Activation {
             ),
         }
     }
-
-    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
-        match self {
-            Self::Host(activation) => activation.run(execution).await,
-            Self::UserEnvironment(activation) => activation.run(execution).await,
-        }
-    }
-
     fn detached_test_activation_unit(&self) -> Option<DetachedActivationUnit> {
         match self {
             Self::Host(activation)
@@ -5490,6 +5889,17 @@ impl Activation {
                 ))
             }
             _ => None,
+        }
+    }
+}
+
+impl Effect for Activation {
+    type Product = ();
+
+    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
+        match self {
+            Self::Host(activation) => activation.run(execution).await,
+            Self::UserEnvironment(activation) => activation.run(execution).await,
         }
     }
 }
@@ -5536,10 +5946,121 @@ struct HostActivation {
     action: ordinary::HostDeployAction,
 }
 
-impl HostActivation {
+/// Activating a whole host: the invocations it needs, whether it must run
+/// detached from the daemon that started it, and the EFI reconciliation a boot
+/// entry change requires.
+trait HostActivating {
     /// Invocation for the simple Boot/Switch/Test path. `None` for the
     /// non-simple actions (BootOnce uses `systemd_run_invocation`; Eval/Build
     /// do not activate).
+    fn ssh_invocation(&self) -> Option<NixCommand>;
+
+    /// The deterministic BootOnce transient unit name for this deploy:
+    /// `lojix-boot-once-deploy-<deployment-identifier>`, the same string the
+    /// durable resume cursor (`DeployJob::boot_once_unit`) persists at submit.
+    /// Deriving both from the deployment identifier (not the old time + pid
+    /// suffix) is what lets a daemon that crashes inside the BootOnce window
+    /// recompute the running unit's name on restart and reconcile by polling
+    /// `journalctl -u <unit>` rather than re-activating (report 150). One
+    /// deploy → one identifier → one unit, so concurrent deploys still don't
+    /// collide.
+    fn unit_name(&self) -> String;
+
+    /// The bash script that runs inside the transient unit on the target. `OLD`
+    /// (the rollback target) is read from `bootctl status`'s `Current Entry`.
+    /// After the candidate has generated its boot configuration, `NEW` is read
+    /// from its generated `loader.conf`, which is the only authority that names
+    /// the hash-named entry. Reboot 1 lands NEW; reboot 2+ returns to OLD.
+    fn boot_once_script(&self) -> String;
+
+    /// BootOnce ssh call: wraps the boot-once script in `systemd-run --wait`.
+    /// ssh holds open as a live stdout/stderr channel; if it dies the unit runs
+    /// to completion regardless (`detached_invocation()`).
+    fn systemd_run_invocation(&self, unit_name: &str) -> NixCommand;
+
+    /// Wrap an arbitrary activation `script` in a PID-1-owned transient unit
+    /// (`systemd-run --service-type=oneshot --wait`). The unit is owned by
+    /// systemd, not the dispatcher's ssh, so a restart of the daemon mid-script
+    /// (a self-Switch restarting `switch-to-configuration switch`) or a network
+    /// blip that kills the ssh leaves the unit running to completion on the
+    /// target. Shared by BootOnce and the deadlock-free self-Switch shape.
+    fn detached_invocation(&self, unit_name: &str, script: String) -> NixCommand;
+
+    /// Whether this activation must run in the detached PID-1-owned shape rather
+    /// than a foreground ssh: a `Switch` whose target node IS the dispatching
+    /// daemon's own host. `switch-to-configuration switch` restarts the daemon,
+    /// which would kill a foreground ssh and deadlock the deploy; the detached
+    /// transient unit survives the restart (report 150 self-Switch). Always
+    /// false when the daemon host is unknown or the target is a different node.
+    /// Which detached self-activation this is, or `None` when the activation
+    /// is not one. The two actions that hand off to a transient unit are the
+    /// only ones with a handoff script, so naming them as their own type is
+    /// what makes [`Self::self_switch_script`] total.
+    fn detached_self_activation(&self) -> Option<DetachedSelfActivation>;
+
+    /// The deterministic transient unit name for a detached self-Switch:
+    /// `lojix-self-switch-deploy-<deployment-identifier>.service`. Distinct from the
+    /// BootOnce unit name (a self-Switch is `switch-to-configuration switch`,
+    /// not a boot-once entry), but derived from the same deployment identifier so
+    /// it is one deploy → one unit.
+    fn self_switch_unit_name(&self) -> String;
+
+    /// The activation script for a detached self-Switch: set the system profile,
+    /// `switch-to-configuration switch` — the same Switch semantics as the
+    /// foreground path's `ssh_invocation`, NOT a boot-once entry — then clears
+    /// both EFI overrides so declarative `loader.conf` is the sole authority.
+    /// The whole
+    /// activation runs inside the transient unit, so the daemon restart `switch`
+    /// triggers cannot kill it mid-flight; the post-switch reconcile rides along
+    /// in the same PID-1-owned unit rather than a (now-dead) foreground ssh.
+    fn self_switch_script(&self, activation: DetachedSelfActivation) -> String;
+
+    /// Whether this action reconciles EFI bootloader vars after activation.
+    /// `Boot`/`Switch` write the declarative `loader.conf` default. Reconcile
+    /// removes both EFI overrides so they cannot compete. `Test` is
+    /// non-persistent; `BootOnce` is its own thing
+    /// (`requires_efi_reconcile()`).
+    fn requires_efi_reconcile(&self) -> bool;
+
+    /// Clear EFI `LoaderEntryDefault`; `loader.conf` owns persistent boot.
+    fn step_clear_efi_default_invocation(&self) -> NixCommand;
+
+    /// `bootctl set-oneshot ''` — clears any pending EFI one-shot from a prior
+    /// BootOnce so it does not hijack the next reboot.
+    fn step_clear_efi_oneshot_invocation(&self) -> NixCommand;
+
+    /// Deadlock-free self-Switch: run the full Switch activation inside a
+    /// PID-1-owned transient unit (the BootOnce mechanism, carrying Switch
+    /// semantics) so `switch-to-configuration switch` restarting the dispatching
+    /// daemon does not kill the activation's foreground ssh (report 150).
+    async fn run_detached_self_activation(
+        &self,
+        execution: &EffectExecution,
+        activation: DetachedSelfActivation,
+    ) -> std::result::Result<(), StageFailure>;
+
+    /// Dispatch a test activation without tying its lifetime to the old daemon
+    /// cgroup. `RemainAfterExit` retains PID-1's terminal receipt until the
+    /// successor has reconciled and explicitly cleans it.
+    fn retained_detached_invocation(&self, unit_name: &str, script: String) -> NixCommand;
+
+    async fn run_simple(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<(), StageFailure>;
+
+    async fn reconcile_efi(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<(), StageFailure>;
+
+    async fn run_boot_once(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<(), StageFailure>;
+}
+
+impl HostActivating for HostActivation {
     fn ssh_invocation(&self) -> Option<NixCommand> {
         let action_word = match self.action {
             ordinary::HostDeployAction::SetBootProfile => "boot",
@@ -5564,24 +6085,10 @@ impl HostActivation {
         )
     }
 
-    /// The deterministic BootOnce transient unit name for this deploy:
-    /// `lojix-boot-once-deploy-<deployment-identifier>`, the same string the
-    /// durable resume cursor (`DeployJob::boot_once_unit`) persists at submit.
-    /// Deriving both from the deployment identifier (not the old time + pid
-    /// suffix) is what lets a daemon that crashes inside the BootOnce window
-    /// recompute the running unit's name on restart and reconcile by polling
-    /// `journalctl -u <unit>` rather than re-activating (report 150). One
-    /// deploy → one identifier → one unit, so concurrent deploys still don't
-    /// collide.
     fn unit_name(&self) -> String {
         self.deployment_identifier.boot_once_unit_name()
     }
 
-    /// The bash script that runs inside the transient unit on the target. `OLD`
-    /// (the rollback target) is read from `bootctl status`'s `Current Entry`.
-    /// After the candidate has generated its boot configuration, `NEW` is read
-    /// from its generated `loader.conf`, which is the only authority that names
-    /// the hash-named entry. Reboot 1 lands NEW; reboot 2+ returns to OLD.
     fn boot_once_script(&self) -> String {
         let store = &self.store_path;
         format!(
@@ -5602,19 +6109,10 @@ impl HostActivation {
         )
     }
 
-    /// BootOnce ssh call: wraps the boot-once script in `systemd-run --wait`.
-    /// ssh holds open as a live stdout/stderr channel; if it dies the unit runs
-    /// to completion regardless (`detached_invocation()`).
     fn systemd_run_invocation(&self, unit_name: &str) -> NixCommand {
         self.detached_invocation(unit_name, self.boot_once_script())
     }
 
-    /// Wrap an arbitrary activation `script` in a PID-1-owned transient unit
-    /// (`systemd-run --service-type=oneshot --wait`). The unit is owned by
-    /// systemd, not the dispatcher's ssh, so a restart of the daemon mid-script
-    /// (a self-Switch restarting `switch-to-configuration switch`) or a network
-    /// blip that kills the ssh leaves the unit running to completion on the
-    /// target. Shared by BootOnce and the deadlock-free self-Switch shape.
     fn detached_invocation(&self, unit_name: &str, script: String) -> NixCommand {
         let remote_command = format!(
             "systemd-run \
@@ -5629,16 +6127,6 @@ impl HostActivation {
             .remote_invocation(ShellCommand::from_raw(remote_command))
     }
 
-    /// Whether this activation must run in the detached PID-1-owned shape rather
-    /// than a foreground ssh: a `Switch` whose target node IS the dispatching
-    /// daemon's own host. `switch-to-configuration switch` restarts the daemon,
-    /// which would kill a foreground ssh and deadlock the deploy; the detached
-    /// transient unit survives the restart (report 150 self-Switch). Always
-    /// false when the daemon host is unknown or the target is a different node.
-    /// Which detached self-activation this is, or `None` when the activation
-    /// is not one. The two actions that hand off to a transient unit are the
-    /// only ones with a handoff script, so naming them as their own type is
-    /// what makes [`Self::self_switch_script`] total.
     fn detached_self_activation(&self) -> Option<DetachedSelfActivation> {
         let is_self_target = self
             .daemon_host
@@ -5654,23 +6142,10 @@ impl HostActivation {
         }
     }
 
-    /// The deterministic transient unit name for a detached self-Switch:
-    /// `lojix-self-switch-deploy-<deployment-identifier>.service`. Distinct from the
-    /// BootOnce unit name (a self-Switch is `switch-to-configuration switch`,
-    /// not a boot-once entry), but derived from the same deployment identifier so
-    /// it is one deploy → one unit.
     fn self_switch_unit_name(&self) -> String {
         DetachedActivationUnit::canonical_name(&self.deployment_identifier)
     }
 
-    /// The activation script for a detached self-Switch: set the system profile,
-    /// `switch-to-configuration switch` — the same Switch semantics as the
-    /// foreground path's `ssh_invocation`, NOT a boot-once entry — then clears
-    /// both EFI overrides so declarative `loader.conf` is the sole authority.
-    /// The whole
-    /// activation runs inside the transient unit, so the daemon restart `switch`
-    /// triggers cannot kill it mid-flight; the post-switch reconcile rides along
-    /// in the same PID-1-owned unit rather than a (now-dead) foreground ssh.
     fn self_switch_script(&self, activation: DetachedSelfActivation) -> String {
         let store = &self.store_path;
         match activation {
@@ -5690,11 +6165,6 @@ impl HostActivation {
         }
     }
 
-    /// Whether this action reconciles EFI bootloader vars after activation.
-    /// `Boot`/`Switch` write the declarative `loader.conf` default. Reconcile
-    /// removes both EFI overrides so they cannot compete. `Test` is
-    /// non-persistent; `BootOnce` is its own thing
-    /// (`requires_efi_reconcile()`).
     fn requires_efi_reconcile(&self) -> bool {
         matches!(
             self.action,
@@ -5702,35 +6172,16 @@ impl HostActivation {
         )
     }
 
-    /// Clear EFI `LoaderEntryDefault`; `loader.conf` owns persistent boot.
     fn step_clear_efi_default_invocation(&self) -> NixCommand {
         self.target
             .remote_invocation(ShellCommand::from_raw("bootctl set-default ''"))
     }
 
-    /// `bootctl set-oneshot ''` — clears any pending EFI one-shot from a prior
-    /// BootOnce so it does not hijack the next reboot.
     fn step_clear_efi_oneshot_invocation(&self) -> NixCommand {
         self.target
             .remote_invocation(ShellCommand::from_raw("bootctl set-oneshot ''"))
     }
 
-    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
-        if let Some(activation) = self.detached_self_activation() {
-            return self
-                .run_detached_self_activation(execution, activation)
-                .await;
-        }
-        match self.action {
-            ordinary::HostDeployAction::ScheduleBootOnce => self.run_boot_once(execution).await,
-            _ => self.run_simple(execution).await,
-        }
-    }
-
-    /// Deadlock-free self-Switch: run the full Switch activation inside a
-    /// PID-1-owned transient unit (the BootOnce mechanism, carrying Switch
-    /// semantics) so `switch-to-configuration switch` restarting the dispatching
-    /// daemon does not kill the activation's foreground ssh (report 150).
     async fn run_detached_self_activation(
         &self,
         execution: &EffectExecution,
@@ -5747,9 +6198,6 @@ impl HostActivation {
         .map(|_| ())
     }
 
-    /// Dispatch a test activation without tying its lifetime to the old daemon
-    /// cgroup. `RemainAfterExit` retains PID-1's terminal receipt until the
-    /// successor has reconciled and explicitly cleans it.
     fn retained_detached_invocation(&self, unit_name: &str, script: String) -> NixCommand {
         let remote_command = format!(
             "systemd-run --unit={unit_name} --no-block --service-type=oneshot --remain-after-exit /bin/sh -c {script}",
@@ -5800,6 +6248,22 @@ impl HostActivation {
             .run(execution)
             .await
             .map(|_| ())
+    }
+}
+
+impl Effect for HostActivation {
+    type Product = ();
+
+    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
+        if let Some(activation) = self.detached_self_activation() {
+            return self
+                .run_detached_self_activation(execution, activation)
+                .await;
+        }
+        match self.action {
+            ordinary::HostDeployAction::ScheduleBootOnce => self.run_boot_once(execution).await,
+            _ => self.run_simple(execution).await,
+        }
     }
 }
 
@@ -5859,15 +6323,55 @@ pub(crate) enum DetachedActivationOutcome {
     Running,
 }
 
-impl DetachedActivationUnit {
-    pub(crate) fn new(name: String) -> Self {
-        Self { name }
-    }
+/// The transient systemd unit a same-host activation is handed to, and what is
+/// asked of PID 1 about it afterwards.
+pub(crate) trait DetachedActivation {
+    fn new(name: String) -> Self
+    where
+        Self: Sized;
 
     /// Systemd's D-Bus unit identity is fully qualified. `systemd-run` accepts
     /// a shorthand service name, but Manager.UnitNew and GetUnit use this
     /// canonical `.service` spelling, so dispatch, signal matching, lookup,
     /// logging, and cleanup must share it exactly.
+    fn canonical_name(deployment_identifier: &ordinary::DeploymentIdentifier) -> String;
+
+    fn for_deployment(deployment_identifier: &ordinary::DeploymentIdentifier) -> Self
+    where
+        Self: Sized;
+
+    /// Subscribe before `systemd-run --no-block` so its UnitNew cannot be
+    /// missed between CLI admission and the first GetUnit call.
+    async fn prepare_observer(&self) -> std::result::Result<DetachedActivationObserver, String>;
+
+    fn terminal_outcome(
+        outcome: Option<DetachedActivationOutcome>,
+    ) -> Option<sema::DeploymentTerminal>;
+
+    #[cfg(test)]
+    fn needs_completion_observer(outcome: Option<DetachedActivationOutcome>) -> bool;
+
+    async fn manager_proxy<'a>(
+        connection: &'a Connection,
+    ) -> std::result::Result<Proxy<'a>, String>;
+
+    async fn unit_proxy<'a>(
+        &self,
+        connection: &'a Connection,
+    ) -> std::result::Result<Option<DetachedActivationProxies<'a>>, String>;
+
+    async fn classify(proxy: &DetachedActivationProxies<'_>) -> DetachedActivationOutcome;
+
+    async fn clean(&self);
+
+    fn is_expected_unit_new(&self, name: &str) -> bool;
+}
+
+impl DetachedActivation for DetachedActivationUnit {
+    fn new(name: String) -> Self {
+        Self { name }
+    }
+
     fn canonical_name(deployment_identifier: &ordinary::DeploymentIdentifier) -> String {
         format!(
             "lojix-self-switch-deploy-{}.service",
@@ -5879,11 +6383,7 @@ impl DetachedActivationUnit {
         Self::new(Self::canonical_name(deployment_identifier))
     }
 
-    /// Subscribe before `systemd-run --no-block` so its UnitNew cannot be
-    /// missed between CLI admission and the first GetUnit call.
-    pub(crate) async fn prepare_observer(
-        &self,
-    ) -> std::result::Result<DetachedActivationObserver, String> {
+    async fn prepare_observer(&self) -> std::result::Result<DetachedActivationObserver, String> {
         let connection = Connection::system()
             .await
             .map_err(|error| format!("connect to systemd for detached activation: {error}"))?;
@@ -6007,7 +6507,7 @@ impl DetachedActivationUnit {
         }
     }
 
-    pub(crate) async fn clean(&self) {
+    async fn clean(&self) {
         let Ok(connection) = Connection::system().await else {
             return;
         };
@@ -6024,12 +6524,29 @@ impl DetachedActivationUnit {
     }
 }
 
-impl DetachedActivationObserver {
+/// Watching a detached activation to its terminal outcome and persisting it,
+/// after the foreground runner has already replied.
+pub(crate) trait DetachedObserving {
     /// This is the successor's first state read. The Manager.UnitNew match was
     /// installed by `prepare_observer` before this lookup, so the one allowed
     /// transient `NoSuchUnit` is a pending registration, not a terminal
     /// activation failure.
-    pub(crate) async fn initial_outcome(
+    async fn initial_outcome(
+        &self,
+    ) -> std::result::Result<Option<DetachedActivationOutcome>, String>;
+
+    /// Start the private event observer after `systemd-run --no-block` has
+    /// accepted the handoff. An observer interruption is deliberately not a
+    /// terminal result: a replacement daemon uses the retained PID-1 receipt.
+    fn observe(self, store: Arc<Store>, deployment_identifier: u64);
+
+    async fn await_completion(
+        &mut self,
+    ) -> std::result::Result<Option<DetachedActivationOutcome>, String>;
+}
+
+impl DetachedObserving for DetachedActivationObserver {
+    async fn initial_outcome(
         &self,
     ) -> std::result::Result<Option<DetachedActivationOutcome>, String> {
         match self.unit.unit_proxy(&self.connection).await? {
@@ -6042,10 +6559,7 @@ impl DetachedActivationObserver {
         }
     }
 
-    /// Start the private event observer after `systemd-run --no-block` has
-    /// accepted the handoff. An observer interruption is deliberately not a
-    /// terminal result: a replacement daemon uses the retained PID-1 receipt.
-    pub(crate) fn observe(mut self, store: Arc<Store>, deployment_identifier: u64) {
+    fn observe(mut self, store: Arc<Store>, deployment_identifier: u64) {
         tokio::spawn(async move {
             eprintln!(
                 "lojix detached test activation observer attached deployment={} unit={}",
@@ -6128,7 +6642,7 @@ impl DetachedActivationObserver {
     }
 }
 
-struct DetachedActivationProxies<'a> {
+pub(crate) struct DetachedActivationProxies<'a> {
     unit: Proxy<'a>,
     service: Proxy<'a>,
 }
@@ -6148,7 +6662,60 @@ struct UserEnvironmentActivation {
     mode: meta::UserEnvironmentAction,
 }
 
-impl UserEnvironmentActivation {
+/// Activating one user environment, locally or through a remote shell.
+trait UserEnvironmentActivating {
+    fn local_profile_invocation(&self, home: &Path) -> NixCommand;
+
+    fn local_activate_invocation(&self) -> NixCommand;
+
+    fn remote_profile_invocation(&self) -> std::result::Result<NixCommand, String>;
+
+    fn remote_activate_invocation(&self) -> std::result::Result<NixCommand, String>;
+
+    /// Build the remote command from the authority carried by the explicit SSH
+    /// destination. This is the effect-side fail-closed guard for recovered
+    /// jobs; fresh submissions reject this same mismatch before any effect.
+    fn remote_invocation(&self, command: ShellCommand) -> std::result::Result<NixCommand, String>;
+
+    /// The explicit deployment SSH identity is root. Drop privilege to the
+    /// target account for the profile and activation commands, so a user profile
+    /// deploy works even when that account has no SSH login while preserving the
+    /// profile's user-owned state.
+    ///
+    /// Drop through a login (`runuser --login`), not a bare privilege drop. The
+    /// root SSH session's environment — `XDG_RUNTIME_DIR` and
+    /// `DBUS_SESSION_BUS_ADDRESS` (`/run/user/0`), `NIX_PROFILES`,
+    /// `XDG_DATA_DIRS`, `XDG_CONFIG_DIRS`, … — otherwise survives into the target
+    /// context and points Home Manager's activation at root-owned runtime and
+    /// profile paths; its `mkdir`, `dconf`, and systemd-reload steps then fail
+    /// with permission errors. A login rebuilds the environment from the target
+    /// account: correct `HOME`, `USER`, `LOGNAME`, and the target's own profile
+    /// and runtime paths, so activation runs as a clean session of that user
+    /// (its systemd reload reaches the target's live `/run/user/<uid>` session).
+    /// The login also resolves the account's home natively, obviating a manual
+    /// `getent` lookup.
+    fn root_mediated_invocation(&self, command: ShellCommand) -> NixCommand;
+
+    async fn run_profile(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<(), StageFailure>;
+
+    async fn run_activate(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<(), StageFailure>;
+
+    /// The local fast-path predicate: the dispatcher is already the requested
+    /// user on the target node, so activation runs locally without ssh.
+    async fn is_local_context(&self, execution: &EffectExecution) -> bool;
+
+    fn current_user(&self) -> Option<String>;
+
+    async fn current_node(&self, execution: &EffectExecution) -> Option<String>;
+}
+
+impl UserEnvironmentActivating for UserEnvironmentActivation {
     fn local_profile_invocation(&self, home: &Path) -> NixCommand {
         NixCommand::new(
             "nix-env",
@@ -6180,9 +6747,6 @@ impl UserEnvironmentActivation {
         ))
     }
 
-    /// Build the remote command from the authority carried by the explicit SSH
-    /// destination. This is the effect-side fail-closed guard for recovered
-    /// jobs; fresh submissions reject this same mismatch before any effect.
     fn remote_invocation(&self, command: ShellCommand) -> std::result::Result<NixCommand, String> {
         match self.authority {
             RemoteUserActivationAuthority::MatchedUser => {
@@ -6198,23 +6762,6 @@ impl UserEnvironmentActivation {
         }
     }
 
-    /// The explicit deployment SSH identity is root. Drop privilege to the
-    /// target account for the profile and activation commands, so a user profile
-    /// deploy works even when that account has no SSH login while preserving the
-    /// profile's user-owned state.
-    ///
-    /// Drop through a login (`runuser --login`), not a bare privilege drop. The
-    /// root SSH session's environment — `XDG_RUNTIME_DIR` and
-    /// `DBUS_SESSION_BUS_ADDRESS` (`/run/user/0`), `NIX_PROFILES`,
-    /// `XDG_DATA_DIRS`, `XDG_CONFIG_DIRS`, … — otherwise survives into the target
-    /// context and points Home Manager's activation at root-owned runtime and
-    /// profile paths; its `mkdir`, `dconf`, and systemd-reload steps then fail
-    /// with permission errors. A login rebuilds the environment from the target
-    /// account: correct `HOME`, `USER`, `LOGNAME`, and the target's own profile
-    /// and runtime paths, so activation runs as a clean session of that user
-    /// (its systemd reload reaches the target's live `/run/user/<uid>` session).
-    /// The login also resolves the account's home natively, obviating a manual
-    /// `getent` lookup.
     fn root_mediated_invocation(&self, command: ShellCommand) -> NixCommand {
         let user = ShellArgument::new(self.user.as_str()).to_command_text();
         let command = ShellArgument::new(command.into_text()).to_command_text();
@@ -6222,17 +6769,6 @@ impl UserEnvironmentActivation {
             .remote_invocation(ShellCommand::from_raw(format!(
                 "runuser --login --command {command} {user}",
             )))
-    }
-
-    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
-        match self.mode {
-            meta::UserEnvironmentAction::Realize => Ok(()),
-            meta::UserEnvironmentAction::SetProfile => self.run_profile(execution).await,
-            meta::UserEnvironmentAction::ActivateNow => {
-                self.run_profile(execution).await?;
-                self.run_activate(execution).await
-            }
-        }
     }
 
     async fn run_profile(
@@ -6271,8 +6807,6 @@ impl UserEnvironmentActivation {
             .map(|_| ())
     }
 
-    /// The local fast-path predicate: the dispatcher is already the requested
-    /// user on the target node, so activation runs locally without ssh.
     async fn is_local_context(&self, execution: &EffectExecution) -> bool {
         self.current_user().as_deref() == Some(self.user.as_str())
             && self.current_node(execution).await.as_deref()
@@ -6296,6 +6830,21 @@ impl UserEnvironmentActivation {
     }
 }
 
+impl Effect for UserEnvironmentActivation {
+    type Product = ();
+
+    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
+        match self.mode {
+            meta::UserEnvironmentAction::Realize => Ok(()),
+            meta::UserEnvironmentAction::SetProfile => self.run_profile(execution).await,
+            meta::UserEnvironmentAction::ActivateNow => {
+                self.run_profile(execution).await?;
+                self.run_activate(execution).await
+            }
+        }
+    }
+}
+
 /// A typed `nix` / `nix-store` invocation. Holds the program name and its
 /// argument vector so the same value can be inspected before it runs; `run`
 /// spawns it via `tokio::process::Command` and returns captured stdout or a
@@ -6306,7 +6855,101 @@ struct NixCommand {
     arguments: Vec<String>,
 }
 
-impl NixCommand {
+/// One external program invocation and what lojix reads out of its output.
+trait NixInvoking {
+    fn new(program: impl Into<String>, arguments: Vec<String>) -> Self
+    where
+        Self: Sized;
+
+    fn flake_metadata(flake: &str) -> Self
+    where
+        Self: Sized;
+
+    /// Resolve the toplevel `.drvPath` before building in the daemon's local
+    /// Nix context. The target parameter is retained in the generated command
+    /// contract, but it deliberately contributes no `--store` redirect: an
+    /// ssh-ng evaluation can deadlock in remote transport. The exact built
+    /// output is copied to the target in the next stage instead.
+    fn eval_drv_path(
+        attribute: &str,
+        overrides: &[nexus::FlakeInputOverride],
+        target: &nexus::BuildTarget,
+        refresh: EvalRefresh,
+    ) -> Self
+    where
+        Self: Sized;
+
+    fn hash_path(path: &Path) -> Self
+    where
+        Self: Sized;
+
+    fn build_closure(closure_path: &str, substituters: &[nexus::ExtraSubstituter]) -> Self
+    where
+        Self: Sized;
+
+    /// `nix build <installable> --no-link --print-out-paths` for a hermetic
+    /// check. The exact request/configuration-owned output selector is passed
+    /// verbatim — no derived attribute, `^*` output selector, or `.drvPath`
+    /// indirection. Exit status is pass/fail; the printed line is the realised
+    /// check out-path.
+    fn build_check(installable: &str) -> Self
+    where
+        Self: Sized;
+
+    fn build_closure_remote(
+        closure_path: &str,
+        builder_spec: &str,
+        substituters: &[nexus::ExtraSubstituter],
+    ) -> Self
+    where
+        Self: Sized;
+
+    /// Select the derivation's *outputs* with the `^*` installable suffix so
+    /// `nix build ... --print-out-paths` returns the realised output store
+    /// path. The closure path threaded in is a `.drv` path (from
+    /// `eval_drv_path`'s `.drvPath`); on nix 2.4+ a bare `.drv` installable
+    /// makes `--print-out-paths` print the `.drv` path itself, NOT the built
+    /// output — the daemon would then copy and activate the `.drv` and
+    /// activation could never succeed (Unit C live e2e on Prometheus). The
+    /// `^*` selector resolves the derivation to all its outputs.
+    fn output_installable(closure_path: &str) -> String;
+
+    /// The `--option extra-substituters / extra-trusted-public-keys` arguments
+    /// for the deploy's extra substituters (audit C2 — `NixBuildCommand`
+    /// carries them but the build previously ignored them, so it could not pull
+    /// from the configured cache). Empty when there are none.
+    fn substituter_options(substituters: &[nexus::ExtraSubstituter]) -> Vec<String>;
+
+    fn override_input_options(overrides: &[nexus::FlakeInputOverride]) -> Vec<String>;
+
+    fn collect_garbage(node_name: &str) -> Self
+    where
+        Self: Sized;
+
+    /// This command's identity, paired with what the attempt reported. A code
+    /// is present only when the process itself exited; a process killed by a
+    /// signal reports none.
+    fn reported(&self, optional_code: Option<i32>, detail: String) -> StageFailure;
+
+    fn first_line(output: &str) -> String;
+
+    fn first_line_or(output: &str, fallback: &str) -> String;
+
+    fn count_lines(output: &str) -> u64;
+
+    /// The program name. Test-only inspection of the constructed invocation
+    /// (the on-node execution is proven at S5).
+    #[cfg(test)]
+    fn program(&self) -> &str;
+
+    /// The arguments joined by single spaces — a flat view of the constructed
+    /// argv for inspection (the remote-command body is the final argument).
+    /// Test-only.
+    #[cfg(test)]
+    fn joined_arguments(&self) -> String;
+}
+
+impl NixInvoking for NixCommand {
     fn new(program: impl Into<String>, arguments: Vec<String>) -> Self {
         Self {
             program: program.into(),
@@ -6326,11 +6969,6 @@ impl NixCommand {
         )
     }
 
-    /// Resolve the toplevel `.drvPath` before building in the daemon's local
-    /// Nix context. The target parameter is retained in the generated command
-    /// contract, but it deliberately contributes no `--store` redirect: an
-    /// ssh-ng evaluation can deadlock in remote transport. The exact built
-    /// output is copied to the target in the next stage instead.
     fn eval_drv_path(
         attribute: &str,
         overrides: &[nexus::FlakeInputOverride],
@@ -6376,11 +7014,6 @@ impl NixCommand {
         Self::new("nix", arguments)
     }
 
-    /// `nix build <installable> --no-link --print-out-paths` for a hermetic
-    /// check. The exact request/configuration-owned output selector is passed
-    /// verbatim — no derived attribute, `^*` output selector, or `.drvPath`
-    /// indirection. Exit status is pass/fail; the printed line is the realised
-    /// check out-path.
     fn build_check(installable: &str) -> Self {
         Self::new(
             "nix",
@@ -6413,22 +7046,10 @@ impl NixCommand {
         Self::new("nix", arguments)
     }
 
-    /// Select the derivation's *outputs* with the `^*` installable suffix so
-    /// `nix build ... --print-out-paths` returns the realised output store
-    /// path. The closure path threaded in is a `.drv` path (from
-    /// `eval_drv_path`'s `.drvPath`); on nix 2.4+ a bare `.drv` installable
-    /// makes `--print-out-paths` print the `.drv` path itself, NOT the built
-    /// output — the daemon would then copy and activate the `.drv` and
-    /// activation could never succeed (Unit C live e2e on Prometheus). The
-    /// `^*` selector resolves the derivation to all its outputs.
     fn output_installable(closure_path: &str) -> String {
         format!("{closure_path}^*")
     }
 
-    /// The `--option extra-substituters / extra-trusted-public-keys` arguments
-    /// for the deploy's extra substituters (audit C2 — `NixBuildCommand`
-    /// carries them but the build previously ignored them, so it could not pull
-    /// from the configured cache). Empty when there are none.
     fn substituter_options(substituters: &[nexus::ExtraSubstituter]) -> Vec<String> {
         if substituters.is_empty() {
             return Vec::new();
@@ -6474,9 +7095,57 @@ impl NixCommand {
         )
     }
 
-    /// Run the command to its own reported completion. Effect completion is
-    /// owned by the command's exit status; elapsed wall time never converts an
-    /// active Nix, SSH, or activation effect into a deployment failure.
+    fn reported(&self, optional_code: Option<i32>, detail: String) -> StageFailure {
+        StageFailure {
+            detail,
+            optional_failed_command: Some(crate::runtime_model::FailedCommand {
+                command_program: crate::runtime_model::CommandProgram::new(self.program.clone()),
+                command_argument_vector: self
+                    .arguments
+                    .iter()
+                    .map(|argument| crate::runtime_model::CommandArgument::new(argument.clone()))
+                    .collect(),
+                optional_exit_code: optional_code
+                    .and_then(|code| u64::try_from(code).ok())
+                    .map(crate::runtime_model::ExitCode::new),
+            }),
+        }
+    }
+
+    fn first_line(output: &str) -> String {
+        output.lines().next().unwrap_or("").trim().to_string()
+    }
+
+    fn first_line_or(output: &str, fallback: &str) -> String {
+        let line = Self::first_line(output);
+        if line.is_empty() {
+            fallback.to_string()
+        } else {
+            line
+        }
+    }
+
+    fn count_lines(output: &str) -> u64 {
+        output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count() as u64
+    }
+
+    #[cfg(test)]
+    fn program(&self) -> &str {
+        &self.program
+    }
+
+    #[cfg(test)]
+    fn joined_arguments(&self) -> String {
+        self.arguments.join(" ")
+    }
+}
+
+impl Effect for NixCommand {
+    type Product = String;
+
     async fn run(&self, execution: &EffectExecution) -> std::result::Result<String, StageFailure> {
         let mut command = Command::new(execution.program(&self.program));
         command
@@ -6559,61 +7228,6 @@ impl NixCommand {
                 String::from_utf8_lossy(&stderr).trim().to_string(),
             ))
         }
-    }
-
-    /// This command's identity, paired with what the attempt reported. A code
-    /// is present only when the process itself exited; a process killed by a
-    /// signal reports none.
-    fn reported(&self, optional_code: Option<i32>, detail: String) -> StageFailure {
-        StageFailure {
-            detail,
-            optional_failed_command: Some(crate::runtime_model::FailedCommand {
-                command_program: crate::runtime_model::CommandProgram::new(self.program.clone()),
-                command_argument_vector: self
-                    .arguments
-                    .iter()
-                    .map(|argument| crate::runtime_model::CommandArgument::new(argument.clone()))
-                    .collect(),
-                optional_exit_code: optional_code
-                    .and_then(|code| u64::try_from(code).ok())
-                    .map(crate::runtime_model::ExitCode::new),
-            }),
-        }
-    }
-
-    fn first_line(output: &str) -> String {
-        output.lines().next().unwrap_or("").trim().to_string()
-    }
-
-    fn first_line_or(output: &str, fallback: &str) -> String {
-        let line = Self::first_line(output);
-        if line.is_empty() {
-            fallback.to_string()
-        } else {
-            line
-        }
-    }
-
-    fn count_lines(output: &str) -> u64 {
-        output
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .count() as u64
-    }
-
-    /// The program name. Test-only inspection of the constructed invocation
-    /// (the on-node execution is proven at S5).
-    #[cfg(test)]
-    fn program(&self) -> &str {
-        &self.program
-    }
-
-    /// The arguments joined by single spaces — a flat view of the constructed
-    /// argv for inspection (the remote-command body is the final argument).
-    /// Test-only.
-    #[cfg(test)]
-    fn joined_arguments(&self) -> String {
-        self.arguments.join(" ")
     }
 }
 

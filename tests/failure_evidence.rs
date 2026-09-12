@@ -11,6 +11,7 @@
 //! to receive.
 
 use lojix::Payload as _;
+use lojix::schema_runtime::DaemonRuntime as _;
 use lojix::{DurableStore as _, GenerationLedger as _};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
