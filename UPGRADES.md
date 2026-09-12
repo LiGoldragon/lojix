@@ -1,5 +1,69 @@
 # Upgrades
 
+## 4.0.0 — behavior is homed on the thing it belongs to
+
+### What changed
+
+lojix enforced neither of the two trait laws. `checks/no-free-functions.sh`
+now does, as a Nix check: production Rust carries no module-level free
+function except `fn main`. It scans the library and all four workspace
+members with each file's `#[cfg(test)]` items removed, so the large
+in-file test modules in `src/lib.rs` and `src/schema_runtime.rs` are not
+production source and are not read as such.
+
+One hundred and ten free functions were rehomed to get there. Most were
+private, and this entry lists only what a consumer outside this workspace
+can see: the public Rust surface of the `lojix` library, its two client
+crates, and the offline tools. No wire contract changed — `signal-lojix`
+and `meta-signal-lojix` are untouched, and a 3.0.0 client talks to a 4.0.0
+Nexus unchanged.
+
+Two duplications were the reason for two of the new types. The predicate
+"is this a canonical `/nix/store` item root?" had three identical copies,
+and "does this text name credential material?" had four. They are now
+`NixStorePath`, `InspectedText` and `PercentEncodedText` in
+`src/inspected_text.rs`, with the verbs on `StoreItemShape` and
+`CredentialBearing`. And `mod ordinary`/`mod meta` in the schema runtime
+held eighteen zero-sized `pub struct X; impl X { pub fn new(p: P) -> P { p } }`
+shims — a namespace pretending to be a thing, whose every one of forty-two
+call sites was the identity function. They are gone.
+
+### The moves a consumer applies
+
+Each is mechanical. Import the named trait (`use lojix::…Trait as _;`) and
+rewrite the call.
+
+| Was | Is | Trait to import |
+| --- | --- | --- |
+| `lojix::single_inline_datom_argument(arguments)` | `arguments.single_inline_datom()` | `lojix::InlineDatomArguments` |
+| `lojix::bootstrap::run_from_environment()` | `BootstrapRun::run_from_environment()` | `lojix::bootstrap::BootstrapInvocation` |
+| `lojix::bootstrap::decode_single_inline(arguments)` | `BootstrapRun::decode_single_inline(arguments)` | `lojix::bootstrap::BootstrapInvocation` |
+| `lojix::bootstrap::run_with_executor(request, &mut executor)` | `request.run_with_executor(&mut executor)` | `lojix::bootstrap::BootstrapInvocation` |
+| `lojix::bootstrap::run_with_executor_and_crash(request, &mut executor, &mut crash)` | `request.run_with_executor_and_crash(&mut executor, &mut crash)` | `lojix::bootstrap::BootstrapInvocation` |
+
+`InlineDatomArguments` has a blanket implementation for every
+`IntoIterator<Item = OsString>`, so the receiver is whatever the argument
+expression already was.
+
+### Additions, which break nothing
+
+- `lojix::LojixNexusConfigurable` gains a provided `runtime_directory()`.
+  Existing implementations compile unchanged.
+- `lojix_client::Invocable` and `meta_lojix_client::Invocable` gain a
+  provided `budget() -> Budget`. Existing implementations compile
+  unchanged.
+- `impl From<u64> for lojix::runtime_model::StateMarker`: a commit sequence
+  is the whole of a state marker, since the digest is derived from it.
+- `impl From<nexus::AsyncMultiListenerDaemonError<lojix::Error>> for lojix::Error`.
+- `lojix::adapters::Raisable` is now implemented for
+  `ConfigurationReceipt` and `ConfigurationRejection`.
+
+### What is not done
+
+`checks/no-inherent-methods.sh` is written and runnable but is **not**
+wired into `flake.nix`, because it does not pass. See the check's own
+output for the current sites.
+
 ## 3.0.0 — a failed deployment says what failed
 
 ### What changed
