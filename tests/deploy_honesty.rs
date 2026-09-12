@@ -17,6 +17,7 @@
 //! were free to disagree. The lifecycle is now read from the terminal, so they
 //! cannot.
 
+use lojix::Payload as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -58,19 +59,19 @@ fn programs_failing_the_copy(directory: &Path) {
 
 fn transport(nix_store_uri: &str, ssh_destination: &str) -> ordinary::DeploymentTransport {
     ordinary::DeploymentTransport {
-        nix_store_uri: ordinary::NixStoreUri::new(nix_store_uri),
-        ssh_destination: ordinary::SshDestination::new(ssh_destination),
+        nix_store_uri: ordinary::NixStoreUri::from(nix_store_uri),
+        ssh_destination: ordinary::SshDestination::from(ssh_destination),
     }
 }
 
 fn user_environment_request(source: &Path) -> meta::DeploySubmission {
     meta::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
-        cluster_name: ordinary::ClusterName::new("alpha"),
-        node_name: ordinary::NodeName::new("beacon"),
-        user_name: ordinary::UserName::new("bird"),
+        cluster_name: ordinary::ClusterName::from("alpha"),
+        node_name: ordinary::NodeName::from("beacon"),
+        user_name: ordinary::UserName::from("bird"),
         proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
         secrets_input: ordinary::SecretsInput::NoSecrets,
-        flake_reference: ordinary::FlakeReference::new(FLAKE),
+        flake_reference: ordinary::FlakeReference::from(FLAKE),
         deployment_transport: transport(
             "ssh-ng://fixture-copy.invalid",
             "root@fixture-activate.invalid",
@@ -78,7 +79,7 @@ fn user_environment_request(source: &Path) -> meta::DeploySubmission {
         deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
         horizon_definition_option: Some(common::read_horizon(source)),
         deployment_output_selector: ordinary::DeploymentOutputSelector::new(
-            ordinary::FlakeAttribute::new("homeConfigurations.bird.activationPackage"),
+            ordinary::FlakeAttribute::from("homeConfigurations.bird.activationPackage"),
         ),
         activation_backend: ordinary::ActivationBackend::HomeManagerNixProfileV1,
         user_environment_action: ordinary::UserEnvironmentAction::ActivateNow,
@@ -106,15 +107,15 @@ fn empty_runtime(directory: &Path) -> SchemaRuntime {
 fn admission_identity() -> ordinary::DeploymentRequestIdentity {
     ordinary::DeploymentRequestIdentity {
         deployment_environment: ordinary::DeploymentEnvironment::HostEnvironment,
-        cluster_name: ordinary::ClusterName::new("cluster"),
-        node_name: ordinary::NodeName::new("node"),
+        cluster_name: ordinary::ClusterName::from("cluster"),
+        node_name: ordinary::NodeName::from("node"),
         generation_artifact: ordinary::GenerationArtifact::BaseHost,
         requested_deployment_action: ordinary::RequestedDeploymentAction::Host(
             ordinary::HostDeployAction::Evaluate,
         ),
         activation_effect: ordinary::ActivationEffect::ProfileOnly,
         source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-        optional_immutable_revision: Some(ordinary::ImmutableRevision::new(
+        optional_immutable_revision: Some(ordinary::ImmutableRevision::from(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )),
     }
@@ -124,12 +125,12 @@ fn admission_job() -> ordinary::DeployJob {
     ordinary::DeployJob {
         deployment_identifier: ordinary::DeploymentIdentifier::new(0),
         generation_identifier: ordinary::GenerationIdentifier::new(0),
-        cluster_name: ordinary::ClusterName::new("cluster"),
-        node_name: ordinary::NodeName::new("node"),
+        cluster_name: ordinary::ClusterName::from("cluster"),
+        node_name: ordinary::NodeName::from("node"),
         deploy_job_phase: ordinary::DeployJobPhase::Submitted,
         optional_closure_path: None,
         source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-        flake_reference: ordinary::FlakeReference::new(
+        flake_reference: ordinary::FlakeReference::from(
             "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ),
         optional_flake_reference: None,
@@ -140,7 +141,7 @@ fn admission_job() -> ordinary::DeployJob {
         ),
         deployment_input_mode: ordinary::DeploymentInputMode::Direct,
         deployment_output_selector: ordinary::DeploymentOutputSelector::new(
-            ordinary::FlakeAttribute::new("checks.fixture-a"),
+            ordinary::FlakeAttribute::from("checks.fixture-a"),
         ),
         activation_backend: ordinary::ActivationBackend::NixosSystemdBootV1,
         optional_nix_builder_spec: None,
@@ -241,7 +242,7 @@ async fn an_effect_completion_with_no_deployment_behind_it_is_refused() {
             effect_stage: nexus::EffectStage::CopyClosure,
             failure_evidence: ordinary::FailureEvidence {
                 optional_failed_command: None,
-                failure_detail: ordinary::FailureDetail::new("an effect nobody asked for"),
+                failure_detail: ordinary::FailureDetail::from("an effect nobody asked for"),
                 detail_truncated: false,
             },
         },

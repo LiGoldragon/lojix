@@ -4,6 +4,7 @@
 //! schema language. Public signal values have already crossed the adapter seam
 //! before they appear here.
 
+use crate::Payload;
 pub use crate::runtime_model::{
     ActivationEffect, ClosurePath, ClusterName, DeploymentIdentifier, FlakeReference,
     GenerationArtifact, GenerationIdentifier, GenerationSlot, HostComposition, HostDeployAction,
@@ -16,20 +17,24 @@ macro_rules! flow_newtype {
     ($name:ident, $inner:ty) => {
         #[derive(Clone, Debug, PartialEq, Eq)]
         pub struct $name($inner);
-        impl $name {
-            pub fn new(payload: $inner) -> Self {
+        impl crate::Payload for $name {
+            type Carried = $inner;
+
+            fn new(payload: $inner) -> Self {
                 Self(payload)
             }
-            pub fn payload(&self) -> &$inner {
+
+            fn payload(&self) -> &$inner {
                 &self.0
             }
-            pub fn into_payload(self) -> $inner {
+
+            fn into_payload(self) -> $inner {
                 self.0
             }
         }
         impl From<$inner> for $name {
             fn from(payload: $inner) -> Self {
-                Self::new(payload)
+                Self(payload)
             }
         }
     };
@@ -39,20 +44,29 @@ macro_rules! flow_text {
     ($name:ident) => {
         #[derive(Clone, Debug, PartialEq, Eq)]
         pub struct $name(String);
-        impl $name {
-            pub fn new(payload: impl Into<String>) -> Self {
-                Self(payload.into())
+        impl crate::Payload for $name {
+            type Carried = String;
+
+            fn new(payload: String) -> Self {
+                Self(payload)
             }
-            pub fn payload(&self) -> &String {
+
+            fn payload(&self) -> &String {
                 &self.0
             }
-            pub fn into_payload(self) -> String {
+
+            fn into_payload(self) -> String {
                 self.0
             }
         }
         impl From<String> for $name {
             fn from(payload: String) -> Self {
-                Self::new(payload)
+                Self(payload)
+            }
+        }
+        impl From<&str> for $name {
+            fn from(payload: &str) -> Self {
+                Self(payload.to_string())
             }
         }
     };

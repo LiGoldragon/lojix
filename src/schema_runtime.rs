@@ -11,6 +11,7 @@
 //! so actor-native request tasks await child processes directly instead of
 //! routing Nexus execution through a blocking-pool bridge.
 
+use crate::Payload;
 use crate::inspected_text::{
     CredentialBearing, InspectedText, NixStorePath, OfferedPath, PathAdmission, PercentEncodedText,
     StoreItemShape,
@@ -375,13 +376,13 @@ impl TestDefaults {
     /// configuration supplies no test fixture.
     fn test_default() -> Self {
         Self {
-            cluster: ordinary::ClusterName::new("fixture-cluster"),
-            default_vm_host: ordinary::NodeName::new("fixture-vm-host"),
+            cluster: ordinary::ClusterName::from("fixture-cluster"),
+            default_vm_host: ordinary::NodeName::from("fixture-vm-host"),
             default_mode: ordinary::TestMode::Hermetic,
-            test_flake: ordinary::FlakeReference::new("github:fixture-owner/fixture-test-flake"),
-            test_nix_system: sema::NixSystem::new("x86_64-linux"),
+            test_flake: ordinary::FlakeReference::from("github:fixture-owner/fixture-test-flake"),
+            test_nix_system: sema::NixSystem::from("x86_64-linux"),
             test_output_selector: sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new(
-                "checks.fixture-a",
+                "checks.fixture-a".to_string(),
             )),
             horizon_definition: None,
         }
@@ -927,7 +928,7 @@ impl RuntimeConfiguration {
     pub fn test_default() -> Self {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
-            daemon_host: ordinary::NodeName::new("daemon-host"),
+            daemon_host: ordinary::NodeName::from("daemon-host"),
             effect_execution: EffectExecution::production(),
             effect_barrier: None,
             test_defaults: Some(TestDefaults::test_default()),
@@ -939,7 +940,7 @@ impl RuntimeConfiguration {
     pub fn test_with_effect_barrier(barrier: EffectBarrier) -> Self {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
-            daemon_host: ordinary::NodeName::new("daemon-host"),
+            daemon_host: ordinary::NodeName::from("daemon-host"),
             effect_execution: EffectExecution::production(),
             effect_barrier: Some(barrier),
             test_defaults: Some(TestDefaults::test_default()),
@@ -956,7 +957,7 @@ impl RuntimeConfiguration {
     ) -> Self {
         Self {
             generated_inputs_directory,
-            daemon_host: ordinary::NodeName::new("daemon-host"),
+            daemon_host: ordinary::NodeName::from("daemon-host"),
             effect_execution: EffectExecution::test(program_directory),
             effect_barrier: None,
             test_defaults: Some(TestDefaults::test_default()),
@@ -5831,7 +5832,7 @@ impl Witnessing for DetachedActivationFailure {
 
     fn reported_command(&self) -> Option<crate::runtime_model::FailedCommand> {
         Some(crate::runtime_model::FailedCommand {
-            command_program: crate::runtime_model::CommandProgram::new("systemd-run"),
+            command_program: crate::runtime_model::CommandProgram::from("systemd-run"),
             command_argument_vector: vec![crate::runtime_model::CommandArgument::new(format!(
                 "ActiveState={}",
                 self.active_state
@@ -6691,12 +6692,12 @@ mod tests {
 
     fn host_submission(action: ordinary::HostDeployAction) -> sema::DeploySubmission {
         sema::DeploySubmission::Host(meta::HostDeployment {
-            cluster_name: ordinary::ClusterName::new("alpha"),
-            node_name: ordinary::NodeName::new("node-1"),
+            cluster_name: ordinary::ClusterName::from("alpha"),
+            node_name: ordinary::NodeName::from("node-1"),
             host_composition: ordinary::HostComposition::BaseHost,
-            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            proposal_source: ordinary::ProposalSource::from("/dev/null"),
             secrets_input: sema::SecretsInput::NoSecrets,
-            flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
+            flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
             deployment_transport: fixture_transport(),
             deployment_input_mode: sema::DeploymentInputMode::Direct,
             horizon_definition_option: None,
@@ -6720,12 +6721,12 @@ mod tests {
 
     fn user_submission() -> sema::DeploySubmission {
         sema::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
-            cluster_name: ordinary::ClusterName::new("fixture-cluster"),
-            node_name: ordinary::NodeName::new("fixture-daemon"),
-            user_name: ordinary::UserName::new("fixture-user"),
-            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            cluster_name: ordinary::ClusterName::from("fixture-cluster"),
+            node_name: ordinary::NodeName::from("fixture-daemon"),
+            user_name: ordinary::UserName::from("fixture-user"),
+            proposal_source: ordinary::ProposalSource::from("/dev/null"),
             secrets_input: sema::SecretsInput::NoSecrets,
-            flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
+            flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
             deployment_transport: fixture_transport(),
             deployment_input_mode: sema::DeploymentInputMode::Direct,
             horizon_definition_option: None,
@@ -6741,9 +6742,9 @@ mod tests {
     fn source_revision(policy: ordinary::SourceRevisionPolicy) -> ordinary::SourceRevisionRecord {
         ordinary::SourceRevisionRecord {
             source_revision_policy: policy,
-            requested_ref: ordinary::FlakeReference::new("github:owner/repo/main"),
+            requested_ref: ordinary::FlakeReference::from("github:owner/repo/main"),
             resolved_ref: ordinary::FlakeReference::new(
-                "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             ),
             string: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         }
@@ -6754,30 +6755,30 @@ mod tests {
     }
 
     fn cluster() -> ordinary::ClusterName {
-        ordinary::ClusterName::new("alpha")
+        ordinary::ClusterName::from("alpha")
     }
 
     fn node() -> ordinary::NodeName {
-        ordinary::NodeName::new("node-1")
+        ordinary::NodeName::from("node-1")
     }
 
     fn fixture_transport() -> sema::DeploymentTransport {
         sema::DeploymentTransport {
-            nix_store_uri: sema::NixStoreUri::new("ssh-ng://fixture-copy.invalid"),
-            ssh_destination: sema::SshDestination::new("fixture-login@fixture-activate.invalid"),
+            nix_store_uri: sema::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
+            ssh_destination: sema::SshDestination::from("fixture-login@fixture-activate.invalid"),
         }
     }
 
     fn fixture_output_selector() -> sema::DeploymentOutputSelector {
-        sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new("checks.fixture-a"))
+        sema::DeploymentOutputSelector::new(sema::FlakeAttribute::from("checks.fixture-a"))
     }
 
     fn fixture_test_profile() -> nexus::TestExecutionProfile {
         nexus::TestExecutionProfile {
             test_mode: ordinary::TestMode::Hermetic,
-            nix_system: nexus::NixSystem::new("x86_64-linux"),
+            nix_system: nexus::NixSystem::from("x86_64-linux"),
             deployment_output_selector: nexus::DeploymentOutputSelector::new(
-                nexus::FlakeAttribute::new("checks.fixture-a"),
+                nexus::FlakeAttribute::from("checks.fixture-a"),
             ),
             optional_deployment_transport: None,
         }
@@ -6793,7 +6794,7 @@ mod tests {
         // never dropped between build and activate (risk R2).
         let mut engine = SchemaRuntime::new();
         engine.active_deploy = Some(host_pipeline(ordinary::HostDeployAction::ActivateNow));
-        let built = ordinary::ClosurePath::new(STORE);
+        let built = ordinary::ClosurePath::from(STORE);
         assert!(engine.set_closure_path(built.clone()));
         engine.set_stage(DeployStage::BuildingRecorded);
 
@@ -6837,7 +6838,7 @@ mod tests {
             ordinary::SourceRevisionPolicy::ResolveAndRecord,
         ));
         assert!(pipeline.activation_commit().is_none());
-        pipeline.closure_path = Some(ordinary::ClosurePath::new(STORE));
+        pipeline.closure_path = Some(ordinary::ClosurePath::from(STORE));
         let commit = pipeline.activation_commit().expect("commit with closure");
         assert_eq!(commit.closure_path.payload(), STORE);
     }
@@ -6845,7 +6846,7 @@ mod tests {
     #[test]
     fn activation_commit_persists_computed_boot_profile_slot() {
         let mut pipeline = host_pipeline(ordinary::HostDeployAction::SetBootProfile);
-        pipeline.closure_path = Some(ordinary::ClosurePath::new(STORE));
+        pipeline.closure_path = Some(ordinary::ClosurePath::from(STORE));
         pipeline.source_revision = Some(source_revision(
             ordinary::SourceRevisionPolicy::ResolveAndRecord,
         ));
@@ -6860,7 +6861,7 @@ mod tests {
     #[test]
     fn activation_commit_persists_computed_boot_once_slot() {
         let mut pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
-        pipeline.closure_path = Some(ordinary::ClosurePath::new(STORE));
+        pipeline.closure_path = Some(ordinary::ClosurePath::from(STORE));
         pipeline.source_revision = Some(source_revision(
             ordinary::SourceRevisionPolicy::ResolveAndRecord,
         ));
@@ -6875,7 +6876,7 @@ mod tests {
     #[test]
     fn activation_commit_persists_computed_test_activation_slot() {
         let mut pipeline = host_pipeline(ordinary::HostDeployAction::TestActivation);
-        pipeline.closure_path = Some(ordinary::ClosurePath::new(STORE));
+        pipeline.closure_path = Some(ordinary::ClosurePath::from(STORE));
         pipeline.source_revision = Some(source_revision(
             ordinary::SourceRevisionPolicy::ResolveAndRecord,
         ));
@@ -6895,9 +6896,9 @@ mod tests {
             cluster_name: cluster(),
             node_name: node(),
             host_composition: ordinary::HostComposition::BaseHost,
-            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            proposal_source: ordinary::ProposalSource::from("/dev/null"),
             secrets_input: sema::SecretsInput::NoSecrets,
-            flake_reference: ordinary::FlakeReference::new(flake),
+            flake_reference: ordinary::FlakeReference::from(flake),
             deployment_transport: fixture_transport(),
             deployment_input_mode: sema::DeploymentInputMode::Direct,
             horizon_definition_option: None,
@@ -6969,7 +6970,7 @@ mod tests {
         let meta::DeployRequest::Host(deployment) = &mut request else {
             unreachable!("fixture is a host deploy")
         };
-        deployment.deployment_transport.ssh_destination = sema::SshDestination::new("root");
+        deployment.deployment_transport.ssh_destination = sema::SshDestination::from("root");
         assert_eq!(
             SchemaRuntime::deployment_routing_rejection(&request),
             Some(meta::DeployRejectionReason::InvalidDeploymentRouting)
@@ -7121,7 +7122,7 @@ mod tests {
                 .as_ref()
                 .expect("source revision")
                 .requested_ref,
-            ordinary::FlakeReference::new("github:owner/repo/main")
+            ordinary::FlakeReference::from("github:owner/repo/main")
         );
         let command = pipeline.nix_eval_command();
         assert_eq!(
@@ -7165,7 +7166,7 @@ mod tests {
     #[test]
     fn injected_closure_effects_terminalize_before_build_copy_or_activation() {
         let unsafe_path = ordinary::ClosurePath::new(
-            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-private-secret",
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-private-secret".to_string(),
         );
 
         let mut evaluated = SchemaRuntime::new();
@@ -7263,14 +7264,14 @@ mod tests {
         let eval = pipeline.nix_eval_command();
         let build = nexus::NixBuildCommand {
             generation_identifier: ordinary::GenerationIdentifier::new(1),
-            closure_path: ordinary::ClosurePath::new(STORE),
+            closure_path: ordinary::ClosurePath::from(STORE),
             build_target: nexus::BuildTarget::Local,
             extra_substituter_vector: Vec::new(),
         };
         let hermetic = nexus::HermeticCheckCommand {
             cluster_name: cluster(),
             node_name: node(),
-            flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
+            flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
             test_execution_profile: fixture_test_profile(),
         };
         let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -7399,7 +7400,7 @@ mod tests {
             resolved_flake(ordinary::SourceRevisionPolicy::ResolveAndRecord),
             sema::DeployResumeStage::RecordBuilding,
         );
-        assert!(engine.set_closure_path(ordinary::ClosurePath::new(STORE)));
+        assert!(engine.set_closure_path(ordinary::ClosurePath::from(STORE)));
         engine.set_activation_slot(ordinary::GenerationSlot::Current);
 
         for (phase, resume_stage) in [
@@ -7478,7 +7479,7 @@ mod tests {
         let source_revision = source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord);
         pipeline.source_revision = Some(source_revision.clone());
         pipeline.activation_slot = Some(ordinary::GenerationSlot::Current);
-        pipeline.closure_path = Some(ordinary::ClosurePath::new(STORE));
+        pipeline.closure_path = Some(ordinary::ClosurePath::from(STORE));
         engine.active_deploy = Some(pipeline.clone());
 
         let event = pipeline.phase_event(
@@ -7520,7 +7521,7 @@ mod tests {
                     .first()
                     .expect("generation")
                     .closure_path,
-                ordinary::ClosurePath::new(STORE)
+                ordinary::ClosurePath::from(STORE)
             ),
             other => panic!("expected GenerationsQueried, got {other:?}"),
         }
@@ -7540,9 +7541,9 @@ mod tests {
                 cluster_name: cluster(),
                 node_name: node(),
                 host_composition: ordinary::HostComposition::BaseHost,
-                proposal_source: ordinary::ProposalSource::new("/dev/null"),
+                proposal_source: ordinary::ProposalSource::from("/dev/null"),
                 secrets_input: sema::SecretsInput::NoSecrets,
-                flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
+                flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
                 deployment_transport: fixture_transport(),
                 deployment_input_mode: sema::DeploymentInputMode::Direct,
                 horizon_definition_option: None,
@@ -7566,10 +7567,10 @@ mod tests {
             let request = meta::DeployRequest::UserEnvironment(meta::UserEnvironmentDeployment {
                 cluster_name: cluster(),
                 node_name: node(),
-                user_name: ordinary::UserName::new("li"),
-                proposal_source: ordinary::ProposalSource::new("/dev/null"),
+                user_name: ordinary::UserName::from("li"),
+                proposal_source: ordinary::ProposalSource::from("/dev/null"),
                 secrets_input: sema::SecretsInput::NoSecrets,
-                flake_reference: ordinary::FlakeReference::new("github:owner/repo"),
+                flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
                 deployment_transport: fixture_transport(),
                 deployment_input_mode: sema::DeploymentInputMode::Direct,
                 horizon_definition_option: None,
@@ -7647,8 +7648,8 @@ mod tests {
 
     fn nexus_fixture_transport() -> nexus::DeploymentTransport {
         nexus::DeploymentTransport {
-            nix_store_uri: nexus::NixStoreUri::new("ssh-ng://fixture-copy.invalid"),
-            ssh_destination: nexus::SshDestination::new("fixture-login@fixture-activate.invalid"),
+            nix_store_uri: nexus::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
+            ssh_destination: nexus::SshDestination::from("fixture-login@fixture-activate.invalid"),
         }
     }
 
@@ -7657,7 +7658,7 @@ mod tests {
             generation_identifier: ordinary::GenerationIdentifier::new(1),
             node_name: node(),
             deployment_transport: nexus_fixture_transport(),
-            closure_path: ordinary::ClosurePath::new(STORE),
+            closure_path: ordinary::ClosurePath::from(STORE),
         }
     }
 
@@ -7683,7 +7684,7 @@ mod tests {
     fn copy_preserves_login_host_and_params() {
         let mut command = copy_command();
         command.deployment_transport.nix_store_uri =
-            nexus::NixStoreUri::new("ssh-ng://bird@zeus.example:2222?compress=true");
+            nexus::NixStoreUri::from("ssh-ng://bird@zeus.example:2222?compress=true");
         let copy = ClosureCopy::from_command(&command).expect("copy transport");
         let invocation = copy.invocation();
         let argv = invocation.joined_arguments();
@@ -7699,7 +7700,7 @@ mod tests {
     fn copy_preserves_root_login_unchanged() {
         let mut command = copy_command();
         command.deployment_transport.nix_store_uri =
-            nexus::NixStoreUri::new("ssh-ng://root@zeus.example");
+            nexus::NixStoreUri::from("ssh-ng://root@zeus.example");
         let copy = ClosureCopy::from_command(&command).expect("copy transport");
         let invocation = copy.invocation();
         let argv = invocation.joined_arguments();
@@ -7716,7 +7717,7 @@ mod tests {
             cluster_name: cluster(),
             node_name: node(),
             deployment_transport: nexus_fixture_transport(),
-            closure_path: ordinary::ClosurePath::new(STORE),
+            closure_path: ordinary::ClosurePath::from(STORE),
             activation_effect: kind,
             activation_backend: match &profile {
                 nexus::ActivationProfile::Host(_) => nexus::ActivationBackend::NixosSystemdBootV1,
@@ -7985,16 +7986,18 @@ mod tests {
         sema::DeployJob {
             deployment_identifier: ordinary::DeploymentIdentifier::new(72),
             generation_identifier: ordinary::GenerationIdentifier::new(72),
-            cluster_name: ordinary::ClusterName::new("fixture-cluster"),
-            node_name: ordinary::NodeName::new("fixture-daemon"),
+            cluster_name: ordinary::ClusterName::from("fixture-cluster"),
+            node_name: ordinary::NodeName::from("fixture-daemon"),
             deploy_job_phase: sema::DeployJobPhase::Activating,
-            optional_closure_path: closure.map(ordinary::ClosurePath::new),
+            optional_closure_path: closure.map(ordinary::ClosurePath::from),
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
             flake_reference: ordinary::FlakeReference::new(
-                "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567",
+                "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567"
+                    .to_string(),
             ),
             optional_flake_reference: Some(ordinary::FlakeReference::new(
-                "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567",
+                "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567"
+                    .to_string(),
             )),
             resolved_revision: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
             deployment_transport: fixture_transport(),
@@ -8130,7 +8133,7 @@ mod tests {
         // ssh is not at risk there.
         let foreign = host_activation_on_host(
             ordinary::HostDeployAction::ActivateNow,
-            Some(ordinary::NodeName::new("some-other-node")),
+            Some(ordinary::NodeName::from("some-other-node")),
         );
         assert!(foreign.detached_self_activation().is_none());
         let no_context = host_activation(ordinary::HostDeployAction::ActivateNow);
@@ -8235,7 +8238,7 @@ mod tests {
         // through the local Nix client; only the default has no named builder.
         let mut pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
         pipeline.builder = Some(sema::NixBuilderSpec::new(
-            "ssh-ng://fixture-builder.invalid x86_64-linux - 4 2 k1",
+            "ssh-ng://fixture-builder.invalid x86_64-linux - 4 2 k1".to_string(),
         ));
         assert!(matches!(
             pipeline.build_target(),
@@ -8294,7 +8297,7 @@ mod tests {
         );
 
         let user = nexus::MaterializationShape::UserEnvironment(
-            nexus::UserEnvironmentMaterialization::new(ordinary::UserName::new("li")),
+            nexus::UserEnvironmentMaterialization::new(ordinary::UserName::from("li")),
         );
         assert!(DeploymentInput::from_shape(&user).is_none());
     }
@@ -8388,7 +8391,7 @@ mod tests {
         // the daemon host's store, matching `build_closure_remote`). So a Remote
         // eval adds no `--store` / `--eval-store` flags at all.
         let target = nexus::BuildTarget::Remote(nexus::NixBuilderSpec::new(
-            "ssh-ng://fixture-builder.invalid x86_64-linux - 4 2 k1",
+            "ssh-ng://fixture-builder.invalid x86_64-linux - 4 2 k1".to_string(),
         ));
         let invocation =
             NixCommand::eval_drv_path(".#toplevel", &[], &target, EvalRefresh::ForceRefresh);
@@ -8435,10 +8438,10 @@ mod tests {
         let profile =
             nexus::ActivationProfile::UserEnvironment(nexus::UserEnvironmentActivationProfile {
                 user_environment_action: mode,
-                user_name: ordinary::UserName::new("li"),
+                user_name: ordinary::UserName::from("li"),
             });
         let mut command = activate_command(profile, ordinary::ActivationEffect::LiveActivation);
-        command.deployment_transport.ssh_destination = nexus::SshDestination::new(ssh_destination);
+        command.deployment_transport.ssh_destination = nexus::SshDestination::from(ssh_destination);
         match Activation::from_command(&command, None).expect("activation") {
             Activation::UserEnvironment(activation) => activation,
             Activation::Host(_) => panic!("expected user-environment activation"),

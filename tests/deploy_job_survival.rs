@@ -1,3 +1,4 @@
+use lojix::Payload as _;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -9,21 +10,21 @@ mod common;
 
 fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
     sema::DeploySubmission::Host(sema::HostDeployment {
-        cluster_name: sema::ClusterName::new("alpha"),
-        node_name: sema::NodeName::new("node-1"),
+        cluster_name: sema::ClusterName::from("alpha"),
+        node_name: sema::NodeName::from("node-1"),
         host_composition: sema::HostComposition::BaseHost,
         proposal_source: sema::ProposalSource::new(proposal_source.display().to_string()),
         secrets_input: sema::SecretsInput::NoSecrets,
-        flake_reference: sema::FlakeReference::new("github:example/fixture"),
+        flake_reference: sema::FlakeReference::from("github:example/fixture"),
         deployment_transport: sema::DeploymentTransport {
-            nix_store_uri: sema::NixStoreUri::new("ssh-ng://fixture-copy.invalid"),
-            ssh_destination: sema::SshDestination::new("fixture-login@fixture-activate.invalid"),
+            nix_store_uri: sema::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
+            ssh_destination: sema::SshDestination::from("fixture-login@fixture-activate.invalid"),
         },
         deployment_input_mode: sema::DeploymentInputMode::Horizon,
         horizon_definition_option: Some(common::read_horizon(proposal_source)),
-        deployment_output_selector: sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new(
-            "checks.fixture-a",
-        )),
+        deployment_output_selector: sema::DeploymentOutputSelector::new(
+            sema::FlakeAttribute::from("checks.fixture-a"),
+        ),
         activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
         host_deploy_action: sema::HostDeployAction::Realize,
         source_revision_policy: sema::SourceRevisionPolicy::ResolveAndRecord,

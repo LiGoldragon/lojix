@@ -9,6 +9,7 @@
 //! the deploy pipeline included), and encodes the reply back. The runtime engine
 //! is the single source of routing truth; there is no inline request `Store`.
 
+use crate::Payload;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
@@ -981,23 +982,23 @@ mod tests {
 
     fn self_switch_submission() -> sema::DeploySubmission {
         sema::DeploySubmission::Host(sema::HostDeployment {
-            cluster_name: ordinary::ClusterName::new("fixture-cluster"),
-            node_name: ordinary::NodeName::new("fixture-daemon"),
+            cluster_name: ordinary::ClusterName::from("fixture-cluster"),
+            node_name: ordinary::NodeName::from("fixture-daemon"),
             host_composition: ordinary::HostComposition::CompleteHost,
-            proposal_source: ordinary::ProposalSource::new("/dev/null"),
+            proposal_source: ordinary::ProposalSource::from("/dev/null"),
             secrets_input: sema::SecretsInput::NoSecrets,
             flake_reference: ordinary::FlakeReference::new(format!(
                 "github:LiGoldragon/CriomOS?rev={REVISION}"
             )),
             deployment_transport: sema::DeploymentTransport {
-                nix_store_uri: sema::NixStoreUri::new("ssh-ng://fixture-copy.invalid"),
-                ssh_destination: sema::SshDestination::new("root@fixture-daemon.invalid"),
+                nix_store_uri: sema::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
+                ssh_destination: sema::SshDestination::from("root@fixture-daemon.invalid"),
             },
             deployment_input_mode: sema::DeploymentInputMode::Direct,
             horizon_definition_option: None,
             deployment_output_selector: sema::DeploymentOutputSelector::new(
                 sema::FlakeAttribute::new(
-                    "nixosConfigurations.fixture-daemon.config.system.build.toplevel",
+                    "nixosConfigurations.fixture-daemon.config.system.build.toplevel".to_string(),
                 ),
             ),
             activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
@@ -1012,10 +1013,10 @@ mod tests {
         sema::DeployJob {
             deployment_identifier: ordinary::DeploymentIdentifier::new(0),
             generation_identifier: ordinary::GenerationIdentifier::new(0),
-            cluster_name: ordinary::ClusterName::new("fixture-cluster"),
-            node_name: ordinary::NodeName::new("fixture-daemon"),
+            cluster_name: ordinary::ClusterName::from("fixture-cluster"),
+            node_name: ordinary::NodeName::from("fixture-daemon"),
             deploy_job_phase: sema::DeployJobPhase::Submitted,
-            optional_closure_path: Some(ordinary::ClosurePath::new(CLOSURE)),
+            optional_closure_path: Some(ordinary::ClosurePath::from(CLOSURE)),
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
             flake_reference: ordinary::FlakeReference::new(format!(
                 "github:LiGoldragon/CriomOS?rev={REVISION}"
@@ -1025,13 +1026,13 @@ mod tests {
             ))),
             resolved_revision: Some(REVISION.to_string()),
             deployment_transport: sema::DeploymentTransport {
-                nix_store_uri: sema::NixStoreUri::new("ssh-ng://fixture-copy.invalid"),
-                ssh_destination: sema::SshDestination::new("root@fixture-daemon.invalid"),
+                nix_store_uri: sema::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
+                ssh_destination: sema::SshDestination::from("root@fixture-daemon.invalid"),
             },
             deployment_input_mode: sema::DeploymentInputMode::Direct,
             deployment_output_selector: sema::DeploymentOutputSelector::new(
                 sema::FlakeAttribute::new(
-                    "nixosConfigurations.fixture-daemon.config.system.build.toplevel",
+                    "nixosConfigurations.fixture-daemon.config.system.build.toplevel".to_string(),
                 ),
             ),
             activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
@@ -1048,15 +1049,15 @@ mod tests {
     fn self_switch_identity() -> ordinary::DeploymentRequestIdentity {
         ordinary::DeploymentRequestIdentity {
             deployment_environment: ordinary::DeploymentEnvironment::HostEnvironment,
-            cluster_name: ordinary::ClusterName::new("fixture-cluster"),
-            node_name: ordinary::NodeName::new("fixture-daemon"),
+            cluster_name: ordinary::ClusterName::from("fixture-cluster"),
+            node_name: ordinary::NodeName::from("fixture-daemon"),
             generation_artifact: ordinary::GenerationArtifact::CompleteHost,
             requested_deployment_action: ordinary::RequestedDeploymentAction::Host(
                 ordinary::HostDeployAction::ActivateNow,
             ),
             activation_effect: ordinary::ActivationEffect::LiveActivation,
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-            optional_immutable_revision: Some(ordinary::ImmutableRevision::new(REVISION)),
+            optional_immutable_revision: Some(ordinary::ImmutableRevision::from(REVISION)),
         }
     }
 
@@ -1085,15 +1086,15 @@ mod tests {
                 ordinary::DeploymentPhaseEvent {
                     deployment_identifier: record.deployment_identifier.clone(),
                     generation_identifier: record.generation_identifier.clone(),
-                    cluster_name: ordinary::ClusterName::new("fixture-cluster"),
-                    node_name: ordinary::NodeName::new("fixture-daemon"),
+                    cluster_name: ordinary::ClusterName::from("fixture-cluster"),
+                    node_name: ordinary::NodeName::from("fixture-daemon"),
                     deployment_phase: ordinary::DeploymentPhase::Copying,
                     event_log_position: ordinary::EventLogPosition::new(copying_position),
                     state_marker: ordinary::StateMarker {
                         commit_sequence: ordinary::CommitSequence::new(0),
                         state_digest: ordinary::StateDigest::new(0),
                     },
-                    optional_immutable_revision: Some(ordinary::ImmutableRevision::new(REVISION)),
+                    optional_immutable_revision: Some(ordinary::ImmutableRevision::from(REVISION)),
                     optional_deployment_terminal: None,
                 },
             )

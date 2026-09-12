@@ -10,6 +10,7 @@
 //! backing the identifier counters reset to zero on restart — this asserts they
 //! resume from the persisted rows instead.
 
+use lojix::Payload as _;
 use lojix::Store;
 use lojix::runtime_model::{self as ordinary, GcRoot, LiveGeneration};
 use tempfile::TempDir;
@@ -17,10 +18,10 @@ use tempfile::TempDir;
 /// A live generation and its matching gc-root for one generation identifier.
 fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
     let generation = ordinary::GenerationIdentifier::new(generation_identifier);
-    let cluster = ordinary::ClusterName::new("fixture-cluster");
-    let node = ordinary::NodeName::new("dune");
+    let cluster = ordinary::ClusterName::from("fixture-cluster");
+    let node = ordinary::NodeName::from("dune");
     let closure =
-        ordinary::ClosurePath::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-resume-closure");
+        ordinary::ClosurePath::from("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-resume-closure");
     (
         LiveGeneration {
             deployment_identifier: ordinary::DeploymentIdentifier::new(generation_identifier),
@@ -34,8 +35,8 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
             closure_path: closure.clone(),
             source_revision_record: ordinary::SourceRevisionRecord {
                 source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
-                requested_ref: ordinary::FlakeReference::new("github:owner/repo/main"),
-                resolved_ref: ordinary::FlakeReference::new(
+                requested_ref: ordinary::FlakeReference::from("github:owner/repo/main"),
+                resolved_ref: ordinary::FlakeReference::from(
                     "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 ),
                 string: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
@@ -142,14 +143,14 @@ fn current_generation_is_unique_per_host_or_user_environment_across_reopen() {
             .expect("record first host current");
         let (alice, alice_root) = activation_in_environment(
             2,
-            ordinary::DeploymentEnvironment::UserEnvironment(ordinary::UserName::new("alice")),
+            ordinary::DeploymentEnvironment::UserEnvironment(ordinary::UserName::from("alice")),
         );
         store
             .record_activation(alice, alice_root)
             .expect("record alice current");
         let (bob, bob_root) = activation_in_environment(
             3,
-            ordinary::DeploymentEnvironment::UserEnvironment(ordinary::UserName::new("bob")),
+            ordinary::DeploymentEnvironment::UserEnvironment(ordinary::UserName::from("bob")),
         );
         store
             .record_activation(bob, bob_root)

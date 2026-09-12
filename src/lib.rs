@@ -37,6 +37,21 @@ use crate::runtime_model::{
     StoredTestRun, TerminalMarker, TransitionIntentState, TransitionMarker, TransitionOrdinal,
 };
 
+/// A named wrapper around exactly one carried value. The wrapper exists to give
+/// the value a contract and a name, never to add a second field, so the only
+/// thing such a type is ever asked is what it carries. Every runtime and flow
+/// newtype in lojix answers here rather than growing its own `new`/`payload`
+/// pair.
+pub trait Payload {
+    type Carried;
+
+    fn new(payload: Self::Carried) -> Self;
+
+    fn payload(&self) -> &Self::Carried;
+
+    fn into_payload(self) -> Self::Carried;
+}
+
 pub type NexusConfiguration = signal_lojix::LojixNexusConfiguration;
 pub type NexusConfigurationState = nexus::ConfigurationState<NexusConfiguration>;
 
@@ -709,7 +724,7 @@ pub(crate) trait SourceRevisionText {
 impl SourceRevisionText for str {
     fn immutable_revision(&self) -> Option<ImmutableRevision> {
         (self.len() == 40 && self.bytes().all(|byte| byte.is_ascii_hexdigit()))
-            .then(|| ImmutableRevision::new(self))
+            .then(|| ImmutableRevision::from(self))
     }
 
     fn validate_as_closure_path(&self, record_kind: &str) -> Result<()> {
@@ -2889,8 +2904,8 @@ mod transition_intent_tests {
     fn admission_identity() -> ordinary::DeploymentRequestIdentity {
         ordinary::DeploymentRequestIdentity {
             deployment_environment: ordinary::DeploymentEnvironment::HostEnvironment,
-            cluster_name: ordinary::ClusterName::new("cluster"),
-            node_name: ordinary::NodeName::new("node"),
+            cluster_name: ordinary::ClusterName::from("cluster"),
+            node_name: ordinary::NodeName::from("node"),
             generation_artifact: ordinary::GenerationArtifact::BaseHost,
             requested_deployment_action: ordinary::RequestedDeploymentAction::Host(
                 ordinary::HostDeployAction::Evaluate,
@@ -2898,7 +2913,7 @@ mod transition_intent_tests {
             activation_effect: ordinary::ActivationEffect::ProfileOnly,
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
             optional_immutable_revision: Some(ordinary::ImmutableRevision::new(
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             )),
         }
     }
@@ -2907,25 +2922,25 @@ mod transition_intent_tests {
         ordinary::DeployJob {
             deployment_identifier: ordinary::DeploymentIdentifier::new(0),
             generation_identifier: ordinary::GenerationIdentifier::new(0),
-            cluster_name: ordinary::ClusterName::new("cluster"),
-            node_name: ordinary::NodeName::new("node"),
+            cluster_name: ordinary::ClusterName::from("cluster"),
+            node_name: ordinary::NodeName::from("node"),
             deploy_job_phase: ordinary::DeployJobPhase::Submitted,
             optional_closure_path: None,
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
             flake_reference: ordinary::FlakeReference::new(
-                "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             ),
             optional_flake_reference: None,
             resolved_revision: None,
             deployment_transport: ordinary::DeploymentTransport {
-                nix_store_uri: ordinary::NixStoreUri::new("ssh-ng://fixture-copy.invalid"),
+                nix_store_uri: ordinary::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
                 ssh_destination: ordinary::SshDestination::new(
-                    "fixture-login@fixture-activate.invalid",
+                    "fixture-login@fixture-activate.invalid".to_string(),
                 ),
             },
             deployment_input_mode: ordinary::DeploymentInputMode::Direct,
             deployment_output_selector: ordinary::DeploymentOutputSelector::new(
-                ordinary::FlakeAttribute::new("checks.fixture-a"),
+                ordinary::FlakeAttribute::from("checks.fixture-a"),
             ),
             activation_backend: ordinary::ActivationBackend::NixosSystemdBootV1,
             optional_nix_builder_spec: None,
@@ -2943,7 +2958,7 @@ mod transition_intent_tests {
         let directory = tempfile::TempDir::new().expect("temporary store directory");
         let store = Store::open(directory.path().join("lojix.sema")).expect("open store");
         let unsafe_path = ordinary::ClosurePath::new(
-            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-private-secret",
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-private-secret".to_string(),
         );
         let mut job = admission_job();
         job.optional_closure_path = Some(unsafe_path.clone());
@@ -2954,8 +2969,8 @@ mod transition_intent_tests {
         );
         let root = ordinary::GcRoot {
             generation_identifier: ordinary::GenerationIdentifier::new(1),
-            cluster_name: ordinary::ClusterName::new("cluster"),
-            node_name: ordinary::NodeName::new("node"),
+            cluster_name: ordinary::ClusterName::from("cluster"),
+            node_name: ordinary::NodeName::from("node"),
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path: unsafe_path,
             optional_pin_label: None,
@@ -2979,7 +2994,7 @@ mod transition_intent_tests {
             .find(|job| job.deployment_identifier == record.deployment_identifier)
             .expect("one restart cursor");
         job.optional_closure_path = Some(ordinary::ClosurePath::new(
-            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-private-secret",
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-private-secret".to_string(),
         ));
         store
             .database

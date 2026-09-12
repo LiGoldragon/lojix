@@ -1,5 +1,6 @@
 //! Generated Datom and portable Signal smoke witnesses for Lojix's owner contract.
 
+use lojix::Payload as _;
 use lojix::adapters::{Lowerable as _, Raisable as _};
 use lojix::schema_runtime::{DeploySubmissionOutcome, SchemaRuntime};
 use signal::{ByteViewable, Restorable, Signal, Signalizable};

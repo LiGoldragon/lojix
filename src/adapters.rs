@@ -2,6 +2,7 @@
 //!
 //! The daemon maps named fields without a Datom or textual intermediate.
 
+use crate::Payload;
 use crate::inspected_text::{NixStorePath, StoreItemShape};
 use crate::runtime_model as sema;
 use meta_signal_lojix as owner;
@@ -907,12 +908,12 @@ mod tests {
         sema::Generation {
             generation_identifier: sema::GenerationIdentifier::new(1),
             deployment_identifier: sema::DeploymentIdentifier::new(1),
-            cluster_name: sema::ClusterName::new("alpha"),
-            node_name: sema::NodeName::new("node-1"),
+            cluster_name: sema::ClusterName::from("alpha"),
+            node_name: sema::NodeName::from("node-1"),
             generation_artifact: sema::GenerationArtifact::BaseHost,
             activation_effect: sema::ActivationEffect::LiveActivation,
             generation_slot: sema::GenerationSlot::Current,
-            closure_path: sema::ClosurePath::new(path),
+            closure_path: sema::ClosurePath::from(path),
             optional_immutable_revision: None,
         }
     }

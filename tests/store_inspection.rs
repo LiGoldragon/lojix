@@ -1,3 +1,4 @@
+use lojix::Payload as _;
 use lojix::Store;
 use lojix::inspection::{
     DatabaseInspection, SchemaInspection, StoreInspectionCommand, StoreInspector,
@@ -12,9 +13,9 @@ const RAW_EVENT_LOG: TableDefinition<String, &[u8]> = TableDefinition::new("even
 
 fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
     let generation = ordinary::GenerationIdentifier::new(generation_identifier);
-    let cluster = ordinary::ClusterName::new("fixture-cluster");
-    let node = ordinary::NodeName::new("dune");
-    let closure = ordinary::ClosurePath::new(
+    let cluster = ordinary::ClusterName::from("fixture-cluster");
+    let node = ordinary::NodeName::from("dune");
+    let closure = ordinary::ClosurePath::from(
         "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-inspection-closure",
     );
     (
@@ -30,8 +31,8 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
             closure_path: closure.clone(),
             source_revision_record: ordinary::SourceRevisionRecord {
                 source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
-                requested_ref: ordinary::FlakeReference::new("github:owner/repo/main"),
-                resolved_ref: ordinary::FlakeReference::new(
+                requested_ref: ordinary::FlakeReference::from("github:owner/repo/main"),
+                resolved_ref: ordinary::FlakeReference::from(
                     "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 ),
                 string: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),

@@ -1,3 +1,4 @@
+use lojix::Payload as _;
 use lojix::runtime_model::{self as ordinary, EventLogEntry, LoggedEvent};
 use lojix::{EventLogRetention, Store};
 
@@ -6,8 +7,8 @@ fn event(position: u64) -> EventLogEntry {
         event_log_position: ordinary::EventLogPosition::new(position),
         logged_event: LoggedEvent::CacheRetention(ordinary::CacheRetentionTransitionEvent {
             generation_identifier: ordinary::GenerationIdentifier::new(position + 1),
-            cluster_name: ordinary::ClusterName::new("alpha"),
-            node_name: ordinary::NodeName::new("node"),
+            cluster_name: ordinary::ClusterName::from("alpha"),
+            node_name: ordinary::NodeName::from("node"),
             cache_retention_transition: ordinary::CacheRetentionTransition::Pinned,
             generation_slot: ordinary::GenerationSlot::Pinned,
             optional_generation_slot: None,
@@ -23,8 +24,8 @@ fn deployment_event(position: u64) -> EventLogEntry {
         logged_event: LoggedEvent::Deployment(ordinary::DeploymentPhaseEvent {
             deployment_identifier: ordinary::DeploymentIdentifier::new(position + 1),
             generation_identifier: ordinary::GenerationIdentifier::new(position + 1),
-            cluster_name: ordinary::ClusterName::new("alpha"),
-            node_name: ordinary::NodeName::new("node"),
+            cluster_name: ordinary::ClusterName::from("alpha"),
+            node_name: ordinary::NodeName::from("node"),
             deployment_phase: ordinary::DeploymentPhase::Submitted,
             event_log_position: ordinary::EventLogPosition::new(position),
             state_marker: ordinary::StateMarker {

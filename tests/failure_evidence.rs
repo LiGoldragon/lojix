@@ -10,6 +10,7 @@
 //! durable record and the event log — not on the reply the submitter happened
 //! to receive.
 
+use lojix::Payload as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -76,19 +77,19 @@ fn fake_programs_with_activation(directory: &Path, fail_activation: bool) {
 
 fn transport(nix_store_uri: &str, ssh_destination: &str) -> ordinary::DeploymentTransport {
     ordinary::DeploymentTransport {
-        nix_store_uri: ordinary::NixStoreUri::new(nix_store_uri),
-        ssh_destination: ordinary::SshDestination::new(ssh_destination),
+        nix_store_uri: ordinary::NixStoreUri::from(nix_store_uri),
+        ssh_destination: ordinary::SshDestination::from(ssh_destination),
     }
 }
 
 fn user_environment_request(source: &Path) -> meta::DeploySubmission {
     meta::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
-        cluster_name: ordinary::ClusterName::new("alpha"),
-        node_name: ordinary::NodeName::new("beacon"),
-        user_name: ordinary::UserName::new("bird"),
+        cluster_name: ordinary::ClusterName::from("alpha"),
+        node_name: ordinary::NodeName::from("beacon"),
+        user_name: ordinary::UserName::from("bird"),
         proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
         secrets_input: ordinary::SecretsInput::NoSecrets,
-        flake_reference: ordinary::FlakeReference::new(FLAKE),
+        flake_reference: ordinary::FlakeReference::from(FLAKE),
         deployment_transport: transport(
             "ssh-ng://fixture-copy.invalid",
             "root@fixture-activate.invalid",
@@ -96,7 +97,7 @@ fn user_environment_request(source: &Path) -> meta::DeploySubmission {
         deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
         horizon_definition_option: Some(common::read_horizon(source)),
         deployment_output_selector: ordinary::DeploymentOutputSelector::new(
-            ordinary::FlakeAttribute::new("homeConfigurations.bird.activationPackage"),
+            ordinary::FlakeAttribute::from("homeConfigurations.bird.activationPackage"),
         ),
         activation_backend: ordinary::ActivationBackend::HomeManagerNixProfileV1,
         user_environment_action: ordinary::UserEnvironmentAction::ActivateNow,

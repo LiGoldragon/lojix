@@ -5,6 +5,7 @@
 //! local immutable evaluation/build, target copy, root-mediated Home Manager
 //! profile set, then target-user activation.
 
+use lojix::Payload as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -69,12 +70,12 @@ fn user_environment_request_with_secrets(
     secrets_input: ordinary::SecretsInput,
 ) -> meta::DeploySubmission {
     meta::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
-        cluster_name: ordinary::ClusterName::new("alpha"),
-        node_name: ordinary::NodeName::new("beacon"),
-        user_name: ordinary::UserName::new("bird"),
+        cluster_name: ordinary::ClusterName::from("alpha"),
+        node_name: ordinary::NodeName::from("beacon"),
+        user_name: ordinary::UserName::from("bird"),
         proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
         secrets_input,
-        flake_reference: ordinary::FlakeReference::new(FLAKE),
+        flake_reference: ordinary::FlakeReference::from(FLAKE),
         deployment_transport: transport(nix_store_uri, ssh_destination),
         deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
         horizon_definition_option: Some(common::read_horizon(source)),
@@ -89,13 +90,13 @@ fn user_environment_request_with_secrets(
 
 fn transport(nix_store_uri: &str, ssh_destination: &str) -> ordinary::DeploymentTransport {
     ordinary::DeploymentTransport {
-        nix_store_uri: ordinary::NixStoreUri::new(nix_store_uri),
-        ssh_destination: ordinary::SshDestination::new(ssh_destination),
+        nix_store_uri: ordinary::NixStoreUri::from(nix_store_uri),
+        ssh_destination: ordinary::SshDestination::from(ssh_destination),
     }
 }
 
 fn selector(value: &str) -> ordinary::DeploymentOutputSelector {
-    ordinary::DeploymentOutputSelector::new(ordinary::FlakeAttribute::new(value))
+    ordinary::DeploymentOutputSelector::new(ordinary::FlakeAttribute::from(value))
 }
 
 fn runtime(directory: &Path, programs: &Path) -> SchemaRuntime {
@@ -275,7 +276,7 @@ async fn invalid_explicit_secrets_inputs_fail_before_effects() {
     symlink(&existing_directory, &link).expect("make symlink witness");
 
     let inputs = [
-        ordinary::SecretsInput::SecretsDirectory(ordinary::SecretsDirectory::new("relative")),
+        ordinary::SecretsInput::SecretsDirectory(ordinary::SecretsDirectory::from("relative")),
         ordinary::SecretsInput::SecretsDirectory(ordinary::SecretsDirectory::new(
             directory.path().join("missing").display().to_string(),
         )),
