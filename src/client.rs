@@ -11,8 +11,17 @@ pub struct SocketExchange {
     capacity: FrameCapacity,
 }
 
-impl SocketExchange {
-    pub fn for_environment(variable: &str) -> Result<Self> {
+/// One Nexus socket, named by the environment variable that carries its path,
+/// used for exactly one request and its one reply. Nothing here interprets the
+/// bytes: the frame is the whole contract at this seam.
+pub trait NexusSocket: Sized {
+    fn for_environment(variable: &str) -> Result<Self>;
+
+    fn exchange(&self, request: Vec<u8>) -> Result<Vec<u8>>;
+}
+
+impl NexusSocket for SocketExchange {
+    fn for_environment(variable: &str) -> Result<Self> {
         let socket_path = std::env::var(variable)
             .map_err(|_| Error::MissingRuntimeConfiguration(variable.to_owned()))?;
         if socket_path.is_empty() {
@@ -24,7 +33,7 @@ impl SocketExchange {
         })
     }
 
-    pub fn exchange(&self, request: Vec<u8>) -> Result<Vec<u8>> {
+    fn exchange(&self, request: Vec<u8>) -> Result<Vec<u8>> {
         let mut stream = UnixStream::connect(&self.socket_path)?;
         stream.write_frame(&FrameBody::from(request), self.capacity)?;
         Ok(stream.read_frame(self.capacity)?.bytes().to_vec())

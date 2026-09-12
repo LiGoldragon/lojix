@@ -23,10 +23,11 @@ use std::sync::{Mutex, MutexGuard};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, Engine as SemaDatabase, EngineOpen, EngineRecord, FamilyDirectory, FamilyName,
-    Mutation, QueryPlan, RecordKey, Retraction, RowMaterializer, SchemaHash, SchemaVersion,
-    TableDescriptor, TableName, TableReference, VersionedHistoryAcknowledgement,
-    VersionedHistoryRetention, VersionedStoreName, VersioningPolicy,
+    Assertion, Engine as SemaDatabase, EngineOpen, EngineRecord, EngineStoredRecord,
+    FamilyDirectory, FamilyName, Mutation, QueryPlan, RecordKey, Retraction, RowMaterializer,
+    SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
+    VersionedHistoryAcknowledgement, VersionedHistoryRetention, VersionedStoreName,
+    VersioningPolicy,
 };
 
 use crate::runtime_model::{
@@ -71,8 +72,33 @@ pub mod runtime_flow;
 pub mod runtime_model;
 pub mod schema_runtime;
 
+/// An offline lojix tool: a request read from the process's one inline Datom
+/// argument, and the thing it then does. The daemon is not involved and no
+/// socket is opened — these are the two ways a store is examined or repaired
+/// while nothing is serving it.
+#[cfg(feature = "tools")]
+pub trait OfflineCommand: Sized {
+    /// What running the command answers with.
+    type Outcome;
+
+    /// The invocation the executable was started with.
+    fn from_environment() -> Result<Self> {
+        Self::from_arguments(std::env::args_os().skip(1))
+    }
+
+    fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self>;
+
+    fn run(&self) -> Self::Outcome;
+}
+
 #[cfg(feature = "tools")]
 pub struct Ingress;
+
+/// A value with exactly one text form it is known by — the name that appears
+/// in a durable record, a generated attribute, or an operator's terminal.
+pub trait Named {
+    fn as_str(&self) -> &str;
+}
 
 /// Capability to create the bounded budget for one public Datom ingress.
 #[cfg(feature = "tools")]
@@ -119,50 +145,190 @@ impl HorizonArchitecture for str {
 /// `lojix-reset-store` primitive while the daemon is stopped.
 const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(5);
 
-/// The ten durable table names. One row per element (a keyed record family),
-/// not one blob per table — the sema-engine model. `deploy-job` is the
-/// in-flight deploy-job mirror (up9q): one row per submitted deploy, rewritten
-/// per phase transition, read on daemon start so an in-flight deploy resumes
-/// rather than being lost with the connection that submitted it.
-const LIVE_SET_TABLE: TableName = TableName::new("live-set");
-const GC_ROOTS_TABLE: TableName = TableName::new("gc-roots");
-const EVENT_LOG_TABLE: TableName = TableName::new("event-log");
-const CONTAINER_LIFECYCLE_TABLE: TableName = TableName::new("container-lifecycle");
-const DEPLOY_JOB_TABLE: TableName = TableName::new("deploy-job");
-const TEST_RUN_TABLE: TableName = TableName::new("test-run");
-const DEPLOYMENT_RECORD_TABLE: TableName = TableName::new("deployment-record");
-const IDENTIFIER_ALLOCATION_TABLE: TableName = TableName::new("identifier-allocation");
-const DEPLOYMENT_OUTBOX_TABLE: TableName = TableName::new("deployment-outbox");
-const PENDING_TRANSITION_INTENT_TABLE: TableName = TableName::new("pending-transition-intent");
-const NEXUS_CONFIGURATION_TABLE: TableName = TableName::new("nexus-configuration");
+/// A record kind the lojix store holds. Every family is one durable table
+/// carrying one row per element — the sema-engine model — and everything the
+/// store, the startup gate and the read-only inspector need to know about a
+/// family is stated once here rather than as a constant, a reader, a validator
+/// and an inspection target spelled separately per kind.
+///
+/// The schema hash only has to be stable across reopens and distinct per
+/// family; a schema change is a deliberate hard migration, so a fixed value is
+/// correct until a version bump.
+pub trait LojixRecord: EngineStoredRecord + Send + Sync + 'static
+where
+    Self::Archived: RkyvDeserialize<Self, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
+        + for<'validation> rkyv::bytecheck::CheckBytes<
+            rkyv::rancor::Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'validation>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    const TABLE: &'static str;
+    const FAMILY: &'static str;
+    const SCHEMA_HASH: [u8; 32];
+    /// What an operator reading an inspection report sees this family called.
+    const ROLE: &'static str;
 
-/// The stable per-family schema identities. Each table is its own record
-/// family with a distinct, reopen-stable `FamilyName` + `SchemaHash`. The hash
-/// only has to be stable across reopens and distinct per family; the leading
-/// byte distinguishes the eight families. A schema change is a deliberate hard
-/// migration, so a fixed value is correct until a version bump.
-const LIVE_SET_FAMILY: &str = "LiveSetFamily";
-const GC_ROOTS_FAMILY: &str = "GcRootsFamily";
-const EVENT_LOG_FAMILY: &str = "EventLogFamily";
-const CONTAINER_LIFECYCLE_FAMILY: &str = "ContainerLifecycleFamily";
-const DEPLOY_JOB_FAMILY: &str = "DeployJobFamily";
-const TEST_RUN_FAMILY: &str = "TestRunFamily";
-const DEPLOYMENT_RECORD_FAMILY: &str = "DeploymentRecordFamily";
-const IDENTIFIER_ALLOCATION_FAMILY: &str = "IdentifierAllocationFamily";
-const DEPLOYMENT_OUTBOX_FAMILY: &str = "DeploymentOutboxFamily";
-const PENDING_TRANSITION_INTENT_FAMILY: &str = "PendingTransitionIntentFamily";
-const NEXUS_CONFIGURATION_FAMILY: &str = "NexusConfigurationFamily";
-const LIVE_SET_SCHEMA_HASH: [u8; 32] = [1; 32];
-const GC_ROOTS_SCHEMA_HASH: [u8; 32] = [2; 32];
-const EVENT_LOG_SCHEMA_HASH: [u8; 32] = [3; 32];
-const CONTAINER_LIFECYCLE_SCHEMA_HASH: [u8; 32] = [4; 32];
-const DEPLOY_JOB_SCHEMA_HASH: [u8; 32] = [5; 32];
-const TEST_RUN_SCHEMA_HASH: [u8; 32] = [6; 32];
-const DEPLOYMENT_RECORD_SCHEMA_HASH: [u8; 32] = [7; 32];
-const IDENTIFIER_ALLOCATION_SCHEMA_HASH: [u8; 32] = [8; 32];
-const DEPLOYMENT_OUTBOX_SCHEMA_HASH: [u8; 32] = [9; 32];
-const PENDING_TRANSITION_INTENT_SCHEMA_HASH: [u8; 32] = [11; 32];
-const NEXUS_CONFIGURATION_SCHEMA_HASH: [u8; 32] = [12; 32];
+    /// Where this family's rows live in an opened store.
+    fn table(directory: &LojixDirectory) -> TableReference<Self>;
+
+    /// The table, family and schema-hash triple that identifies this family in
+    /// a store catalog.
+    fn family_identity() -> (String, String, [u8; 32]) {
+        (
+            Self::TABLE.to_string(),
+            Self::FAMILY.to_string(),
+            Self::SCHEMA_HASH,
+        )
+    }
+
+    fn descriptor() -> TableDescriptor<Self> {
+        TableDescriptor::new(
+            TableName::new(Self::TABLE),
+            FamilyName::new(Self::FAMILY),
+            SchemaHash::new(Self::SCHEMA_HASH),
+        )
+    }
+
+    fn register(database: &mut SemaDatabase, path: &Path) -> Result<TableReference<Self>> {
+        database
+            .register_table(Self::descriptor())
+            .map_err(|source| Error::StoreStartupCompatibility {
+                path: path.to_path_buf(),
+                stage: format!("registering {} table", Self::TABLE),
+                source: Box::new(source),
+            })
+    }
+}
+
+impl LojixRecord for LiveGeneration {
+    const TABLE: &'static str = "live-set";
+    const FAMILY: &'static str = "LiveSetFamily";
+    const SCHEMA_HASH: [u8; 32] = [1; 32];
+    const ROLE: &'static str = "current generation rows";
+
+    fn table(directory: &LojixDirectory) -> TableReference<Self> {
+        directory.live_set
+    }
+}
+
+impl LojixRecord for GcRoot {
+    const TABLE: &'static str = "gc-roots";
+    const FAMILY: &'static str = "GcRootsFamily";
+    const SCHEMA_HASH: [u8; 32] = [2; 32];
+    const ROLE: &'static str = "gc root rows";
+
+    fn table(directory: &LojixDirectory) -> TableReference<Self> {
+        directory.gc_roots
+    }
+}
+
+impl LojixRecord for EventLogEntry {
+    const TABLE: &'static str = "event-log";
+    const FAMILY: &'static str = "EventLogFamily";
+    const SCHEMA_HASH: [u8; 32] = [3; 32];
+    const ROLE: &'static str = "deployment event-log rows";
+
+    fn table(directory: &LojixDirectory) -> TableReference<Self> {
+        directory.event_log
+    }
+}
+
+impl LojixRecord for ContainerLifecycleRecord {
+    const TABLE: &'static str = "container-lifecycle";
+    const FAMILY: &'static str = "ContainerLifecycleFamily";
+    const SCHEMA_HASH: [u8; 32] = [4; 32];
+    const ROLE: &'static str = "container lifecycle rows";
+
+    fn table(directory: &LojixDirectory) -> TableReference<Self> {
+        directory.containers
+    }
+}
+
+/// The in-flight deploy-job mirror (up9q): one row per submitted deploy,
+/// rewritten per phase transition, read on daemon start so an in-flight deploy
+/// resumes rather than being lost with the connection that submitted it.
+impl LojixRecord for DeployJob {
+    const TABLE: &'static str = "deploy-job";
+    const FAMILY: &'static str = "DeployJobFamily";
+    const SCHEMA_HASH: [u8; 32] = [5; 32];
+    const ROLE: &'static str = "in-flight deploy job rows";
+
+    fn table(directory: &LojixDirectory) -> TableReference<Self> {
+        directory.deploy_jobs
+    }
+}
+
+impl LojixRecord for StoredTestRun {
+    const TABLE: &'static str = "test-run";
+    const FAMILY: &'static str = "TestRunFamily";
+    const SCHEMA_HASH: [u8; 32] = [6; 32];
+    const ROLE: &'static str = "test-run rows";
+
+    fn table(directory: &LojixDirectory) -> TableReference<Self> {
+        directory.test_runs
+    }
+}
+
+impl LojixRecord for DeploymentRecord {
+    const TABLE: &'static str = "deployment-record";
+    const FAMILY: &'static str = "DeploymentRecordFamily";
+    const SCHEMA_HASH: [u8; 32] = [7; 32];
+    const ROLE: &'static str = "durable deployment correlation rows";
+
+    fn table(directory: &LojixDirectory) -> TableReference<Self> {
+        directory.deployment_records
+    }
+}
+
+impl LojixRecord for IdentifierAllocation {
+    const TABLE: &'static str = "identifier-allocation";
+    const FAMILY: &'static str = "IdentifierAllocationFamily";
+    const SCHEMA_HASH: [u8; 32] = [8; 32];
+    const ROLE: &'static str = "global identifier high-water row";
+
+    fn table(directory: &LojixDirectory) -> TableReference<Self> {
+        directory.identifier_allocation
+    }
+}
+
+impl LojixRecord for DeploymentOutboxRecord {
+    const TABLE: &'static str = "deployment-outbox";
+    const FAMILY: &'static str = "DeploymentOutboxFamily";
+    const SCHEMA_HASH: [u8; 32] = [9; 32];
+    const ROLE: &'static str = "deployment outbox rows";
+
+    fn table(directory: &LojixDirectory) -> TableReference<Self> {
+        directory.deployment_outbox
+    }
+}
+
+impl LojixRecord for PendingTransitionIntent {
+    const TABLE: &'static str = "pending-transition-intent";
+    const FAMILY: &'static str = "PendingTransitionIntentFamily";
+    const SCHEMA_HASH: [u8; 32] = [11; 32];
+    const ROLE: &'static str = "pending transition intent rows";
+
+    fn table(directory: &LojixDirectory) -> TableReference<Self> {
+        directory.pending_transition_intents
+    }
+}
+
+impl LojixRecord for NexusConfigurationRecord {
+    const TABLE: &'static str = "nexus-configuration";
+    const FAMILY: &'static str = "NexusConfigurationFamily";
+    const SCHEMA_HASH: [u8; 32] = [12; 32];
+    const ROLE: &'static str = "nexus configuration row";
+
+    fn table(directory: &LojixDirectory) -> TableReference<Self> {
+        directory.nexus_configuration
+    }
+}
+
 static STARTUP_PROBE_IDENTIFIER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, thiserror::Error)]
@@ -255,7 +421,7 @@ pub enum Error {
     )]
     StoreStartupCompatibility {
         path: PathBuf,
-        stage: &'static str,
+        stage: String,
         #[source]
         source: Box<sema_engine::Error>,
     },
@@ -557,22 +723,6 @@ impl TerminalOutcome for DeploymentTerminal {
     }
 }
 
-pub trait NexusPersistable {
-    fn open_with_default_configuration(
-        path: impl Into<PathBuf>,
-        default_configuration: NexusConfiguration,
-    ) -> Result<Self>
-    where
-        Self: Sized;
-    fn nexus_configuration_state(&self) -> Result<NexusConfigurationState>;
-    fn ordinary_configure(
-        &self,
-        configuration: NexusConfiguration,
-    ) -> Result<NexusConfigurationState>;
-    fn meta_configure(&self, configuration: NexusConfiguration) -> Result<NexusConfigurationState>;
-    fn reverse_meta_configuration(&self) -> Result<NexusConfigurationState>;
-}
-
 /// The explicit bounded-history policy for deployment and container events.
 /// Current generations, GC roots, and active deploy jobs are independent keyed
 /// state and are never selected by this policy.
@@ -581,18 +731,27 @@ pub struct EventLogRetention {
     maximum_entries: u64,
 }
 
-impl EventLogRetention {
-    pub const DEFAULT_MAXIMUM_ENTRIES: u64 = 4_096;
-
-    pub const fn default_policy() -> Self {
-        Self::new(Self::DEFAULT_MAXIMUM_ENTRIES)
+impl Default for EventLogRetention {
+    /// Four thousand and ninety-six entries: enough history for an operator to
+    /// reconstruct a deployment, bounded enough that the store cannot grow
+    /// without limit.
+    fn default() -> Self {
+        Self::new(4_096)
     }
+}
 
-    pub const fn new(maximum_entries: u64) -> Self {
+impl Payload for EventLogRetention {
+    type Carried = u64;
+
+    fn new(maximum_entries: u64) -> Self {
         Self { maximum_entries }
     }
 
-    pub const fn maximum_entries(&self) -> u64 {
+    fn payload(&self) -> &u64 {
+        &self.maximum_entries
+    }
+
+    fn into_payload(self) -> u64 {
         self.maximum_entries
     }
 }
@@ -616,17 +775,7 @@ impl EventLogRetention {
 /// high-water row rather than in RAM or a scan of retained history.
 pub struct Store {
     database: SemaDatabase,
-    live_set: TableReference<LiveGeneration>,
-    gc_roots: TableReference<GcRoot>,
-    event_log: TableReference<EventLogEntry>,
-    containers: TableReference<ContainerLifecycleRecord>,
-    deploy_jobs: TableReference<DeployJob>,
-    test_runs: TableReference<StoredTestRun>,
-    deployment_records: TableReference<DeploymentRecord>,
-    identifier_allocation: TableReference<IdentifierAllocation>,
-    deployment_outbox: TableReference<DeploymentOutboxRecord>,
-    pending_transition_intents: TableReference<PendingTransitionIntent>,
-    nexus_configuration: TableReference<NexusConfigurationRecord>,
+    directory: LojixDirectory,
     path: PathBuf,
     write_gate: Mutex<()>,
     /// The ephemeral subscription-token counter. Subscriptions are connection
@@ -635,7 +784,7 @@ pub struct Store {
     subscription_sequence: AtomicU64,
 }
 
-struct LojixDirectory {
+pub struct LojixDirectory {
     live_set: TableReference<LiveGeneration>,
     gc_roots: TableReference<GcRoot>,
     event_log: TableReference<EventLogEntry>,
@@ -647,6 +796,30 @@ struct LojixDirectory {
     deployment_outbox: TableReference<DeploymentOutboxRecord>,
     pending_transition_intents: TableReference<PendingTransitionIntent>,
     nexus_configuration: TableReference<NexusConfigurationRecord>,
+}
+
+/// The one place that says which families a lojix store holds. Registration is
+/// idempotent, so building the directory doubles as the resume.
+trait LojixTables: Sized {
+    fn register(database: &mut SemaDatabase, path: &Path) -> Result<Self>;
+}
+
+impl LojixTables for LojixDirectory {
+    fn register(database: &mut SemaDatabase, path: &Path) -> Result<Self> {
+        Ok(Self {
+            live_set: LiveGeneration::register(database, path)?,
+            gc_roots: GcRoot::register(database, path)?,
+            event_log: EventLogEntry::register(database, path)?,
+            containers: ContainerLifecycleRecord::register(database, path)?,
+            deploy_jobs: DeployJob::register(database, path)?,
+            test_runs: StoredTestRun::register(database, path)?,
+            deployment_records: DeploymentRecord::register(database, path)?,
+            identifier_allocation: IdentifierAllocation::register(database, path)?,
+            deployment_outbox: DeploymentOutboxRecord::register(database, path)?,
+            pending_transition_intents: PendingTransitionIntent::register(database, path)?,
+            nexus_configuration: NexusConfigurationRecord::register(database, path)?,
+        })
+    }
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Clone, Debug, PartialEq)]
@@ -657,17 +830,17 @@ struct NexusConfigurationRecord {
 impl FamilyDirectory for LojixDirectory {
     fn materialize(&self, row: RowMaterializer<'_>) -> sema_engine::Result<()> {
         match row.family().table_name() {
-            "live-set" => row.apply(self.live_set),
-            "gc-roots" => row.apply(self.gc_roots),
-            "event-log" => row.apply(self.event_log),
-            "container-lifecycle" => row.apply(self.containers),
-            "deploy-job" => row.apply(self.deploy_jobs),
-            "test-run" => row.apply(self.test_runs),
-            "deployment-record" => row.apply(self.deployment_records),
-            "identifier-allocation" => row.apply(self.identifier_allocation),
-            "deployment-outbox" => row.apply(self.deployment_outbox),
-            "pending-transition-intent" => row.apply(self.pending_transition_intents),
-            "nexus-configuration" => row.apply(self.nexus_configuration),
+            LiveGeneration::TABLE => row.apply(self.live_set),
+            GcRoot::TABLE => row.apply(self.gc_roots),
+            EventLogEntry::TABLE => row.apply(self.event_log),
+            ContainerLifecycleRecord::TABLE => row.apply(self.containers),
+            DeployJob::TABLE => row.apply(self.deploy_jobs),
+            StoredTestRun::TABLE => row.apply(self.test_runs),
+            DeploymentRecord::TABLE => row.apply(self.deployment_records),
+            IdentifierAllocation::TABLE => row.apply(self.identifier_allocation),
+            DeploymentOutboxRecord::TABLE => row.apply(self.deployment_outbox),
+            PendingTransitionIntent::TABLE => row.apply(self.pending_transition_intents),
+            NexusConfigurationRecord::TABLE => row.apply(self.nexus_configuration),
             table => Err(sema_engine::Error::TableNotRegistered {
                 table: table.to_owned(),
             }),
@@ -776,16 +949,569 @@ impl ClosureRecord for GcRoot {
     }
 }
 
-impl Store {
+/// The durable lojix state plane itself: where it lives, how far its write
+/// counter has run, and every row of one record family read back. The record
+/// kind is the parameter here — a family is not a method.
+pub trait DurableStore {
     /// Open or create the durable SEMA database at `path`. A fresh file is
     /// created with empty engine counters; an existing file resumes its
     /// persisted commit sequence and records straight back through sema-engine.
     /// The six `register_table` calls are idempotent, so opening doubles as the
     /// resume — there is no separate load path (ur16).
-    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+    fn open(path: impl Into<PathBuf>) -> Result<Self>
+    where
+        Self: Sized;
+
+    fn path(&self) -> &Path;
+
+    /// The persisted commit sequence — sema-engine's durable write counter,
+    /// read back after a write for the reply marker. Survives restart because
+    /// the engine owns it (it just deletes from RAM here). `state_digest`
+    /// remains the commit-sequence stand-in (decision 6).
+    fn commit_sequence(&self) -> Result<u64>;
+
+    /// The next subscription token: an in-memory atomic fetch-add. Subscriptions
+    /// do not survive restart, so an ephemeral counter is correct (decision 5).
+    fn next_subscription_token(&self) -> u64;
+
+    /// Every persisted row of one record family.
+    fn records<Record>(&self) -> Result<Vec<Record>>
+    where
+        Record: LojixRecord,
+        Record::Archived: RkyvDeserialize<Record, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
+            + for<'validation> rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'validation>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >;
+}
+
+/// What the store does to itself at startup and between commits: take the
+/// process-local write gate, prove every persisted family still decodes, and
+/// resume an interrupted compaction. None of this is domain vocabulary, so
+/// none of it leaves the crate.
+pub(crate) trait StoreIntegrity {
+    fn lock_write(&self) -> Result<MutexGuard<'_, ()>>;
+
+    /// Read every durable table once during store construction. The daemon must
+    /// fail at the storage boundary when an older row layout no longer decodes;
+    /// otherwise startup succeeds and the first query reports a misleading
+    /// domain miss such as `GenerationUnknown`.
+    fn validate_startup_compatibility(&self) -> Result<()>;
+
+    fn startup_compatibility_error(&self, stage: &str, error: Error) -> Error;
+
+    /// Compact only the historical event and container-observation rows. The
+    /// caller supplies the query window explicitly; live deploy state and
+    /// restart-resume jobs stay outside this historical plane.
+    fn resume_compaction(&self) -> Result<()>;
+}
+
+/// A Nexus's durable configuration: the built-in defaults a new store is
+/// seeded with, the state a populated one resumes, and the two socket-scoped
+/// mutations that change it.
+pub trait NexusPersistable {
+    fn open_with_default_configuration(
+        path: impl Into<PathBuf>,
+        default_configuration: NexusConfiguration,
+    ) -> Result<Self>
+    where
+        Self: Sized;
+
+    fn open_unchecked(
+        path: impl Into<PathBuf>,
+        default_configuration: NexusConfiguration,
+        seed_existing_state: bool,
+    ) -> Result<Self>
+    where
+        Self: Sized;
+
+    fn ensure_nexus_configuration(
+        &self,
+        default_configuration: NexusConfiguration,
+        seed_existing_state: bool,
+    ) -> Result<()>;
+
+    fn nexus_configuration_state(&self) -> Result<NexusConfigurationState>;
+
+    fn ordinary_configure(
+        &self,
+        configuration: NexusConfiguration,
+    ) -> Result<NexusConfigurationState>;
+
+    fn meta_configure(&self, configuration: NexusConfiguration) -> Result<NexusConfigurationState>;
+
+    fn reverse_meta_configuration(&self) -> Result<NexusConfigurationState>;
+}
+
+/// The durable high-water row. Identifiers are handed out from persisted
+/// counters rather than from RAM or a scan of retained history, so a restart
+/// never reissues one that has been spent.
+pub trait IdentifierAllocating {
+    /// Initialize the one global high-water record once from the durable v5
+    /// records that can issue identities.
+    fn ensure_identifier_allocation(&self) -> Result<()>;
+
+    /// The private write-ahead transition records. Public queries never expose
+    /// these rows; they exist solely to bridge a committed state transition to
+    /// its exactly-once public event/outbox delivery.
+    fn identifier_allocation(&self) -> Result<IdentifierAllocation>;
+
+    /// The next generation identifier comes from the durable global allocator,
+    /// never a scan of currently retained rows.
+    fn next_generation_identifier(&self) -> Result<u64>;
+
+    /// The next deployment identifier comes from the durable global allocator,
+    /// never a scan of currently retained rows.
+    fn next_deployment_identifier(&self) -> Result<u64>;
+
+    /// The next event-log position comes from the durable global allocator, so
+    /// retention cannot cause an event position to be reused.
+    fn next_event_log_position(&self) -> Result<u64>;
+
+    /// Reserve an event-log position before constructing its record. The
+    /// reservation itself is durable, so a crash can introduce only a gap;
+    /// it can never lead to a reused position.
+    fn allocate_event_log_position(&self) -> Result<u64>;
+
+    /// The persisted test-run rows — read by the ordinary `(ByTestRun …)`
+    /// query and on daemon start so an in-flight test reconciles rather than
+    /// being lost (report 54 §5.3). A row is keyed by its `TestRunIdentifier`.
+    /// The next test-run identifier: one past the maximum persisted, or 1 when
+    /// empty. Restart-safe — derived from the durable rows, not a RAM counter,
+    /// mirroring `next_deployment_identifier`.
+    fn next_test_run_identifier(&self) -> Result<u64>;
+}
+
+/// Exactly-once delivery of a durable transition. An intent is bound to the
+/// commit that created it, dispatched, acknowledged, and reconciled on
+/// restart; the outbox is the private delivery ledger behind it.
+pub trait TransitionJournal {
+    /// The private delivery ledger. A record is uniquely keyed by the durable
+    /// deployment identity and the exact transition marker that created its
+    /// event; an effect replay therefore cannot create a second delivery for
+    /// the same transition.
+    fn outbox_key(
+        deployment_identifier: &crate::runtime_model::DeploymentIdentifier,
+        transition_marker: &TransitionMarker,
+    ) -> RecordKey;
+
+    fn transition_intent_key(intent: &PendingTransitionIntent) -> RecordKey;
+
+    fn transition_intent_event(
+        intent: &PendingTransitionIntent,
+    ) -> Result<crate::runtime_model::DeploymentPhaseEvent>;
+
+    /// Find the exact durable transaction that created `intent`.  The
+    /// write-ahead row is not allowed to borrow the current database head: a
+    /// later unrelated commit would otherwise forge the public marker.  The
+    /// versioned SEMA log names both keyed rows written together, so matching
+    /// the intent key and its deployment-record key proves the atomic source.
+    fn initial_intent_marker(&self, intent: &PendingTransitionIntent) -> Result<TransitionMarker>;
+
+    fn intent_from_key(
+        &self,
+        deployment_identifier: u64,
+        transition_ordinal: u64,
+    ) -> Result<PendingTransitionIntent>;
+
+    /// Bind one freshly committed write-ahead intent to the receipt of its own
+    /// durable transaction and create its private delivery row.  This is a
+    /// separate commit by design: the marker is learned only from the durable
+    /// commit log, never predicted before the initial transaction.
+    fn bind_transition_intent(
+        &self,
+        deployment_identifier: u64,
+        transition_ordinal: u64,
+    ) -> Result<PendingTransitionIntent>;
+
+    /// Persist `Pending -> Dispatched` before touching the local journal.  A
+    /// restart deliberately requeues this durable state, so a crash cannot
+    /// skip the exact-payload journal check.
+    fn dispatch_transition_intent(
+        &self,
+        intent: &PendingTransitionIntent,
+    ) -> Result<PendingTransitionIntent>;
+
+    /// Append (or prove an exact existing copy of) the public journal event.
+    /// An outbox row never counts as delivery: the local journal is checked at
+    /// its full typed payload boundary on every recovery attempt.
+    fn append_transition_intent_journal(
+        &self,
+        intent: &PendingTransitionIntent,
+    ) -> Result<PendingTransitionIntent>;
+
+    /// The terminal local acknowledgement is atomic across the private intent
+    /// and its outbox row, and is permitted only after the exact journal event
+    /// has been proven present.
+    fn acknowledge_transition_intent(&self, intent: &PendingTransitionIntent) -> Result<()>;
+
+    /// Drive one durable transition all the way to a locally-acknowledged
+    /// journal record.  It is idempotent over every crash boundary above.
+    fn complete_pending_transition_intent(
+        &self,
+        deployment_identifier: u64,
+        transition_ordinal: u64,
+    ) -> Result<()>;
+
+    /// Finish a committed write-ahead transition after restart. This runs
+    /// before pipelines are reconstructed, so a later phase can never leap an
+    /// earlier record mutation whose public transition was not delivered.
+    fn reconcile_pending_transition_intents(&self) -> Result<()>;
+
+    fn outbox_record_for_event(
+        event: crate::runtime_model::DeploymentPhaseEvent,
+    ) -> DeploymentOutboxRecord;
+
+    /// Reopen recovery makes any unacknowledged dispatch available again. An
+    /// acknowledged transition is never re-delivered; a dispatched-but-unacked
+    /// transition is retried with its original composite key and payload.
+    fn requeue_dispatched_outbox(&self) -> Result<()>;
+
+    /// Reconstruct delivery rows from already-durable deployment events. Equal
+    /// payloads deduplicate; any attempt to reuse a composite key for a
+    /// different payload stops recovery.
+    fn reconcile_deployment_outbox(&self) -> Result<()>;
+}
+
+/// The bounded historical plane: the append-only event log, the container
+/// observation mirror, and the retention policy that retires them. Live deploy
+/// state and resume jobs are keyed state and never selected by it.
+pub trait EventHistory {
+    /// Append one non-deployment event-log entry, keyed by its position.
+    ///
+    /// Deployment events are deliberately excluded: they must originate from
+    /// a `PendingTransitionIntent`, acquire their marker from that exact
+    /// commit, and be locally acknowledged through the durable outbox before
+    /// a caller can continue the deployment pipeline.
+    fn append_event_log_entry(&self, entry: EventLogEntry) -> Result<()>;
+
+    /// The persisted event-log entries in the half-open position range
+    /// `[from, until)`.
+    fn event_log_in_range(&self, from: u64, until: u64) -> Result<Vec<EventLogEntry>>;
+
+    fn compact_event_history(&self, retention: EventLogRetention) -> Result<u64>;
+
+    fn maintain_event_history(&self) -> Result<()>;
+
+    /// The persisted GC-roots — the retention tree the pin/unpin/retire verbs
+    /// search and rewrite.
+    /// Record a container observation and its matching event in one durable commit.
+    fn record_container_transition(
+        &self,
+        record: ContainerLifecycleRecord,
+        entry: EventLogEntry,
+    ) -> Result<()>;
+}
+
+/// The durable life of one deployment — admitted, phased, terminalized or
+/// rejected — together with the in-flight job row that lets it resume when the
+/// connection that submitted it is gone.
+pub trait DeploymentLedger {
+    /// Atomically create the admission correlation record *and* the durable
+    /// write-ahead intent.  The public receipt is intentionally absent here:
+    /// it is bound only after this transaction is visible in sema-engine's
+    /// versioned commit log.
+    fn begin_admission_transition(
+        &self,
+        deployment_request_identity: DeploymentRequestIdentity,
+        deploy_job: DeployJob,
+    ) -> Result<DeploymentRecord>;
+
+    /// The synchronous admission helper used by the runtime.  It makes a
+    /// submitted record visible only after its initial transition has reached
+    /// the locally acknowledged journal protocol.
+    fn allocate_deployment_record(
+        &self,
+        deployment_request_identity: DeploymentRequestIdentity,
+        deploy_job: DeployJob,
+    ) -> Result<DeploymentRecord>;
+
+    /// Atomically persist the terminal correlation state and its write-ahead
+    /// intent.  The job remains durable through dispatch/journal delivery and
+    /// is retracted only in the same acknowledgement commit as the intent and
+    /// outbox, so a crash cannot turn an unreported terminal into an orphan.
+    fn begin_terminal_transition(
+        &self,
+        deployment_identifier: u64,
+        deployment_terminal: DeploymentTerminal,
+    ) -> Result<u64>;
+
+    /// Complete a terminal transition and return the record only after its
+    /// terminal journal/outbox acknowledgement has committed.
+    fn terminalize_deployment(
+        &self,
+        deployment_identifier: u64,
+        deployment_terminal: DeploymentTerminal,
+    ) -> Result<DeploymentRecord>;
+
+    /// Preflight/policy rejection creates the correlation record and terminal
+    /// intent in one transaction.  Unlike an accepted deployment it has no
+    /// restart job, but its terminal journal is still locally acknowledged
+    /// before a rejection handle can leave the daemon.
+    fn begin_rejected_deployment_request(
+        &self,
+        deployment_request_identity: DeploymentRequestIdentity,
+        deployment_terminal: DeploymentTerminal,
+    ) -> Result<DeploymentRecord>;
+
+    fn reject_deployment_request(
+        &self,
+        deployment_request_identity: DeploymentRequestIdentity,
+        deployment_terminal: DeploymentTerminal,
+    ) -> Result<DeploymentRecord>;
+
+    /// Every admitted, rejected, or failed deployment is retained here for
+    /// correlation queries; in-flight job rows are a separate resume
+    /// convenience and may be retired at terminal state.
+    /// Persist the safe immutable revision once flake resolution supplies it.
+    /// This updates the correlation record before subsequent generation and
+    /// terminal projections consume the same value.
+    fn set_deployment_immutable_revision(
+        &self,
+        deployment_identifier: u64,
+        immutable_revision: crate::runtime_model::ImmutableRevision,
+    ) -> Result<()>;
+
+    /// Persist the resolved immutable identity and the exact restart cursor in
+    /// one commit before the pipeline advances. A crash cannot leave a record
+    /// pinned to one revision while its job replays a different mutable ref.
+    fn record_resolved_source(
+        &self,
+        deployment_identifier: u64,
+        immutable_revision: crate::runtime_model::ImmutableRevision,
+        deploy_job: DeployJob,
+    ) -> Result<()>;
+
+    /// Atomically persist one intermediate record/job transition together with
+    /// its write-ahead intent.  The public event is deliberately absent from
+    /// this commit: its marker is bound from this exact logged transaction and
+    /// delivery is acknowledged before this method returns to the runtime.
+    fn begin_deployment_phase_transition(
+        &self,
+        deployment_identifier: u64,
+        deployment_lifecycle: DeploymentLifecycle,
+        deploy_job: DeployJob,
+        event: crate::runtime_model::DeploymentPhaseEvent,
+    ) -> Result<u64>;
+
+    /// Complete the acknowledged delivery half of one intermediate phase.  No
+    /// caller receives a phase receipt, and therefore no next effect becomes
+    /// eligible, until this returns the exact marker from the durable intent.
+    fn advance_deployment_phase(
+        &self,
+        deployment_identifier: u64,
+        deployment_lifecycle: DeploymentLifecycle,
+        deploy_job: DeployJob,
+        event: crate::runtime_model::DeploymentPhaseEvent,
+    ) -> Result<StateMarker>;
+
+    fn record_deployment_phase(
+        &self,
+        entry: EventLogEntry,
+        deployment_lifecycle: DeploymentLifecycle,
+        deploy_job: DeployJob,
+    ) -> Result<EventLogEntry>;
+
+    /// The persisted in-flight deploy-job rows — read on daemon start so an
+    /// in-flight deploy resumes from its recorded phase rather than being lost
+    /// with the connection that submitted it (up9q). A finished or failed job
+    /// is retracted on completion, so a steady-state store reads back empty.
+    fn deploy_jobs(&self) -> Result<Vec<DeployJob>>;
+
+    /// Write or rewrite one deploy-job row, keyed by its deployment identifier.
+    /// `assert` on the first (submit) write, `mutate` to overwrite the existing
+    /// row on each phase transition — so the persisted phase cursor always
+    /// reflects the latest committed step (up9q durable resume).
+    fn upsert_deploy_job(&self, job: DeployJob) -> Result<()>;
+
+    /// Drop one deploy-job row by its deployment identifier — called when the
+    /// deploy reaches a terminal phase (Activated or Failed), so the in-flight
+    /// mirror tracks only deploys that still need resuming. A no-op when the
+    /// row is already absent.
+    fn retract_deploy_job(&self, deployment_identifier: u64) -> Result<()>;
+}
+
+/// What is installed on a node and what keeps it alive: the live generation
+/// set and the GC-root retention tree the pin, unpin and retire verbs search
+/// and rewrite.
+pub trait GenerationLedger {
+    /// The live generations matching a predicate, projected by the caller.
+    fn matching_live_generations(
+        &self,
+        keep: impl Fn(&LiveGeneration) -> bool,
+    ) -> Result<Vec<LiveGeneration>>;
+
+    /// Append one live generation, keyed by its generation identifier
+    /// (decision 4).
+    fn append_live_generation(&self, generation: LiveGeneration) -> Result<()>;
+
+    /// Record the live generation and its GC root as one durable commit.
+    fn record_activation(&self, generation: LiveGeneration, root: GcRoot) -> Result<()>;
+
+    /// Append one GC-root, keyed by its generation identifier (decision 4).
+    fn append_gc_root(&self, root: GcRoot) -> Result<()>;
+
+    /// Overwrite one GC-root in place (a slot/label change), keyed by its
+    /// generation identifier.
+    fn mutate_gc_root(&self, root: GcRoot) -> Result<()>;
+
+    /// Drop one GC-root by its generation identifier.
+    fn retract_gc_root(&self, generation_identifier: u64) -> Result<()>;
+}
+
+/// The durable record of a test run, rewritten through its phases to a
+/// terminal verdict.
+pub trait TestRunLedger {
+    /// Write or rewrite one test-run row, keyed by its run identifier. `assert`
+    /// on the first (accept) write, `mutate` to overwrite the existing row at
+    /// each later phase transition (Unit 2b), so the persisted outcome always
+    /// reflects the latest committed step. Mirrors `upsert_deploy_job`.
+    fn upsert_test_run(&self, run: StoredTestRun) -> Result<()>;
+}
+
+impl DurableStore for Store {
+    fn open(path: impl Into<PathBuf>) -> Result<Self> {
         Self::open_with_default_configuration(path, NexusConfiguration::built_in())
     }
 
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn commit_sequence(&self) -> Result<u64> {
+        Ok(self.database.current_commit_sequence()?.value())
+    }
+
+    fn next_subscription_token(&self) -> u64 {
+        self.subscription_sequence.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn records<Record>(&self) -> Result<Vec<Record>>
+    where
+        Record: LojixRecord,
+        Record::Archived: RkyvDeserialize<Record, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
+            + for<'validation> rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'validation>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        Ok(self
+            .database
+            .match_records(QueryPlan::all(Record::table(&self.directory)))?
+            .records()
+            .to_vec())
+    }
+}
+
+impl StoreIntegrity for Store {
+    fn lock_write(&self) -> Result<MutexGuard<'_, ()>> {
+        self.write_gate
+            .lock()
+            .map_err(|_| Error::Invariant("lojix store write gate is poisoned".to_string()))
+    }
+
+    fn validate_startup_compatibility(&self) -> Result<()> {
+        self.records::<LiveGeneration>()
+            .map(|_| ())
+            .map_err(|source| {
+                self.startup_compatibility_error("validating live-set rows", source)
+            })?;
+        self.records::<GcRoot>().map(|_| ()).map_err(|source| {
+            self.startup_compatibility_error("validating gc-roots rows", source)
+        })?;
+        self.records::<EventLogEntry>()
+            .map(|_| ())
+            .map_err(|source| {
+                self.startup_compatibility_error("validating event-log rows", source)
+            })?;
+        self.records::<ContainerLifecycleRecord>()
+            .map(|_| ())
+            .map_err(|source| {
+                self.startup_compatibility_error("validating container-lifecycle rows", source)
+            })?;
+        self.deploy_jobs().map(|_| ()).map_err(|source| {
+            self.startup_compatibility_error("validating deploy-job rows", source)
+        })?;
+        self.records::<StoredTestRun>()
+            .map(|_| ())
+            .map_err(|source| {
+                self.startup_compatibility_error("validating test-run rows", source)
+            })?;
+        self.records::<DeploymentRecord>()
+            .map(|_| ())
+            .map_err(|source| {
+                self.startup_compatibility_error("validating deployment-record rows", source)
+            })?;
+        self.records::<IdentifierAllocation>()
+            .map(|_| ())
+            .map_err(|source| {
+                self.startup_compatibility_error("validating identifier-allocation row", source)
+            })?;
+        self.records::<DeploymentOutboxRecord>()
+            .map(|_| ())
+            .map_err(|source| {
+                self.startup_compatibility_error("validating deployment-outbox rows", source)
+            })?;
+        self.records::<PendingTransitionIntent>()
+            .map(|_| ())
+            .map_err(|source| {
+                self.startup_compatibility_error(
+                    "validating pending-transition-intent rows",
+                    source,
+                )
+            })?;
+        self.nexus_configuration_state()
+            .and_then(|state| state.desired_configuration.validate())
+            .map_err(|source| match source {
+                Error::Database(error) => self.startup_compatibility_error(
+                    "validating nexus-configuration row",
+                    Error::Database(error),
+                ),
+                other => other,
+            })?;
+        Ok(())
+    }
+
+    fn startup_compatibility_error(&self, stage: &str, error: Error) -> Error {
+        match error {
+            Error::Database(source) => Error::StoreStartupCompatibility {
+                path: self.path.clone(),
+                stage: stage.to_string(),
+                source: Box::new(source),
+            },
+            other => other,
+        }
+    }
+
+    fn resume_compaction(&self) -> Result<()> {
+        self.database.resume_compaction(&LojixDirectory {
+            live_set: self.directory.live_set,
+            gc_roots: self.directory.gc_roots,
+            event_log: self.directory.event_log,
+            containers: self.directory.containers,
+            deploy_jobs: self.directory.deploy_jobs,
+            test_runs: self.directory.test_runs,
+            deployment_records: self.directory.deployment_records,
+            identifier_allocation: self.directory.identifier_allocation,
+            deployment_outbox: self.directory.deployment_outbox,
+            pending_transition_intents: self.directory.pending_transition_intents,
+            nexus_configuration: self.directory.nexus_configuration,
+        })?;
+        Ok(())
+    }
+}
+
+impl NexusPersistable for Store {
     fn open_with_default_configuration(
         path: impl Into<PathBuf>,
         default_configuration: NexusConfiguration,
@@ -815,17 +1541,14 @@ impl Store {
                 ))
             })?;
             drop(target);
-            let probe_store = match Self::open_with_default_configuration_unchecked(
-                &probe,
-                default_configuration.clone(),
-                false,
-            ) {
-                Ok(store) => store,
-                Err(error) => {
-                    let _ = std::fs::remove_file(&probe);
-                    return Err(error);
-                }
-            };
+            let probe_store =
+                match Self::open_unchecked(&probe, default_configuration.clone(), false) {
+                    Ok(store) => store,
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&probe);
+                        return Err(error);
+                    }
+                };
             drop(probe_store);
             std::fs::remove_file(&probe).map_err(|error| {
                 Error::StoreMaintenance(format!(
@@ -834,10 +1557,10 @@ impl Store {
                 ))
             })?;
         }
-        Self::open_with_default_configuration_unchecked(path, default_configuration, false)
+        Self::open_unchecked(path, default_configuration, false)
     }
 
-    fn open_with_default_configuration_unchecked(
+    fn open_unchecked(
         path: impl Into<PathBuf>,
         default_configuration: NexusConfiguration,
         seed_existing_state: bool,
@@ -851,143 +1574,13 @@ impl Store {
         )
         .map_err(|source| Error::StoreStartupCompatibility {
             path: path.clone(),
-            stage: "opening sema-engine",
+            stage: "opening sema-engine".to_string(),
             source: Box::new(source),
         })?;
-        let live_set = database
-            .register_table(TableDescriptor::new(
-                LIVE_SET_TABLE,
-                FamilyName::new(LIVE_SET_FAMILY),
-                SchemaHash::new(LIVE_SET_SCHEMA_HASH),
-            ))
-            .map_err(|source| Error::StoreStartupCompatibility {
-                path: path.clone(),
-                stage: "registering live-set table",
-                source: Box::new(source),
-            })?;
-        let gc_roots = database
-            .register_table(TableDescriptor::new(
-                GC_ROOTS_TABLE,
-                FamilyName::new(GC_ROOTS_FAMILY),
-                SchemaHash::new(GC_ROOTS_SCHEMA_HASH),
-            ))
-            .map_err(|source| Error::StoreStartupCompatibility {
-                path: path.clone(),
-                stage: "registering gc-roots table",
-                source: Box::new(source),
-            })?;
-        let event_log = database
-            .register_table(TableDescriptor::new(
-                EVENT_LOG_TABLE,
-                FamilyName::new(EVENT_LOG_FAMILY),
-                SchemaHash::new(EVENT_LOG_SCHEMA_HASH),
-            ))
-            .map_err(|source| Error::StoreStartupCompatibility {
-                path: path.clone(),
-                stage: "registering event-log table",
-                source: Box::new(source),
-            })?;
-        let containers = database
-            .register_table(TableDescriptor::new(
-                CONTAINER_LIFECYCLE_TABLE,
-                FamilyName::new(CONTAINER_LIFECYCLE_FAMILY),
-                SchemaHash::new(CONTAINER_LIFECYCLE_SCHEMA_HASH),
-            ))
-            .map_err(|source| Error::StoreStartupCompatibility {
-                path: path.clone(),
-                stage: "registering container-lifecycle table",
-                source: Box::new(source),
-            })?;
-        let deploy_jobs = database
-            .register_table(TableDescriptor::new(
-                DEPLOY_JOB_TABLE,
-                FamilyName::new(DEPLOY_JOB_FAMILY),
-                SchemaHash::new(DEPLOY_JOB_SCHEMA_HASH),
-            ))
-            .map_err(|source| Error::StoreStartupCompatibility {
-                path: path.clone(),
-                stage: "registering deploy-job table",
-                source: Box::new(source),
-            })?;
-        let test_runs = database
-            .register_table(TableDescriptor::new(
-                TEST_RUN_TABLE,
-                FamilyName::new(TEST_RUN_FAMILY),
-                SchemaHash::new(TEST_RUN_SCHEMA_HASH),
-            ))
-            .map_err(|source| Error::StoreStartupCompatibility {
-                path: path.clone(),
-                stage: "registering test-run table",
-                source: Box::new(source),
-            })?;
-        let deployment_records = database
-            .register_table(TableDescriptor::new(
-                DEPLOYMENT_RECORD_TABLE,
-                FamilyName::new(DEPLOYMENT_RECORD_FAMILY),
-                SchemaHash::new(DEPLOYMENT_RECORD_SCHEMA_HASH),
-            ))
-            .map_err(|source| Error::StoreStartupCompatibility {
-                path: path.clone(),
-                stage: "registering deployment-record table",
-                source: Box::new(source),
-            })?;
-        let identifier_allocation = database
-            .register_table(TableDescriptor::new(
-                IDENTIFIER_ALLOCATION_TABLE,
-                FamilyName::new(IDENTIFIER_ALLOCATION_FAMILY),
-                SchemaHash::new(IDENTIFIER_ALLOCATION_SCHEMA_HASH),
-            ))
-            .map_err(|source| Error::StoreStartupCompatibility {
-                path: path.clone(),
-                stage: "registering identifier-allocation table",
-                source: Box::new(source),
-            })?;
-        let deployment_outbox = database
-            .register_table(TableDescriptor::new(
-                DEPLOYMENT_OUTBOX_TABLE,
-                FamilyName::new(DEPLOYMENT_OUTBOX_FAMILY),
-                SchemaHash::new(DEPLOYMENT_OUTBOX_SCHEMA_HASH),
-            ))
-            .map_err(|source| Error::StoreStartupCompatibility {
-                path: path.clone(),
-                stage: "registering deployment-outbox table",
-                source: Box::new(source),
-            })?;
-        let pending_transition_intents = database
-            .register_table(TableDescriptor::new(
-                PENDING_TRANSITION_INTENT_TABLE,
-                FamilyName::new(PENDING_TRANSITION_INTENT_FAMILY),
-                SchemaHash::new(PENDING_TRANSITION_INTENT_SCHEMA_HASH),
-            ))
-            .map_err(|source| Error::StoreStartupCompatibility {
-                path: path.clone(),
-                stage: "registering pending-transition-intent table",
-                source: Box::new(source),
-            })?;
-        let nexus_configuration = database
-            .register_table(TableDescriptor::new(
-                NEXUS_CONFIGURATION_TABLE,
-                FamilyName::new(NEXUS_CONFIGURATION_FAMILY),
-                SchemaHash::new(NEXUS_CONFIGURATION_SCHEMA_HASH),
-            ))
-            .map_err(|source| Error::StoreStartupCompatibility {
-                path: path.clone(),
-                stage: "registering nexus-configuration table",
-                source: Box::new(source),
-            })?;
+        let directory = LojixDirectory::register(&mut database, &path)?;
         let store = Self {
             database,
-            live_set,
-            gc_roots,
-            event_log,
-            containers,
-            deploy_jobs,
-            test_runs,
-            deployment_records,
-            identifier_allocation,
-            deployment_outbox,
-            pending_transition_intents,
-            nexus_configuration,
+            directory,
             path,
             write_gate: Mutex::new(()),
             subscription_sequence: AtomicU64::new(0),
@@ -1002,181 +1595,6 @@ impl Store {
         Ok(store)
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Read every durable table once during store construction. The daemon must
-    /// fail at the storage boundary when an older row layout no longer decodes;
-    /// otherwise startup succeeds and the first query reports a misleading
-    /// domain miss such as `GenerationUnknown`.
-    fn validate_startup_compatibility(&self) -> Result<()> {
-        self.live_generations().map(|_| ()).map_err(|source| {
-            self.startup_compatibility_error("validating live-set rows", source)
-        })?;
-        self.gc_root_records().map(|_| ()).map_err(|source| {
-            self.startup_compatibility_error("validating gc-roots rows", source)
-        })?;
-        self.event_log_entries().map(|_| ()).map_err(|source| {
-            self.startup_compatibility_error("validating event-log rows", source)
-        })?;
-        self.container_lifecycle_records()
-            .map(|_| ())
-            .map_err(|source| {
-                self.startup_compatibility_error("validating container-lifecycle rows", source)
-            })?;
-        self.deploy_jobs().map(|_| ()).map_err(|source| {
-            self.startup_compatibility_error("validating deploy-job rows", source)
-        })?;
-        self.test_runs().map(|_| ()).map_err(|source| {
-            self.startup_compatibility_error("validating test-run rows", source)
-        })?;
-        self.deployment_records().map(|_| ()).map_err(|source| {
-            self.startup_compatibility_error("validating deployment-record rows", source)
-        })?;
-        self.identifier_allocations()
-            .map(|_| ())
-            .map_err(|source| {
-                self.startup_compatibility_error("validating identifier-allocation row", source)
-            })?;
-        self.deployment_outbox_records()
-            .map(|_| ())
-            .map_err(|source| {
-                self.startup_compatibility_error("validating deployment-outbox rows", source)
-            })?;
-        self.pending_transition_intents()
-            .map(|_| ())
-            .map_err(|source| {
-                self.startup_compatibility_error(
-                    "validating pending-transition-intent rows",
-                    source,
-                )
-            })?;
-        self.nexus_configuration_state()
-            .and_then(|state| state.desired_configuration.validate())
-            .map_err(|source| match source {
-                Error::Database(error) => self.startup_compatibility_error(
-                    "validating nexus-configuration row",
-                    Error::Database(error),
-                ),
-                other => other,
-            })?;
-        Ok(())
-    }
-
-    fn startup_compatibility_error(&self, stage: &'static str, error: Error) -> Error {
-        match error {
-            Error::Database(source) => Error::StoreStartupCompatibility {
-                path: self.path.clone(),
-                stage,
-                source: Box::new(source),
-            },
-            other => other,
-        }
-    }
-
-    /// The persisted commit sequence — sema-engine's durable write counter,
-    /// read back after a write for the reply marker. Survives restart because
-    /// the engine owns it (it just deletes from RAM here). `state_digest`
-    /// remains the commit-sequence stand-in (decision 6).
-    pub fn commit_sequence(&self) -> Result<u64> {
-        Ok(self.database.current_commit_sequence()?.value())
-    }
-
-    fn lock_write(&self) -> Result<MutexGuard<'_, ()>> {
-        self.write_gate
-            .lock()
-            .map_err(|_| Error::Invariant("lojix store write gate is poisoned".to_string()))
-    }
-
-    fn live_generations(&self) -> Result<Vec<LiveGeneration>> {
-        Ok(self
-            .database
-            .match_records(QueryPlan::all(self.live_set))?
-            .records()
-            .to_vec())
-    }
-
-    fn gc_root_records(&self) -> Result<Vec<GcRoot>> {
-        Ok(self
-            .database
-            .match_records(QueryPlan::all(self.gc_roots))?
-            .records()
-            .to_vec())
-    }
-
-    fn event_log_entries(&self) -> Result<Vec<EventLogEntry>> {
-        Ok(self
-            .database
-            .match_records(QueryPlan::all(self.event_log))?
-            .records()
-            .to_vec())
-    }
-
-    fn container_lifecycle_records(&self) -> Result<Vec<ContainerLifecycleRecord>> {
-        Ok(self
-            .database
-            .match_records(QueryPlan::all(self.containers))?
-            .records()
-            .to_vec())
-    }
-
-    fn deployment_records_unchecked(&self) -> Result<Vec<DeploymentRecord>> {
-        Ok(self
-            .database
-            .match_records(QueryPlan::all(self.deployment_records))?
-            .records()
-            .to_vec())
-    }
-
-    fn identifier_allocations(&self) -> Result<Vec<IdentifierAllocation>> {
-        Ok(self
-            .database
-            .match_records(QueryPlan::all(self.identifier_allocation))?
-            .records()
-            .to_vec())
-    }
-
-    fn deployment_outbox_records(&self) -> Result<Vec<DeploymentOutboxRecord>> {
-        Ok(self
-            .database
-            .match_records(QueryPlan::all(self.deployment_outbox))?
-            .records()
-            .to_vec())
-    }
-
-    /// The private write-ahead transition records. Public queries never expose
-    /// these rows; they exist solely to bridge a committed state transition to
-    /// its exactly-once public event/outbox delivery.
-    pub fn pending_transition_intents(&self) -> Result<Vec<PendingTransitionIntent>> {
-        Ok(self
-            .database
-            .match_records(QueryPlan::all(self.pending_transition_intents))?
-            .records()
-            .to_vec())
-    }
-
-    fn identifier_allocation(&self) -> Result<IdentifierAllocation> {
-        let allocations = self.identifier_allocations()?;
-        match allocations.as_slice() {
-            [allocation] => Ok(allocation.clone()),
-            [] => Err(Error::StoreMaintenance(
-                "identifier allocation row is missing after store initialization".to_string(),
-            )),
-            _ => Err(Error::StoreMaintenance(
-                "identifier allocation table contains more than one row".to_string(),
-            )),
-        }
-    }
-
-    fn nexus_configuration_records(&self) -> Result<Vec<NexusConfigurationRecord>> {
-        Ok(self
-            .database
-            .match_records(QueryPlan::all(self.nexus_configuration))?
-            .records()
-            .to_vec())
-    }
-
     fn ensure_nexus_configuration(
         &self,
         default_configuration: NexusConfiguration,
@@ -1184,18 +1602,18 @@ impl Store {
     ) -> Result<()> {
         use nexus::Configurable as _;
 
-        match self.nexus_configuration_records()?.as_slice() {
+        match self.records::<NexusConfigurationRecord>()?.as_slice() {
             [] => {
-                let legacy_state_exists = !self.live_generations()?.is_empty()
-                    || !self.gc_root_records()?.is_empty()
-                    || !self.event_log_entries()?.is_empty()
-                    || !self.container_lifecycle_records()?.is_empty()
+                let legacy_state_exists = !self.records::<LiveGeneration>()?.is_empty()
+                    || !self.records::<GcRoot>()?.is_empty()
+                    || !self.records::<EventLogEntry>()?.is_empty()
+                    || !self.records::<ContainerLifecycleRecord>()?.is_empty()
                     || !self.deploy_jobs()?.is_empty()
-                    || !self.test_runs()?.is_empty()
-                    || !self.deployment_records_unchecked()?.is_empty()
-                    || !self.identifier_allocations()?.is_empty()
-                    || !self.deployment_outbox_records()?.is_empty()
-                    || !self.pending_transition_intents()?.is_empty();
+                    || !self.records::<StoredTestRun>()?.is_empty()
+                    || !self.records::<DeploymentRecord>()?.is_empty()
+                    || !self.records::<IdentifierAllocation>()?.is_empty()
+                    || !self.records::<DeploymentOutboxRecord>()?.is_empty()
+                    || !self.records::<PendingTransitionIntent>()?.is_empty();
                 if legacy_state_exists && !seed_existing_state {
                     return Err(Error::StoreMaintenance(
                         "existing Lojix Sema has no Nexus configuration; migrate its legacy startup archive into a validated copy before opening it"
@@ -1204,7 +1622,7 @@ impl Store {
                 }
                 default_configuration.validate()?;
                 self.database.assert(Assertion::new(
-                    self.nexus_configuration,
+                    self.directory.nexus_configuration,
                     NexusConfigurationRecord {
                         state: NexusConfigurationState::from_default(default_configuration),
                     },
@@ -1219,7 +1637,7 @@ impl Store {
     }
 
     fn nexus_configuration_state(&self) -> Result<NexusConfigurationState> {
-        match self.nexus_configuration_records()?.as_slice() {
+        match self.records::<NexusConfigurationRecord>()?.as_slice() {
             [record] => Ok(record.state.clone()),
             [] => Err(Error::StoreMaintenance(
                 "nexus configuration row is missing after store initialization".to_string(),
@@ -1242,7 +1660,7 @@ impl Store {
             .ordinary_configure_if_unset(configuration)
             .map_err(|_| Error::OrdinaryConfigureClosed)?;
         self.database.mutate(Mutation::new(
-            self.nexus_configuration,
+            self.directory.nexus_configuration,
             NexusConfigurationRecord {
                 state: state.clone(),
             },
@@ -1257,7 +1675,7 @@ impl Store {
         let mut state = self.nexus_configuration_state()?;
         state.meta_configure(configuration);
         self.database.mutate(Mutation::new(
-            self.nexus_configuration,
+            self.directory.nexus_configuration,
             NexusConfigurationRecord {
                 state: state.clone(),
             },
@@ -1271,23 +1689,23 @@ impl Store {
         let mut state = self.nexus_configuration_state()?;
         state.meta_reverse();
         self.database.mutate(Mutation::new(
-            self.nexus_configuration,
+            self.directory.nexus_configuration,
             NexusConfigurationRecord {
                 state: state.clone(),
             },
         ))?;
         Ok(state)
     }
+}
 
-    /// Initialize the one global high-water record once from the durable v5
-    /// records that can issue identities.
+impl IdentifierAllocating for Store {
     fn ensure_identifier_allocation(&self) -> Result<()> {
-        if !self.identifier_allocations()?.is_empty() {
+        if !self.records::<IdentifierAllocation>()?.is_empty() {
             return self.identifier_allocation().map(|_| ());
         }
 
         let next_deployment_identifier = self
-            .live_generations()?
+            .records::<LiveGeneration>()?
             .iter()
             .map(|generation| *generation.deployment_identifier.payload())
             .chain(
@@ -1300,7 +1718,7 @@ impl Store {
             .transpose()?
             .unwrap_or(1);
         let next_generation_identifier = self
-            .live_generations()?
+            .records::<LiveGeneration>()?
             .iter()
             .map(|generation| *generation.generation_identifier.payload())
             .chain(
@@ -1313,7 +1731,7 @@ impl Store {
             .transpose()?
             .unwrap_or(1);
         let next_event_log_position = self
-            .event_log_entries()?
+            .records::<EventLogEntry>()?
             .iter()
             .map(|entry| *entry.event_log_position.payload())
             .max()
@@ -1321,7 +1739,7 @@ impl Store {
             .transpose()?
             .unwrap_or(0);
         self.database.assert(Assertion::new(
-            self.identifier_allocation,
+            self.directory.identifier_allocation,
             IdentifierAllocation {
                 next_deployment_identifier,
                 next_generation_identifier,
@@ -1331,39 +1749,59 @@ impl Store {
         Ok(())
     }
 
-    /// The live generations matching a predicate, projected by the caller.
-    pub fn matching_live_generations(
-        &self,
-        keep: impl Fn(&LiveGeneration) -> bool,
-    ) -> Result<Vec<LiveGeneration>> {
+    fn identifier_allocation(&self) -> Result<IdentifierAllocation> {
+        let allocations = self.records::<IdentifierAllocation>()?;
+        match allocations.as_slice() {
+            [allocation] => Ok(allocation.clone()),
+            [] => Err(Error::StoreMaintenance(
+                "identifier allocation row is missing after store initialization".to_string(),
+            )),
+            _ => Err(Error::StoreMaintenance(
+                "identifier allocation table contains more than one row".to_string(),
+            )),
+        }
+    }
+
+    fn next_generation_identifier(&self) -> Result<u64> {
+        Ok(self.identifier_allocation()?.next_generation_identifier)
+    }
+
+    fn next_deployment_identifier(&self) -> Result<u64> {
+        Ok(self.identifier_allocation()?.next_deployment_identifier)
+    }
+
+    fn next_event_log_position(&self) -> Result<u64> {
+        Ok(self.identifier_allocation()?.next_event_log_position)
+    }
+
+    fn allocate_event_log_position(&self) -> Result<u64> {
+        let _write = self.lock_write()?;
+        let allocation = self.identifier_allocation()?;
+        let position = allocation.next_event_log_position;
+        self.database
+            .commit_atomic(self.database.begin_atomic_commit().mutate(
+                self.directory.identifier_allocation,
+                IdentifierAllocation {
+                    next_deployment_identifier: allocation.next_deployment_identifier,
+                    next_generation_identifier: allocation.next_generation_identifier,
+                    next_event_log_position: (position).next_identifier()?,
+                },
+            ))?;
+        Ok(position)
+    }
+
+    fn next_test_run_identifier(&self) -> Result<u64> {
         Ok(self
-            .live_generations()?
-            .into_iter()
-            .filter(|generation| keep(generation))
-            .collect())
+            .records::<StoredTestRun>()?
+            .iter()
+            .map(|run| *run.test_run_identifier.payload())
+            .max()
+            .map(|maximum| maximum + 1)
+            .unwrap_or(1))
     }
+}
 
-    /// The persisted event-log entries in the half-open position range
-    /// `[from, until)`.
-    pub fn event_log_in_range(&self, from: u64, until: u64) -> Result<Vec<EventLogEntry>> {
-        Ok(self
-            .event_log_entries()?
-            .into_iter()
-            .filter(|entry| {
-                let position = *entry.event_log_position.payload();
-                position >= from && position < until
-            })
-            .collect())
-    }
-
-    /// The private delivery ledger. A record is uniquely keyed by the durable
-    /// deployment identity and the exact transition marker that created its
-    /// event; an effect replay therefore cannot create a second delivery for
-    /// the same transition.
-    pub fn deployment_outbox(&self) -> Result<Vec<DeploymentOutboxRecord>> {
-        self.deployment_outbox_records()
-    }
-
+impl TransitionJournal for Store {
     fn outbox_key(
         deployment_identifier: &crate::runtime_model::DeploymentIdentifier,
         transition_marker: &TransitionMarker,
@@ -1403,11 +1841,6 @@ impl Store {
         })
     }
 
-    /// Find the exact durable transaction that created `intent`.  The
-    /// write-ahead row is not allowed to borrow the current database head: a
-    /// later unrelated commit would otherwise forge the public marker.  The
-    /// versioned SEMA log names both keyed rows written together, so matching
-    /// the intent key and its deployment-record key proves the atomic source.
     fn initial_intent_marker(&self, intent: &PendingTransitionIntent) -> Result<TransitionMarker> {
         let intent_key = Self::transition_intent_key(intent);
         let deployment_key = RecordKey::new(intent.deployment_identifier.payload().to_string());
@@ -1417,18 +1850,17 @@ impl Store {
             .into_iter()
             .filter(|entry| {
                 let operations = entry.operations();
-                let has_intent = operations.head().table_name()
-                    == PENDING_TRANSITION_INTENT_TABLE.as_str()
+                let has_intent = operations.head().table_name() == PendingTransitionIntent::TABLE
                     && operations.head().key() == Some(&intent_key)
                     || operations.tail().iter().any(|operation| {
-                        operation.table_name() == PENDING_TRANSITION_INTENT_TABLE.as_str()
+                        operation.table_name() == PendingTransitionIntent::TABLE
                             && operation.key() == Some(&intent_key)
                     });
                 let has_deployment_record = operations.head().table_name()
-                    == DEPLOYMENT_RECORD_TABLE.as_str()
+                    == DeploymentRecord::TABLE
                     && operations.head().key() == Some(&deployment_key)
                     || operations.tail().iter().any(|operation| {
-                        operation.table_name() == DEPLOYMENT_RECORD_TABLE.as_str()
+                        operation.table_name() == DeploymentRecord::TABLE
                             && operation.key() == Some(&deployment_key)
                     });
                 has_intent && has_deployment_record
@@ -1452,7 +1884,7 @@ impl Store {
         deployment_identifier: u64,
         transition_ordinal: u64,
     ) -> Result<PendingTransitionIntent> {
-        self.pending_transition_intents()?
+        self.records::<PendingTransitionIntent>()?
             .into_iter()
             .find(|intent| {
                 *intent.deployment_identifier.payload() == deployment_identifier
@@ -1465,10 +1897,6 @@ impl Store {
             })
     }
 
-    /// Bind one freshly committed write-ahead intent to the receipt of its own
-    /// durable transaction and create its private delivery row.  This is a
-    /// separate commit by design: the marker is learned only from the durable
-    /// commit log, never predicted before the initial transaction.
     fn bind_transition_intent(
         &self,
         deployment_identifier: u64,
@@ -1485,13 +1913,13 @@ impl Store {
             ..intent.clone()
         })?;
         let outbox = Self::outbox_record_for_event(event);
-        if let Some(existing) = self
-            .deployment_outbox_records()?
-            .into_iter()
-            .find(|existing| {
-                existing.deployment_identifier == outbox.deployment_identifier
-                    && existing.transition_marker == outbox.transition_marker
-            })
+        if let Some(existing) =
+            self.records::<DeploymentOutboxRecord>()?
+                .into_iter()
+                .find(|existing| {
+                    existing.deployment_identifier == outbox.deployment_identifier
+                        && existing.transition_marker == outbox.transition_marker
+                })
         {
             if existing.deployment_phase_event != outbox.deployment_phase_event {
                 return Err(Error::Invariant(
@@ -1509,15 +1937,15 @@ impl Store {
         let mut commit = self
             .database
             .begin_atomic_commit()
-            .mutate(self.pending_transition_intents, intent.clone())
-            .assert(self.deployment_outbox, outbox);
+            .mutate(self.directory.pending_transition_intents, intent.clone())
+            .assert(self.directory.deployment_outbox, outbox);
         if matches!(
             intent.deployment_phase,
             crate::runtime_model::DeploymentPhase::Submitted
         ) || intent.optional_deployment_terminal.is_some()
         {
             let mut record = self
-                .deployment_records_unchecked()?
+                .records::<DeploymentRecord>()?
                 .into_iter()
                 .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
                 .ok_or_else(|| {
@@ -1540,15 +1968,12 @@ impl Store {
                 }
                 record.optional_terminal_marker = Some(TerminalMarker::new(marker.into_payload()));
             }
-            commit = commit.mutate(self.deployment_records, record);
+            commit = commit.mutate(self.directory.deployment_records, record);
         }
         self.database.commit_atomic(commit)?;
         Ok(intent)
     }
 
-    /// Persist `Pending -> Dispatched` before touching the local journal.  A
-    /// restart deliberately requeues this durable state, so a crash cannot
-    /// skip the exact-payload journal check.
     fn dispatch_transition_intent(
         &self,
         intent: &PendingTransitionIntent,
@@ -1561,7 +1986,7 @@ impl Store {
         let event = Self::transition_intent_event(&intent)?;
         let expected = Self::outbox_record_for_event(event);
         let mut outbox = self
-            .deployment_outbox_records()?
+            .records::<DeploymentOutboxRecord>()?
             .into_iter()
             .find(|record| {
                 record.deployment_identifier == expected.deployment_identifier
@@ -1589,14 +2014,11 @@ impl Store {
             outbox.outbox_retry_count =
                 OutboxRetryCount::new((*outbox.outbox_retry_count.payload()).next_identifier()?);
             self.database
-                .mutate(Mutation::new(self.deployment_outbox, outbox))?;
+                .mutate(Mutation::new(self.directory.deployment_outbox, outbox))?;
         }
         Ok(intent)
     }
 
-    /// Append (or prove an exact existing copy of) the public journal event.
-    /// An outbox row never counts as delivery: the local journal is checked at
-    /// its full typed payload boundary on every recovery attempt.
     fn append_transition_intent_journal(
         &self,
         intent: &PendingTransitionIntent,
@@ -1612,7 +2034,7 @@ impl Store {
             logged_event: crate::runtime_model::LoggedEvent::Deployment(event),
         };
         match self
-            .event_log_entries()?
+            .records::<EventLogEntry>()?
             .into_iter()
             .find(|entry| entry.event_log_position == expected_entry.event_log_position)
         {
@@ -1627,8 +2049,8 @@ impl Store {
                 self.database.commit_atomic(
                     self.database
                         .begin_atomic_commit()
-                        .assert(self.event_log, expected_entry)
-                        .mutate(self.pending_transition_intents, intent.clone()),
+                        .assert(self.directory.event_log, expected_entry)
+                        .mutate(self.directory.pending_transition_intents, intent.clone()),
                 )?;
                 return Ok(intent);
             }
@@ -1639,16 +2061,13 @@ impl Store {
         ) {
             intent.transition_intent_state = TransitionIntentState::Appended;
             self.database.mutate(Mutation::new(
-                self.pending_transition_intents,
+                self.directory.pending_transition_intents,
                 intent.clone(),
             ))?;
         }
         Ok(intent)
     }
 
-    /// The terminal local acknowledgement is atomic across the private intent
-    /// and its outbox row, and is permitted only after the exact journal event
-    /// has been proven present.
     fn acknowledge_transition_intent(&self, intent: &PendingTransitionIntent) -> Result<()> {
         let _write = self.lock_write()?;
         let mut intent = self.intent_from_key(
@@ -1661,7 +2080,7 @@ impl Store {
             logged_event: crate::runtime_model::LoggedEvent::Deployment(event.clone()),
         };
         if !self
-            .event_log_entries()?
+            .records::<EventLogEntry>()?
             .into_iter()
             .any(|entry| entry == expected_entry)
         {
@@ -1670,7 +2089,7 @@ impl Store {
             ));
         }
         let mut outbox = self
-            .deployment_outbox_records()?
+            .records::<DeploymentOutboxRecord>()?
             .into_iter()
             .find(|record| {
                 record.deployment_identifier == event.deployment_identifier
@@ -1710,18 +2129,16 @@ impl Store {
         let mut commit = self
             .database
             .begin_atomic_commit()
-            .mutate(self.deployment_outbox, outbox)
-            .mutate(self.pending_transition_intents, intent);
+            .mutate(self.directory.deployment_outbox, outbox)
+            .mutate(self.directory.pending_transition_intents, intent);
         if let Some(job_key) = terminal_job_key {
-            commit = commit.retract(self.deploy_jobs, job_key);
+            commit = commit.retract(self.directory.deploy_jobs, job_key);
         }
         self.database.commit_atomic(commit)?;
         Ok(())
     }
 
-    /// Drive one durable transition all the way to a locally-acknowledged
-    /// journal record.  It is idempotent over every crash boundary above.
-    pub fn complete_pending_transition_intent(
+    fn complete_pending_transition_intent(
         &self,
         deployment_identifier: u64,
         transition_ordinal: u64,
@@ -1732,11 +2149,8 @@ impl Store {
         self.acknowledge_transition_intent(&intent)
     }
 
-    /// Finish a committed write-ahead transition after restart. This runs
-    /// before pipelines are reconstructed, so a later phase can never leap an
-    /// earlier record mutation whose public transition was not delivered.
     fn reconcile_pending_transition_intents(&self) -> Result<()> {
-        for intent in self.pending_transition_intents()? {
+        for intent in self.records::<PendingTransitionIntent>()? {
             if !matches!(
                 intent.transition_intent_state,
                 TransitionIntentState::Acknowledged
@@ -1762,13 +2176,10 @@ impl Store {
         }
     }
 
-    /// Reopen recovery makes any unacknowledged dispatch available again. An
-    /// acknowledged transition is never re-delivered; a dispatched-but-unacked
-    /// transition is retried with its original composite key and payload.
-    pub fn requeue_dispatched_outbox(&self) -> Result<()> {
+    fn requeue_dispatched_outbox(&self) -> Result<()> {
         let _write = self.lock_write()?;
         let dispatched: Vec<_> = self
-            .deployment_outbox_records()?
+            .records::<DeploymentOutboxRecord>()?
             .into_iter()
             .filter(|record| {
                 matches!(
@@ -1783,20 +2194,17 @@ impl Store {
         let mut commit = self.database.begin_atomic_commit();
         for mut record in dispatched {
             record.outbox_delivery_state = OutboxDeliveryState::Pending;
-            commit = commit.mutate(self.deployment_outbox, record);
+            commit = commit.mutate(self.directory.deployment_outbox, record);
         }
         self.database.commit_atomic(commit)?;
         Ok(())
     }
 
-    /// Reconstruct delivery rows from already-durable deployment events. Equal
-    /// payloads deduplicate; any attempt to reuse a composite key for a
-    /// different payload stops recovery.
-    pub fn reconcile_deployment_outbox(&self) -> Result<()> {
+    fn reconcile_deployment_outbox(&self) -> Result<()> {
         let _write = self.lock_write()?;
-        let existing = self.deployment_outbox_records()?;
+        let existing = self.records::<DeploymentOutboxRecord>()?;
         let mut additions = Vec::new();
-        for entry in self.event_log_entries()? {
+        for entry in self.records::<EventLogEntry>()? {
             let crate::runtime_model::LoggedEvent::Deployment(event) = entry.logged_event else {
                 continue;
             };
@@ -1821,39 +2229,63 @@ impl Store {
         }
         let mut commit = self.database.begin_atomic_commit();
         for record in additions {
-            commit = commit.assert(self.deployment_outbox, record);
+            commit = commit.assert(self.directory.deployment_outbox, record);
         }
         self.database.commit_atomic(commit)?;
         Ok(())
     }
+}
 
-    /// Compact only the historical event and container-observation rows. The
-    /// caller supplies the query window explicitly; live deploy state and
-    /// restart-resume jobs stay outside this historical plane.
-    fn resume_compaction(&self) -> Result<()> {
-        self.database.resume_compaction(&LojixDirectory {
-            live_set: self.live_set,
-            gc_roots: self.gc_roots,
-            event_log: self.event_log,
-            containers: self.containers,
-            deploy_jobs: self.deploy_jobs,
-            test_runs: self.test_runs,
-            deployment_records: self.deployment_records,
-            identifier_allocation: self.identifier_allocation,
-            deployment_outbox: self.deployment_outbox,
-            pending_transition_intents: self.pending_transition_intents,
-            nexus_configuration: self.nexus_configuration,
-        })?;
+impl EventHistory for Store {
+    fn append_event_log_entry(&self, entry: EventLogEntry) -> Result<()> {
+        if matches!(
+            entry.logged_event,
+            crate::runtime_model::LoggedEvent::Deployment(_)
+        ) {
+            return Err(Error::Invariant(
+                "deployment journal entries require a pending transition intent".to_string(),
+            ));
+        }
+        {
+            let _write = self.lock_write()?;
+            let allocation = self.identifier_allocation()?;
+            let position = *entry.event_log_position.payload();
+            let mut commit = self
+                .database
+                .begin_atomic_commit()
+                .assert(self.directory.event_log, entry);
+            if position >= allocation.next_event_log_position {
+                commit = commit.mutate(
+                    self.directory.identifier_allocation,
+                    IdentifierAllocation {
+                        next_deployment_identifier: allocation.next_deployment_identifier,
+                        next_generation_identifier: allocation.next_generation_identifier,
+                        next_event_log_position: (position).next_identifier()?,
+                    },
+                );
+            }
+            self.database.commit_atomic(commit)?;
+        }
+        self.maintain_event_history()?;
         Ok(())
     }
 
-    pub fn compact_event_history(&self, retention: EventLogRetention) -> Result<u64> {
+    fn event_log_in_range(&self, from: u64, until: u64) -> Result<Vec<EventLogEntry>> {
+        Ok(self
+            .records::<EventLogEntry>()?
+            .into_iter()
+            .filter(|entry| {
+                let position = *entry.event_log_position.payload();
+                position >= from && position < until
+            })
+            .collect())
+    }
+
+    fn compact_event_history(&self, retention: EventLogRetention) -> Result<u64> {
         let _write = self.lock_write()?;
-        let mut events = self.event_log_entries()?;
+        let mut events = self.records::<EventLogEntry>()?;
         events.sort_by_key(|entry| *entry.event_log_position.payload());
-        let retired = events
-            .len()
-            .saturating_sub(retention.maximum_entries() as usize);
+        let retired = events.len().saturating_sub(*retention.payload() as usize);
         if retired == 0 {
             return Ok(0);
         }
@@ -1864,21 +2296,24 @@ impl Store {
             .collect();
         self.database.begin_compaction()?;
         let mut group = self.database.begin_atomic_commit();
-        for container in self.container_lifecycle_records()? {
+        for container in self.records::<ContainerLifecycleRecord>()? {
             if retired_positions.contains(container.event_log_position.payload()) {
                 group = group.retract(
-                    self.containers,
+                    self.directory.containers,
                     RecordKey::new(container.event_log_position.payload().to_string()),
                 );
             }
         }
         for position in &retired_positions {
-            group = group.retract(self.event_log, RecordKey::new(position.to_string()));
+            group = group.retract(
+                self.directory.event_log,
+                RecordKey::new(position.to_string()),
+            );
         }
         // A pending/dispatched delivery remains the recovery payload even when
         // its historical journal row ages out. Only an acknowledged delivery
         // is eligible for the same compaction pass.
-        for outbox in self.deployment_outbox_records()? {
+        for outbox in self.records::<DeploymentOutboxRecord>()? {
             if retired_positions
                 .contains(outbox.deployment_phase_event.event_log_position.payload())
                 && matches!(
@@ -1887,7 +2322,7 @@ impl Store {
                 )
             {
                 group = group.retract(
-                    self.deployment_outbox,
+                    self.directory.deployment_outbox,
                     Self::outbox_key(&outbox.deployment_identifier, &outbox.transition_marker),
                 );
             }
@@ -1908,53 +2343,32 @@ impl Store {
     }
 
     fn maintain_event_history(&self) -> Result<()> {
-        self.compact_event_history(EventLogRetention::default_policy())?;
+        self.compact_event_history(EventLogRetention::default())?;
         self.database.compact_configured_versioned_history()?;
         Ok(())
     }
 
-    /// The next generation identifier comes from the durable global allocator,
-    /// never a scan of currently retained rows.
-    pub fn next_generation_identifier(&self) -> Result<u64> {
-        Ok(self.identifier_allocation()?.next_generation_identifier)
+    fn record_container_transition(
+        &self,
+        record: ContainerLifecycleRecord,
+        entry: EventLogEntry,
+    ) -> Result<()> {
+        {
+            let _write = self.lock_write()?;
+            self.database.commit_atomic(
+                self.database
+                    .begin_atomic_commit()
+                    .assert(self.directory.containers, record)
+                    .assert(self.directory.event_log, entry),
+            )?;
+        }
+        self.maintain_event_history()?;
+        Ok(())
     }
+}
 
-    /// The next deployment identifier comes from the durable global allocator,
-    /// never a scan of currently retained rows.
-    pub fn next_deployment_identifier(&self) -> Result<u64> {
-        Ok(self.identifier_allocation()?.next_deployment_identifier)
-    }
-
-    /// The next event-log position comes from the durable global allocator, so
-    /// retention cannot cause an event position to be reused.
-    pub fn next_event_log_position(&self) -> Result<u64> {
-        Ok(self.identifier_allocation()?.next_event_log_position)
-    }
-
-    /// Reserve an event-log position before constructing its record. The
-    /// reservation itself is durable, so a crash can introduce only a gap;
-    /// it can never lead to a reused position.
-    pub fn allocate_event_log_position(&self) -> Result<u64> {
-        let _write = self.lock_write()?;
-        let allocation = self.identifier_allocation()?;
-        let position = allocation.next_event_log_position;
-        self.database
-            .commit_atomic(self.database.begin_atomic_commit().mutate(
-                self.identifier_allocation,
-                IdentifierAllocation {
-                    next_deployment_identifier: allocation.next_deployment_identifier,
-                    next_generation_identifier: allocation.next_generation_identifier,
-                    next_event_log_position: (position).next_identifier()?,
-                },
-            ))?;
-        Ok(position)
-    }
-
-    /// Atomically create the admission correlation record *and* the durable
-    /// write-ahead intent.  The public receipt is intentionally absent here:
-    /// it is bound only after this transaction is visible in sema-engine's
-    /// versioned commit log.
-    pub fn begin_admission_transition(
+impl DeploymentLedger for Store {
+    fn begin_admission_transition(
         &self,
         deployment_request_identity: DeploymentRequestIdentity,
         mut deploy_job: DeployJob,
@@ -2003,7 +2417,7 @@ impl Store {
             self.database
                 .begin_atomic_commit()
                 .mutate(
-                    self.identifier_allocation,
+                    self.directory.identifier_allocation,
                     IdentifierAllocation {
                         next_deployment_identifier: (allocation.next_deployment_identifier)
                             .next_identifier()?,
@@ -2013,24 +2427,21 @@ impl Store {
                             .next_identifier()?,
                     },
                 )
-                .assert(self.deployment_records, record.clone())
-                .assert(self.deploy_jobs, deploy_job)
-                .assert(self.pending_transition_intents, intent),
+                .assert(self.directory.deployment_records, record.clone())
+                .assert(self.directory.deploy_jobs, deploy_job)
+                .assert(self.directory.pending_transition_intents, intent),
         )?;
         Ok(record)
     }
 
-    /// The synchronous admission helper used by the runtime.  It makes a
-    /// submitted record visible only after its initial transition has reached
-    /// the locally acknowledged journal protocol.
-    pub fn allocate_deployment_record(
+    fn allocate_deployment_record(
         &self,
         deployment_request_identity: DeploymentRequestIdentity,
         deploy_job: DeployJob,
     ) -> Result<DeploymentRecord> {
         let record = self.begin_admission_transition(deployment_request_identity, deploy_job)?;
         self.complete_pending_transition_intent(*record.deployment_identifier.payload(), 0)?;
-        self.deployment_records_unchecked()?
+        self.records::<DeploymentRecord>()?
             .into_iter()
             .find(|existing| existing.deployment_identifier == record.deployment_identifier)
             .ok_or_else(|| {
@@ -2038,11 +2449,7 @@ impl Store {
             })
     }
 
-    /// Atomically persist the terminal correlation state and its write-ahead
-    /// intent.  The job remains durable through dispatch/journal delivery and
-    /// is retracted only in the same acknowledgement commit as the intent and
-    /// outbox, so a crash cannot turn an unreported terminal into an orphan.
-    pub fn begin_terminal_transition(
+    fn begin_terminal_transition(
         &self,
         deployment_identifier: u64,
         deployment_terminal: DeploymentTerminal,
@@ -2052,7 +2459,7 @@ impl Store {
         let deploy_job_phase = deployment_terminal.deploy_job_phase();
         let _write = self.lock_write()?;
         let mut record = self
-            .deployment_records_unchecked()?
+            .records::<DeploymentRecord>()?
             .into_iter()
             .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
             .ok_or_else(|| {
@@ -2065,7 +2472,7 @@ impl Store {
                 "deployment record is already terminal".to_string(),
             ));
         }
-        let intents = self.pending_transition_intents()?;
+        let intents = self.records::<PendingTransitionIntent>()?;
         if intents.iter().any(|intent| {
             *intent.deployment_identifier.payload() == deployment_identifier
                 && !matches!(
@@ -2110,7 +2517,7 @@ impl Store {
             .database
             .begin_atomic_commit()
             .mutate(
-                self.identifier_allocation,
+                self.directory.identifier_allocation,
                 IdentifierAllocation {
                     next_deployment_identifier: allocation.next_deployment_identifier,
                     next_generation_identifier: allocation.next_generation_identifier,
@@ -2118,8 +2525,8 @@ impl Store {
                         .next_identifier()?,
                 },
             )
-            .mutate(self.deployment_records, record)
-            .assert(self.pending_transition_intents, intent);
+            .mutate(self.directory.deployment_records, record)
+            .assert(self.directory.pending_transition_intents, intent);
         if let Some(mut job) = self
             .deploy_jobs()?
             .into_iter()
@@ -2127,15 +2534,13 @@ impl Store {
         {
             job.deploy_job_phase = deploy_job_phase;
             job.deploy_resume_stage = crate::runtime_model::DeployResumeStage::FinishDeployment;
-            commit = commit.mutate(self.deploy_jobs, job);
+            commit = commit.mutate(self.directory.deploy_jobs, job);
         }
         self.database.commit_atomic(commit)?;
         Ok(transition_ordinal)
     }
 
-    /// Complete a terminal transition and return the record only after its
-    /// terminal journal/outbox acknowledgement has committed.
-    pub fn terminalize_deployment(
+    fn terminalize_deployment(
         &self,
         deployment_identifier: u64,
         deployment_terminal: DeploymentTerminal,
@@ -2143,7 +2548,7 @@ impl Store {
         let ordinal = self.begin_terminal_transition(deployment_identifier, deployment_terminal)?;
         self.complete_pending_transition_intent(deployment_identifier, ordinal)?;
         let record = self
-            .deployment_records_unchecked()?
+            .records::<DeploymentRecord>()?
             .into_iter()
             .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
             .ok_or_else(|| {
@@ -2158,11 +2563,7 @@ impl Store {
         Ok(record)
     }
 
-    /// Preflight/policy rejection creates the correlation record and terminal
-    /// intent in one transaction.  Unlike an accepted deployment it has no
-    /// restart job, but its terminal journal is still locally acknowledged
-    /// before a rejection handle can leave the daemon.
-    pub fn begin_rejected_deployment_request(
+    fn begin_rejected_deployment_request(
         &self,
         deployment_request_identity: DeploymentRequestIdentity,
         deployment_terminal: DeploymentTerminal,
@@ -2198,7 +2599,7 @@ impl Store {
             self.database
                 .begin_atomic_commit()
                 .mutate(
-                    self.identifier_allocation,
+                    self.directory.identifier_allocation,
                     IdentifierAllocation {
                         next_deployment_identifier: (allocation.next_deployment_identifier)
                             .next_identifier()?,
@@ -2208,13 +2609,13 @@ impl Store {
                             .next_identifier()?,
                     },
                 )
-                .assert(self.deployment_records, record.clone())
-                .assert(self.pending_transition_intents, intent),
+                .assert(self.directory.deployment_records, record.clone())
+                .assert(self.directory.pending_transition_intents, intent),
         )?;
         Ok(record)
     }
 
-    pub fn reject_deployment_request(
+    fn reject_deployment_request(
         &self,
         deployment_request_identity: DeploymentRequestIdentity,
         deployment_terminal: DeploymentTerminal,
@@ -2222,7 +2623,7 @@ impl Store {
         let record = self
             .begin_rejected_deployment_request(deployment_request_identity, deployment_terminal)?;
         self.complete_pending_transition_intent(*record.deployment_identifier.payload(), 0)?;
-        self.deployment_records_unchecked()?
+        self.records::<DeploymentRecord>()?
             .into_iter()
             .find(|current| current.deployment_identifier == record.deployment_identifier)
             .ok_or_else(|| {
@@ -2230,24 +2631,14 @@ impl Store {
             })
     }
 
-    /// Every admitted, rejected, or failed deployment is retained here for
-    /// correlation queries; in-flight job rows are a separate resume
-    /// convenience and may be retired at terminal state.
-    pub fn deployment_records(&self) -> Result<Vec<DeploymentRecord>> {
-        self.deployment_records_unchecked()
-    }
-
-    /// Persist the safe immutable revision once flake resolution supplies it.
-    /// This updates the correlation record before subsequent generation and
-    /// terminal projections consume the same value.
-    pub fn set_deployment_immutable_revision(
+    fn set_deployment_immutable_revision(
         &self,
         deployment_identifier: u64,
         immutable_revision: crate::runtime_model::ImmutableRevision,
     ) -> Result<()> {
         let _write = self.lock_write()?;
         let mut record = self
-            .deployment_records_unchecked()?
+            .records::<DeploymentRecord>()?
             .into_iter()
             .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
             .ok_or_else(|| {
@@ -2259,14 +2650,11 @@ impl Store {
             .deployment_request_identity
             .optional_immutable_revision = Some(immutable_revision);
         self.database
-            .mutate(Mutation::new(self.deployment_records, record))?;
+            .mutate(Mutation::new(self.directory.deployment_records, record))?;
         Ok(())
     }
 
-    /// Persist the resolved immutable identity and the exact restart cursor in
-    /// one commit before the pipeline advances. A crash cannot leave a record
-    /// pinned to one revision while its job replays a different mutable ref.
-    pub fn record_resolved_source(
+    fn record_resolved_source(
         &self,
         deployment_identifier: u64,
         immutable_revision: crate::runtime_model::ImmutableRevision,
@@ -2275,7 +2663,7 @@ impl Store {
         deploy_job.validate_fresh()?;
         let _write = self.lock_write()?;
         let mut record = self
-            .deployment_records_unchecked()?
+            .records::<DeploymentRecord>()?
             .into_iter()
             .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
             .ok_or_else(|| {
@@ -2294,62 +2682,13 @@ impl Store {
         self.database.commit_atomic(
             self.database
                 .begin_atomic_commit()
-                .mutate(self.deployment_records, record)
-                .mutate(self.deploy_jobs, deploy_job),
+                .mutate(self.directory.deployment_records, record)
+                .mutate(self.directory.deploy_jobs, deploy_job),
         )?;
         Ok(())
     }
 
-    /// The next subscription token: an in-memory atomic fetch-add. Subscriptions
-    /// do not survive restart, so an ephemeral counter is correct (decision 5).
-    pub fn next_subscription_token(&self) -> u64 {
-        self.subscription_sequence.fetch_add(1, Ordering::SeqCst) + 1
-    }
-
-    /// Append one non-deployment event-log entry, keyed by its position.
-    ///
-    /// Deployment events are deliberately excluded: they must originate from
-    /// a `PendingTransitionIntent`, acquire their marker from that exact
-    /// commit, and be locally acknowledged through the durable outbox before
-    /// a caller can continue the deployment pipeline.
-    pub fn append_event_log_entry(&self, entry: EventLogEntry) -> Result<()> {
-        if matches!(
-            entry.logged_event,
-            crate::runtime_model::LoggedEvent::Deployment(_)
-        ) {
-            return Err(Error::Invariant(
-                "deployment journal entries require a pending transition intent".to_string(),
-            ));
-        }
-        {
-            let _write = self.lock_write()?;
-            let allocation = self.identifier_allocation()?;
-            let position = *entry.event_log_position.payload();
-            let mut commit = self
-                .database
-                .begin_atomic_commit()
-                .assert(self.event_log, entry);
-            if position >= allocation.next_event_log_position {
-                commit = commit.mutate(
-                    self.identifier_allocation,
-                    IdentifierAllocation {
-                        next_deployment_identifier: allocation.next_deployment_identifier,
-                        next_generation_identifier: allocation.next_generation_identifier,
-                        next_event_log_position: (position).next_identifier()?,
-                    },
-                );
-            }
-            self.database.commit_atomic(commit)?;
-        }
-        self.maintain_event_history()?;
-        Ok(())
-    }
-
-    /// Atomically persist one intermediate record/job transition together with
-    /// its write-ahead intent.  The public event is deliberately absent from
-    /// this commit: its marker is bound from this exact logged transaction and
-    /// delivery is acknowledged before this method returns to the runtime.
-    pub fn begin_deployment_phase_transition(
+    fn begin_deployment_phase_transition(
         &self,
         deployment_identifier: u64,
         deployment_lifecycle: DeploymentLifecycle,
@@ -2379,7 +2718,7 @@ impl Store {
             ));
         }
         let mut record = self
-            .deployment_records_unchecked()?
+            .records::<DeploymentRecord>()?
             .into_iter()
             .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
             .ok_or_else(|| {
@@ -2404,7 +2743,7 @@ impl Store {
                 "deployment phase event does not match its correlation identity".to_string(),
             ));
         }
-        let intents = self.pending_transition_intents()?;
+        let intents = self.records::<PendingTransitionIntent>()?;
         if intents.iter().any(|intent| {
             *intent.deployment_identifier.payload() == deployment_identifier
                 && !matches!(
@@ -2418,7 +2757,7 @@ impl Store {
             ));
         }
         if self
-            .event_log_entries()?
+            .records::<EventLogEntry>()?
             .iter()
             .any(|entry| entry.event_log_position == event.event_log_position)
         {
@@ -2453,17 +2792,14 @@ impl Store {
         self.database.commit_atomic(
             self.database
                 .begin_atomic_commit()
-                .mutate(self.deployment_records, record)
-                .mutate(self.deploy_jobs, deploy_job)
-                .assert(self.pending_transition_intents, intent),
+                .mutate(self.directory.deployment_records, record)
+                .mutate(self.directory.deploy_jobs, deploy_job)
+                .assert(self.directory.pending_transition_intents, intent),
         )?;
         Ok(transition_ordinal)
     }
 
-    /// Complete the acknowledged delivery half of one intermediate phase.  No
-    /// caller receives a phase receipt, and therefore no next effect becomes
-    /// eligible, until this returns the exact marker from the durable intent.
-    pub fn advance_deployment_phase(
+    fn advance_deployment_phase(
         &self,
         deployment_identifier: u64,
         deployment_lifecycle: DeploymentLifecycle,
@@ -2493,7 +2829,7 @@ impl Store {
             .ok_or_else(|| Error::Invariant("acknowledged phase intent lacks a marker".to_string()))
     }
 
-    pub fn record_deployment_phase(
+    fn record_deployment_phase(
         &self,
         mut entry: EventLogEntry,
         deployment_lifecycle: DeploymentLifecycle,
@@ -2519,9 +2855,65 @@ impl Store {
         Ok(entry)
     }
 
-    /// Append one live generation, keyed by its generation identifier
-    /// (decision 4).
-    pub fn append_live_generation(&self, generation: LiveGeneration) -> Result<()> {
+    fn deploy_jobs(&self) -> Result<Vec<DeployJob>> {
+        let jobs = self
+            .database
+            .match_records(QueryPlan::all(self.directory.deploy_jobs))?
+            .records()
+            .to_vec();
+        for job in &jobs {
+            job.validate_persisted()?;
+        }
+        Ok(jobs)
+    }
+
+    fn upsert_deploy_job(&self, job: DeployJob) -> Result<()> {
+        job.validate_fresh()?;
+        let _write = self.lock_write()?;
+        let key = *job.deployment_identifier.payload();
+        let present = self
+            .deploy_jobs()?
+            .iter()
+            .any(|existing| *existing.deployment_identifier.payload() == key);
+        if present {
+            self.database
+                .mutate(Mutation::new(self.directory.deploy_jobs, job))?;
+        } else {
+            self.database
+                .assert(Assertion::new(self.directory.deploy_jobs, job))?;
+        }
+        Ok(())
+    }
+
+    fn retract_deploy_job(&self, deployment_identifier: u64) -> Result<()> {
+        let _write = self.lock_write()?;
+        let present = self
+            .deploy_jobs()?
+            .iter()
+            .any(|existing| *existing.deployment_identifier.payload() == deployment_identifier);
+        if present {
+            self.database.retract(Retraction::new(
+                self.directory.deploy_jobs,
+                RecordKey::new(deployment_identifier.to_string()),
+            ))?;
+        }
+        Ok(())
+    }
+}
+
+impl GenerationLedger for Store {
+    fn matching_live_generations(
+        &self,
+        keep: impl Fn(&LiveGeneration) -> bool,
+    ) -> Result<Vec<LiveGeneration>> {
+        Ok(self
+            .records::<LiveGeneration>()?
+            .into_iter()
+            .filter(|generation| keep(generation))
+            .collect())
+    }
+
+    fn append_live_generation(&self, generation: LiveGeneration) -> Result<()> {
         if !NixStorePath::from(generation.closure_path.payload().as_str()).is_canonical_item_root()
         {
             return Err(Error::Invariant(
@@ -2535,9 +2927,9 @@ impl Store {
         self.database.commit_atomic(
             self.database
                 .begin_atomic_commit()
-                .assert(self.live_set, generation)
+                .assert(self.directory.live_set, generation)
                 .mutate(
-                    self.identifier_allocation,
+                    self.directory.identifier_allocation,
                     IdentifierAllocation {
                         next_deployment_identifier: allocation
                             .next_deployment_identifier
@@ -2552,8 +2944,7 @@ impl Store {
         Ok(())
     }
 
-    /// Record the live generation and its GC root as one durable commit.
-    pub fn record_activation(&self, generation: LiveGeneration, root: GcRoot) -> Result<()> {
+    fn record_activation(&self, generation: LiveGeneration, root: GcRoot) -> Result<()> {
         if !NixStorePath::from(generation.closure_path.payload().as_str()).is_canonical_item_root()
             || !NixStorePath::from(root.closure_path.payload().as_str()).is_canonical_item_root()
         {
@@ -2569,7 +2960,7 @@ impl Store {
             generation.generation_slot,
             crate::runtime_model::GenerationSlot::Current
         ) {
-            self.live_generations()?
+            self.records::<LiveGeneration>()?
                 .into_iter()
                 .filter(|existing| {
                     existing.cluster_name == generation.cluster_name
@@ -2585,14 +2976,14 @@ impl Store {
         } else {
             std::collections::BTreeSet::new()
         };
-        let roots = self.gc_root_records()?;
+        let roots = self.records::<GcRoot>()?;
         let mut commit = self
             .database
             .begin_atomic_commit()
-            .assert(self.live_set, generation)
-            .assert(self.gc_roots, root)
+            .assert(self.directory.live_set, generation)
+            .assert(self.directory.gc_roots, root)
             .mutate(
-                self.identifier_allocation,
+                self.directory.identifier_allocation,
                 IdentifierAllocation {
                     next_deployment_identifier: allocation
                         .next_deployment_identifier
@@ -2603,169 +2994,62 @@ impl Store {
                     next_event_log_position: allocation.next_event_log_position,
                 },
             );
-        for mut existing in self.live_generations()? {
+        for mut existing in self.records::<LiveGeneration>()? {
             if prior_current.contains(existing.generation_identifier.payload()) {
                 existing.generation_slot = crate::runtime_model::GenerationSlot::Recent;
-                commit = commit.mutate(self.live_set, existing);
+                commit = commit.mutate(self.directory.live_set, existing);
             }
         }
         for mut existing in roots {
             if prior_current.contains(existing.generation_identifier.payload()) {
                 existing.generation_slot = crate::runtime_model::GenerationSlot::Recent;
-                commit = commit.mutate(self.gc_roots, existing);
+                commit = commit.mutate(self.directory.gc_roots, existing);
             }
         }
         self.database.commit_atomic(commit)?;
         Ok(())
     }
 
-    /// Append one GC-root, keyed by its generation identifier (decision 4).
-    pub fn append_gc_root(&self, root: GcRoot) -> Result<()> {
+    fn append_gc_root(&self, root: GcRoot) -> Result<()> {
         root.validate_fresh()?;
         let _write = self.lock_write()?;
-        self.database.assert(Assertion::new(self.gc_roots, root))?;
+        self.database
+            .assert(Assertion::new(self.directory.gc_roots, root))?;
         Ok(())
     }
 
-    /// Overwrite one GC-root in place (a slot/label change), keyed by its
-    /// generation identifier.
-    pub fn mutate_gc_root(&self, root: GcRoot) -> Result<()> {
+    fn mutate_gc_root(&self, root: GcRoot) -> Result<()> {
         root.validate_fresh()?;
         let _write = self.lock_write()?;
-        self.database.mutate(Mutation::new(self.gc_roots, root))?;
+        self.database
+            .mutate(Mutation::new(self.directory.gc_roots, root))?;
         Ok(())
     }
 
-    /// Drop one GC-root by its generation identifier.
-    pub fn retract_gc_root(&self, generation_identifier: u64) -> Result<()> {
+    fn retract_gc_root(&self, generation_identifier: u64) -> Result<()> {
         let _write = self.lock_write()?;
         self.database.retract(Retraction::new(
-            self.gc_roots,
+            self.directory.gc_roots,
             RecordKey::new(generation_identifier.to_string()),
         ))?;
         Ok(())
     }
+}
 
-    /// The persisted GC-roots — the retention tree the pin/unpin/retire verbs
-    /// search and rewrite.
-    pub fn gc_roots(&self) -> Result<Vec<GcRoot>> {
-        self.gc_root_records()
-    }
-
-    /// Record a container observation and its matching event in one durable commit.
-    pub fn record_container_transition(
-        &self,
-        record: ContainerLifecycleRecord,
-        entry: EventLogEntry,
-    ) -> Result<()> {
-        {
-            let _write = self.lock_write()?;
-            self.database.commit_atomic(
-                self.database
-                    .begin_atomic_commit()
-                    .assert(self.containers, record)
-                    .assert(self.event_log, entry),
-            )?;
-        }
-        self.maintain_event_history()?;
-        Ok(())
-    }
-
-    /// The persisted in-flight deploy-job rows — read on daemon start so an
-    /// in-flight deploy resumes from its recorded phase rather than being lost
-    /// with the connection that submitted it (up9q). A finished or failed job
-    /// is retracted on completion, so a steady-state store reads back empty.
-    pub fn deploy_jobs(&self) -> Result<Vec<DeployJob>> {
-        let jobs = self
-            .database
-            .match_records(QueryPlan::all(self.deploy_jobs))?
-            .records()
-            .to_vec();
-        for job in &jobs {
-            job.validate_persisted()?;
-        }
-        Ok(jobs)
-    }
-
-    /// Write or rewrite one deploy-job row, keyed by its deployment identifier.
-    /// `assert` on the first (submit) write, `mutate` to overwrite the existing
-    /// row on each phase transition — so the persisted phase cursor always
-    /// reflects the latest committed step (up9q durable resume).
-    pub fn upsert_deploy_job(&self, job: DeployJob) -> Result<()> {
-        job.validate_fresh()?;
-        let _write = self.lock_write()?;
-        let key = *job.deployment_identifier.payload();
-        let present = self
-            .deploy_jobs()?
-            .iter()
-            .any(|existing| *existing.deployment_identifier.payload() == key);
-        if present {
-            self.database.mutate(Mutation::new(self.deploy_jobs, job))?;
-        } else {
-            self.database
-                .assert(Assertion::new(self.deploy_jobs, job))?;
-        }
-        Ok(())
-    }
-
-    /// Drop one deploy-job row by its deployment identifier — called when the
-    /// deploy reaches a terminal phase (Activated or Failed), so the in-flight
-    /// mirror tracks only deploys that still need resuming. A no-op when the
-    /// row is already absent.
-    pub fn retract_deploy_job(&self, deployment_identifier: u64) -> Result<()> {
-        let _write = self.lock_write()?;
-        let present = self
-            .deploy_jobs()?
-            .iter()
-            .any(|existing| *existing.deployment_identifier.payload() == deployment_identifier);
-        if present {
-            self.database.retract(Retraction::new(
-                self.deploy_jobs,
-                RecordKey::new(deployment_identifier.to_string()),
-            ))?;
-        }
-        Ok(())
-    }
-
-    /// The persisted test-run rows — read by the ordinary `(ByTestRun …)`
-    /// query and on daemon start so an in-flight test reconciles rather than
-    /// being lost (report 54 §5.3). A row is keyed by its `TestRunIdentifier`.
-    pub fn test_runs(&self) -> Result<Vec<StoredTestRun>> {
-        Ok(self
-            .database
-            .match_records(QueryPlan::all(self.test_runs))?
-            .records()
-            .to_vec())
-    }
-
-    /// The next test-run identifier: one past the maximum persisted, or 1 when
-    /// empty. Restart-safe — derived from the durable rows, not a RAM counter,
-    /// mirroring `next_deployment_identifier`.
-    pub fn next_test_run_identifier(&self) -> Result<u64> {
-        Ok(self
-            .test_runs()?
-            .iter()
-            .map(|run| *run.test_run_identifier.payload())
-            .max()
-            .map(|maximum| maximum + 1)
-            .unwrap_or(1))
-    }
-
-    /// Write or rewrite one test-run row, keyed by its run identifier. `assert`
-    /// on the first (accept) write, `mutate` to overwrite the existing row at
-    /// each later phase transition (Unit 2b), so the persisted outcome always
-    /// reflects the latest committed step. Mirrors `upsert_deploy_job`.
-    pub fn upsert_test_run(&self, run: StoredTestRun) -> Result<()> {
+impl TestRunLedger for Store {
+    fn upsert_test_run(&self, run: StoredTestRun) -> Result<()> {
         let _write = self.lock_write()?;
         let key = *run.test_run_identifier.payload();
         let present = self
-            .test_runs()?
+            .records::<StoredTestRun>()?
             .iter()
             .any(|existing| *existing.test_run_identifier.payload() == key);
         if present {
-            self.database.mutate(Mutation::new(self.test_runs, run))?;
+            self.database
+                .mutate(Mutation::new(self.directory.test_runs, run))?;
         } else {
-            self.database.assert(Assertion::new(self.test_runs, run))?;
+            self.database
+                .assert(Assertion::new(self.directory.test_runs, run))?;
         }
         Ok(())
     }
@@ -2793,40 +3077,11 @@ impl LegacyConfigurationMigratable for Store {
         }
         std::fs::copy(source, target)?;
         let desired_configuration = NexusConfiguration::from(legacy_configuration);
-        let migration =
-            Self::open_with_default_configuration_unchecked(target, desired_configuration, true);
+        let migration = Self::open_unchecked(target, desired_configuration, true);
         if migration.is_err() {
             let _ = std::fs::remove_file(target);
         }
         migration
-    }
-}
-
-impl NexusPersistable for Store {
-    fn open_with_default_configuration(
-        path: impl Into<PathBuf>,
-        default_configuration: NexusConfiguration,
-    ) -> Result<Self> {
-        Store::open_with_default_configuration(path, default_configuration)
-    }
-
-    fn nexus_configuration_state(&self) -> Result<NexusConfigurationState> {
-        Store::nexus_configuration_state(self)
-    }
-
-    fn ordinary_configure(
-        &self,
-        configuration: NexusConfiguration,
-    ) -> Result<NexusConfigurationState> {
-        Store::ordinary_configure(self, configuration)
-    }
-
-    fn meta_configure(&self, configuration: NexusConfiguration) -> Result<NexusConfigurationState> {
-        Store::meta_configure(self, configuration)
-    }
-
-    fn reverse_meta_configuration(&self) -> Result<NexusConfigurationState> {
-        Store::reverse_meta_configuration(self)
     }
 }
 
@@ -2998,7 +3253,7 @@ mod transition_intent_tests {
         ));
         store
             .database
-            .mutate(Mutation::new(store.deploy_jobs, job))
+            .mutate(Mutation::new(store.directory.deploy_jobs, job))
             .expect("inject malformed persisted row");
         drop(store);
 
@@ -3077,7 +3332,7 @@ mod transition_intent_tests {
                 "{crash_after} retains the admission restart cursor"
             );
             let intents = store
-                .pending_transition_intents()
+                .records::<PendingTransitionIntent>()
                 .expect("read recovered transition intent");
             assert!(matches!(
                 intents[0].transition_intent_state,
@@ -3088,7 +3343,7 @@ mod transition_intent_tests {
                 .as_ref()
                 .expect("intent is bound to its source commit");
             let journal: Vec<_> = store
-                .event_log_entries()
+                .records::<EventLogEntry>()
                 .expect("read journal")
                 .into_iter()
                 .filter(|entry| match &entry.logged_event {
@@ -3101,7 +3356,7 @@ mod transition_intent_tests {
                 .collect();
             assert_eq!(journal.len(), 1, "{crash_after} replays one exact event");
             let outbox: Vec<_> = store
-                .deployment_outbox()
+                .records::<DeploymentOutboxRecord>()
                 .expect("read outbox")
                 .into_iter()
                 .filter(|record| {
@@ -3134,13 +3389,13 @@ mod transition_intent_tests {
         );
         assert!(
             store
-                .event_log_entries()
+                .records::<EventLogEntry>()
                 .expect("journal compacted")
                 .is_empty()
         );
         assert!(
             store
-                .deployment_outbox()
+                .records::<DeploymentOutboxRecord>()
                 .expect("outbox compacted")
                 .is_empty()
         );
@@ -3155,19 +3410,19 @@ mod transition_intent_tests {
         );
         assert!(
             reopened
-                .event_log_entries()
+                .records::<EventLogEntry>()
                 .expect("journal remains compacted")
                 .is_empty()
         );
         assert!(
             reopened
-                .deployment_outbox()
+                .records::<DeploymentOutboxRecord>()
                 .expect("outbox remains compacted")
                 .is_empty()
         );
         assert!(
             reopened
-                .pending_transition_intents()
+                .records::<PendingTransitionIntent>()
                 .expect("intent remains durable")
                 .iter()
                 .any(|intent| {
@@ -3249,7 +3504,7 @@ mod transition_intent_tests {
 
             let store = Store::open(&path).expect("reopen recovers phase intent");
             let intents: Vec<_> = store
-                .pending_transition_intents()
+                .records::<PendingTransitionIntent>()
                 .expect("read intents")
                 .into_iter()
                 .filter(|intent| *intent.deployment_identifier.payload() == deployment_identifier)
@@ -3270,7 +3525,7 @@ mod transition_intent_tests {
                 .as_ref()
                 .expect("building intent marker");
             let events: Vec<_> = store
-                .event_log_entries()
+                .records::<EventLogEntry>()
                 .expect("read journal")
                 .into_iter()
                 .filter(|entry| match &entry.logged_event {
@@ -3285,7 +3540,7 @@ mod transition_intent_tests {
             assert_eq!(events.len(), 1, "{crash_after} records one building event");
             assert!(
                 store
-                    .deployment_outbox()
+                    .records::<DeploymentOutboxRecord>()
                     .expect("read outbox")
                     .iter()
                     .any(|outbox| {
@@ -3374,7 +3629,7 @@ mod transition_intent_tests {
 
             let store = Store::open(&path).expect("reopen terminal recovery");
             let record = store
-                .deployment_records()
+                .records::<DeploymentRecord>()
                 .expect("read terminal record")
                 .into_iter()
                 .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
@@ -3389,7 +3644,7 @@ mod transition_intent_tests {
                 .expect("terminal marker is bound from source commit");
             assert!(
                 store
-                    .event_log_entries()
+                    .records::<EventLogEntry>()
                     .expect("read terminal journal")
                     .iter()
                     .filter(|entry| match &entry.logged_event {
@@ -3408,7 +3663,7 @@ mod transition_intent_tests {
             );
             assert!(
                 store
-                    .deployment_outbox()
+                    .records::<DeploymentOutboxRecord>()
                     .expect("read terminal outbox")
                     .iter()
                     .any(|outbox| {
@@ -3479,7 +3734,7 @@ mod transition_intent_tests {
             };
             let store = Store::open(&path).expect("reopen rejection recovery");
             let intent = store
-                .pending_transition_intents()
+                .records::<PendingTransitionIntent>()
                 .expect("read rejection intent")
                 .into_iter()
                 .find(|intent| *intent.deployment_identifier.payload() == deployment_identifier)
@@ -3490,7 +3745,7 @@ mod transition_intent_tests {
             ));
             assert!(
                 store
-                    .deployment_outbox()
+                    .records::<DeploymentOutboxRecord>()
                     .expect("read rejection outbox")
                     .iter()
                     .any(|outbox| {

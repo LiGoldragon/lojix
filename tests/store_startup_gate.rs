@@ -1,5 +1,6 @@
 use lojix::Payload as _;
 use lojix::runtime_model::{self as ordinary, GcRoot, LiveGeneration};
+use lojix::{DurableStore as _, GenerationLedger as _};
 use lojix::{Error, Store};
 use redb::{Database, TableDefinition};
 use tempfile::TempDir;

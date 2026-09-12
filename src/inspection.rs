@@ -8,55 +8,36 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use datom_codec::{Actualizing, Potential};
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
+use rkyv::Deserialize as RkyvDeserialize;
 use rkyv::api::high::HighDeserializer;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::rancor::{self, Strategy};
 use rkyv::validation::Validator;
 use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
-use rkyv::{Archive, Deserialize as RkyvDeserialize};
 use sema_engine::TableRegistration;
 
 use crate::runtime_model::{
     ContainerLifecycleRecord, DeployJob, DeploymentRecord, EventLogEntry, GcRoot,
     IdentifierAllocation, LiveGeneration, StoredTestRun,
 };
-use crate::{Error, InlineDatomArguments as _, Result, ingress};
+use crate::{Error, InlineDatomArguments as _, LojixRecord, OfflineCommand, Result, ingress};
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");
 const SCHEMA_VERSION_KEY: &str = "schema_version";
-const LIVE_SET_INSPECTION: TableInspectionTarget<LiveGeneration> =
-    TableInspectionTarget::new("live-set", "current generation rows");
-const GC_ROOTS_INSPECTION: TableInspectionTarget<GcRoot> =
-    TableInspectionTarget::new("gc-roots", "gc root rows");
-const EVENT_LOG_INSPECTION: TableInspectionTarget<EventLogEntry> =
-    TableInspectionTarget::new("event-log", "deployment event-log rows");
-const CONTAINER_LIFECYCLE_INSPECTION: TableInspectionTarget<ContainerLifecycleRecord> =
-    TableInspectionTarget::new("container-lifecycle", "container lifecycle rows");
-const DEPLOY_JOB_INSPECTION: TableInspectionTarget<DeployJob> =
-    TableInspectionTarget::new("deploy-job", "in-flight deploy job rows");
-const TEST_RUN_INSPECTION: TableInspectionTarget<StoredTestRun> =
-    TableInspectionTarget::new("test-run", "test-run rows");
-const DEPLOYMENT_RECORD_INSPECTION: TableInspectionTarget<DeploymentRecord> =
-    TableInspectionTarget::new("deployment-record", "durable deployment correlation rows");
-const IDENTIFIER_ALLOCATION_INSPECTION: TableInspectionTarget<IdentifierAllocation> =
-    TableInspectionTarget::new("identifier-allocation", "global identifier high-water row");
-
 pub struct StoreInspectionCommand {
     path: PathBuf,
 }
 
-impl StoreInspectionCommand {
-    pub fn from_environment() -> Result<Self> {
-        Self::from_arguments(std::env::args_os().skip(1))
-    }
+impl OfflineCommand for StoreInspectionCommand {
+    type Outcome = StoreInspection;
 
-    pub fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
+    fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let text = (arguments).single_inline_datom()?;
         let path = text.inspected_store_path()?;
         Ok(Self {
@@ -64,8 +45,11 @@ impl StoreInspectionCommand {
         })
     }
 
-    pub fn run(&self) -> StoreInspection {
-        StoreInspector::new(self.path.clone()).inspect()
+    fn run(&self) -> StoreInspection {
+        StoreInspector {
+            path: self.path.clone(),
+        }
+        .inspect()
     }
 }
 
@@ -90,15 +74,18 @@ impl InspectionRequestText for str {
 }
 
 pub struct StoreInspector {
-    path: PathBuf,
+    pub path: PathBuf,
 }
 
-impl StoreInspector {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
-    }
+/// Reading a store file without changing it. Registering tables through
+/// `sema-engine` is a write when a catalog entry is missing, so the inspector
+/// opens redb read-only and decodes the known families itself.
+pub trait StoreInspecting {
+    fn inspect(&self) -> StoreInspection;
+}
 
-    pub fn inspect(&self) -> StoreInspection {
+impl StoreInspecting for StoreInspector {
+    fn inspect(&self) -> StoreInspection {
         if !self.path.exists() {
             return StoreInspection {
                 path: self.path.clone(),
@@ -132,13 +119,23 @@ impl StoreInspector {
             }
         };
 
-        let catalog = StoreCatalogReader::new(&database).read();
+        let catalog = StoreCatalogReader {
+            database: &database,
+        }
+        .read();
         let registered_tables = catalog.registered_tables();
         StoreInspection {
             path: self.path.clone(),
             database: DatabaseInspection::Opened,
-            schema: StoreSchemaReader::new(&database).read(),
-            tables: StoreTableReader::new(&database, registered_tables).inspect_all(),
+            schema: StoreSchemaReader {
+                database: &database,
+            }
+            .read(),
+            tables: StoreTableReader {
+                database: &database,
+                registered_tables,
+            }
+            .read(),
             catalog,
         }
     }
@@ -146,36 +143,21 @@ impl StoreInspector {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreInspection {
-    path: PathBuf,
-    database: DatabaseInspection,
-    schema: SchemaInspection,
-    catalog: CatalogInspection,
-    tables: Vec<TableInspection>,
+    pub path: PathBuf,
+    pub database: DatabaseInspection,
+    pub schema: SchemaInspection,
+    pub catalog: CatalogInspection,
+    pub tables: Vec<TableInspection>,
 }
 
-impl StoreInspection {
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
+/// Finding one family's row in a whole-store report.
+pub trait InspectedTables {
+    fn table_named(&self, name: &str) -> Option<&TableInspection>;
+}
 
-    pub fn database(&self) -> &DatabaseInspection {
-        &self.database
-    }
-
-    pub fn schema(&self) -> &SchemaInspection {
-        &self.schema
-    }
-
-    pub fn catalog(&self) -> &CatalogInspection {
-        &self.catalog
-    }
-
-    pub fn tables(&self) -> &[TableInspection] {
-        &self.tables
-    }
-
-    pub fn table_named(&self, name: &str) -> Option<&TableInspection> {
-        self.tables.iter().find(|table| table.name() == name)
+impl InspectedTables for StoreInspection {
+    fn table_named(&self, name: &str) -> Option<&TableInspection> {
+        self.tables.iter().find(|table| table.name == name)
     }
 }
 
@@ -237,7 +219,13 @@ pub enum CatalogInspection {
     Unreadable { message: String },
 }
 
-impl CatalogInspection {
+/// What a catalog read says the store has registered, whether or not it could
+/// be read at all.
+trait RegisteredTables {
+    fn registered_tables(&self) -> BTreeSet<String>;
+}
+
+impl RegisteredTables for CatalogInspection {
     fn registered_tables(&self) -> BTreeSet<String> {
         match self {
             Self::Readable { registered_tables } => registered_tables.clone(),
@@ -264,23 +252,9 @@ impl std::fmt::Display for CatalogInspection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableInspection {
-    name: &'static str,
-    role: &'static str,
-    status: TableInspectionStatus,
-}
-
-impl TableInspection {
-    pub fn name(&self) -> &'static str {
-        self.name
-    }
-
-    pub fn role(&self) -> &'static str {
-        self.role
-    }
-
-    pub fn status(&self) -> &TableInspectionStatus {
-        &self.status
-    }
+    pub name: &'static str,
+    pub role: &'static str,
+    pub status: TableInspectionStatus,
 }
 
 impl std::fmt::Display for TableInspection {
@@ -318,10 +292,15 @@ struct StoreSchemaReader<'database> {
     database: &'database redb::ReadOnlyDatabase,
 }
 
-impl<'database> StoreSchemaReader<'database> {
-    fn new(database: &'database redb::ReadOnlyDatabase) -> Self {
-        Self { database }
-    }
+/// One part of a store report, read from an already-open read-only database.
+trait InspectionReader {
+    type Read;
+
+    fn read(&self) -> Self::Read;
+}
+
+impl InspectionReader for StoreSchemaReader<'_> {
+    type Read = SchemaInspection;
 
     fn read(&self) -> SchemaInspection {
         let transaction = match self.database.begin_read() {
@@ -363,10 +342,8 @@ struct StoreCatalogReader<'database> {
     database: &'database redb::ReadOnlyDatabase,
 }
 
-impl<'database> StoreCatalogReader<'database> {
-    fn new(database: &'database redb::ReadOnlyDatabase) -> Self {
-        Self { database }
-    }
+impl InspectionReader for StoreCatalogReader<'_> {
+    type Read = CatalogInspection;
 
     fn read(&self) -> CatalogInspection {
         let transaction = match self.database.begin_read() {
@@ -425,54 +402,60 @@ struct StoreTableReader<'database> {
     registered_tables: BTreeSet<String>,
 }
 
-impl<'database> StoreTableReader<'database> {
-    fn new(
-        database: &'database redb::ReadOnlyDatabase,
-        registered_tables: BTreeSet<String>,
-    ) -> Self {
-        Self {
-            database,
-            registered_tables,
-        }
-    }
+impl InspectionReader for StoreTableReader<'_> {
+    type Read = Vec<TableInspection>;
 
-    fn inspect_all(&self) -> Vec<TableInspection> {
+    fn read(&self) -> Vec<TableInspection> {
         vec![
-            self.inspect(LIVE_SET_INSPECTION),
-            self.inspect(GC_ROOTS_INSPECTION),
-            self.inspect(EVENT_LOG_INSPECTION),
-            self.inspect(CONTAINER_LIFECYCLE_INSPECTION),
-            self.inspect(DEPLOY_JOB_INSPECTION),
-            self.inspect(TEST_RUN_INSPECTION),
-            self.inspect(DEPLOYMENT_RECORD_INSPECTION),
-            self.inspect(IDENTIFIER_ALLOCATION_INSPECTION),
+            self.inspect::<LiveGeneration>(),
+            self.inspect::<GcRoot>(),
+            self.inspect::<EventLogEntry>(),
+            self.inspect::<ContainerLifecycleRecord>(),
+            self.inspect::<DeployJob>(),
+            self.inspect::<StoredTestRun>(),
+            self.inspect::<DeploymentRecord>(),
+            self.inspect::<IdentifierAllocation>(),
         ]
     }
+}
 
-    fn inspect<RecordValue>(&self, target: TableInspectionTarget<RecordValue>) -> TableInspection
+/// Reading one known family's rows back out of a store, to say whether they are
+/// there and whether they still decode.
+trait FamilyInspecting {
+    fn inspect<Record: LojixRecord>(&self) -> TableInspection
     where
-        RecordValue: Archive + 'static,
-        <RecordValue as Archive>::Archived: RkyvDeserialize<RecordValue, HighDeserializer<rancor::Error>>
+        Record::Archived: RkyvDeserialize<Record, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >;
+
+    fn inspect_rows<Record: LojixRecord>(&self, registered: bool) -> TableInspectionStatus
+    where
+        Record::Archived: RkyvDeserialize<Record, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
+            >;
+}
+
+impl FamilyInspecting for StoreTableReader<'_> {
+    fn inspect<Record: LojixRecord>(&self) -> TableInspection
+    where
+        Record::Archived: RkyvDeserialize<Record, HighDeserializer<rancor::Error>>
             + for<'validation> CheckBytes<
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
-        let registered = self.registered_tables.contains(target.name);
+        let registered = self.registered_tables.contains(Record::TABLE);
         TableInspection {
-            name: target.name,
-            role: target.role,
-            status: self.inspect_rows(target, registered),
+            name: Record::TABLE,
+            role: Record::ROLE,
+            status: self.inspect_rows::<Record>(registered),
         }
     }
 
-    fn inspect_rows<RecordValue>(
-        &self,
-        target: TableInspectionTarget<RecordValue>,
-        registered: bool,
-    ) -> TableInspectionStatus
+    fn inspect_rows<Record: LojixRecord>(&self, registered: bool) -> TableInspectionStatus
     where
-        RecordValue: Archive + 'static,
-        <RecordValue as Archive>::Archived: RkyvDeserialize<RecordValue, HighDeserializer<rancor::Error>>
+        Record::Archived: RkyvDeserialize<Record, HighDeserializer<rancor::Error>>
             + for<'validation> CheckBytes<
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
@@ -485,20 +468,21 @@ impl<'database> StoreTableReader<'database> {
                 };
             }
         };
-        let table = match transaction.open_table(target.definition()) {
-            Ok(table) => table,
-            Err(redb::TableError::TableDoesNotExist(_)) if registered => {
-                return TableInspectionStatus::Empty;
-            }
-            Err(redb::TableError::TableDoesNotExist(_)) => {
-                return TableInspectionStatus::Missing;
-            }
-            Err(error) => {
-                return TableInspectionStatus::ReadFailed {
-                    message: error.to_string(),
-                };
-            }
-        };
+        let table =
+            match transaction.open_table(TableDefinition::<String, &[u8]>::new(Record::TABLE)) {
+                Ok(table) => table,
+                Err(redb::TableError::TableDoesNotExist(_)) if registered => {
+                    return TableInspectionStatus::Empty;
+                }
+                Err(redb::TableError::TableDoesNotExist(_)) => {
+                    return TableInspectionStatus::Missing;
+                }
+                Err(error) => {
+                    return TableInspectionStatus::ReadFailed {
+                        message: error.to_string(),
+                    };
+                }
+            };
         if table.is_empty().unwrap_or(false) {
             return TableInspectionStatus::Empty;
         }
@@ -520,7 +504,7 @@ impl<'database> StoreTableReader<'database> {
                     };
                 }
             };
-            if let Err(error) = rkyv::from_bytes::<RecordValue, rancor::Error>(value.value()) {
+            if let Err(error) = rkyv::from_bytes::<Record, rancor::Error>(value.value()) {
                 return TableInspectionStatus::DecodeFailed {
                     message: error.to_string(),
                 };
@@ -528,26 +512,5 @@ impl<'database> StoreTableReader<'database> {
             row_count += 1;
         }
         TableInspectionStatus::Readable { row_count }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct TableInspectionTarget<RecordValue> {
-    name: &'static str,
-    role: &'static str,
-    record: std::marker::PhantomData<RecordValue>,
-}
-
-impl<RecordValue> TableInspectionTarget<RecordValue> {
-    const fn new(name: &'static str, role: &'static str) -> Self {
-        Self {
-            name,
-            role,
-            record: std::marker::PhantomData,
-        }
-    }
-
-    fn definition(self) -> TableDefinition<'static, String, &'static [u8]> {
-        TableDefinition::new(self.name)
     }
 }

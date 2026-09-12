@@ -1,5 +1,6 @@
 //! Generated Datom and portable Signal smoke witnesses for Lojix's owner contract.
 
+use lojix::DurableStore as _;
 use lojix::Payload as _;
 use lojix::adapters::{Lowerable as _, Raisable as _};
 use lojix::schema_runtime::{DeploySubmissionOutcome, SchemaRuntime};
@@ -131,7 +132,7 @@ async fn fixture_eval_reserves_a_durable_deployment_before_effects() {
     };
     let records = engine
         .store()
-        .deployment_records()
+        .records::<lojix::runtime_model::DeploymentRecord>()
         .expect("read durable deployment records");
     assert!(
         records

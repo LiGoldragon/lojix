@@ -19,9 +19,13 @@ use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use rkyv::rancor;
 use sema_engine::TableRegistration;
 
+use crate::runtime_model::{
+    ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, DeploymentRecord, EventLogEntry,
+    GcRoot, IdentifierAllocation, LiveGeneration, PendingTransitionIntent, StoredTestRun,
+};
 use crate::{
-    Error, InlineDatomArguments as _, LegacyConfigurationArchivable as _,
-    LegacyStartupConfiguration, Result, Store, ingress,
+    DurableStore as _, Error, InlineDatomArguments as _, LegacyConfigurationArchivable as _,
+    LegacyStartupConfiguration, LojixRecord as _, OfflineCommand, Result, Store, ingress,
 };
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");
@@ -89,21 +93,36 @@ pub struct StoreResetCommand {
     configuration_path: PathBuf,
 }
 
-impl StoreResetCommand {
-    pub fn from_environment() -> Result<Self> {
-        Self::from_arguments(std::env::args_os().skip(1))
-    }
+impl OfflineCommand for StoreResetCommand {
+    type Outcome = Result<StoreResetOutcome>;
 
-    pub fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
+    fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let configuration_path = std::env::var_os(CONFIGURATION_ENV)
             .ok_or_else(|| Error::MissingRuntimeConfiguration(CONFIGURATION_ENV.to_string()))?;
         Self::from_arguments_with_configuration(arguments, configuration_path)
     }
 
+    fn run(&self) -> Result<StoreResetOutcome> {
+        self.reset()
+    }
+}
+
+/// Bringing a recognised older store forward to the current schema by removing
+/// and recreating it.
+pub trait StoreResetting: Sized {
     /// Construct the command with an explicit generated archive. This exists
     /// for in-process tests; the executable reaches it exclusively through
     /// [`CONFIGURATION_ENV`].
-    pub fn from_arguments_with_configuration(
+    fn from_arguments_with_configuration(
+        arguments: impl IntoIterator<Item = OsString>,
+        configuration_path: impl Into<PathBuf>,
+    ) -> Result<Self>;
+
+    fn reset(&self) -> Result<StoreResetOutcome>;
+}
+
+impl StoreResetting for StoreResetCommand {
+    fn from_arguments_with_configuration(
         arguments: impl IntoIterator<Item = OsString>,
         configuration_path: impl Into<PathBuf>,
     ) -> Result<Self> {
@@ -114,7 +133,7 @@ impl StoreResetCommand {
         })
     }
 
-    pub fn run(&self) -> Result<StoreResetOutcome> {
+    fn reset(&self) -> Result<StoreResetOutcome> {
         let configuration_path = self
             .configuration_path
             .canonical_regular_file("configuration")?;
@@ -393,75 +412,30 @@ trait StoreLayouts {
 
 impl StoreLayouts for LojixCatalog {
     fn core() -> Self {
-        Self::from([
-            (
-                crate::LIVE_SET_TABLE.as_str(),
-                crate::LIVE_SET_FAMILY,
-                crate::LIVE_SET_SCHEMA_HASH,
-            ),
-            (
-                crate::GC_ROOTS_TABLE.as_str(),
-                crate::GC_ROOTS_FAMILY,
-                crate::GC_ROOTS_SCHEMA_HASH,
-            ),
-            (
-                crate::EVENT_LOG_TABLE.as_str(),
-                crate::EVENT_LOG_FAMILY,
-                crate::EVENT_LOG_SCHEMA_HASH,
-            ),
-            (
-                crate::CONTAINER_LIFECYCLE_TABLE.as_str(),
-                crate::CONTAINER_LIFECYCLE_FAMILY,
-                crate::CONTAINER_LIFECYCLE_SCHEMA_HASH,
-            ),
-            (
-                crate::DEPLOY_JOB_TABLE.as_str(),
-                crate::DEPLOY_JOB_FAMILY,
-                crate::DEPLOY_JOB_SCHEMA_HASH,
-            ),
-            (
-                crate::TEST_RUN_TABLE.as_str(),
-                crate::TEST_RUN_FAMILY,
-                crate::TEST_RUN_SCHEMA_HASH,
-            ),
-        ])
+        Self(BTreeSet::from([
+            LiveGeneration::family_identity(),
+            GcRoot::family_identity(),
+            EventLogEntry::family_identity(),
+            ContainerLifecycleRecord::family_identity(),
+            DeployJob::family_identity(),
+            StoredTestRun::family_identity(),
+        ]))
     }
 
     fn recognised() -> Self {
         let Self(mut identities) = Self::core();
-        let Self(correlation) = Self::from([
+        identities.extend([
+            DeploymentRecord::family_identity(),
+            IdentifierAllocation::family_identity(),
+            DeploymentOutboxRecord::family_identity(),
+            PendingTransitionIntent::family_identity(),
+            crate::NexusConfigurationRecord::family_identity(),
             (
-                crate::DEPLOYMENT_RECORD_TABLE.as_str(),
-                crate::DEPLOYMENT_RECORD_FAMILY,
-                crate::DEPLOYMENT_RECORD_SCHEMA_HASH,
-            ),
-            (
-                crate::IDENTIFIER_ALLOCATION_TABLE.as_str(),
-                crate::IDENTIFIER_ALLOCATION_FAMILY,
-                crate::IDENTIFIER_ALLOCATION_SCHEMA_HASH,
-            ),
-            (
-                crate::DEPLOYMENT_OUTBOX_TABLE.as_str(),
-                crate::DEPLOYMENT_OUTBOX_FAMILY,
-                crate::DEPLOYMENT_OUTBOX_SCHEMA_HASH,
-            ),
-            (
-                crate::PENDING_TRANSITION_INTENT_TABLE.as_str(),
-                crate::PENDING_TRANSITION_INTENT_FAMILY,
-                crate::PENDING_TRANSITION_INTENT_SCHEMA_HASH,
-            ),
-            (
-                crate::NEXUS_CONFIGURATION_TABLE.as_str(),
-                crate::NEXUS_CONFIGURATION_FAMILY,
-                crate::NEXUS_CONFIGURATION_SCHEMA_HASH,
-            ),
-            (
-                "legacy-deployment-event-quarantine",
-                "LegacyDeploymentEventQuarantineFamily",
+                "legacy-deployment-event-quarantine".to_string(),
+                "LegacyDeploymentEventQuarantineFamily".to_string(),
                 [10; 32],
             ),
         ]);
-        identities.extend(correlation);
         Self(identities)
     }
 }

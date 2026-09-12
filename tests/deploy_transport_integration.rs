@@ -6,6 +6,7 @@
 //! profile set, then target-user activation.
 
 use lojix::Payload as _;
+use lojix::{DeploymentLedger as _, DurableStore as _, GenerationLedger as _};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

@@ -10,6 +10,10 @@
 //! is the single source of routing truth; there is no inline request `Store`.
 
 use crate::Payload;
+use crate::runtime_flow::{Routable, Routed};
+use crate::{
+    DeploymentLedger as _, DurableStore as _, GenerationLedger as _, NexusPersistable as _,
+};
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
@@ -856,7 +860,7 @@ impl DeployProcessable for DeployJobs {
     ) {
         let already_recorded = self
             .store
-            .gc_roots()
+            .records::<crate::runtime_model::GcRoot>()
             .map(|roots| {
                 roots.iter().any(|existing| {
                     existing.generation_identifier == generation.generation_identifier
@@ -976,6 +980,7 @@ impl Message<ReconcilePersistedJobs> for DeployJobs {
 mod tests {
     use super::*;
     use crate::runtime_model as ordinary;
+    use crate::{EventHistory as _, IdentifierAllocating as _};
 
     const CLOSURE: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-self-switch";
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -1118,7 +1123,7 @@ mod tests {
 
         assert!(
             store
-                .live_generations()
+                .records::<crate::runtime_model::LiveGeneration>()
                 .expect("current live generation")
                 .iter()
                 .any(|generation| {
@@ -1130,7 +1135,7 @@ mod tests {
                 })
         );
         let record = store
-            .deployment_records()
+            .records::<crate::runtime_model::DeploymentRecord>()
             .expect("public deployment record")
             .into_iter()
             .find(|record| *record.deployment_identifier.payload() == deployment_identifier)

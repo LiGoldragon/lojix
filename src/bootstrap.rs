@@ -9,6 +9,7 @@
 //! has been atomically committed and directory-synced at the caller-selected
 //! path.
 
+use crate::DurableStore as _;
 use crate::inspected_text::{
     NixStorePath, OfferedPath, PathAdmission as _, PathFault, StoreItemShape,
 };
@@ -203,8 +204,8 @@ pub enum BootstrapEvidenceStatus {
     Failed,
 }
 
-impl BootstrapEvidenceStatus {
-    fn as_str(self) -> &'static str {
+impl crate::Named for BootstrapEvidenceStatus {
+    fn as_str(&self) -> &str {
         match self {
             Self::Succeeded => "Succeeded",
             Self::Failed => "Failed",
@@ -282,10 +283,15 @@ pub enum BootstrapError {
     RecoveryPending,
 }
 
-impl BootstrapError {
+/// Saying what went wrong without saying anything the caller owns.
+pub trait Redacting {
     /// Never echo request-owned routes, inputs, command bodies, or process
     /// output to the terminal.  The durable typed evidence is the witness.
-    pub fn redacted(&self) -> &'static str {
+    fn redacted(&self) -> &'static str;
+}
+
+impl Redacting for BootstrapError {
+    fn redacted(&self) -> &'static str {
         match self {
             Self::Argument(_) | Self::Decode(_) | Self::Validation(_) => "InvalidRequest",
             Self::Journal(_) | Self::JournalStore(_) => "JournalFailure",
@@ -696,8 +702,8 @@ enum JournalStage {
     TerminalEvidenceWritten,
 }
 
-impl JournalStage {
-    fn from_effect(stage: BootstrapEffectStage) -> Self {
+impl From<BootstrapEffectStage> for JournalStage {
+    fn from(stage: BootstrapEffectStage) -> Self {
         match stage {
             BootstrapEffectStage::JournalCreated => Self::JournalCreated,
             BootstrapEffectStage::Materialized => Self::Materialized,
@@ -710,18 +716,20 @@ impl JournalStage {
             BootstrapEffectStage::TerminalEvidenceWritten => Self::TerminalEvidenceWritten,
         }
     }
+}
 
-    fn effect(self) -> BootstrapEffectStage {
-        match self {
-            Self::JournalCreated => BootstrapEffectStage::JournalCreated,
-            Self::Materialized => BootstrapEffectStage::Materialized,
-            Self::Tested => BootstrapEffectStage::Tested,
-            Self::Built => BootstrapEffectStage::Built,
-            Self::GcRooted => BootstrapEffectStage::GcRooted,
-            Self::Copied => BootstrapEffectStage::Copied,
-            Self::BootOnceScheduled => BootstrapEffectStage::BootOnceScheduled,
-            Self::BootOnceActivated => BootstrapEffectStage::BootOnceActivated,
-            Self::TerminalEvidenceWritten => BootstrapEffectStage::TerminalEvidenceWritten,
+impl From<JournalStage> for BootstrapEffectStage {
+    fn from(stage: JournalStage) -> Self {
+        match stage {
+            JournalStage::JournalCreated => Self::JournalCreated,
+            JournalStage::Materialized => Self::Materialized,
+            JournalStage::Tested => Self::Tested,
+            JournalStage::Built => Self::Built,
+            JournalStage::GcRooted => Self::GcRooted,
+            JournalStage::Copied => Self::Copied,
+            JournalStage::BootOnceScheduled => Self::BootOnceScheduled,
+            JournalStage::BootOnceActivated => Self::BootOnceActivated,
+            JournalStage::TerminalEvidenceWritten => Self::TerminalEvidenceWritten,
         }
     }
 }
@@ -769,7 +777,95 @@ struct EphemeralJournal {
     parent: PathBuf,
 }
 
-impl EphemeralJournal {
+/// The private write-ahead journal one bootstrap run keeps beside its output:
+/// what it intends to do, what it has done, and the terminal evidence it
+/// leaves. It is ephemeral — the run removes it when it is finished — and
+/// nothing outside the run may read it.
+trait BootstrapJournalling: Sized {
+    fn open_or_create(request: &ValidatedBootstrapRun)
+    -> std::result::Result<Self, BootstrapError>;
+
+    fn read_state(&self) -> std::result::Result<BootstrapJournalConfiguration, BootstrapError>;
+
+    fn write_state(
+        &self,
+        state: &BootstrapJournalConfiguration,
+    ) -> std::result::Result<(), BootstrapError>;
+
+    fn verify_identity(
+        &self,
+        state: &BootstrapJournalConfiguration,
+    ) -> std::result::Result<(), BootstrapError>;
+
+    fn mutate(
+        &self,
+        mutate: impl FnOnce(&mut BootstrapJournalConfiguration),
+    ) -> std::result::Result<(), BootstrapError>;
+
+    fn events(&self) -> std::result::Result<Vec<JournalEvent>, BootstrapError>;
+
+    fn succeeded(&self, stage: JournalStage) -> std::result::Result<bool, BootstrapError>;
+
+    fn intent(&self, stage: JournalStage) -> std::result::Result<(), BootstrapError>;
+
+    fn receipt(&self, stage: JournalStage) -> std::result::Result<(), BootstrapError>;
+
+    fn outcome(
+        &self,
+        stage: JournalStage,
+        succeeded: bool,
+    ) -> std::result::Result<(), BootstrapError>;
+
+    fn event(
+        &self,
+        stage: JournalStage,
+        kind: JournalEventKind,
+        succeeded: bool,
+    ) -> std::result::Result<(), BootstrapError>;
+
+    fn terminal_status(
+        &self,
+    ) -> std::result::Result<Option<BootstrapEvidenceStatus>, BootstrapError>;
+
+    fn set_terminal_status(
+        &self,
+        status: BootstrapEvidenceStatus,
+    ) -> std::result::Result<(), BootstrapError>;
+
+    fn closure_path(&self) -> std::result::Result<Option<String>, BootstrapError>;
+
+    fn set_closure_path(&self, closure: &str) -> std::result::Result<(), BootstrapError>;
+
+    fn materialized_overrides(
+        &self,
+    ) -> std::result::Result<Option<Vec<FlakeOverride>>, BootstrapError>;
+
+    fn set_materialized_overrides(
+        &self,
+        overrides: &[FlakeOverride],
+    ) -> std::result::Result<(), BootstrapError>;
+
+    fn set_root_receipt(
+        &self,
+        root: &Path,
+        closure: &str,
+    ) -> std::result::Result<(), BootstrapError>;
+
+    fn verify_root_receipt(
+        &self,
+        root: &Path,
+        closure: &str,
+    ) -> std::result::Result<bool, BootstrapError>;
+
+    fn evidence(
+        &self,
+        status: BootstrapEvidenceStatus,
+    ) -> std::result::Result<BootstrapTerminalEvidence, BootstrapError>;
+
+    fn cleanup(self) -> std::result::Result<(), BootstrapError>;
+}
+
+impl BootstrapJournalling for EphemeralJournal {
     fn open_or_create(
         request: &ValidatedBootstrapRun,
     ) -> std::result::Result<Self, BootstrapError> {
@@ -1029,7 +1125,7 @@ impl EphemeralJournal {
         for event in state.events {
             if event.kind == JournalEventKind::Outcome {
                 effects.push(BootstrapEffectEvidence {
-                    stage: event.stage.effect(),
+                    stage: event.stage.into(),
                     succeeded: event.succeeded,
                 });
             }
@@ -1422,7 +1518,15 @@ struct SshIdentity {
     port: Option<u16>,
 }
 
-impl SshIdentity {
+/// The remote account a bootstrap reaches, and the exact argument vector that
+/// reaches it — no ambient SSH configuration participates.
+trait SshInvoking {
+    fn destination(&self) -> String;
+
+    fn ssh_arguments(&self, config: &Path, command: String) -> Vec<String>;
+}
+
+impl SshInvoking for SshIdentity {
     fn destination(&self) -> String {
         format!("{}@{}", self.user, self.host)
     }
@@ -1448,7 +1552,18 @@ impl SshIdentity {
     }
 }
 
-impl BootstrapSshPolicyValidated {
+/// The caller-owned SSH material written where only this bootstrap can read
+/// it, and the option string that points Nix at it.
+trait SshPolicyMaterial {
+    fn write_private_config(
+        &self,
+        journal: &EphemeralJournal,
+    ) -> std::result::Result<PathBuf, BootstrapError>;
+
+    fn nix_ssh_options(&self, config: &Path) -> String;
+}
+
+impl SshPolicyMaterial for BootstrapSshPolicyValidated {
     fn write_private_config(
         &self,
         journal: &EphemeralJournal,
@@ -1565,7 +1680,16 @@ impl TryFrom<BootstrapRun> for ValidatedBootstrapRun {
     }
 }
 
-impl BootstrapModeValidated {
+/// What a validated bootstrap request asks for, whichever mode it is in.
+trait ValidatedBootstrapMode {
+    fn input(&self) -> &BootstrapInputValidated;
+
+    fn builder(&self) -> Option<&str>;
+
+    fn evidence_mode(&self) -> BootstrapEvidenceMode;
+}
+
+impl ValidatedBootstrapMode for BootstrapModeValidated {
     fn input(&self) -> &BootstrapInputValidated {
         match self {
             Self::BuildOnly { input, .. } => input,
@@ -1588,7 +1712,17 @@ impl BootstrapModeValidated {
     }
 }
 
-impl BootstrapInputValidated {
+/// The three words that name what a bootstrap builds, however the request
+/// arrived at them.
+trait BootstrapBuildTarget {
+    fn flake_reference(&self) -> &str;
+
+    fn nix_system(&self) -> &str;
+
+    fn output_selector(&self) -> &str;
+}
+
+impl BootstrapBuildTarget for BootstrapInputValidated {
     fn flake_reference(&self) -> &str {
         match self {
             Self::Direct(input) => &input.flake_reference,
@@ -2283,7 +2417,7 @@ impl BootstrapInvocation for BootstrapRun {
                     return Err(BootstrapError::RecoveryPending);
                 }
                 Err(BootstrapError::Effect(stage)) => {
-                    journal.outcome(JournalStage::from_effect(stage), false)?;
+                    journal.outcome(JournalStage::from(stage), false)?;
                     journal.set_terminal_status(BootstrapEvidenceStatus::Failed)?;
                     BootstrapEvidenceStatus::Failed
                 }
@@ -2298,7 +2432,10 @@ impl BootstrapInvocation for BootstrapRun {
         journal.cleanup()?;
 
         Ok(BootstrapTerminal {
-            status: status.as_str(),
+            status: match status {
+                BootstrapEvidenceStatus::Succeeded => "Succeeded",
+                BootstrapEvidenceStatus::Failed => "Failed",
+            },
         })
     }
 }

@@ -11,6 +11,7 @@
 //! to receive.
 
 use lojix::Payload as _;
+use lojix::{DurableStore as _, GenerationLedger as _};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -161,7 +162,7 @@ async fn a_failed_activation_names_the_command_and_its_exit_status() {
 
     let record = engine
         .store()
-        .deployment_records()
+        .records::<lojix::runtime_model::DeploymentRecord>()
         .expect("read durable deployment records")
         .into_iter()
         .find(|record| record.deployment_identifier == identifier)
@@ -209,7 +210,7 @@ async fn the_durable_detail_drops_the_credential_line_it_was_printed_beside() {
 
     let record = engine
         .store()
-        .deployment_records()
+        .records::<lojix::runtime_model::DeploymentRecord>()
         .expect("read durable deployment records")
         .into_iter()
         .find(|record| record.deployment_identifier == identifier)
@@ -330,7 +331,7 @@ async fn the_profile_advanced_although_the_deployment_failed() {
 
     let record = engine
         .store()
-        .deployment_records()
+        .records::<lojix::runtime_model::DeploymentRecord>()
         .expect("read durable deployment records")
         .into_iter()
         .find(|record| record.deployment_identifier == identifier)

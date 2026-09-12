@@ -5,6 +5,7 @@
 //! supplied journal parent and its terminal evidence is durable at the
 //! supplied evidence path.
 
+use lojix::bootstrap::Redacting as _;
 use lojix::bootstrap::{BootstrapInvocation as _, BootstrapRun};
 
 fn main() {

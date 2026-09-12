@@ -1,5 +1,6 @@
 use lojix::Payload as _;
 use lojix::runtime_model::{self as ordinary, EventLogEntry, LoggedEvent};
+use lojix::{DurableStore as _, EventHistory as _, IdentifierAllocating as _};
 use lojix::{EventLogRetention, Store};
 
 fn event(position: u64) -> EventLogEntry {

@@ -350,48 +350,39 @@ pub enum Output {
     Action(NexusAction),
 }
 
-impl NexusWork {
-    pub fn with_origin_route(self, origin_route: OriginRoute) -> Nexus<Self> {
+/// A value that knows which connection it belongs to once it is told. Work
+/// arriving from a socket and the action answering it are the same kind of
+/// thing in this respect: neither carries its route, and both are tagged with
+/// one before the runner sees them.
+pub trait Routable: Sized {
+    fn with_origin_route(self, origin_route: OriginRoute) -> Nexus<Self> {
         Nexus::new(origin_route, self)
-    }
-
-    fn sema_write_completed(output: SemaWriteOutput) -> Self {
-        Self::SemaWriteCompleted(output)
-    }
-
-    fn sema_read_completed(output: SemaReadOutput) -> Self {
-        Self::SemaReadCompleted(output)
-    }
-
-    fn effect_completed(output: EffectResult) -> Self {
-        Self::EffectCompleted(output)
     }
 }
 
-impl NexusAction {
-    pub fn with_origin_route(self, origin_route: OriginRoute) -> Nexus<Self> {
-        Nexus::new(origin_route, self)
-    }
+impl Routable for NexusWork {}
+impl Routable for NexusAction {}
 
-    fn reply_to_signal(output: SignalOutput) -> Self {
-        Self::ReplyToSignal(output)
-    }
-}
-
-impl EffectResult {
-    pub fn flake_resolved(value: SourceRevisionRecord) -> Self {
+impl From<SourceRevisionRecord> for EffectResult {
+    fn from(value: SourceRevisionRecord) -> Self {
         Self::FlakeResolved(ResolvedFlake::new(value))
     }
+}
 
-    pub fn horizon_materialized(value: Vec<FlakeInputOverride>) -> Self {
+impl From<Vec<FlakeInputOverride>> for EffectResult {
+    fn from(value: Vec<FlakeInputOverride>) -> Self {
         Self::HorizonMaterialized(MaterializedInputs::new(value))
     }
+}
 
-    pub fn closure_evaluated(value: EvaluatedClosure) -> Self {
+impl From<EvaluatedClosure> for EffectResult {
+    fn from(value: EvaluatedClosure) -> Self {
         Self::ClosureEvaluated(value)
     }
+}
 
-    pub fn closure_built(value: BuiltClosure) -> Self {
+impl From<BuiltClosure> for EffectResult {
+    fn from(value: BuiltClosure) -> Self {
         Self::ClosureBuilt(value)
     }
 }
@@ -399,33 +390,52 @@ impl EffectResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OriginRoute(u64);
 
-impl OriginRoute {
-    pub fn new(payload: u64) -> Self {
+impl crate::Payload for OriginRoute {
+    type Carried = u64;
+
+    fn new(payload: u64) -> Self {
         Self(payload)
     }
-    pub fn payload(&self) -> &u64 {
+
+    fn payload(&self) -> &u64 {
         &self.0
+    }
+
+    fn into_payload(self) -> u64 {
+        self.0
     }
 }
 
+/// A root value carried together with the connection it came from. The pair is
+/// what the runner routes on; the root alone has no address.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Nexus<Root> {
     pub origin_route: OriginRoute,
     pub root: Root,
 }
 
-impl<Root> Nexus<Root> {
-    pub fn new(origin_route: OriginRoute, root: Root) -> Self {
+pub trait Routed {
+    type Root;
+
+    fn new(origin_route: OriginRoute, root: Self::Root) -> Self;
+
+    fn origin_route(&self) -> OriginRoute;
+
+    fn into_root(self) -> Self::Root;
+}
+
+impl<Root> Routed for Nexus<Root> {
+    type Root = Root;
+
+    fn new(origin_route: OriginRoute, root: Root) -> Self {
         Self { origin_route, root }
     }
 
-    pub fn origin_route(&self) -> OriginRoute {
+    fn origin_route(&self) -> OriginRoute {
         self.origin_route.clone()
     }
-    pub fn root(&self) -> &Root {
-        &self.root
-    }
-    pub fn into_root(self) -> Root {
+
+    fn into_root(self) -> Root {
         self.root
     }
 }
@@ -507,7 +517,7 @@ pub trait NexusEngine: Send {
                 origin_route: origin_route.clone(),
             };
             let reply = runner.drive(&mut adapter, first_work).await;
-            NexusAction::reply_to_signal(reply).with_origin_route(origin_route)
+            NexusAction::ReplyToSignal(reply).with_origin_route(origin_route)
         }
     }
 }
@@ -540,7 +550,7 @@ impl<Engine: NexusEngine> triad_runtime::RunnerEngines for NexusRunnerAdapter<'_
             .engine
             .apply_sema_write(self.origin_route.clone(), write)
             .await;
-        NexusWork::sema_write_completed(output)
+        NexusWork::SemaWriteCompleted(output)
     }
 
     async fn observe_sema_read(&mut self, read: Self::SemaRead) -> Self::Work {
@@ -548,12 +558,12 @@ impl<Engine: NexusEngine> triad_runtime::RunnerEngines for NexusRunnerAdapter<'_
             .engine
             .observe_sema_read(self.origin_route.clone(), read)
             .await;
-        NexusWork::sema_read_completed(output)
+        NexusWork::SemaReadCompleted(output)
     }
 
     async fn run_effect(&mut self, effect: Self::Effect) -> Self::Work {
         let output = self.engine.run_effect(effect).await;
-        NexusWork::effect_completed(output)
+        NexusWork::EffectCompleted(output)
     }
 
     fn budget_exhausted_reply(

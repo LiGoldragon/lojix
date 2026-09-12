@@ -1,5 +1,6 @@
 //! Read-only Lojix store inspection CLI.
 
+use lojix::OfflineCommand as _;
 use lojix::inspection::StoreInspectionCommand;
 
 fn main() {

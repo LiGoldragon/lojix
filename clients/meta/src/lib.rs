@@ -6,7 +6,7 @@ use std::{
 };
 
 use datom_codec::{Actualizing, Budget, Potential};
-use lojix::client::SocketExchange;
+use lojix::client::{NexusSocket, SocketExchange};
 use protos::ReaderBudget;
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
 

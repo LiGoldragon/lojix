@@ -1,3 +1,4 @@
+use lojix::DurableStore as _;
 use std::fs;
 use std::process::Command;
 

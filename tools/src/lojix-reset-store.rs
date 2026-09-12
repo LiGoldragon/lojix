@@ -1,5 +1,6 @@
 //! Explicit, inline-Datom, path-scoped Lojix v5 store reset CLI.
 
+use lojix::OfflineCommand as _;
 use lojix::reconstruction::StoreResetCommand;
 
 fn main() {

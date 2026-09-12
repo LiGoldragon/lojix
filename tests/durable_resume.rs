@@ -13,6 +13,7 @@
 use lojix::Payload as _;
 use lojix::Store;
 use lojix::runtime_model::{self as ordinary, GcRoot, LiveGeneration};
+use lojix::{DurableStore as _, GenerationLedger as _, IdentifierAllocating as _};
 use tempfile::TempDir;
 
 /// A live generation and its matching gc-root for one generation identifier.

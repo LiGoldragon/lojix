@@ -5,6 +5,10 @@ use lojix::inspection::{
     TableInspectionStatus,
 };
 use lojix::runtime_model::{self as ordinary, GcRoot, LiveGeneration};
+use lojix::{DurableStore as _, GenerationLedger as _};
+use lojix::{
+    OfflineCommand as _, inspection::InspectedTables as _, inspection::StoreInspecting as _,
+};
 use redb::{Database, TableDefinition};
 use tempfile::TempDir;
 
@@ -54,9 +58,9 @@ fn missing_store_path_is_reported_without_creating_file() {
     let directory = TempDir::new().expect("tempdir");
     let path = directory.path().join("missing.sema");
 
-    let inspection = StoreInspector::new(&path).inspect();
+    let inspection = StoreInspector { path: path.clone() }.inspect();
 
-    assert_eq!(inspection.database(), &DatabaseInspection::MissingPath);
+    assert_eq!(inspection.database, DatabaseInspection::MissingPath);
     assert!(
         !path.exists(),
         "the read-only inspector must not create a missing store path"
@@ -71,26 +75,23 @@ fn registered_tables_with_no_rows_report_empty() {
         let _store = Store::open(&path).expect("open empty store");
     }
 
-    let inspection = StoreInspector::new(&path).inspect();
+    let inspection = StoreInspector { path: path.clone() }.inspect();
 
-    assert!(matches!(inspection.database(), DatabaseInspection::Opened));
-    assert_eq!(
-        inspection.schema(),
-        &SchemaInspection::Matches { version: 5 }
-    );
+    assert!(matches!(inspection.database, DatabaseInspection::Opened));
+    assert_eq!(inspection.schema, SchemaInspection::Matches { version: 5 });
     assert_eq!(
         inspection
             .table_named("live-set")
             .expect("live-set inspection")
-            .status(),
-        &TableInspectionStatus::Empty
+            .status,
+        TableInspectionStatus::Empty
     );
     assert_eq!(
         inspection
             .table_named("event-log")
             .expect("event-log inspection")
-            .status(),
-        &TableInspectionStatus::Empty
+            .status,
+        TableInspectionStatus::Empty
     );
 }
 
@@ -106,21 +107,21 @@ fn populated_generation_rows_report_row_counts() {
             .expect("record activation");
     }
 
-    let inspection = StoreInspector::new(&path).inspect();
+    let inspection = StoreInspector { path: path.clone() }.inspect();
 
     assert_eq!(
         inspection
             .table_named("live-set")
             .expect("live-set inspection")
-            .status(),
-        &TableInspectionStatus::Readable { row_count: 1 }
+            .status,
+        TableInspectionStatus::Readable { row_count: 1 }
     );
     assert_eq!(
         inspection
             .table_named("gc-roots")
             .expect("gc-roots inspection")
-            .status(),
-        &TableInspectionStatus::Readable { row_count: 1 }
+            .status,
+        TableInspectionStatus::Readable { row_count: 1 }
     );
 }
 
@@ -147,14 +148,14 @@ fn unreadable_generation_and_event_rows_report_decode_failures() {
     transaction.commit().expect("commit corruption");
     drop(database);
 
-    let inspection = StoreInspector::new(&path).inspect();
+    let inspection = StoreInspector { path: path.clone() }.inspect();
 
     assert!(
         matches!(
             inspection
                 .table_named("live-set")
                 .expect("live-set inspection")
-                .status(),
+                .status,
             TableInspectionStatus::DecodeFailed { .. }
         ),
         "live-set should report rows unreadable under the current schema"
@@ -164,7 +165,7 @@ fn unreadable_generation_and_event_rows_report_decode_failures() {
             inspection
                 .table_named("event-log")
                 .expect("event-log inspection")
-                .status(),
+                .status,
             TableInspectionStatus::DecodeFailed { .. }
         ),
         "event-log should report rows unreadable under the current schema"

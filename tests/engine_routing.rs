@@ -2,6 +2,7 @@
 //! of the generated Datom boundary so they can prove durable state without a
 //! shell effect.
 
+use lojix::DurableStore as _;
 use lojix::Payload as _;
 use std::path::Path;
 
@@ -47,7 +48,10 @@ fn accepted_submission_creates_a_correlated_durable_record() {
     };
     let identifier = *accepted.deployment_identifier.payload();
     assert_ne!(identifier, 0);
-    let records = engine.store().deployment_records().expect("read records");
+    let records = engine
+        .store()
+        .records::<lojix::runtime_model::DeploymentRecord>()
+        .expect("read records");
     let record = records
         .into_iter()
         .find(|record| *record.deployment_identifier.payload() == identifier)

@@ -1,5 +1,7 @@
 //! Public boundary checks for the v5 reset contract.
 
+use lojix::DurableStore as _;
+use lojix::{OfflineCommand as _, reconstruction::StoreResetting as _};
 use std::ffi::OsString;
 
 use lojix::reconstruction::StoreResetCommand;

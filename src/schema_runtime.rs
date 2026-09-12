@@ -16,6 +16,11 @@ use crate::inspected_text::{
     CredentialBearing, InspectedText, NixStorePath, OfferedPath, PathAdmission, PercentEncodedText,
     StoreItemShape,
 };
+use crate::runtime_flow::{Routable, Routed};
+use crate::{
+    DeploymentLedger as _, DurableStore as _, EventHistory as _, GenerationLedger as _,
+    IdentifierAllocating as _, NexusPersistable as _, TestRunLedger as _,
+};
 use crate::{HorizonArchitecture as _, SourceRevisionText as _};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -2171,7 +2176,7 @@ impl SchemaRuntime {
         }
         let record = self
             .store
-            .deployment_records()?
+            .records::<crate::runtime_model::DeploymentRecord>()?
             .into_iter()
             .find(|record| record.deployment_identifier == job.deployment_identifier)
             .ok_or_else(|| {
@@ -2240,7 +2245,7 @@ impl SchemaRuntime {
         {
             let matching_intents: Vec<_> = self
                 .store
-                .pending_transition_intents()?
+                .records::<crate::runtime_model::PendingTransitionIntent>()?
                 .into_iter()
                 .filter(|intent| {
                     intent.deployment_identifier == pipeline.deployment_identifier
@@ -2353,10 +2358,10 @@ impl SchemaRuntime {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
-                nexus::NexusWork::EffectCompleted(nexus::EffectResult::flake_resolved(revision))
+                nexus::NexusWork::EffectCompleted(nexus::EffectResult::from(revision))
             }
             sema::DeployResumeStage::RecordBuilding => nexus::NexusWork::EffectCompleted(
-                nexus::EffectResult::horizon_materialized(pipeline.input_overrides.clone()),
+                nexus::EffectResult::from(pipeline.input_overrides.clone()),
             ),
             sema::DeployResumeStage::NixEval => {
                 let Some(receipt) = pipeline.phase_receipt.clone() else {
@@ -2370,7 +2375,7 @@ impl SchemaRuntime {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
-                nexus::NexusWork::EffectCompleted(nexus::EffectResult::closure_evaluated(
+                nexus::NexusWork::EffectCompleted(nexus::EffectResult::from(
                     nexus::EvaluatedClosure {
                         generation_identifier: pipeline.generation_identifier.clone(),
                         closure_path,
@@ -2382,12 +2387,10 @@ impl SchemaRuntime {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
-                nexus::NexusWork::EffectCompleted(nexus::EffectResult::closure_built(
-                    nexus::BuiltClosure {
-                        generation_identifier: pipeline.generation_identifier.clone(),
-                        closure_path,
-                    },
-                ))
+                nexus::NexusWork::EffectCompleted(nexus::EffectResult::from(nexus::BuiltClosure {
+                    generation_identifier: pipeline.generation_identifier.clone(),
+                    closure_path,
+                }))
             }
             sema::DeployResumeStage::ActivateGeneration
             | sema::DeployResumeStage::RecordGenerationActivated => {
@@ -3736,7 +3739,7 @@ impl SchemaRuntime {
         if let Some((deployment_identifier, deploy_job)) = snapshot {
             let record_exists = self
                 .store
-                .deployment_records()
+                .records::<crate::runtime_model::DeploymentRecord>()
                 .expect("read deployment correlation records for resolved revision")
                 .iter()
                 .any(|record| *record.deployment_identifier.payload() == deployment_identifier);
@@ -4134,7 +4137,7 @@ impl SchemaRuntime {
     }
 
     fn pin_generation(&mut self, request: meta::PinRequest) -> sema::SemaWriteOutput {
-        let roots = match self.store.gc_roots() {
+        let roots = match self.store.records::<crate::runtime_model::GcRoot>() {
             Ok(roots) => roots,
             Err(error) => panic!("read durable gc roots for pin request: {error}"),
         };
@@ -4175,7 +4178,7 @@ impl SchemaRuntime {
     }
 
     fn unpin_generation(&mut self, request: meta::UnpinRequest) -> sema::SemaWriteOutput {
-        let roots = match self.store.gc_roots() {
+        let roots = match self.store.records::<crate::runtime_model::GcRoot>() {
             Ok(roots) => roots,
             Err(error) => panic!("read durable gc roots for unpin request: {error}"),
         };
@@ -4208,7 +4211,7 @@ impl SchemaRuntime {
     }
 
     fn retire_generation(&mut self, request: meta::RetireRequest) -> sema::SemaWriteOutput {
-        let roots = match self.store.gc_roots() {
+        let roots = match self.store.records::<crate::runtime_model::GcRoot>() {
             Ok(roots) => roots,
             Err(error) => panic!("read durable gc roots for retire request: {error}"),
         };
@@ -4316,7 +4319,7 @@ impl SchemaRuntime {
     /// rows are returned newest-first by run identifier so the routine
     /// `(Check …)` reader sees its latest run first.
     fn query_test_runs(&self, lookup: ordinary::TestRunLookup) -> sema::SemaReadOutput {
-        let runs = match self.store.test_runs() {
+        let runs = match self.store.records::<crate::runtime_model::StoredTestRun>() {
             Ok(runs) => runs,
             Err(error) => panic!("read durable test runs: {error}"),
         };
@@ -4358,14 +4361,17 @@ impl SchemaRuntime {
             Err(error) => panic!("read durable generations: {error}"),
         };
         let commit_sequence = self.current_commit_sequence();
-        let deployment_records: Vec<sema::DeploymentRecord> = match self.store.deployment_records()
-        {
-            Ok(records) => records
-                .into_iter()
-                .filter(|record| Self::deployment_record_matches(&selection, record))
-                .collect(),
-            Err(error) => panic!("read durable deployment records: {error}"),
-        };
+        let deployment_records: Vec<sema::DeploymentRecord> =
+            match self
+                .store
+                .records::<crate::runtime_model::DeploymentRecord>()
+            {
+                Ok(records) => records
+                    .into_iter()
+                    .filter(|record| Self::deployment_record_matches(&selection, record))
+                    .collect(),
+                Err(error) => panic!("read durable deployment records: {error}"),
+            };
         let generations: Vec<ordinary::Generation> = live_generations
             .iter()
             .map(|generation| Self::project_generation(generation, &deployment_records))

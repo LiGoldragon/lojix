@@ -1,4 +1,5 @@
 use lojix::Payload as _;
+use lojix::{DeploymentLedger as _, DurableStore as _};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -61,7 +62,7 @@ fn accepted_deploy_job_survives_a_store_reopen_with_its_correlation_identity() {
     assert_eq!(job.deploy_job_phase, sema::DeployJobPhase::Submitted);
     assert!(
         resumed
-            .deployment_records()
+            .records::<lojix::runtime_model::DeploymentRecord>()
             .expect("read correlations")
             .iter()
             .any(|record| *record.deployment_identifier.payload() == identifier)

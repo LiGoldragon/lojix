@@ -18,6 +18,8 @@
 //! cannot.
 
 use lojix::Payload as _;
+use lojix::runtime_flow::{Routable as _, Routed as _};
+use lojix::{DeploymentLedger as _, DurableStore as _};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -191,7 +193,7 @@ async fn a_failed_closure_copy_names_the_copy_stage_and_not_a_builder() {
 
     let record = engine
         .store()
-        .deployment_records()
+        .records::<lojix::runtime_model::DeploymentRecord>()
         .expect("read durable deployment records")
         .into_iter()
         .find(|record| record.deployment_identifier == identifier)
@@ -261,7 +263,7 @@ async fn an_effect_completion_with_no_deployment_behind_it_is_refused() {
     assert!(
         engine
             .store()
-            .deployment_records()
+            .records::<lojix::runtime_model::DeploymentRecord>()
             .expect("read durable deployment records")
             .is_empty(),
         "a refusal that names no deployment must not invent one"
