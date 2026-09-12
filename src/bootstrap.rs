@@ -19,7 +19,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use datom_codec::{Actualizing, Potential};
-use horizon_lib::HorizonDefinition;
+use horizon_lib::{DatomDecoding, HorizonDefinition, Projecting};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -836,7 +836,7 @@ fn materialize<E: BootstrapExecutor>(
     let proposal_text =
         fs::read_to_string(&input.proposal_source).map_err(|_| BootstrapError::Materialization)?;
     let definition: HorizonDefinition =
-        horizon_lib::decode(&proposal_text).map_err(|_| BootstrapError::Materialization)?;
+        HorizonDefinition::decode(&proposal_text).map_err(|_| BootstrapError::Materialization)?;
     let horizon = definition
         .project(&input.node_name)
         .map_err(|_| BootstrapError::Materialization)?;

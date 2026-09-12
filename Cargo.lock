@@ -617,8 +617,8 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "horizon-lib"
-version = "0.9.0"
-source = "git+https://github.com/LiGoldragon/horizon-rs?rev=8f4240ef23024c2d3b55f803d96d3c6e7aa5b433#8f4240ef23024c2d3b55f803d96d3c6e7aa5b433"
+version = "0.10.0"
+source = "git+https://github.com/LiGoldragon/horizon-rs?rev=a56330451934d682ae15612acd49924356ec0205#a56330451934d682ae15612acd49924356ec0205"
 dependencies = [
  "datom-codec 0.25.7",
  "ethos-zero",
@@ -664,21 +664,7 @@ dependencies = [
  "downcast-rs",
  "dyn-clone",
  "futures",
- "kameo_macros 0.20.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "serde",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "kameo"
-version = "0.20.0"
-source = "git+https://github.com/LiGoldragon/kameo.git?rev=f491b45d7dcb55e5837eddde3d5d7ca8ceaa9f01#f491b45d7dcb55e5837eddde3d5d7ca8ceaa9f01"
-dependencies = [
- "downcast-rs",
- "dyn-clone",
- "futures",
- "kameo_macros 0.20.0 (git+https://github.com/LiGoldragon/kameo.git?rev=f491b45d7dcb55e5837eddde3d5d7ca8ceaa9f01)",
+ "kameo_macros",
  "serde",
  "tokio",
  "tracing",
@@ -689,17 +675,6 @@ name = "kameo_macros"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "16c9002c9ecd16e1636f566c0bf62db48e70d86ed0d0a91b398955e883217a23"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "kameo_macros"
-version = "0.20.0"
-source = "git+https://github.com/LiGoldragon/kameo.git?rev=f491b45d7dcb55e5837eddde3d5d7ca8ceaa9f01#f491b45d7dcb55e5837eddde3d5d7ca8ceaa9f01"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -721,13 +696,13 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lojix"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "datom-codec 0.25.7",
  "ethos-zero",
  "futures-util",
  "horizon-lib",
- "kameo 0.20.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "kameo",
  "meta-signal-lojix",
  "nexus",
  "protos",
@@ -748,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "lojix-client"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "datom-codec 0.25.7",
  "lojix",
@@ -759,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "lojix-nexus"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "lojix",
  "meta-signal-lojix",
@@ -772,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "lojix-offline-tools"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "datom-codec 0.25.7",
  "horizon-lib",
@@ -800,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "meta-lojix-client"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "datom-codec 0.25.7",
  "horizon-lib",
@@ -814,8 +789,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-lojix"
-version = "3.0.1"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix?rev=f7f11d410d68cc6843ad217a8b1ea715a5645912#f7f11d410d68cc6843ad217a8b1ea715a5645912"
+version = "5.1.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix?rev=1eccc0e3d314a5d92c741959a698697c37ec0eac#1eccc0e3d314a5d92c741959a698697c37ec0eac"
 dependencies = [
  "datom-codec 0.25.7",
  "ethos-zero",
@@ -1134,7 +1109,7 @@ dependencies = [
 [[package]]
 name = "sema-engine"
 version = "0.15.1"
-source = "git+https://github.com/LiGoldragon/sema-engine.git?branch=main#27e814a721439af67721c530d48b4d2101141f74"
+source = "git+https://github.com/LiGoldragon/sema-engine.git?rev=27e814a721439af67721c530d48b4d2101141f74#27e814a721439af67721c530d48b4d2101141f74"
 dependencies = [
  "blake3",
  "rkyv",
@@ -1270,8 +1245,8 @@ dependencies = [
 
 [[package]]
 name = "signal-lojix"
-version = "2.0.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix?rev=662cedb7d92b76e01eb689bf3b7945c5db003bc2#662cedb7d92b76e01eb689bf3b7945c5db003bc2"
+version = "4.1.0"
+source = "git+https://github.com/LiGoldragon/signal-lojix?rev=d0f5c70d437add1df16055dcb760b7ef9a140ef0#d0f5c70d437add1df16055dcb760b7ef9a140ef0"
 dependencies = [
  "datom-codec 0.25.7",
  "ethos-zero",
@@ -1480,9 +1455,9 @@ dependencies = [
 [[package]]
 name = "triad-runtime"
 version = "0.8.1"
-source = "git+https://github.com/LiGoldragon/triad-runtime.git?branch=main#02cdd49df63a1769b3cf1b2761261a87eeaa75a4"
+source = "git+https://github.com/LiGoldragon/triad-runtime.git?rev=02cdd49df63a1769b3cf1b2761261a87eeaa75a4#02cdd49df63a1769b3cf1b2761261a87eeaa75a4"
 dependencies = [
- "kameo 0.20.0 (git+https://github.com/LiGoldragon/kameo.git?rev=f491b45d7dcb55e5837eddde3d5d7ca8ceaa9f01)",
+ "kameo",
  "rkyv",
  "rustix",
  "signal-frame",

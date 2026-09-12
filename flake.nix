@@ -165,6 +165,17 @@
             }
           );
 
+          # What a failed deployment leaves behind: the command that failed,
+          # its exit status, and the bounded redacted detail, in the durable
+          # record and in the event log.
+          failure-evidence = craneLib.cargoTest (
+            commonArguments
+            // {
+              inherit cargoArtifacts;
+              cargoExtraArgs = "-p lojix --test failure_evidence";
+            }
+          );
+
           nexus-startup-rejects-arguments =
             let
               package = self.packages.${system}.default;

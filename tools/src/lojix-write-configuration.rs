@@ -1,5 +1,6 @@
 //! `lojix-write-configuration` encodes one generated current Datom request into the daemon's rkyv startup archive.
 use datom_codec::{Actualizing, Potential};
+use horizon_lib::DatomDecoding;
 use lojix::ingress;
 use lojix::{
     Error as LojixError, LegacyConfigurationArchivable as _, LegacyStartupConfiguration,
@@ -137,9 +138,11 @@ fn actualize_horizon_definition(
         ));
     }
     let authored = std::fs::read_to_string(path)?;
-    horizon_lib::decode(&authored).map(Some).map_err(|_| {
-        ConfigurationWriterError::Horizon("proposal source is not a Horizon definition".into())
-    })
+    horizon_lib::HorizonDefinition::decode(&authored)
+        .map(Some)
+        .map_err(|_| {
+            ConfigurationWriterError::Horizon("proposal source is not a Horizon definition".into())
+        })
 }
 #[derive(Debug, Error)]
 enum ConfigurationWriterError {

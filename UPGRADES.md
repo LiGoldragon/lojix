@@ -1,5 +1,66 @@
 # Upgrades
 
+## 3.0.0 — a failed deployment says what failed
+
+### What changed
+
+A `DeploymentFailure` now carries `Option<FailureEvidence>`: the bounded,
+redacted text the failing stage printed and, when a subprocess ran, that
+process's program, arguments and exit code. It reaches an operator three
+ways — the `DeployTerminal` reply, `Query.ByDeployment`, and
+`Query.ByEventLog`, which carries the same terminal in its journalled
+transition.
+
+Until now every stage failure collapsed into one of eleven generic reasons and
+the captured stderr was printed to the journal and dropped. `Eval` and `Build`
+both reported `FlakeReferenceMalformed`, which was true of neither; both now
+have their own reason, `EvaluationFailed` and `BuildFailed`.
+
+The detail is redacted at the producer: any line containing a credential term
+is dropped, and `detail_truncated` says so. Only the last 4 KiB survive — a
+Nexus keeps the evidence a retry needs, not a log stream.
+
+`Query.ByDeployment` also answers with the generation that deployment
+produced. It previously matched deployment records but no generation at all,
+so the question an operator asks after a deployment — what did it put on the
+node — had no answer.
+
+`CheckHostKeyMaterial` is gone from the ordinary contract, with its whole
+vocabulary. It was a stub reporting an empty mismatch vector for every node,
+with no effect behind it and an adapter that discarded the vector regardless.
+A security check that always answers "no mismatch" can only mislead. If it is
+wanted it returns as an effect-backed verb with its own pipeline stage,
+comparing Horizon's published `ssh_public_key` and Yggdrasil key view against
+the live host.
+
+### Reconciling a partial failure before a retry
+
+This is the point of the evidence, so read it before retrying anything.
+
+A Lojix terminal is a statement about the **ledger**, not about the target. A
+`Failed` at `Activate` means the activation step reported failure; it does not
+mean the target is unchanged. The user-environment pipeline sets the profile
+before it activates, so a deployment that fails at `Activate` has already
+advanced the target's Home Manager profile generation. A host deployment that
+fails after `SetBootProfile` has already written a boot entry. The failed
+deployment does not enter the live set, so Lojix's live-set query and the
+target's actual state disagree — correctly, and on purpose.
+
+Before retrying:
+
+1. Read the evidence. `Query.ByDeployment` on the failed identifier gives the
+   command and exit status. The named command tells you which step ran last.
+2. Establish the target's real state independently — `readlink -f` the profile
+   or `/run/current-system` on the node. Lojix's ledger cannot tell you this
+   and does not claim to.
+3. If the profile advanced but activation failed, the target holds a generation
+   Lojix does not list as live. Either activate that generation on the target,
+   or roll the profile back, before submitting a new deployment. Submitting on
+   top of an unreconciled partial advance means the next failure has two causes
+   and the evidence cannot separate them.
+4. Only then resubmit. Lojix allocates a new deployment identifier; the failed
+   one stays failed, with its evidence, permanently.
+
 ## Horizon 0.9 fixed location
 
 Lojix now decodes Horizon 0.9 definitions, whose nodes end with an optional

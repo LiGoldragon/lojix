@@ -1,6 +1,6 @@
 [package]
 name = "lojix-nexus"
-version = "2.0.0"
+version = "3.0.0"
 edition = "2024"
 rust-version = "1.89"
 publish = false
@@ -13,11 +13,11 @@ path = "src/main.rs"
 lojix = { path = "..", default-features = false }
 
 [dev-dependencies]
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "f7f11d410d68cc6843ad217a8b1ea715a5645912" }
-signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "662cedb7d92b76e01eb689bf3b7945c5db003bc2" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "1eccc0e3d314a5d92c741959a698697c37ec0eac" }
+signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "d0f5c70d437add1df16055dcb760b7ef9a140ef0" }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "626e407be520a7a12f39b1d06c56ec423f3b3d09", default-features = false }
 tempfile = "3"
-triad-runtime = { git = "https://github.com/LiGoldragon/triad-runtime.git", branch = "main" }
+triad-runtime = { git = "https://github.com/LiGoldragon/triad-runtime.git", rev = "02cdd49df63a1769b3cf1b2761261a87eeaa75a4" }
 rustix = { version = "1", default-features = false, features = ["process"] }
 
 [lints.rust]

@@ -17,7 +17,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use horizon_lib::{Horizon, HorizonDefinition};
+use horizon_lib::{Horizon, HorizonDefinition, Projecting};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use zbus::proxy::{Builder as ProxyBuilder, CacheProperties, SignalStream};
@@ -87,6 +87,94 @@ fn credential_like(value: &str) -> bool {
     .any(|term| value.contains(term))
 }
 
+/// The bound on durable failure detail. A Nexus keeps the evidence a retry
+/// needs, not a log stream: the tail is where a Nix or activation failure
+/// states its cause, so the tail is what is kept.
+const FAILURE_DETAIL_BOUND: usize = 4096;
+
+/// What a stage reported when it failed: the text it printed and, when a
+/// subprocess ran, that process's identity and exit code. Every effect
+/// failure travels in this one carrier, so nothing actionable is discarded
+/// between the process and the durable record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StageFailure {
+    detail: String,
+    optional_failed_command: Option<crate::runtime_model::FailedCommand>,
+}
+
+impl From<String> for StageFailure {
+    /// A stage that failed without running a subprocess — a Horizon
+    /// projection, a malformed transport, an internal invariant — has detail
+    /// and no command.
+    fn from(detail: String) -> Self {
+        Self {
+            detail,
+            optional_failed_command: None,
+        }
+    }
+}
+
+impl From<&str> for StageFailure {
+    fn from(detail: &str) -> Self {
+        Self::from(detail.to_string())
+    }
+}
+
+impl From<StageFailure> for String {
+    /// The lossy edge. Intermediate helpers that still thread `String` errors
+    /// keep the detail and drop the command identity; every path that reaches
+    /// a durable record goes through `witness` instead.
+    fn from(failure: StageFailure) -> Self {
+        failure.detail
+    }
+}
+
+/// Turning what a failing stage reported into the bounded, redacted evidence
+/// the durable record keeps.
+pub(crate) trait Witnessing {
+    fn reported_detail(&self) -> &str;
+    fn reported_command(&self) -> Option<crate::runtime_model::FailedCommand>;
+
+    /// Drop every line naming a credential, then keep the last
+    /// `FAILURE_DETAIL_BOUND` bytes on a line boundary.
+    fn bounded_redaction(detail: &str) -> (String, bool) {
+        let retained: Vec<&str> = detail
+            .lines()
+            .filter(|line| !credential_like(line))
+            .collect();
+        let redacted = retained.join("\n");
+        let dropped_a_line = retained.len() != detail.lines().count();
+        if redacted.len() <= FAILURE_DETAIL_BOUND {
+            return (redacted, dropped_a_line);
+        }
+        let tail = &redacted[redacted.len() - FAILURE_DETAIL_BOUND..];
+        let bounded = match tail.find('\n') {
+            Some(break_at) => &tail[break_at + 1..],
+            None => tail,
+        };
+        (bounded.to_string(), true)
+    }
+
+    fn witness(&self) -> crate::runtime_model::FailureEvidence {
+        let (detail, truncated) = Self::bounded_redaction(self.reported_detail());
+        crate::runtime_model::FailureEvidence {
+            optional_failed_command: self.reported_command(),
+            failure_detail: crate::runtime_model::FailureDetail::new(detail),
+            detail_truncated: truncated,
+        }
+    }
+}
+
+impl Witnessing for StageFailure {
+    fn reported_detail(&self) -> &str {
+        &self.detail
+    }
+
+    fn reported_command(&self) -> Option<crate::runtime_model::FailedCommand> {
+        self.optional_failed_command.clone()
+    }
+}
+
 // The engine has no public-contract nouns. These small local facades retain
 // local names while lowering them to the private
 // ingress/egress roots.  They are deliberately value-only shims: no wire type
@@ -119,12 +207,6 @@ mod ordinary {
     pub struct Queried;
     impl Queried {
         pub fn new(payload: GenerationListing) -> GenerationListing {
-            payload
-        }
-    }
-    pub struct KeyMaterialChecked;
-    impl KeyMaterialChecked {
-        pub fn new(payload: KeyMaterialReport) -> KeyMaterialReport {
             payload
         }
     }
@@ -161,6 +243,8 @@ mod meta {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum DeployRejectionReason {
         ClusterUnknown,
+        EvaluationFailed,
+        BuildFailed,
         NodeUnknown,
         ProposalSourceUnreachable,
         FlakeReferenceMalformed,
@@ -834,14 +918,16 @@ impl HermeticCheck {
     async fn run(
         &self,
         execution: &EffectExecution,
-    ) -> std::result::Result<ordinary::ClosurePath, String> {
+    ) -> std::result::Result<ordinary::ClosurePath, StageFailure> {
         let output = NixCommand::build_check(&self.installable())
             .run(execution)
             .await?;
         let closure_path = NixCommand::first_line(&output);
         canonical_nix_store_root(&closure_path)
             .then(|| ordinary::ClosurePath::new(closure_path))
-            .ok_or_else(|| "nix hermetic check returned a noncanonical closure path".to_string())
+            .ok_or_else(|| {
+                StageFailure::from("nix hermetic check returned a noncanonical closure path")
+            })
     }
 }
 
@@ -2683,9 +2769,6 @@ impl SchemaRuntime {
                     ),
                 }
             }
-            ordinary::Input::CheckHostKeyMaterial(query) => {
-                nexus::NexusAction::CommandSemaRead(sema::SemaReadInput::CheckKeyMaterial(query))
-            }
             ordinary::Input::WatchDeployments(_) | ordinary::Input::WatchCacheRetention(_) => {
                 self.open_subscription()
             }
@@ -3032,9 +3115,6 @@ impl SchemaRuntime {
             sema::SemaReadOutput::GenerationsQueried(listing) => {
                 ordinary::Output::Queried(ordinary::Queried::new(listing))
             }
-            sema::SemaReadOutput::KeyMaterialChecked(report) => {
-                ordinary::Output::KeyMaterialChecked(ordinary::KeyMaterialChecked::new(report))
-            }
             sema::SemaReadOutput::TestRunsQueried(listing) => {
                 ordinary::Output::TestRunsQueried(ordinary::TestRunsQueried::new(listing))
             }
@@ -3166,7 +3246,10 @@ impl SchemaRuntime {
             // internal invariant failure rather than a misleading pass.
             _ => self.fail_test_pipeline(nexus::EffectFailure {
                 effect_stage: nexus::EffectStage::HermeticCheck,
-                string: "unexpected effect result on the test pipeline".to_string(),
+                failure_evidence: StageFailure::from(
+                    "unexpected effect result on the test pipeline".to_string(),
+                )
+                .witness(),
             }),
         }
     }
@@ -3298,14 +3381,19 @@ impl SchemaRuntime {
                     None => {
                         return self.fail_pipeline(nexus::EffectFailure {
                             effect_stage: nexus::EffectStage::Activate,
-                            string: "activation reached without a built closure path".to_string(),
+                            failure_evidence: StageFailure::from(
+                                "activation reached without a built closure path".to_string(),
+                            )
+                            .witness(),
                         });
                     }
                     Some(_) => {
                         return self.fail_pipeline(nexus::EffectFailure {
                             effect_stage: nexus::EffectStage::Activate,
-                            string: "activation reached with a noncanonical closure path"
-                                .to_string(),
+                            failure_evidence: StageFailure::from(
+                                "activation reached with a noncanonical closure path".to_string(),
+                            )
+                            .witness(),
                         });
                     }
                 };
@@ -3326,8 +3414,11 @@ impl SchemaRuntime {
                     None => {
                         return self.fail_pipeline(nexus::EffectFailure {
                             effect_stage: nexus::EffectStage::Activate,
-                            string: "activation record reached without a built closure path"
-                                .to_string(),
+                            failure_evidence: StageFailure::from(
+                                "activation record reached without a built closure path"
+                                    .to_string(),
+                            )
+                            .witness(),
                         });
                     }
                 };
@@ -3359,7 +3450,10 @@ impl SchemaRuntime {
             Err(error) => {
                 return self.fail_pipeline(nexus::EffectFailure {
                     effect_stage: nexus::EffectStage::Activate,
-                    string: format!("could not persist correlated deployment success: {error}"),
+                    failure_evidence: StageFailure::from(format!(
+                        "could not persist correlated deployment success: {error}"
+                    ))
+                    .witness(),
                 });
             }
         };
@@ -3480,6 +3574,10 @@ impl SchemaRuntime {
             meta::DeployRejectionReason::FlakeReferenceMalformed => {
                 sema::DeploymentTerminalReason::FlakeReferenceMalformed
             }
+            meta::DeployRejectionReason::EvaluationFailed => {
+                sema::DeploymentTerminalReason::EvaluationFailed
+            }
+            meta::DeployRejectionReason::BuildFailed => sema::DeploymentTerminalReason::BuildFailed,
             meta::DeployRejectionReason::InvalidDeploymentRouting => {
                 sema::DeploymentTerminalReason::InvalidDeploymentRouting
             }
@@ -3599,7 +3697,10 @@ impl SchemaRuntime {
                 if !self.set_resolved_flake(resolved, next_stage) {
                     return self.fail_pipeline(nexus::EffectFailure {
                         effect_stage: nexus::EffectStage::FlakeAuth,
-                        string: "flake resolver did not prove an immutable commit".to_string(),
+                        failure_evidence: StageFailure::from(
+                            "flake resolver did not prove an immutable commit".to_string(),
+                        )
+                        .witness(),
                     });
                 }
                 if pipeline.needs_horizon_materialization() {
@@ -3620,7 +3721,10 @@ impl SchemaRuntime {
                 if !self.set_closure_path(evaluated.closure_path.clone()) {
                     return self.fail_pipeline(nexus::EffectFailure {
                         effect_stage: nexus::EffectStage::Eval,
-                        string: "effect returned a noncanonical closure path".to_string(),
+                        failure_evidence: StageFailure::from(
+                            "effect returned a noncanonical closure path".to_string(),
+                        )
+                        .witness(),
                     });
                 }
                 if pipeline.action.produces_closure() {
@@ -3645,7 +3749,10 @@ impl SchemaRuntime {
                 if !self.set_closure_path(built.closure_path.clone()) {
                     return self.fail_pipeline(nexus::EffectFailure {
                         effect_stage: nexus::EffectStage::Build,
-                        string: "effect returned a noncanonical closure path".to_string(),
+                        failure_evidence: StageFailure::from(
+                            "effect returned a noncanonical closure path".to_string(),
+                        )
+                        .witness(),
                     });
                 }
                 if pipeline.action.activates() {
@@ -3695,7 +3802,10 @@ impl SchemaRuntime {
                     None => {
                         return self.fail_pipeline(nexus::EffectFailure {
                             effect_stage: nexus::EffectStage::Activate,
-                            string: "detached test activation lost its deploy cursor".to_string(),
+                            failure_evidence: StageFailure::from(
+                                "detached test activation lost its deploy cursor".to_string(),
+                            )
+                            .witness(),
                         });
                     }
                 };
@@ -3714,7 +3824,10 @@ impl SchemaRuntime {
             | nexus::EffectResult::TestVmStarted(_)
             | nexus::EffectResult::TestVmStopped(_) => self.fail_pipeline(nexus::EffectFailure {
                 effect_stage: nexus::EffectStage::Build,
-                string: "test effect result on the deploy pipeline".to_string(),
+                failure_evidence: StageFailure::from(
+                    "test effect result on the deploy pipeline".to_string(),
+                )
+                .witness(),
             }),
             nexus::EffectResult::EffectFailed(failure) => self.fail_pipeline(failure),
         }
@@ -3814,7 +3927,10 @@ impl SchemaRuntime {
                     Err(error) => {
                         return self.fail_pipeline(nexus::EffectFailure {
                             effect_stage: nexus::EffectStage::Gc,
-                            string: format!("could not reserve deployment event position: {error}"),
+                            failure_evidence: StageFailure::from(format!(
+                                "could not reserve deployment event position: {error}"
+                            ))
+                            .witness(),
                         });
                     }
                 };
@@ -3863,8 +3979,9 @@ impl SchemaRuntime {
 
     fn fail_pipeline(&mut self, failure: nexus::EffectFailure) -> nexus::NexusAction {
         eprintln!(
-            "lojix deploy pipeline effect failed at {:?}",
-            failure.effect_stage
+            "lojix deploy pipeline effect failed at {:?}: {}",
+            failure.effect_stage,
+            failure.failure_evidence.failure_detail.payload()
         );
         let pipeline = self.active_deploy.clone();
         // Clear BOTH in-flight slots symmetrically with the finish path (audit
@@ -3874,8 +3991,11 @@ impl SchemaRuntime {
             nexus::EffectStage::MaterializeHorizon => {
                 meta::DeployRejectionReason::ProposalSourceUnreachable
             }
-            nexus::EffectStage::Eval => meta::DeployRejectionReason::FlakeReferenceMalformed,
-            nexus::EffectStage::Build => meta::DeployRejectionReason::FlakeReferenceMalformed,
+            // A flake that evaluates and then fails to build is not a
+            // malformed reference; both stages reported that one reason until
+            // the contract gained a name for each.
+            nexus::EffectStage::Eval => meta::DeployRejectionReason::EvaluationFailed,
+            nexus::EffectStage::Build => meta::DeployRejectionReason::BuildFailed,
             nexus::EffectStage::CopyClosure => meta::DeployRejectionReason::BuilderUnreachable,
             nexus::EffectStage::Activate => meta::DeployRejectionReason::ActivationFailed,
             nexus::EffectStage::Gc => meta::DeployRejectionReason::DeploymentInFlight,
@@ -3889,9 +4009,13 @@ impl SchemaRuntime {
         let Some(pipeline) = pipeline else {
             unreachable!("a deploy effect failure cannot occur without a correlation cursor");
         };
+        // The evidence the stage reported travels into the durable record and,
+        // through the terminal transition's journal event, into the event log.
+        // This is the only place a deploy effect failure becomes permanent.
         let terminal = sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
             deployment_failure_stage: Self::deployment_failure_stage(failure.effect_stage),
             deployment_terminal_reason: Self::terminal_reason(reason),
+            optional_failure_evidence: Some(failure.failure_evidence),
         });
         let record = match self.store.terminalize_deployment(
             *pipeline.deployment_identifier.payload(),
@@ -4316,7 +4440,6 @@ impl SchemaRuntime {
         match input {
             sema::SemaReadInput::QueryGenerations(selection) => self.query_generations(selection),
             sema::SemaReadInput::ReadEventLog(range) => self.read_event_log(range),
-            sema::SemaReadInput::CheckKeyMaterial(query) => self.check_key_material(query),
             sema::SemaReadInput::QueryTestRuns(lookup) => self.query_test_runs(lookup),
         }
     }
@@ -4401,7 +4524,12 @@ impl SchemaRuntime {
             ordinary::Selection::ByGeneration(lookup) => {
                 *lookup.payload() == live.generation_identifier
             }
-            ordinary::Selection::ByDeployment(_) => false,
+            // A generation belongs to the deployment that produced it; a
+            // ByDeployment query that answered with no generation made the
+            // documented selector useless.
+            ordinary::Selection::ByDeployment(lookup) => {
+                *lookup.payload() == live.deployment_identifier
+            }
             ordinary::Selection::ByEventLog(_) => true,
             // A test-run selection never reads the generation set — it is
             // routed to QueryTestRuns before reaching here (decide_ordinary_input).
@@ -4487,15 +4615,6 @@ impl SchemaRuntime {
             deployment_phase_event_vector: deployment_events,
             cache_retention_transition_event_vector: retention_events,
             state_marker: Self::sema_marker(commit_sequence),
-        })
-    }
-
-    fn check_key_material(&self, query: ordinary::KeyMaterialQuery) -> sema::SemaReadOutput {
-        let commit_sequence = self.current_commit_sequence();
-        sema::SemaReadOutput::KeyMaterialChecked(ordinary::KeyMaterialReport {
-            node_name: query.node_name,
-            string_vector: Vec::new(),
-            state_marker: Self::marker(commit_sequence),
         })
     }
 
@@ -4768,10 +4887,13 @@ impl SchemaRuntime {
         })
     }
 
-    fn effect_failed(stage: nexus::EffectStage, detail: String) -> nexus::EffectResult {
+    fn effect_failed(
+        stage: nexus::EffectStage,
+        reported: impl Into<StageFailure>,
+    ) -> nexus::EffectResult {
         nexus::EffectResult::EffectFailed(nexus::EffectFailure {
             effect_stage: stage,
-            string: detail,
+            failure_evidence: reported.into().witness(),
         })
     }
 }
@@ -4796,8 +4918,10 @@ impl HorizonMaterialization {
         }
     }
 
-    async fn run(&self) -> std::result::Result<nexus::MaterializedInputs, String> {
-        self.run_inner().await.map_err(|error| error.to_string())
+    async fn run(&self) -> std::result::Result<nexus::MaterializedInputs, StageFailure> {
+        self.run_inner()
+            .await
+            .map_err(|error| StageFailure::from(error.to_string()))
     }
 
     async fn run_inner(&self) -> Result<nexus::MaterializedInputs> {
@@ -5236,7 +5360,10 @@ impl NarHash {
             .run(execution)
             .await
             .map_err(|detail| {
-                std::io::Error::other(format!("failed to hash generated input: {detail}"))
+                std::io::Error::other(format!(
+                    "failed to hash generated input: {}",
+                    detail.reported_detail()
+                ))
             })?;
         Ok(Self(NixCommand::first_line(&output)))
     }
@@ -5443,7 +5570,7 @@ impl ClosureCopy {
         NixCommand::new("nix", arguments)
     }
 
-    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
+    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
         self.invocation().run(execution).await.map(|_| ())
     }
 }
@@ -5500,7 +5627,7 @@ impl Activation {
         }
     }
 
-    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
+    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
         match self {
             Self::Host(activation) => activation.run(execution).await,
             Self::UserEnvironment(activation) => activation.run(execution).await,
@@ -5724,7 +5851,7 @@ impl HostActivation {
             .remote_invocation(ShellCommand::from_raw("bootctl set-oneshot ''"))
     }
 
-    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
+    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
         if self.runs_detached_self_activation() {
             return self.run_detached_self_activation(execution).await;
         }
@@ -5741,7 +5868,7 @@ impl HostActivation {
     async fn run_detached_self_activation(
         &self,
         execution: &EffectExecution,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<(), StageFailure> {
         let unit_name = self.self_switch_unit_name();
         if matches!(self.action, ordinary::HostDeployAction::ActivateNow) {
             return self
@@ -5768,11 +5895,17 @@ impl HostActivation {
             .remote_invocation(ShellCommand::from_raw(remote_command))
     }
 
-    async fn run_simple(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
+    async fn run_simple(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<(), StageFailure> {
         match self.ssh_invocation() {
             Some(invocation) => invocation.run(execution).await.map(|_| ())?,
             None => {
-                return Err(format!("no simple activation for action {:?}", self.action));
+                return Err(StageFailure::from(format!(
+                    "no simple activation for action {:?}",
+                    self.action
+                )));
             }
         }
         if self.requires_efi_reconcile() {
@@ -5781,7 +5914,10 @@ impl HostActivation {
         Ok(())
     }
 
-    async fn reconcile_efi(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
+    async fn reconcile_efi(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<(), StageFailure> {
         self.step_clear_efi_default_invocation()
             .run(execution)
             .await?;
@@ -5791,7 +5927,10 @@ impl HostActivation {
         Ok(())
     }
 
-    async fn run_boot_once(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
+    async fn run_boot_once(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<(), StageFailure> {
         let unit_name = self.unit_name();
         self.systemd_run_invocation(&unit_name)
             .run(execution)
@@ -5818,10 +5957,40 @@ pub(crate) struct DetachedActivationObserver {
     unit_new: SignalStream<'static>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What PID 1 reported about a detached activation transient: its
+/// `ActiveState`, the service `Result`, and the main process's exit status
+/// when it had one. Observed, not inferred.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DetachedActivationFailure {
+    active_state: String,
+    result: String,
+    optional_exit_status: Option<i32>,
+}
+
+impl Witnessing for DetachedActivationFailure {
+    fn reported_detail(&self) -> &str {
+        &self.result
+    }
+
+    fn reported_command(&self) -> Option<crate::runtime_model::FailedCommand> {
+        Some(crate::runtime_model::FailedCommand {
+            command_program: crate::runtime_model::CommandProgram::new("systemd-run"),
+            command_argument_vector: vec![crate::runtime_model::CommandArgument::new(format!(
+                "ActiveState={}",
+                self.active_state
+            ))],
+            optional_exit_code: self
+                .optional_exit_status
+                .and_then(|status| u64::try_from(status).ok())
+                .map(crate::runtime_model::ExitCode::new),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DetachedActivationOutcome {
     Succeeded,
-    Failed,
+    Failed(DetachedActivationFailure),
     /// `UnitNew` is already subscribed, but PID 1 has not yet made this
     /// exact transient visible to GetUnit. This is only a registration window,
     /// never an activation failure.
@@ -5878,11 +6047,12 @@ impl DetachedActivationUnit {
                 sema::DeploymentLifecycle::Completed,
                 sema::DeploymentTerminal::Succeeded,
             )),
-            Some(DetachedActivationOutcome::Failed) => Some((
+            Some(DetachedActivationOutcome::Failed(observed)) => Some((
                 sema::DeploymentLifecycle::Failed,
                 sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
                     deployment_failure_stage: sema::DeploymentFailureStage::Activate,
                     deployment_terminal_reason: sema::DeploymentTerminalReason::ActivationFailed,
+                    optional_failure_evidence: Some(observed.witness()),
                 }),
             )),
             Some(DetachedActivationOutcome::Missing)
@@ -5963,7 +6133,24 @@ impl DetachedActivationUnit {
             (Ok("active"), Ok("success")) => DetachedActivationOutcome::Succeeded,
             (Ok("activating" | "reloading"), _) => DetachedActivationOutcome::Running,
             (Ok("active"), _) => DetachedActivationOutcome::Running,
-            (Ok(_), _) => DetachedActivationOutcome::Failed,
+            (Ok(state), _) => {
+                // What PID 1 said is the whole evidence for this failure —
+                // keep it rather than printing it and terminalizing a generic
+                // reason.
+                let exit_status = proxy.service.get_property::<i32>("ExecMainStatus").await;
+                DetachedActivationOutcome::Failed(DetachedActivationFailure {
+                    active_state: state.to_string(),
+                    result: match result {
+                        Ok(result) => format!("systemd reported Result={result}"),
+                        Err(error) => {
+                            format!(
+                                "systemd reported ActiveState={state}, Result unreadable: {error}"
+                            )
+                        }
+                    },
+                    optional_exit_status: exit_status.ok(),
+                })
+            }
             _ => DetachedActivationOutcome::Missing,
         }
     }
@@ -6070,7 +6257,7 @@ impl DetachedActivationObserver {
         loop {
             match DetachedActivationUnit::classify(&proxy).await {
                 outcome @ (DetachedActivationOutcome::Succeeded
-                | DetachedActivationOutcome::Failed) => {
+                | DetachedActivationOutcome::Failed(_)) => {
                     return Ok(Some(outcome));
                 }
                 DetachedActivationOutcome::Missing => {
@@ -6184,7 +6371,7 @@ impl UserEnvironmentActivation {
             )))
     }
 
-    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
+    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
         match self.mode {
             meta::UserEnvironmentAction::Realize => Ok(()),
             meta::UserEnvironmentAction::SetProfile => self.run_profile(execution).await,
@@ -6195,7 +6382,10 @@ impl UserEnvironmentActivation {
         }
     }
 
-    async fn run_profile(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
+    async fn run_profile(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<(), StageFailure> {
         if !self.is_local_context(execution).await {
             return self
                 .remote_profile_invocation()?
@@ -6211,7 +6401,10 @@ impl UserEnvironmentActivation {
             .map(|_| ())
     }
 
-    async fn run_activate(&self, execution: &EffectExecution) -> std::result::Result<(), String> {
+    async fn run_activate(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<(), StageFailure> {
         if !self.is_local_context(execution).await {
             return self
                 .remote_activate_invocation()?
@@ -6431,24 +6624,31 @@ impl NixCommand {
     /// Run the command to its own reported completion. Effect completion is
     /// owned by the command's exit status; elapsed wall time never converts an
     /// active Nix, SSH, or activation effect into a deployment failure.
-    async fn run(&self, execution: &EffectExecution) -> std::result::Result<String, String> {
+    async fn run(&self, execution: &EffectExecution) -> std::result::Result<String, StageFailure> {
         let mut command = Command::new(execution.program(&self.program));
         command
             .args(&self.arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("failed to spawn session for {}: {error}", self.program))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| format!("spawned {} without a stdout pipe", self.program))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| format!("spawned {} without a stderr pipe", self.program))?;
+        let mut child = command.spawn().map_err(|error| {
+            self.reported(
+                None,
+                format!("failed to spawn session for {}: {error}", self.program),
+            )
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            self.reported(
+                None,
+                format!("spawned {} without a stdout pipe", self.program),
+            )
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            self.reported(
+                None,
+                format!("spawned {} without a stderr pipe", self.program),
+            )
+        })?;
         let stdout_task = tokio::spawn(async move {
             let mut bytes = Vec::new();
             let mut stdout = stdout;
@@ -6462,30 +6662,69 @@ impl NixCommand {
 
         let outcome = match child.wait().await {
             Ok(status) => Ok(status),
-            Err(error) => Err(format!(
-                "failed while waiting for {}: {error}",
-                self.program
+            Err(error) => Err(self.reported(
+                None,
+                format!("failed while waiting for {}: {error}", self.program),
             )),
         };
         let stdout = stdout_task
             .await
-            .map_err(|error| format!("failed to join {} stdout reader: {error}", self.program))?
-            .map_err(|error| format!("failed to read {} stdout: {error}", self.program))?;
+            .map_err(|error| {
+                self.reported(
+                    None,
+                    format!("failed to join {} stdout reader: {error}", self.program),
+                )
+            })?
+            .map_err(|error| {
+                self.reported(
+                    None,
+                    format!("failed to read {} stdout: {error}", self.program),
+                )
+            })?;
         let stderr = stderr_task
             .await
-            .map_err(|error| format!("failed to join {} stderr reader: {error}", self.program))?
-            .map_err(|error| format!("failed to read {} stderr: {error}", self.program))?;
+            .map_err(|error| {
+                self.reported(
+                    None,
+                    format!("failed to join {} stderr reader: {error}", self.program),
+                )
+            })?
+            .map_err(|error| {
+                self.reported(
+                    None,
+                    format!("failed to read {} stderr: {error}", self.program),
+                )
+            })?;
         let status = outcome?;
         if status.success() {
             Ok(String::from_utf8_lossy(&stdout).into_owned())
         } else {
-            Err(format!(
-                "{} {} exited with {}: {}",
-                self.program,
-                self.arguments.join(" "),
-                status,
-                String::from_utf8_lossy(&stderr).trim()
+            // The exact stderr the process printed, kept whole here; bounding
+            // and redaction belong to `Witnessing`, at the durable edge.
+            Err(self.reported(
+                status.code(),
+                String::from_utf8_lossy(&stderr).trim().to_string(),
             ))
+        }
+    }
+
+    /// This command's identity, paired with what the attempt reported. A code
+    /// is present only when the process itself exited; a process killed by a
+    /// signal reports none.
+    fn reported(&self, optional_code: Option<i32>, detail: String) -> StageFailure {
+        StageFailure {
+            detail,
+            optional_failed_command: Some(crate::runtime_model::FailedCommand {
+                command_program: crate::runtime_model::CommandProgram::new(self.program.clone()),
+                command_argument_vector: self
+                    .arguments
+                    .iter()
+                    .map(|argument| crate::runtime_model::CommandArgument::new(argument.clone()))
+                    .collect(),
+                optional_exit_code: optional_code
+                    .and_then(|code| u64::try_from(code).ok())
+                    .map(crate::runtime_model::ExitCode::new),
+            }),
         }
     }
 
@@ -7206,7 +7445,13 @@ mod tests {
             match result {
                 nexus::EffectResult::EffectFailed(failure) => {
                     assert_eq!(failure.effect_stage, stage);
-                    assert!(!failure.string.contains(unsafe_output));
+                    assert!(
+                        !failure
+                            .failure_evidence
+                            .failure_detail
+                            .payload()
+                            .contains(unsafe_output)
+                    );
                 }
                 other => panic!("unsafe output must fail at {stage:?}, got {other:?}"),
             }

@@ -1,3 +1,4 @@
+use horizon_lib::DatomDecoding;
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
@@ -96,7 +97,7 @@ fn actualize_horizon(
         signal_lojix::DeploymentInputMode::Horizon => {
             let path = checked_horizon_path(source)?;
             let authored = std::fs::read_to_string(path)?;
-            let definition = horizon_lib::decode(&authored).map_err(|_| {
+            let definition = horizon_lib::HorizonDefinition::decode(&authored).map_err(|_| {
                 lojix::Error::DatomRequestText("proposal source is not a Horizon definition".into())
             })?;
             Ok(Some(definition))

@@ -698,8 +698,16 @@ impl DeployProcessable for DeployJobs {
                             unit.clean().await;
                         }
                     }
-                    Ok(crate::schema_runtime::DetachedActivationOutcome::Failed)
-                    | Ok(crate::schema_runtime::DetachedActivationOutcome::Missing) => {
+                    Ok(outcome @ crate::schema_runtime::DetachedActivationOutcome::Failed(_))
+                    | Ok(outcome @ crate::schema_runtime::DetachedActivationOutcome::Missing) => {
+                        // A Missing transient is its own evidence: PID 1 no
+                        // longer has the unit, so there is nothing it reported.
+                        let optional_failure_evidence = match &outcome {
+                            crate::schema_runtime::DetachedActivationOutcome::Failed(observed) => {
+                                Some(crate::schema_runtime::Witnessing::witness(observed))
+                            }
+                            _ => None,
+                        };
                         if self
                             .store
                             .terminalize_deployment(
@@ -710,6 +718,7 @@ impl DeployProcessable for DeployJobs {
                                         sema::DeploymentFailureStage::Activate,
                                     deployment_terminal_reason:
                                         sema::DeploymentTerminalReason::ActivationFailed,
+                                    optional_failure_evidence,
                                 }),
                             )
                             .is_ok()

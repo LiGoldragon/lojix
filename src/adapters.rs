@@ -42,6 +42,16 @@ impl Lowerable<String> for String {
         Ok(self)
     }
 }
+impl Lowerable<bool> for bool {
+    fn lower(self) -> Result<bool, WireShapeError> {
+        Ok(self)
+    }
+}
+impl Raisable<bool> for bool {
+    fn raise(self) -> Result<bool, WireShapeError> {
+        Ok(self)
+    }
+}
 impl Raisable<String> for String {
     fn raise(self) -> Result<String, WireShapeError> {
         Ok(self)
@@ -175,6 +185,9 @@ text_value!(ClusterName);
 text_value!(NodeName);
 text_value!(UserName);
 text_value!(PinLabel);
+text_value!(CommandProgram);
+text_value!(CommandArgument);
+text_value!(FailureDetail);
 text_value!(ClosurePath);
 text_value!(FlakeReference);
 text_value!(NixStoreUri);
@@ -190,6 +203,7 @@ integer_value!(GenerationIdentifier);
 integer_value!(TestRunIdentifier);
 integer_value!(SubscriptionToken);
 integer_value!(EventLogPosition);
+integer_value!(ExitCode);
 integer_value!(CommitSequence);
 integer_value!(StateDigest);
 
@@ -205,12 +219,6 @@ shared_unit_enum!(CacheRetentionTransition {
     Promoted,
     Unpinned,
     Evicted
-});
-shared_unit_enum!(KeyMaterialCheckRejectionReason {
-    ProposalSourceUnreachable,
-    HostUnreachable,
-    PublicationMalformed,
-    NodeUnknown
 });
 shared_unit_enum!(FailureStage {
     HermeticCheck,
@@ -327,7 +335,9 @@ shared_unit_enum!(DeploymentTerminalReason {
     ClusterUnknown,
     ActivationFailed,
     BuilderUnreachable,
-    SubstituterUnreachable
+    SubstituterUnreachable,
+    EvaluationFailed,
+    BuildFailed
 });
 owner_unit_enum!(PinRejectionReason {
     PinSlotExhausted,
@@ -510,8 +520,9 @@ shared_struct!(EventLogRange => EventLogRange { first_event_log_position => from
 shared_struct!(TestRunLookup => TestRunLookup { cluster_name => cluster_name, node_name => node_name, test_run_identifier_option => optional_test_run_identifier });
 shared_struct!(DeploymentWatch => DeploymentWatch { deployment_identifier_option => optional_deployment_identifier, cluster_name_option => optional_cluster_name, node_name_option => optional_node_name });
 shared_struct!(CacheRetentionWatch => CacheRetentionWatch { cluster_name_option => optional_cluster_name, node_name_option => optional_node_name });
-shared_struct!(KeyMaterialQuery => KeyMaterialQuery { cluster_name => cluster_name, node_name => node_name, proposal_source => proposal_source });
-shared_struct!(DeploymentFailure => DeploymentFailure { deployment_failure_stage => deployment_failure_stage, deployment_terminal_reason => deployment_terminal_reason });
+shared_struct!(DeploymentFailure => DeploymentFailure { deployment_failure_stage => deployment_failure_stage, deployment_terminal_reason => deployment_terminal_reason, failure_evidence_option => optional_failure_evidence });
+shared_struct!(FailureEvidence => FailureEvidence { failed_command_option => optional_failed_command, failure_detail => failure_detail, detail_truncated => detail_truncated });
+shared_struct!(FailedCommand => FailedCommand { command_program => command_program, command_argument_vector => command_argument_vector, exit_code_option => optional_exit_code });
 
 impl Lowerable<sema::GenerationLookup> for ordinary::GenerationLookup {
     fn lower(self) -> Result<sema::GenerationLookup, WireShapeError> {
@@ -675,7 +686,6 @@ shared_raise_struct!(CacheRetentionTransitionEvent => CacheRetentionTransitionEv
 });
 shared_raise_struct!(RejectedQuery => RejectedQuery { query_rejection_reason => query_rejection_reason, database_marker => state_marker });
 shared_raise_struct!(RejectedUnwatch => RejectedUnwatch { unwatch_rejection_reason => unwatch_rejection_reason, subscription_token => subscription_token });
-shared_raise_struct!(RejectedKeyMaterialCheck => RejectedKeyMaterialCheck { key_material_check_rejection_reason => key_material_check_rejection_reason, database_marker => state_marker });
 shared_raise_struct!(SubscriptionOpened => SubscriptionOpened { subscription_token => subscription_token, commit_sequence => commit_sequence });
 shared_raise_struct!(GenerationListing => GenerationListing { generation_vector => generation_vector, deployment_record_vector => deployment_record_vector, database_marker => state_marker });
 shared_raise_struct!(EventLogPage => EventLogPage { deployment_phase_event_vector => deployment_phase_event_vector, cache_retention_transition_event_vector => cache_retention_transition_event_vector, database_marker => state_marker });
@@ -749,15 +759,6 @@ impl Raisable<ordinary::TestRunRecord> for sema::TestRunRecord {
         })
     }
 }
-impl Raisable<ordinary::KeyMaterialReport> for sema::KeyMaterialReport {
-    fn raise(self) -> Result<ordinary::KeyMaterialReport, WireShapeError> {
-        Ok(ordinary::KeyMaterialReport {
-            node_name: self.node_name.raise()?,
-            key_material_mismatch_vector: Vec::new(),
-            database_marker: self.state_marker.raise()?,
-        })
-    }
-}
 
 fn canonical_nix_store_root(value: &str) -> bool {
     let Some(item) = value.strip_prefix("/nix/store/") else {
@@ -798,9 +799,6 @@ impl Lowerable<sema::OrdinaryIngress> for ordinary::Query {
     fn lower(self) -> Result<sema::OrdinaryIngress, WireShapeError> {
         Ok(match self {
             ordinary::Query::Configure(value) => sema::OrdinaryIngress::Configure(value.lower()?),
-            ordinary::Query::CheckHostKeyMaterial(value) => {
-                sema::OrdinaryIngress::CheckHostKeyMaterial(value.lower()?)
-            }
             ordinary::Query::WatchDeployments(value) => {
                 sema::OrdinaryIngress::WatchDeployments(value.lower()?)
             }
@@ -848,17 +846,11 @@ impl Raisable<ordinary::Response> for sema::OrdinaryEgress {
                 ordinary::Response::QueryRejected(value.raise()?)
             }
             sema::OrdinaryEgress::Watching(value) => ordinary::Response::Watching(value.raise()?),
-            sema::OrdinaryEgress::KeyMaterialCheckRejected(value) => {
-                ordinary::Response::KeyMaterialCheckRejected(value.raise()?)
-            }
             sema::OrdinaryEgress::Queried(value) => ordinary::Response::Queried(value.raise()?),
             sema::OrdinaryEgress::DeploymentEventsQueried(value) => {
                 ordinary::Response::DeploymentEventsQueried(value.raise()?)
             }
             sema::OrdinaryEgress::Unwatched(value) => ordinary::Response::Unwatched(value.raise()?),
-            sema::OrdinaryEgress::KeyMaterialChecked(value) => {
-                ordinary::Response::KeyMaterialChecked(value.raise()?)
-            }
             sema::OrdinaryEgress::WatchRejected(value) => {
                 ordinary::Response::WatchRejected(value.raise()?)
             }
@@ -972,18 +964,6 @@ mod tests {
             .unwrap();
             assert!(!format!("{visible:?}").contains(private));
         }
-    }
-    #[test]
-    fn public_key_report_drops_private_runtime_text() {
-        let private = "token=raw-secret path=/srv/private";
-        let visible = sema::OrdinaryEgress::KeyMaterialChecked(sema::KeyMaterialReport {
-            node_name: sema::NodeName::new("node-1"),
-            string_vector: vec![private.to_owned()],
-            state_marker: marker(),
-        })
-        .raise()
-        .unwrap();
-        assert!(!format!("{visible:?}").contains(private));
     }
     #[test]
     fn negative_public_identifiers_are_rejected_without_wrapping() {

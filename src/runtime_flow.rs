@@ -273,10 +273,13 @@ pub struct GarbageCollected {
     pub node_name: NodeName,
     pub integer: u64,
 }
+/// A failed effect, carrying what the stage actually reported. The evidence
+/// is bounded and redacted by its producer, so it is safe to persist and to
+/// hand back over the wire.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectFailure {
     pub effect_stage: EffectStage,
-    pub string: String,
+    pub failure_evidence: crate::runtime_model::FailureEvidence,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
 pub enum EffectStage {

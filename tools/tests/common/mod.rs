@@ -7,8 +7,10 @@ use horizon_lib::*;
 use protos::{Protosizable, Textualizable};
 
 pub fn read_horizon(path: &std::path::Path) -> horizon_lib::HorizonDefinition {
-    horizon_lib::decode(&std::fs::read_to_string(path).expect("read Horizon fixture"))
-        .expect("actualize Horizon fixture")
+    horizon_lib::HorizonDefinition::decode(
+        &std::fs::read_to_string(path).expect("read Horizon fixture"),
+    )
+    .expect("actualize Horizon fixture")
 }
 
 fn hardware() -> Hardware {

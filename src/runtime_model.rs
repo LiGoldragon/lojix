@@ -58,6 +58,9 @@ runtime_text!(ClusterName);
 runtime_text!(NodeName);
 runtime_text!(UserName);
 runtime_text!(PinLabel);
+runtime_text!(CommandProgram);
+runtime_text!(CommandArgument);
+runtime_text!(FailureDetail);
 runtime_text!(ClosurePath);
 runtime_text!(FlakeReference);
 runtime_text!(NixStoreUri);
@@ -101,6 +104,7 @@ runtime_newtype!(GenerationIdentifier, u64);
 runtime_newtype!(TestRunIdentifier, u64);
 runtime_newtype!(SubscriptionToken, u64);
 runtime_newtype!(EventLogPosition, u64);
+runtime_newtype!(ExitCode, u64);
 runtime_newtype!(CommitSequence, u64);
 runtime_newtype!(StateDigest, u64);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
@@ -260,11 +264,28 @@ pub enum DeploymentTerminalReason {
     UnsupportedDeployAction,
     InternalError,
     ActivationFailed,
+    EvaluationFailed,
+    BuildFailed,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DeploymentFailure {
     pub deployment_failure_stage: DeploymentFailureStage,
     pub deployment_terminal_reason: DeploymentTerminalReason,
+    pub optional_failure_evidence: Option<FailureEvidence>,
+}
+/// What the failing stage actually reported. The detail is always present and
+/// always bounded; the command is present only when a subprocess ran.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FailureEvidence {
+    pub optional_failed_command: Option<FailedCommand>,
+    pub failure_detail: FailureDetail,
+    pub detail_truncated: bool,
+}
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FailedCommand {
+    pub command_program: CommandProgram,
+    pub command_argument_vector: Vec<CommandArgument>,
+    pub optional_exit_code: Option<ExitCode>,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum DeploymentTerminal {
@@ -303,18 +324,6 @@ pub struct IdentifierAllocation {
 pub struct GenerationListing {
     pub generation_vector: Vec<Generation>,
     pub deployment_record_vector: Vec<DeploymentRecord>,
-    pub state_marker: StateMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct KeyMaterialQuery {
-    pub cluster_name: ClusterName,
-    pub node_name: NodeName,
-    pub proposal_source: ProposalSource,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct KeyMaterialReport {
-    pub node_name: NodeName,
-    pub string_vector: Vec<String>,
     pub state_marker: StateMarker,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
@@ -571,14 +580,12 @@ pub struct AppliedRetire {
 pub enum SemaReadInput {
     QueryGenerations(Selection),
     ReadEventLog(EventLogRange),
-    CheckKeyMaterial(KeyMaterialQuery),
     QueryTestRuns(TestRunLookup),
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum SemaReadOutput {
     GenerationsQueried(GenerationListing),
     EventLogRead(EventLogPage),
-    KeyMaterialChecked(KeyMaterialReport),
     TestRunsQueried(TestRunListing),
     ReadMissed(RejectionReport),
 }
@@ -702,13 +709,6 @@ pub enum UnwatchRejectionReason {
     SubscriptionTokenUnknown,
     SubscriptionAlreadyClosed,
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum KeyMaterialCheckRejectionReason {
-    NodeUnknown,
-    ProposalSourceUnreachable,
-    HostUnreachable,
-    PublicationMalformed,
-}
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RejectedQuery {
     pub query_rejection_reason: QueryRejectionReason,
@@ -719,11 +719,6 @@ runtime_newtype!(RejectedWatch, WatchRejectionReason);
 pub struct RejectedUnwatch {
     pub unwatch_rejection_reason: UnwatchRejectionReason,
     pub subscription_token: SubscriptionToken,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RejectedKeyMaterialCheck {
-    pub key_material_check_rejection_reason: KeyMaterialCheckRejectionReason,
-    pub state_marker: StateMarker,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
 pub enum PinRejectionReason {
@@ -801,7 +796,6 @@ pub enum OrdinaryIngress {
     WatchDeployments(DeploymentWatch),
     WatchCacheRetention(CacheRetentionWatch),
     Unwatch(SubscriptionClose),
-    CheckHostKeyMaterial(KeyMaterialQuery),
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum OrdinaryEgress {
@@ -812,11 +806,9 @@ pub enum OrdinaryEgress {
     TestRunsQueried(TestRunListing),
     Watching(SubscriptionOpened),
     Unwatched(SubscriptionClosed),
-    KeyMaterialChecked(KeyMaterialReport),
     QueryRejected(RejectedQuery),
     WatchRejected(RejectedWatch),
     UnwatchRejected(RejectedUnwatch),
-    KeyMaterialCheckRejected(RejectedKeyMaterialCheck),
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum MetaIngress {
