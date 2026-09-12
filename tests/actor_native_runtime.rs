@@ -33,8 +33,8 @@ fn daemon_uses_actor_native_listener_runtime() {
         "AsyncMultiListenerDaemon",
         "AsyncMultiConnectionRuntime",
         "AcceptedConnection",
-        "read_body_async",
-        "write_body_async",
+        "read_frame",
+        "write_frame",
         "execute_request",
         "engine.execute(work).await",
     ] {

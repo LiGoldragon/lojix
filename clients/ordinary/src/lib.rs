@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use datom_codec::{Actualizing, Budget, Potential};
 use lojix::client::SocketExchange;
 use protos::ReaderBudget;
-use signal_lojix::{ByteViewable, Restorable, Signal, Signalizable};
+use signal::{ByteViewable, Restorable, Signal, Signalizable};
 
 const SOCKET_ENV: &str = "LOJIX_ORDINARY_SOCKET";
 

@@ -16,17 +16,17 @@ use std::time::Duration;
 use kameo::actor::{Actor, ActorRef, Spawn};
 use kameo::error::Infallible;
 use kameo::message::{Context, Message};
+use signal::{AsyncFrameReading, AsyncFrameWriting, ByteViewable, FrameBody, FrameCapacity};
 use triad_runtime::{
     AcceptedConnection, AsyncListenerSocket, AsyncMultiConnectionRuntime, AsyncMultiListenerDaemon,
-    AsyncMultiListenerDaemonError, ConnectionContext, FrameBody, LengthPrefixedCodec,
-    MaximumFrameLength, PeerIdentity, RequestConcurrencyLimit, RequestErrorLog, SocketMode,
-    UnixCredentials,
+    AsyncMultiListenerDaemonError, ConnectionContext, PeerIdentity, RequestConcurrencyLimit,
+    RequestErrorLog, SocketMode, UnixCredentials,
 };
 
-/// Maximum inbound request-frame body the daemon accepts (8 MiB). A lojix
-/// request is a few hundred bytes; this bounds a hostile length prefix far
-/// below the 4 GiB the u32-prefix codec default would pre-allocate (audit R1).
-const MAXIMUM_REQUEST_FRAME_BYTES: usize = 8 * 1024 * 1024;
+// The inbound request-frame body cap comes from the shared Signal frame
+// capacity (8 MiB). A lojix request is a few hundred bytes; the cap bounds a
+// hostile length prefix far below the 4 GiB a bare u32 prefix could
+// pre-allocate (audit R1).
 
 /// How long the daemon waits for a connected client to send its request frame
 /// before dropping the stream — bounds the connect-and-never-send wedge of the
@@ -34,14 +34,14 @@ const MAXIMUM_REQUEST_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn decode_meta_request(bytes: &[u8]) -> Result<meta_signal_lojix::Query> {
-    use meta_signal_lojix::{Restorable, Signal};
+    use signal::{Restorable, Signal};
     Signal::<meta_signal_lojix::Query>::from(bytes.to_vec())
         .restore()
         .map_err(|fault| Error::Wire(format!("{fault:?}")))
 }
 
 fn encode_meta_response(response: meta_signal_lojix::Response) -> Result<Vec<u8>> {
-    use meta_signal_lojix::{ByteViewable, Signalizable};
+    use signal::{ByteViewable, Signalizable};
     response
         .signalize()
         .map(|signal| signal.bytes().to_vec())
@@ -170,7 +170,7 @@ async fn run_daemon(daemon_configuration: Daemon) -> Result<()> {
 fn map_daemon_error(error: AsyncMultiListenerDaemonError<Error>) -> Error {
     match error {
         AsyncMultiListenerDaemonError::Listener(listener_error) => Error::SignalFrame(
-            triad_runtime::FrameError::Io(std::io::Error::other(listener_error.to_string())),
+            signal::FrameError::Io(std::io::Error::other(listener_error.to_string())),
         ),
         AsyncMultiListenerDaemonError::Start(error)
         | AsyncMultiListenerDaemonError::Stop(error) => error,
@@ -220,7 +220,7 @@ const MAXIMUM_CONCURRENT_DEPLOYS: usize = 8;
 struct LojixRuntime {
     store: Arc<Store>,
     configuration: Arc<RuntimeConfiguration>,
-    codec: LengthPrefixedCodec,
+    capacity: FrameCapacity,
     owner_authority: OwnerPeerAuthority,
     /// The daemon-owned deploy-job executor. Its `ActorRef` lives here on the
     /// runtime (daemon-lifetime), NOT on a connection task, so an admitted
@@ -273,7 +273,7 @@ impl RuntimeConstructible for LojixRuntime {
         Ok(Self {
             store,
             configuration,
-            codec: LengthPrefixedCodec::new(MaximumFrameLength::new(MAXIMUM_REQUEST_FRAME_BYTES)),
+            capacity: FrameCapacity::default(),
             owner_authority: OwnerPeerAuthority::current_process(),
             deploy_jobs,
             test_jobs,
@@ -361,7 +361,7 @@ impl AsyncMultiConnectionRuntime for LojixRuntime {
         let worker = RequestWorker {
             store: self.store.clone(),
             configuration: self.configuration.clone(),
-            codec: self.codec,
+            capacity: self.capacity,
             owner_authority: self.owner_authority,
             deploy_jobs: self.deploy_jobs.clone(),
             test_jobs: self.test_jobs.clone(),
@@ -376,7 +376,7 @@ impl AsyncMultiConnectionRuntime for LojixRuntime {
 struct RequestWorker {
     store: Arc<Store>,
     configuration: Arc<RuntimeConfiguration>,
-    codec: LengthPrefixedCodec,
+    capacity: FrameCapacity,
     owner_authority: OwnerPeerAuthority,
     /// The daemon-owned deploy-job executor's handle. A `Deploy` request hands
     /// the submission here and replies the accepted handle; the pipeline runs
@@ -420,7 +420,7 @@ impl RequestServable for RequestWorker {
 
     async fn serve_ordinary(&self, connection: &mut AcceptedConnection) -> Result<()> {
         let body = self.read_body(connection).await?;
-        use signal_lojix::{Restorable, Signal};
+        use signal::{Restorable, Signal};
         let input = Signal::<signal_lojix::Query>::from(body.bytes().to_vec())
             .restore()
             .map_err(|fault| Error::Wire(format!("{fault:?}")))?;
@@ -431,14 +431,15 @@ impl RequestServable for RequestWorker {
             )
             .await?;
         let reply = Self::ordinary_reply(output)?.raise()?;
-        use signal_lojix::{ByteViewable, Signalizable};
+        use signal::{ByteViewable, Signalizable};
         let frame = reply
             .signalize()
             .map_err(|fault| Error::Wire(format!("{fault:?}")))?
             .bytes()
             .to_vec();
-        self.codec
-            .write_body_async(connection.stream_mut(), &FrameBody::new(frame))
+        connection
+            .stream_mut()
+            .write_frame(&FrameBody::from(frame), self.capacity)
             .await?;
         Ok(())
     }
@@ -468,8 +469,9 @@ impl RequestServable for RequestWorker {
         };
         let reply = reply.raise()?;
         let frame = encode_meta_response(reply)?;
-        self.codec
-            .write_body_async(connection.stream_mut(), &FrameBody::new(frame))
+        connection
+            .stream_mut()
+            .write_frame(&FrameBody::from(frame), self.capacity)
             .await?;
         Ok(())
     }
@@ -516,7 +518,7 @@ impl RequestServable for RequestWorker {
     async fn read_body(&self, connection: &mut AcceptedConnection) -> Result<FrameBody> {
         tokio::time::timeout(
             REQUEST_READ_TIMEOUT,
-            self.codec.read_body_async(connection.stream_mut()),
+            connection.stream_mut().read_frame(self.capacity),
         )
         .await
         .map_err(|_| Error::RequestReadTimedOut)?

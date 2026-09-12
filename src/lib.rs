@@ -152,7 +152,7 @@ pub enum Error {
     Argument(#[from] triad_runtime::ArgumentError),
 
     #[error("signal frame error: {0}")]
-    SignalFrame(#[from] triad_runtime::FrameError),
+    SignalFrame(#[from] signal::FrameError),
 
     #[error("expected exactly one argument")]
     ExpectedSingleArgument,

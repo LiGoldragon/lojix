@@ -8,9 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lojix::{LegacyConfigurationArchivable as _, LegacyStartupConfiguration};
-use meta_signal_lojix::{ByteViewable as _, Restorable as _, Signalizable as _};
-use signal_lojix::{ByteViewable as _, Restorable as _, Signalizable as _};
-use triad_runtime::{FrameBody, LengthPrefixedCodec};
+use signal::{ByteViewable, FrameBody, FrameCapacity, FrameReading, FrameWriting};
+use signal::{Restorable as _, Signalizable as _};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -196,12 +195,11 @@ fn wait_for_socket(path: &Path, daemon: &mut Child, listener: &str) {
 
 fn exchange(socket: &Path, bytes: Vec<u8>) -> Vec<u8> {
     let mut stream = UnixStream::connect(socket).expect("connect typed client");
-    let codec = LengthPrefixedCodec::default();
-    codec
-        .write_body(&mut stream, &FrameBody::new(bytes))
+    stream
+        .write_frame(&FrameBody::from(bytes), FrameCapacity::default())
         .expect("write request");
-    codec
-        .read_body(&mut stream)
+    stream
+        .read_frame(FrameCapacity::default())
         .expect("read response")
         .bytes()
         .to_vec()
@@ -209,19 +207,16 @@ fn exchange(socket: &Path, bytes: Vec<u8>) -> Vec<u8> {
 
 fn ordinary_exchange(socket: &Path, request: signal_lojix::Query) -> signal_lojix::Response {
     let signal = request.signalize().expect("archive ordinary query");
-    signal_lojix::Signal::<signal_lojix::Response>::from(exchange(socket, signal.bytes().to_vec()))
+    signal::Signal::<signal_lojix::Response>::from(exchange(socket, signal.bytes().to_vec()))
         .restore()
         .expect("restore ordinary response")
 }
 
 fn meta_exchange(socket: &Path, request: meta_signal_lojix::Query) -> meta_signal_lojix::Response {
     let signal = request.signalize().expect("archive meta query");
-    meta_signal_lojix::Signal::<meta_signal_lojix::Response>::from(exchange(
-        socket,
-        signal.bytes().to_vec(),
-    ))
-    .restore()
-    .expect("restore meta response")
+    signal::Signal::<meta_signal_lojix::Response>::from(exchange(socket, signal.bytes().to_vec()))
+        .restore()
+        .expect("restore meta response")
 }
 
 fn stop_daemon(daemon: Child, name: &str) {

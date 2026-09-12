@@ -5,8 +5,8 @@ use std::{
 
 use datom_codec::{Actualizing, Budget, Potential};
 use lojix::client::SocketExchange;
-use meta_signal_lojix::{ByteViewable, Restorable, Signal, Signalizable};
 use protos::ReaderBudget;
+use signal::{ByteViewable, Restorable, Signal, Signalizable};
 
 const SOCKET_ENV: &str = "LOJIX_OWNER_SOCKET";
 

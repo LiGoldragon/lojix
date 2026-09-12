@@ -105,3 +105,36 @@ dependency together, then submit the normal immutable Lojix deployment request
 with that exact canonical source path. Observe the returned deployment through
 the ordinary Lojix client until its terminal record is `Succeeded`; admission
 does not establish the upgrade.
+
+# 1.0.1 to 2.0.0
+
+Lojix takes its wire framing and its Signal kinds from the `signal`
+repository. Nothing on the Lojix wire changed: `triad-runtime`'s
+`LengthPrefixedCodec` and `signal`'s frame both write a four-byte
+big-endian length prefix, so a 1.0.1 client and a 2.0.0 Nexus still
+understand each other's bytes.
+
+Three things do change for a consumer of the `lojix` library:
+
+1. `lojix::Error::SignalFrame` now wraps `signal::FrameError` instead of
+   `triad_runtime::FrameError`.
+2. `lojix::client::SocketExchange` caps a response body at 8 MiB. It
+   previously accepted `LengthPrefixedCodec::default()`, which admits a
+   `u32::MAX` prefix — the daemon already capped requests at 8 MiB, and the
+   client now matches it.
+3. `Signal<T>`, `Signalizable`, `ByteViewable`, and `Restorable` come from
+   `signal`, not from `signal-lojix` or `meta-signal-lojix`:
+
+   ```rust
+   -use signal_lojix::{ByteViewable, Restorable, Signal, Signalizable};
+   +use signal::{ByteViewable, Restorable, Signal, Signalizable};
+   ```
+
+Deploy by rebuilding; the Nexus and both CLIs may be rolled independently
+because the wire is unchanged.
+
+Pins moved to `signal-lojix` 2.0.0, `meta-signal-lojix` 3.0.1, and
+`signal` 2.0.0.
+
+`triad-runtime` is still a dependency for the actor listener runtime; only
+its frame codec is no longer used here. Its streaming path is untouched.

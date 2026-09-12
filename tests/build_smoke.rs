@@ -2,7 +2,7 @@
 
 use lojix::adapters::{Lowerable as _, Raisable as _};
 use lojix::schema_runtime::{DeploySubmissionOutcome, SchemaRuntime};
-use meta_signal_lojix::{ByteViewable, Restorable, Signal, Signalizable};
+use signal::{ByteViewable, Restorable, Signal, Signalizable};
 
 fn text(value: &str) -> String {
     value.to_owned()

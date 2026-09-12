@@ -2,13 +2,13 @@
 
 use std::os::unix::net::UnixStream;
 
-use triad_runtime::{FrameBody, LengthPrefixedCodec};
+use signal::{ByteViewable, FrameBody, FrameCapacity, FrameReading, FrameWriting};
 
 use crate::{Error, Result};
 
 pub struct SocketExchange {
     socket_path: String,
-    codec: LengthPrefixedCodec,
+    capacity: FrameCapacity,
 }
 
 impl SocketExchange {
@@ -20,14 +20,13 @@ impl SocketExchange {
         }
         Ok(Self {
             socket_path,
-            codec: LengthPrefixedCodec::default(),
+            capacity: FrameCapacity::default(),
         })
     }
 
     pub fn exchange(&self, request: Vec<u8>) -> Result<Vec<u8>> {
         let mut stream = UnixStream::connect(&self.socket_path)?;
-        self.codec
-            .write_body(&mut stream, &FrameBody::new(request))?;
-        Ok(self.codec.read_body(&mut stream)?.bytes().to_vec())
+        stream.write_frame(&FrameBody::from(request), self.capacity)?;
+        Ok(stream.read_frame(self.capacity)?.bytes().to_vec())
     }
 }
