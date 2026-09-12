@@ -2,6 +2,7 @@
 //!
 //! The daemon maps named fields without a Datom or textual intermediate.
 
+use crate::inspected_text::{NixStorePath, StoreItemShape};
 use crate::runtime_model as sema;
 use meta_signal_lojix as owner;
 use signal_lojix as ordinary;
@@ -725,7 +726,8 @@ impl Raisable<owner::RejectedDeploy> for sema::RejectedDeploy {
 
 impl Raisable<ordinary::Generation> for sema::Generation {
     fn raise(self) -> Result<ordinary::Generation, WireShapeError> {
-        let closure_path_option = canonical_nix_store_root(self.closure_path.payload())
+        let closure_path_option = NixStorePath::new(self.closure_path.payload())
+            .is_canonical_item_root()
             .then_some(self.closure_path)
             .raise()?;
         Ok(ordinary::Generation {
@@ -745,7 +747,7 @@ impl Raisable<ordinary::TestRunRecord> for sema::TestRunRecord {
     fn raise(self) -> Result<ordinary::TestRunRecord, WireShapeError> {
         let closure_path_option = self
             .optional_closure_path
-            .filter(|path| canonical_nix_store_root(path.payload()))
+            .filter(|path| NixStorePath::new(path.payload()).is_canonical_item_root())
             .raise()?;
         Ok(ordinary::TestRunRecord {
             test_run_identifier: self.test_run_identifier.raise()?,
@@ -758,41 +760,6 @@ impl Raisable<ordinary::TestRunRecord> for sema::TestRunRecord {
             closure_path_option,
         })
     }
-}
-
-fn canonical_nix_store_root(value: &str) -> bool {
-    let Some(item) = value.strip_prefix("/nix/store/") else {
-        return false;
-    };
-    let Some((hash, name)) = item.split_once('-') else {
-        return false;
-    };
-    hash.len() == 32
-        && hash.bytes().all(|byte| {
-            matches!(byte, b'0'..=b'9' | b'a'..=b'z') && !matches!(byte, b'e' | b'o' | b't' | b'u')
-        })
-        && !name.is_empty()
-        && !name.contains("..")
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'_' | b'-'))
-        && !credential_like(value)
-}
-fn credential_like(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    [
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "credential",
-        "apikey",
-        "api-key",
-        "api_key",
-        "auth",
-    ]
-    .into_iter()
-    .any(|term| value.contains(term))
 }
 
 impl Lowerable<sema::OrdinaryIngress> for ordinary::Query {

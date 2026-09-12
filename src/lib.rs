@@ -15,6 +15,7 @@
 //! back, so the daemon recovers without replay code (Spirit oh9l durable-first,
 //! fosp sema-engine-exclusive, ur16 self-resume).
 
+use crate::inspected_text::{NixStorePath, StoreItemShape};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,6 +47,7 @@ pub mod client;
 pub mod daemon;
 #[cfg(feature = "tools")]
 pub mod ingress;
+mod inspected_text;
 #[cfg(feature = "tools")]
 pub mod inspection;
 #[cfg(feature = "tools")]
@@ -634,27 +636,8 @@ pub(crate) fn immutable_revision(value: &str) -> Option<ImmutableRevision> {
         .then(|| ImmutableRevision::new(value))
 }
 
-fn canonical_nix_store_root(value: &str) -> bool {
-    let Some(item) = value.strip_prefix("/nix/store/") else {
-        return false;
-    };
-    let Some((hash, name)) = item.split_once('-') else {
-        return false;
-    };
-    hash.len() == 32
-        && hash.bytes().all(|byte| {
-            matches!(byte, b'0'..=b'9' | b'a'..=b'z') && !matches!(byte, b'e' | b'o' | b't' | b'u')
-        })
-        && !name.is_empty()
-        && !name.contains("..")
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'_' | b'-'))
-        && !credential_like(value)
-}
-
 fn validate_fresh_closure_path(value: &str, record_kind: &str) -> Result<()> {
-    if canonical_nix_store_root(value) {
+    if NixStorePath::new(value).is_canonical_item_root() {
         Ok(())
     } else {
         Err(Error::Invariant(format!(
@@ -676,23 +659,6 @@ fn validate_persisted_deploy_job(job: &DeployJob) -> Result<()> {
 
 fn validate_fresh_gc_root(root: &GcRoot) -> Result<()> {
     validate_fresh_closure_path(root.closure_path.payload(), "GC root")
-}
-
-fn credential_like(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    [
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "credential",
-        "apikey",
-        "api-key",
-        "api_key",
-        "auth",
-    ]
-    .into_iter()
-    .any(|term| value.contains(term))
 }
 
 impl Store {
@@ -2475,7 +2441,7 @@ impl Store {
     /// Append one live generation, keyed by its generation identifier
     /// (decision 4).
     pub fn append_live_generation(&self, generation: LiveGeneration) -> Result<()> {
-        if !canonical_nix_store_root(generation.closure_path.payload()) {
+        if !NixStorePath::new(generation.closure_path.payload()).is_canonical_item_root() {
             return Err(Error::Invariant(
                 "fresh live generation requires a canonical immutable store-item root".to_string(),
             ));
@@ -2506,8 +2472,8 @@ impl Store {
 
     /// Record the live generation and its GC root as one durable commit.
     pub fn record_activation(&self, generation: LiveGeneration, root: GcRoot) -> Result<()> {
-        if !canonical_nix_store_root(generation.closure_path.payload())
-            || !canonical_nix_store_root(root.closure_path.payload())
+        if !NixStorePath::new(generation.closure_path.payload()).is_canonical_item_root()
+            || !NixStorePath::new(root.closure_path.payload()).is_canonical_item_root()
         {
             return Err(Error::Invariant(
                 "fresh activation requires a canonical immutable store-item root".to_string(),

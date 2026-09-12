@@ -11,6 +11,9 @@
 //! so actor-native request tasks await child processes directly instead of
 //! routing Nexus execution through a blocking-pool bridge.
 
+use crate::inspected_text::{
+    CredentialBearing, InspectedText, NixStorePath, PercentEncodedText, StoreItemShape,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -49,42 +52,6 @@ impl HorizonUserName {
     fn as_str(&self) -> &str {
         &self.0
     }
-}
-
-fn canonical_nix_store_root(value: &str) -> bool {
-    let Some(item) = value.strip_prefix("/nix/store/") else {
-        return false;
-    };
-    let Some((hash, name)) = item.split_once('-') else {
-        return false;
-    };
-    hash.len() == 32
-        && hash.bytes().all(|byte| {
-            matches!(byte, b'0'..=b'9' | b'a'..=b'z') && !matches!(byte, b'e' | b'o' | b't' | b'u')
-        })
-        && !name.is_empty()
-        && !name.contains("..")
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'_' | b'-'))
-        && !credential_like(value)
-}
-
-fn credential_like(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    [
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "credential",
-        "apikey",
-        "api-key",
-        "api_key",
-        "auth",
-    ]
-    .into_iter()
-    .any(|term| value.contains(term))
 }
 
 /// The bound on durable failure detail. A Nexus keeps the evidence a retry
@@ -140,7 +107,7 @@ pub(crate) trait Witnessing {
     fn bounded_redaction(detail: &str) -> (String, bool) {
         let retained: Vec<&str> = detail
             .lines()
-            .filter(|line| !credential_like(line))
+            .filter(|line| !InspectedText::new(line).names_credential_material())
             .collect();
         let redacted = retained.join("\n");
         let dropped_a_line = retained.len() != detail.lines().count();
@@ -175,62 +142,16 @@ impl Witnessing for StageFailure {
     }
 }
 
-// The engine has no public-contract nouns. These small local facades retain
-// local names while lowering them to the private
-// ingress/egress roots.  They are deliberately value-only shims: no wire type
-// can cross this module boundary.
-#[allow(clippy::new_ret_no_self)]
+// The engine has no public-contract nouns. These two aliases name the private
+// ingress/egress roots the engine reasons in; no wire type crosses this module
+// boundary.
 mod ordinary {
     pub use crate::runtime_model::*;
 
     pub type Input = OrdinaryIngress;
     pub type Output = OrdinaryEgress;
-
-    pub struct Watching;
-    impl Watching {
-        pub fn new(payload: SubscriptionOpened) -> SubscriptionOpened {
-            payload
-        }
-    }
-    pub struct WatchRejected;
-    impl WatchRejected {
-        pub fn new(payload: RejectedWatch) -> RejectedWatch {
-            payload
-        }
-    }
-    pub struct Unwatched;
-    impl Unwatched {
-        pub fn new(payload: SubscriptionClosed) -> SubscriptionClosed {
-            payload
-        }
-    }
-    pub struct Queried;
-    impl Queried {
-        pub fn new(payload: GenerationListing) -> GenerationListing {
-            payload
-        }
-    }
-    pub struct TestRunsQueried;
-    impl TestRunsQueried {
-        pub fn new(payload: TestRunListing) -> TestRunListing {
-            payload
-        }
-    }
-    pub struct DeploymentEventsQueried;
-    impl DeploymentEventsQueried {
-        pub fn new(payload: EventLogPage) -> EventLogPage {
-            payload
-        }
-    }
-    pub struct QueryRejected;
-    impl QueryRejected {
-        pub fn new(payload: RejectedQuery) -> RejectedQuery {
-            payload
-        }
-    }
 }
 
-#[allow(clippy::new_ret_no_self)]
 mod meta {
     pub use crate::runtime_model::*;
 
@@ -254,73 +175,6 @@ mod meta {
         UnsupportedDeployAction,
         InternalError,
         ActivationFailed,
-    }
-
-    pub struct DeployAccepted;
-    impl DeployAccepted {
-        pub fn new(payload: DeployHandle) -> DeployHandle {
-            payload
-        }
-    }
-    pub struct DeployRejected;
-    impl DeployRejected {
-        pub fn new(payload: RejectedDeploy) -> RejectedDeploy {
-            payload
-        }
-    }
-    pub struct Pinned;
-    impl Pinned {
-        pub fn new(payload: AppliedPin) -> AppliedPin {
-            payload
-        }
-    }
-    pub struct PinRejected;
-    impl PinRejected {
-        pub fn new(payload: RejectedPin) -> RejectedPin {
-            payload
-        }
-    }
-    pub struct Unpinned;
-    impl Unpinned {
-        pub fn new(payload: AppliedUnpin) -> AppliedUnpin {
-            payload
-        }
-    }
-    pub struct UnpinRejected;
-    impl UnpinRejected {
-        pub fn new(payload: RejectedUnpin) -> RejectedUnpin {
-            payload
-        }
-    }
-    pub struct Retired;
-    impl Retired {
-        pub fn new(payload: AppliedRetire) -> AppliedRetire {
-            payload
-        }
-    }
-    pub struct RetireRejected;
-    impl RetireRejected {
-        pub fn new(payload: RejectedRetire) -> RejectedRetire {
-            payload
-        }
-    }
-    pub struct Tested;
-    impl Tested {
-        pub fn new(payload: AcceptedTest) -> AcceptedTest {
-            payload
-        }
-    }
-    pub struct TestRejected;
-    impl TestRejected {
-        pub fn new(payload: RejectedTest) -> RejectedTest {
-            payload
-        }
-    }
-    pub struct Test;
-    impl Test {
-        pub fn new(payload: TestRequest) -> TestRequest {
-            payload
-        }
     }
 }
 use crate::{Error, LegacyStartupConfiguration, NexusConfiguration, Result, Store};
@@ -923,7 +777,8 @@ impl HermeticCheck {
             .run(execution)
             .await?;
         let closure_path = NixCommand::first_line(&output);
-        canonical_nix_store_root(&closure_path)
+        NixStorePath::new(&closure_path)
+            .is_canonical_item_root()
             .then(|| ordinary::ClosurePath::new(closure_path))
             .ok_or_else(|| {
                 StageFailure::from("nix hermetic check returned a noncanonical closure path")
@@ -1348,8 +1203,8 @@ impl<'a> FlakeReferencePolicy<'a> {
             if key.is_empty()
                 || value.is_empty()
                 || value.contains('=')
-                || Self::credential_like(key)
-                || Self::credential_like(value)
+                || PercentEncodedText::new(key).names_credential_material()
+                || PercentEncodedText::new(value).names_credential_material()
             {
                 return false;
             }
@@ -1378,8 +1233,8 @@ impl<'a> FlakeReferencePolicy<'a> {
             if key.is_empty()
                 || value.is_empty()
                 || value.contains('=')
-                || Self::credential_like(key)
-                || Self::credential_like(value)
+                || PercentEncodedText::new(key).names_credential_material()
+                || PercentEncodedText::new(value).names_credential_material()
             {
                 return false;
             }
@@ -1411,54 +1266,6 @@ impl<'a> FlakeReferencePolicy<'a> {
         !value.starts_with('/')
             && !value.ends_with('/')
             && value.split('/').all(Self::safe_locator_component)
-    }
-
-    fn credential_like(value: &str) -> bool {
-        let Some(value) = Self::percent_decode_once(value) else {
-            return true;
-        };
-        let value = value.to_ascii_lowercase();
-        [
-            "token",
-            "secret",
-            "password",
-            "passwd",
-            "credential",
-            "apikey",
-            "api-key",
-            "api_key",
-            "auth",
-        ]
-        .into_iter()
-        .any(|term| value.contains(term))
-    }
-
-    /// Decode percent escapes exactly once before inspecting query values for
-    /// credential-like material. A remaining `%` would require a second decode
-    /// and is rejected rather than normalized ambiguously.
-    fn percent_decode_once(value: &str) -> Option<String> {
-        let bytes = value.as_bytes();
-        let mut decoded = Vec::with_capacity(bytes.len());
-        let mut index = 0;
-        while index < bytes.len() {
-            if bytes[index] != b'%' {
-                decoded.push(bytes[index]);
-                index += 1;
-                continue;
-            }
-            let high = *bytes.get(index + 1)?;
-            let low = *bytes.get(index + 2)?;
-            let hex = |byte| match byte {
-                b'0'..=b'9' => Some(byte - b'0'),
-                b'a'..=b'f' => Some(byte - b'a' + 10),
-                b'A'..=b'F' => Some(byte - b'A' + 10),
-                _ => None,
-            };
-            decoded.push((hex(high)? << 4) | hex(low)?);
-            index += 3;
-        }
-        let decoded = String::from_utf8(decoded).ok()?;
-        (!decoded.contains('%')).then_some(decoded)
     }
 
     fn immutable_revision(&self) -> Option<sema::ImmutableRevision> {
@@ -2337,7 +2144,9 @@ impl SchemaRuntime {
         if job
             .optional_closure_path
             .as_ref()
-            .is_some_and(|closure_path| !canonical_nix_store_root(closure_path.payload()))
+            .is_some_and(|closure_path| {
+                !NixStorePath::new(closure_path.payload()).is_canonical_item_root()
+            })
         {
             return Err(Error::Invariant(
                 "persisted deploy job has a noncanonical closure path".to_string(),
@@ -2523,9 +2332,9 @@ impl SchemaRuntime {
                 state_marker: pipeline.accepted_marker.clone(),
             },
             None => {
-                return meta::Output::DeployRejected(meta::DeployRejected::new(
+                return meta::Output::DeployRejected(
                     self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                ));
+                );
             }
         };
         let pipeline = self
@@ -2540,9 +2349,9 @@ impl SchemaRuntime {
                 nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => {
                     output
                 }
-                _ => meta::Output::DeployRejected(meta::DeployRejected::new(
+                _ => meta::Output::DeployRejected(
                     self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                )),
+                ),
             };
         }
         let work = match pipeline.resume_stage {
@@ -2551,9 +2360,9 @@ impl SchemaRuntime {
             ),
             sema::DeployResumeStage::MaterializeHorizon => {
                 let Some(revision) = pipeline.source_revision.clone() else {
-                    return meta::Output::DeployRejected(meta::DeployRejected::new(
+                    return meta::Output::DeployRejected(
                         self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                    ));
+                    );
                 };
                 nexus::NexusWork::EffectCompleted(nexus::EffectResult::flake_resolved(revision))
             }
@@ -2562,17 +2371,17 @@ impl SchemaRuntime {
             ),
             sema::DeployResumeStage::NixEval => {
                 let Some(receipt) = pipeline.phase_receipt.clone() else {
-                    return meta::Output::DeployRejected(meta::DeployRejected::new(
+                    return meta::Output::DeployRejected(
                         self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                    ));
+                    );
                 };
                 nexus::NexusWork::SemaWriteCompleted(sema::SemaWriteOutput::PhaseRecorded(receipt))
             }
             sema::DeployResumeStage::NixBuild => {
                 let Some(closure_path) = pipeline.closure_path.clone() else {
-                    return meta::Output::DeployRejected(meta::DeployRejected::new(
+                    return meta::Output::DeployRejected(
                         self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                    ));
+                    );
                 };
                 nexus::NexusWork::EffectCompleted(nexus::EffectResult::closure_evaluated(
                     nexus::EvaluatedClosure {
@@ -2583,9 +2392,9 @@ impl SchemaRuntime {
             }
             sema::DeployResumeStage::CopyClosure => {
                 let Some(closure_path) = pipeline.closure_path.clone() else {
-                    return meta::Output::DeployRejected(meta::DeployRejected::new(
+                    return meta::Output::DeployRejected(
                         self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                    ));
+                    );
                 };
                 nexus::NexusWork::EffectCompleted(nexus::EffectResult::closure_built(
                     nexus::BuiltClosure {
@@ -2597,9 +2406,9 @@ impl SchemaRuntime {
             sema::DeployResumeStage::ActivateGeneration
             | sema::DeployResumeStage::RecordGenerationActivated => {
                 let Some(receipt) = pipeline.phase_receipt.clone() else {
-                    return meta::Output::DeployRejected(meta::DeployRejected::new(
+                    return meta::Output::DeployRejected(
                         self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                    ));
+                    );
                 };
                 nexus::NexusWork::SemaWriteCompleted(sema::SemaWriteOutput::PhaseRecorded(receipt))
             }
@@ -2608,9 +2417,9 @@ impl SchemaRuntime {
         .with_origin_route(nexus::OriginRoute::new(0));
         match self.execute(work).await.into_root() {
             nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => output,
-            _ => meta::Output::DeployRejected(meta::DeployRejected::new(
+            _ => meta::Output::DeployRejected(
                 self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-            )),
+            ),
         }
     }
 
@@ -2623,7 +2432,7 @@ impl SchemaRuntime {
     /// hermetic build / live cycle does NOT run here.
     pub async fn submit_test(&mut self, request: meta::TestRequest) -> TestSubmissionOutcome {
         let work = nexus::NexusWork::SignalArrived(nexus::SignalInput::MetaInput(
-            meta::Input::Test(meta::Test::new(request)),
+            meta::Input::Test(request),
         ))
         .with_origin_route(nexus::OriginRoute::new(0));
         match self.execute(work).await.into_root() {
@@ -2659,9 +2468,9 @@ impl SchemaRuntime {
     /// re-observes the outcome via `(Query (ByTestRun …))`.
     pub async fn drive_submitted_test(&mut self) -> meta::Output {
         let Some(pipeline) = self.active_test.clone() else {
-            return meta::Output::TestRejected(meta::TestRejected::new(
+            return meta::Output::TestRejected(
                 self.test_rejection(meta::TestRejectionReason::InternalError),
-            ));
+            );
         };
         self.active_operation = Some(MetaOperation::Test);
         let first_effect = match pipeline.run.profile.test_mode {
@@ -2707,9 +2516,9 @@ impl SchemaRuntime {
                     action = self.decide_test_effect_completion(result);
                 }
                 _ => {
-                    return meta::Output::TestRejected(meta::TestRejected::new(
+                    return meta::Output::TestRejected(
                         self.test_rejection(meta::TestRejectionReason::InternalError),
-                    ));
+                    );
                 }
             }
         }
@@ -2779,23 +2588,20 @@ impl SchemaRuntime {
     fn open_subscription(&mut self) -> nexus::NexusAction {
         let subscription_token = self.store.next_subscription_token();
         let reply = match self.store.commit_sequence() {
-            Ok(commit_sequence) => {
-                ordinary::Output::Watching(ordinary::Watching::new(ordinary::SubscriptionOpened {
-                    subscription_token: ordinary::SubscriptionToken::new(subscription_token),
-                    commit_sequence: ordinary::CommitSequence::new(commit_sequence),
-                }))
-            }
-            Err(_) => ordinary::Output::WatchRejected(ordinary::WatchRejected::new(
-                ordinary::RejectedWatch::new(ordinary::WatchRejectionReason::StreamUnavailable),
+            Ok(commit_sequence) => ordinary::Output::Watching(ordinary::SubscriptionOpened {
+                subscription_token: ordinary::SubscriptionToken::new(subscription_token),
+                commit_sequence: ordinary::CommitSequence::new(commit_sequence),
+            }),
+            Err(_) => ordinary::Output::WatchRejected(ordinary::RejectedWatch::new(
+                ordinary::WatchRejectionReason::StreamUnavailable,
             )),
         };
         nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
     }
 
     fn close_subscription(&mut self, close: ordinary::SubscriptionClose) -> nexus::NexusAction {
-        let reply = ordinary::Output::Unwatched(ordinary::Unwatched::new(
-            ordinary::SubscriptionClosed::new(close.into_payload()),
-        ));
+        let reply =
+            ordinary::Output::Unwatched(ordinary::SubscriptionClosed::new(close.into_payload()));
         nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
     }
 
@@ -2810,22 +2616,22 @@ impl SchemaRuntime {
             meta::Input::Deploy(request) => {
                 if let Some(reason) = Self::unsupported_deploy_reason(&request) {
                     return Self::reply_meta(meta::Output::DeployRejected(
-                        meta::DeployRejected::new(self.deploy_rejection(reason)),
+                        self.deploy_rejection(reason),
                     ));
                 }
                 if let Some(reason) = Self::deployment_routing_rejection(&request) {
                     return Self::reply_meta(meta::Output::DeployRejected(
-                        meta::DeployRejected::new(self.deploy_rejection(reason)),
+                        self.deploy_rejection(reason),
                     ));
                 }
                 if let Some(reason) = Self::proposal_source_rejection(&request) {
                     return Self::reply_meta(meta::Output::DeployRejected(
-                        meta::DeployRejected::new(self.deploy_rejection(reason)),
+                        self.deploy_rejection(reason),
                     ));
                 }
                 if let Some(reason) = Self::source_revision_policy_rejection(&request) {
                     return Self::reply_meta(meta::Output::DeployRejected(
-                        meta::DeployRejected::new(self.deploy_rejection(reason)),
+                        self.deploy_rejection(reason),
                     ));
                 }
                 self.active_operation = Some(MetaOperation::Deploy);
@@ -2884,9 +2690,9 @@ impl SchemaRuntime {
                     run.pending_record(identifier),
                 ))
             }
-            Err(reason) => Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
-                self.test_rejection(reason),
-            ))),
+            Err(reason) => {
+                Self::reply_meta(meta::Output::TestRejected(self.test_rejection(reason)))
+            }
         }
     }
 
@@ -3112,21 +2918,19 @@ impl SchemaRuntime {
 
     fn decide_read_completion(&mut self, output: sema::SemaReadOutput) -> nexus::NexusAction {
         let reply = match output {
-            sema::SemaReadOutput::GenerationsQueried(listing) => {
-                ordinary::Output::Queried(ordinary::Queried::new(listing))
-            }
+            sema::SemaReadOutput::GenerationsQueried(listing) => ordinary::Output::Queried(listing),
             sema::SemaReadOutput::TestRunsQueried(listing) => {
-                ordinary::Output::TestRunsQueried(ordinary::TestRunsQueried::new(listing))
+                ordinary::Output::TestRunsQueried(listing)
             }
-            sema::SemaReadOutput::EventLogRead(page) => ordinary::Output::DeploymentEventsQueried(
-                ordinary::DeploymentEventsQueried::new(page),
-            ),
-            sema::SemaReadOutput::ReadMissed(report) => ordinary::Output::QueryRejected(
-                ordinary::QueryRejected::new(ordinary::RejectedQuery {
+            sema::SemaReadOutput::EventLogRead(page) => {
+                ordinary::Output::DeploymentEventsQueried(page)
+            }
+            sema::SemaReadOutput::ReadMissed(report) => {
+                ordinary::Output::QueryRejected(ordinary::RejectedQuery {
                     query_rejection_reason: ordinary::QueryRejectionReason::GenerationUnknown,
                     state_marker: report.state_marker,
-                }),
-            ),
+                })
+            }
         };
         nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
     }
@@ -3161,15 +2965,15 @@ impl SchemaRuntime {
             sema::SemaWriteOutput::GenerationActivated(_) => self.finish_deploy_pipeline(),
             sema::SemaWriteOutput::GenerationPinned(applied) => {
                 self.active_operation = None;
-                Self::reply_meta(meta::Output::Pinned(meta::Pinned::new(applied)))
+                Self::reply_meta(meta::Output::Pinned(applied))
             }
             sema::SemaWriteOutput::GenerationUnpinned(applied) => {
                 self.active_operation = None;
-                Self::reply_meta(meta::Output::Unpinned(meta::Unpinned::new(applied)))
+                Self::reply_meta(meta::Output::Unpinned(applied))
             }
             sema::SemaWriteOutput::GenerationRetired(applied) => {
                 self.active_operation = None;
-                Self::reply_meta(meta::Output::Retired(meta::Retired::new(applied)))
+                Self::reply_meta(meta::Output::Retired(applied))
             }
             sema::SemaWriteOutput::ContainerRecorded(_) => self.advance_after_phase(),
             sema::SemaWriteOutput::TestRunRecorded(accepted) => {
@@ -3178,7 +2982,7 @@ impl SchemaRuntime {
                 // decoupled executor (`drive_submitted_test`) re-enters to run
                 // the real dispatch and rewrite the row to a terminal outcome.
                 self.active_operation = None;
-                Self::reply_meta(meta::Output::Tested(meta::Tested::new(accepted)))
+                Self::reply_meta(meta::Output::Tested(accepted))
             }
             sema::SemaWriteOutput::WriteRejected(report) => self.reject_active_or_meta(report),
         }
@@ -3198,9 +3002,9 @@ impl SchemaRuntime {
     /// honest live terminal is the belt to that submit-time gate.
     fn decide_test_effect_completion(&mut self, result: nexus::EffectResult) -> nexus::NexusAction {
         let Some(pipeline) = self.active_test.clone() else {
-            return Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
+            return Self::reply_meta(meta::Output::TestRejected(
                 self.test_rejection(meta::TestRejectionReason::InternalError),
-            )));
+            ));
         };
         match result {
             nexus::EffectResult::HermeticCheckBuilt(built) => {
@@ -3272,11 +3076,11 @@ impl SchemaRuntime {
         self.active_test = None;
         match output {
             sema::SemaWriteOutput::TestRunRecorded(accepted) => {
-                Self::reply_meta(meta::Output::Tested(meta::Tested::new(accepted)))
+                Self::reply_meta(meta::Output::Tested(accepted))
             }
-            _ => Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
+            _ => Self::reply_meta(meta::Output::TestRejected(
                 self.test_rejection(meta::TestRejectionReason::InternalError),
-            ))),
+            )),
         }
     }
 
@@ -3307,9 +3111,9 @@ impl SchemaRuntime {
         let pipeline = match self.active_test.clone() {
             Some(pipeline) => pipeline,
             None => {
-                return Self::reply_meta(meta::Output::TestRejected(meta::TestRejected::new(
+                return Self::reply_meta(meta::Output::TestRejected(
                     self.test_rejection(meta::TestRejectionReason::InternalError),
-                )));
+                ));
             }
         };
         self.record_test_terminal(
@@ -3338,9 +3142,7 @@ impl SchemaRuntime {
         let pipeline = match self.active_deploy.as_ref() {
             Some(pipeline) => pipeline.clone(),
             None => {
-                return Self::reply_meta(meta::Output::DeployAccepted(meta::DeployAccepted::new(
-                    accepted,
-                )));
+                return Self::reply_meta(meta::Output::DeployAccepted(accepted));
             }
         };
         // First effect of the chain: resolve the flake against the proposal
@@ -3357,9 +3159,9 @@ impl SchemaRuntime {
         let pipeline = match self.active_deploy.clone() {
             Some(pipeline) => pipeline,
             None => {
-                return Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
+                return Self::reply_meta(meta::Output::DeployRejected(
                     self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-                )));
+                ));
             }
         };
         match pipeline.stage {
@@ -3375,7 +3177,9 @@ impl SchemaRuntime {
                 // without a closure is an internal invariant failure, not an empty
                 // activation (risk R2). Fail the pipeline rather than activate "".
                 let closure_path = match pipeline.closure_path.clone() {
-                    Some(closure_path) if canonical_nix_store_root(closure_path.payload()) => {
+                    Some(closure_path)
+                        if NixStorePath::new(closure_path.payload()).is_canonical_item_root() =>
+                    {
                         closure_path
                     }
                     None => {
@@ -3473,33 +3277,25 @@ impl SchemaRuntime {
             .unwrap_or(MetaOperation::Deploy);
         let marker = report.state_marker;
         let output = match operation {
-            MetaOperation::Deploy => meta::Output::DeployRejected(meta::DeployRejected::new(
+            MetaOperation::Deploy => meta::Output::DeployRejected(
                 self.deploy_rejection(Self::deploy_reason(report.rejection_reason)),
-            )),
-            MetaOperation::Pin => {
-                meta::Output::PinRejected(meta::PinRejected::new(meta::RejectedPin {
-                    pin_rejection_reason: Self::pin_reason(report.rejection_reason),
-                    state_marker: marker,
-                }))
-            }
-            MetaOperation::Unpin => {
-                meta::Output::UnpinRejected(meta::UnpinRejected::new(meta::RejectedUnpin {
-                    unpin_rejection_reason: Self::unpin_reason(report.rejection_reason),
-                    state_marker: marker,
-                }))
-            }
-            MetaOperation::Retire => {
-                meta::Output::RetireRejected(meta::RetireRejected::new(meta::RejectedRetire {
-                    retire_rejection_reason: Self::retire_reason(report.rejection_reason),
-                    state_marker: marker,
-                }))
-            }
-            MetaOperation::Test => {
-                meta::Output::TestRejected(meta::TestRejected::new(meta::RejectedTest {
-                    test_rejection_reason: Self::test_reason(report.rejection_reason),
-                    state_marker: marker,
-                }))
-            }
+            ),
+            MetaOperation::Pin => meta::Output::PinRejected(meta::RejectedPin {
+                pin_rejection_reason: Self::pin_reason(report.rejection_reason),
+                state_marker: marker,
+            }),
+            MetaOperation::Unpin => meta::Output::UnpinRejected(meta::RejectedUnpin {
+                unpin_rejection_reason: Self::unpin_reason(report.rejection_reason),
+                state_marker: marker,
+            }),
+            MetaOperation::Retire => meta::Output::RetireRejected(meta::RejectedRetire {
+                retire_rejection_reason: Self::retire_reason(report.rejection_reason),
+                state_marker: marker,
+            }),
+            MetaOperation::Test => meta::Output::TestRejected(meta::RejectedTest {
+                test_rejection_reason: Self::test_reason(report.rejection_reason),
+                state_marker: marker,
+            }),
         };
         Self::reply_meta(output)
     }
@@ -3681,9 +3477,9 @@ impl SchemaRuntime {
                 // an unexpected effect completion replies a rejection.
                 return match result {
                     nexus::EffectResult::EffectFailed(failure) => self.fail_pipeline(failure),
-                    _ => Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
+                    _ => Self::reply_meta(meta::Output::DeployRejected(
                         self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-                    ))),
+                    )),
                 };
             }
         };
@@ -3810,9 +3606,7 @@ impl SchemaRuntime {
                     }
                 };
                 self.active_deploy = None;
-                Self::reply_meta(meta::Output::DeployAccepted(meta::DeployAccepted::new(
-                    accepted,
-                )))
+                Self::reply_meta(meta::Output::DeployAccepted(accepted))
             }
             nexus::EffectResult::PathsCollected(_) => self.finish_deploy_pipeline(),
             // The test-dispatch effect results never reach the DEPLOY effect
@@ -3843,7 +3637,7 @@ impl SchemaRuntime {
     /// This is intentionally independent of Nix-command parsing: an injected
     /// `EffectResult` must not reach a later build, copy, or activation command.
     fn set_closure_path(&mut self, closure_path: ordinary::ClosurePath) -> bool {
-        if !canonical_nix_store_root(closure_path.payload()) {
+        if !NixStorePath::new(closure_path.payload()).is_canonical_item_root() {
             return false;
         }
         if let Some(pipeline) = self.active_deploy.as_mut() {
@@ -3937,9 +3731,9 @@ impl SchemaRuntime {
                 pipeline.phase_event(phase, ordinary::EventLogPosition::new(position), detail)
             }
             None => {
-                return Self::reply_meta(meta::Output::DeployRejected(meta::DeployRejected::new(
+                return Self::reply_meta(meta::Output::DeployRejected(
                     self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-                )));
+                ));
             }
         };
         nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordPhaseTransition(event))
@@ -4688,7 +4482,7 @@ impl SchemaRuntime {
         {
             Ok(output) => {
                 let closure_path = NixCommand::first_line(&output);
-                if !canonical_nix_store_root(&closure_path) {
+                if !NixStorePath::new(&closure_path).is_canonical_item_root() {
                     return Self::effect_failed(
                         nexus::EffectStage::Eval,
                         "nix eval returned a noncanonical closure path".to_string(),
@@ -4723,7 +4517,7 @@ impl SchemaRuntime {
             Ok(output) => {
                 let closure_path =
                     NixCommand::first_line_or(&output, command.closure_path.payload());
-                if !canonical_nix_store_root(&closure_path) {
+                if !NixStorePath::new(&closure_path).is_canonical_item_root() {
                     return Self::effect_failed(
                         nexus::EffectStage::Build,
                         "nix build returned a noncanonical closure path".to_string(),
@@ -6810,9 +6604,9 @@ impl nexus::NexusEngine for SchemaRuntime {
         &self,
         _exhausted: triad_runtime::ContinuationExhausted,
     ) -> nexus::SignalOutput {
-        nexus::SignalOutput::MetaOutput(meta::Output::DeployRejected(meta::DeployRejected::new(
+        nexus::SignalOutput::MetaOutput(meta::Output::DeployRejected(
             self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-        )))
+        ))
     }
 
     fn decide(

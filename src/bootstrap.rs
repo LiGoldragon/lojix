@@ -9,6 +9,7 @@
 //! has been atomically committed and directory-synced at the caller-selected
 //! path.
 
+use crate::inspected_text::{NixStorePath, StoreItemShape};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -776,7 +777,7 @@ fn build<E: BootstrapExecutor>(
         arguments: evaluation_arguments,
         environment: Vec::new(),
     })?)?;
-    if !is_canonical_nix_store_item(&derivation) || !derivation.ends_with(".drv") {
+    if !NixStorePath::new(&derivation).is_canonical_item() || !derivation.ends_with(".drv") {
         return Err(BootstrapError::Effect(BootstrapEffectStage::Built));
     }
 
@@ -802,7 +803,7 @@ fn build<E: BootstrapExecutor>(
         arguments: build_arguments,
         environment: Vec::new(),
     })?)?;
-    if !is_canonical_nix_store_item(&closure) || closure.ends_with(".drv") {
+    if !NixStorePath::new(&closure).is_canonical_item() || closure.ends_with(".drv") {
         return Err(BootstrapError::Effect(BootstrapEffectStage::Built));
     }
     Ok(closure)
@@ -2509,24 +2510,6 @@ fn absolute_normal_path(value: &str) -> std::result::Result<PathBuf, BootstrapEr
         ));
     }
     Ok(path)
-}
-
-fn is_canonical_nix_store_item(value: &str) -> bool {
-    let Some(item) = value.strip_prefix("/nix/store/") else {
-        return false;
-    };
-    let Some((hash, name)) = item.split_once('-') else {
-        return false;
-    };
-    hash.len() == 32
-        && hash.bytes().all(|byte| {
-            matches!(byte, b'0'..=b'9' | b'a'..=b'z') && !matches!(byte, b'e' | b'o' | b't' | b'u')
-        })
-        && !name.is_empty()
-        && !name.contains("..")
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'_' | b'-'))
 }
 
 #[cfg(test)]
