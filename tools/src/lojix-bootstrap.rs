@@ -5,8 +5,10 @@
 //! supplied journal parent and its terminal evidence is durable at the
 //! supplied evidence path.
 
+use lojix::bootstrap::{BootstrapInvocation as _, BootstrapRun};
+
 fn main() {
-    match lojix::bootstrap::run_from_environment() {
+    match BootstrapRun::run_from_environment() {
         Ok(terminal) => {
             println!("(BootstrapTerminal.{})", terminal.status);
             if terminal.status == "Failed" {

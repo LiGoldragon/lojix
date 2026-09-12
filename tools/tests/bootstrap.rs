@@ -12,12 +12,12 @@ use lojix::bootstrap::{
     BootstrapActivationBackend, BootstrapBootOnce, BootstrapBuildOnly, BootstrapBuilder,
     BootstrapCommand, BootstrapCrashInjector, BootstrapCrashPoint, BootstrapDirectInput,
     BootstrapEffectStage, BootstrapExecutor, BootstrapGcRootPath, BootstrapHermeticTest,
-    BootstrapJournalParent, BootstrapLocalBootstrapV1, BootstrapMode, BootstrapNixStoreUri,
-    BootstrapNixSystem, BootstrapOutputSelector, BootstrapRemoteNixosSystemdBootV1,
-    BootstrapRequestId, BootstrapRun, BootstrapSshDestination, BootstrapSshIdentityFile,
-    BootstrapSshKnownHostsFile, BootstrapSshPolicy, BootstrapStrictHostKeyMode,
-    BootstrapSystemProfilePath, BootstrapTerminalEvidencePath, BootstrapTestPlan,
-    decode_single_inline, run_with_executor, run_with_executor_and_crash,
+    BootstrapInvocation as _, BootstrapJournalParent, BootstrapLocalBootstrapV1, BootstrapMode,
+    BootstrapNixStoreUri, BootstrapNixSystem, BootstrapOutputSelector,
+    BootstrapRemoteNixosSystemdBootV1, BootstrapRequestId, BootstrapRun, BootstrapSshDestination,
+    BootstrapSshIdentityFile, BootstrapSshKnownHostsFile, BootstrapSshPolicy,
+    BootstrapStrictHostKeyMode, BootstrapSystemProfilePath, BootstrapTerminalEvidencePath,
+    BootstrapTestPlan,
 };
 
 const FLAKE: &str = "github:fixture-owner/fixture-flake/0123456789abcdef0123456789abcdef01234567";
@@ -266,8 +266,9 @@ fn build_only_has_no_transport_or_activation_body() {
     let directory = tempfile::tempdir().expect("tempdir");
     private(directory.path());
     let mut executor = SuppressedExecutor::default();
-    let terminal =
-        run_with_executor(build_only(directory.path()), &mut executor).expect("build only");
+    let terminal = build_only(directory.path())
+        .run_with_executor(&mut executor)
+        .expect("build only");
     assert_eq!(terminal.status, "Succeeded");
     assert_eq!(executor.count("nix-store", "--add-root"), 1);
     assert!(executor.commands.iter().all(|command| {
@@ -289,7 +290,9 @@ fn remote_dispatch_is_no_block_and_identity_is_explicit() {
     let directory = tempfile::tempdir().expect("tempdir");
     private(directory.path());
     let mut executor = SuppressedExecutor::default();
-    run_with_executor(remote_boot_once(directory.path()), &mut executor).expect("remote pipeline");
+    remote_boot_once(directory.path())
+        .run_with_executor(&mut executor)
+        .expect("remote pipeline");
     let dispatch = executor
         .commands
         .iter()
@@ -373,7 +376,9 @@ fn local_backend_has_explicit_systemd_and_path_environment() {
     let directory = tempfile::tempdir().expect("tempdir");
     private(directory.path());
     let mut executor = SuppressedExecutor::default();
-    run_with_executor(local_boot_once(directory.path()), &mut executor).expect("local pipeline");
+    local_boot_once(directory.path())
+        .run_with_executor(&mut executor)
+        .expect("local pipeline");
     let dispatch = executor
         .commands
         .iter()
@@ -408,7 +413,9 @@ fn crash_receipts_resume_without_repeating_prior_effects() {
         let mut initial = SuppressedExecutor::default();
         let mut crash = CrashOnce(point);
         assert!(matches!(
-            run_with_executor_and_crash(request.clone(), &mut initial, &mut crash),
+            request
+                .clone()
+                .run_with_executor_and_crash(&mut initial, &mut crash),
             Err(lojix::bootstrap::BootstrapError::InjectedCrash)
         ));
 
@@ -426,7 +433,9 @@ fn crash_receipts_resume_without_repeating_prior_effects() {
             })
             .count();
         let mut resumed = SuppressedExecutor::with_remote_receipts();
-        run_with_executor(request, &mut resumed).expect("resumed journal");
+        request
+            .run_with_executor(&mut resumed)
+            .expect("resumed journal");
         assert_eq!(resumed.count("nix-store", "--add-root"), 0, "{point:?}");
         if initial_copy > 0 {
             assert_eq!(resumed.count("nix", "copy"), 0, "{point:?}");
@@ -464,7 +473,9 @@ fn root_command_crash_reconciles_private_staging_for_every_mode() {
         let mut initial = SuppressedExecutor::default();
         let mut crash = CrashOnce(BootstrapCrashPoint::AfterGcRootCommand);
         assert!(matches!(
-            run_with_executor_and_crash(request.clone(), &mut initial, &mut crash),
+            request
+                .clone()
+                .run_with_executor_and_crash(&mut initial, &mut crash),
             Err(lojix::bootstrap::BootstrapError::InjectedCrash)
         ));
         let staging = fs::read_dir(directory.path())
@@ -478,7 +489,9 @@ fn root_command_crash_reconciles_private_staging_for_every_mode() {
         );
 
         let mut resumed = SuppressedExecutor::default();
-        run_with_executor(request, &mut resumed).expect("reconcile root staging");
+        request
+            .run_with_executor(&mut resumed)
+            .expect("reconcile root staging");
         assert_eq!(resumed.count("nix-store", "--add-root"), 0, "{mode}");
         assert_eq!(
             fs::read_link(directory.path().join("generation-root")).expect("final root"),
@@ -495,7 +508,12 @@ fn wrong_root_staging_after_crash_fails_without_deleting_it() {
     let request = build_only(directory.path());
     let mut initial = SuppressedExecutor::default();
     let mut crash = CrashOnce(BootstrapCrashPoint::AfterGcRootCommand);
-    assert!(run_with_executor_and_crash(request.clone(), &mut initial, &mut crash).is_err());
+    assert!(
+        request
+            .clone()
+            .run_with_executor_and_crash(&mut initial, &mut crash)
+            .is_err()
+    );
     let staging = fs::read_dir(directory.path())
         .expect("journal parent")
         .map(|entry| entry.expect("entry").path().join("gc-root-staging"))
@@ -508,7 +526,7 @@ fn wrong_root_staging_after_crash_fails_without_deleting_it() {
     )
     .expect("wrong link");
     let mut resumed = SuppressedExecutor::default();
-    assert!(run_with_executor(request, &mut resumed).is_err());
+    assert!(request.run_with_executor(&mut resumed).is_err());
     assert_eq!(
         fs::read_link(staging).expect("wrong staging remains"),
         Path::new("/nix/store/cccccccccccccccccccccccccccccccc-wrong")
@@ -532,7 +550,7 @@ fn nonprivate_ssh_policy_files_are_rejected_before_any_effect() {
     fs::set_permissions(&bad_identity, fs::Permissions::from_mode(0o644)).expect("mode");
     remote.ssh_policy.identity_file = BootstrapSshIdentityFile(bad_identity.display().to_string());
     let mut executor = SuppressedExecutor::default();
-    assert!(run_with_executor(request, &mut executor).is_err());
+    assert!(request.run_with_executor(&mut executor).is_err());
     assert!(executor.commands.is_empty());
 }
 
@@ -551,7 +569,7 @@ fn mutable_flakes_and_ambiguous_transport_fail_before_effects() {
         "github:fixture-owner/fixture-flake?rev=0123456789abcdef0123456789abcdef01234567"
             .to_string();
     let mut executor = SuppressedExecutor::default();
-    assert!(run_with_executor(mutable, &mut executor).is_err());
+    assert!(mutable.run_with_executor(&mut executor).is_err());
     assert!(executor.commands.is_empty());
 
     let mut mismatched = remote_boot_once(directory.path());
@@ -564,7 +582,7 @@ fn mutable_flakes_and_ambiguous_transport_fail_before_effects() {
     };
     remote.ssh_destination.0 = "root@other.invalid:2222".to_string();
     let mut executor = SuppressedExecutor::default();
-    assert!(run_with_executor(mismatched, &mut executor).is_err());
+    assert!(mismatched.run_with_executor(&mut executor).is_err());
     assert!(executor.commands.is_empty());
 }
 
@@ -599,7 +617,7 @@ fn transport_identity_rejection_table_never_reaches_a_body() {
         remote.ssh_destination.0 = destination.to_string();
         let mut executor = SuppressedExecutor::default();
         assert!(
-            run_with_executor(request, &mut executor).is_err(),
+            request.run_with_executor(&mut executor).is_err(),
             "{store_uri} / {destination}"
         );
         assert!(executor.commands.is_empty(), "{store_uri} / {destination}");
@@ -612,13 +630,21 @@ fn private_output_parents_and_existing_collisions_fail_closed() {
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755))
         .expect("make parent nonprivate");
     let mut executor = SuppressedExecutor::default();
-    assert!(run_with_executor(build_only(directory.path()), &mut executor).is_err());
+    assert!(
+        build_only(directory.path())
+            .run_with_executor(&mut executor)
+            .is_err()
+    );
     assert!(executor.commands.is_empty());
     fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
         .expect("restore parent");
     fs::write(directory.path().join("terminal.rkyv"), "collision").expect("collision");
     let mut executor = SuppressedExecutor::default();
-    assert!(run_with_executor(build_only(directory.path()), &mut executor).is_err());
+    assert!(
+        build_only(directory.path())
+            .run_with_executor(&mut executor)
+            .is_err()
+    );
     assert!(executor.commands.is_empty());
 }
 
@@ -631,7 +657,8 @@ fn failed_effect_writes_private_terminal_evidence_before_cleanup() {
         fail_subcommand: Some("build"),
         ..Default::default()
     };
-    let terminal = run_with_executor(build_only(directory.path()), &mut executor)
+    let terminal = build_only(directory.path())
+        .run_with_executor(&mut executor)
         .expect("failure becomes durable terminal evidence");
     assert_eq!(terminal.status, "Failed");
     let artifact = fs::symlink_metadata(directory.path().join("terminal.rkyv")).expect("evidence");
@@ -656,7 +683,9 @@ fn substituted_journal_child_is_never_cleaned_recursively() {
     let mut executor = SuppressedExecutor::default();
     let mut crash = CrashOnce(BootstrapCrashPoint::AfterGcRoot);
     assert!(matches!(
-        run_with_executor_and_crash(request.clone(), &mut executor, &mut crash),
+        request
+            .clone()
+            .run_with_executor_and_crash(&mut executor, &mut crash),
         Err(lojix::bootstrap::BootstrapError::InjectedCrash)
     ));
     let child = fs::read_dir(directory.path())
@@ -674,7 +703,7 @@ fn substituted_journal_child_is_never_cleaned_recursively() {
     fs::write(child.join("not-ours"), "retain").expect("replacement marker");
 
     let mut resumed = SuppressedExecutor::default();
-    assert!(run_with_executor(request, &mut resumed).is_err());
+    assert!(request.run_with_executor(&mut resumed).is_err());
     assert!(
         child.join("not-ours").exists(),
         "replacement survives fail-closed cleanup"
@@ -694,9 +723,9 @@ fn cli_remains_exactly_one_inline_object() {
         vec![OsString::from("--help")],
         vec![OsString::from("BootstrapRun.{}"), OsString::from("extra")],
     ] {
-        assert!(decode_single_inline(arguments).is_err());
+        assert!(BootstrapRun::decode_single_inline(arguments).is_err());
     }
-    let parsed = decode_single_inline([OsString::from(format!(
+    let parsed = BootstrapRun::decode_single_inline([OsString::from(format!(
         "BootstrapRun.{{fixture BuildOnly.{{Direct.{{{FLAKE} x86_64-linux nixosConfigurations.target.config.system.build.toplevel}} NoBuilder {} {} {}}}}}",
         directory.path().display(),
         directory.path().join("root").display(),

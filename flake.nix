@@ -51,6 +51,17 @@
               ]
             );
         };
+        # The two trait laws are read off the Rust text, so their check needs
+        # every `.rs` file plus the shell the check itself is written in —
+        # a different set from what crane compiles.
+        lawSource = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          filter =
+            path: type:
+            (type == "directory")
+            || (type == "regular" && pkgs.lib.hasSuffix ".rs" path)
+            || (type == "regular" && pkgs.lib.hasSuffix ".sh" path);
+        };
         commonArguments = {
           src = source;
           strictDeps = true;
@@ -221,6 +232,10 @@
           fmt = craneLib.cargoFmt {
             src = source;
           };
+
+          no-free-functions =
+            pkgs.runCommand "lojix-no-free-functions" { src = lawSource; }
+              (builtins.readFile ./checks/no-free-functions.sh);
 
           clippy = craneLib.cargoClippy (
             commonArguments
