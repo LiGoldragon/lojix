@@ -19,6 +19,7 @@ use crate::{
     DeploymentLedger as _, DurableStore as _, GenerationLedger as _, NexusPersistable as _,
 };
 use std::fmt::{Display, Formatter};
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -127,6 +128,38 @@ impl Runnable for Daemon {
     }
 }
 
+/// The one event a supervisor, an operator or a test may wait on to know that a
+/// Nexus is serving: both listeners bound, both started, nothing yet accepted.
+/// It is announced once, on standard output, in the same parenthesised form the
+/// offline tools use for their terminals.
+///
+/// A Nexus announces this because the alternative is a clock. A deadline that
+/// holds on a developer's machine is a lie on a loaded builder, and a waiter
+/// that believes it reports a startup failure that did not happen.
+pub trait NexusReadiness {
+    /// The head of the announcement. A waiter matches on this and reads the
+    /// bound socket paths that follow.
+    const READY: &'static str = "(LojixNexusReady";
+
+    /// Say, once, that both listeners are bound and serving.
+    fn announce_readiness(&self) -> Result<()>;
+}
+
+impl NexusReadiness for NexusConfiguration {
+    fn announce_readiness(&self) -> Result<()> {
+        let mut standard_output = std::io::stdout().lock();
+        writeln!(
+            standard_output,
+            "{} {} {})",
+            Self::READY,
+            self.ordinary_socket_path,
+            self.owner_socket_path
+        )?;
+        standard_output.flush()?;
+        Ok(())
+    }
+}
+
 async fn run_daemon(daemon_configuration: Daemon) -> Result<()> {
     let configuration = daemon_configuration.configuration;
     configuration.validate()?;
@@ -168,6 +201,10 @@ async fn run_daemon(daemon_configuration: Daemon) -> Result<()> {
         .start()
         .await
         .map_err(|error| Error::from(AsyncMultiListenerDaemonError::Start(error)))?;
+    // Both listeners are bound and started and nothing has been accepted yet:
+    // this is the moment a waiter is entitled to know about, so the Nexus says
+    // so rather than leaving a supervisor or a test to guess it from a clock.
+    configuration.announce_readiness()?;
 
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;

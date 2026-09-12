@@ -1,17 +1,26 @@
 //! Isolated process witnesses for the zero-argument Lojix Nexus.
 
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use lojix::daemon::NexusReadiness;
 use lojix::{LegacyConfigurationArchivable as _, LegacyStartupConfiguration};
 use signal::{ByteViewable, FrameBody, FrameCapacity, FrameReading, FrameWriting};
 use signal::{Restorable as _, Signalizable as _};
 
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// The backstop, and nothing else. The success path waits on the readiness the
+/// Nexus announces, not on a clock: a five-second deadline that holds on this
+/// machine is a lie on a loaded remote builder, and the test that believed it
+/// failed there while passing here. This bound exists only so that a Nexus
+/// wedged before readiness cannot take the harness down with it, and it is far
+/// above any real startup on any builder.
+const READINESS_BACKSTOP: Duration = Duration::from_secs(300);
 
 fn text(value: &str) -> String {
     value.to_owned()
@@ -66,8 +75,14 @@ fn zero_argument_daemon_persists_lifecycle_and_uses_desired_sockets_on_restart()
     let store = initial_state.join("lojix.sema");
 
     let mut daemon = start_daemon(&runtime_root, &state_root);
-    wait_for_socket(&ordinary_socket, &mut daemon, "ordinary");
-    wait_for_socket(&meta_socket, &mut daemon, "meta");
+    assert_eq!(
+        announced_readiness(&mut daemon, "first start"),
+        vec![
+            ordinary_socket.display().to_string(),
+            meta_socket.display().to_string(),
+        ],
+        "the Nexus must name both bound listeners when it announces readiness"
+    );
 
     let ordinary_configuration = configuration(
         &ordinary_socket,
@@ -128,15 +143,13 @@ fn zero_argument_daemon_persists_lifecycle_and_uses_desired_sockets_on_restart()
     assert!(store.exists(), "stable XDG-discovered Sema must persist");
 
     let mut restarted = start_daemon(&runtime_root, &state_root);
-    wait_for_socket(
-        &next_ordinary_socket,
-        &mut restarted,
-        "desired ordinary after restart",
-    );
-    wait_for_socket(
-        &next_meta_socket,
-        &mut restarted,
-        "desired meta after restart",
+    assert_eq!(
+        announced_readiness(&mut restarted, "restart"),
+        vec![
+            next_ordinary_socket.display().to_string(),
+            next_meta_socket.display().to_string(),
+        ],
+        "a restarted Nexus must announce the desired listeners it resumed onto"
     );
     let reply = ordinary_exchange(
         &next_ordinary_socket,
@@ -179,17 +192,38 @@ fn start_daemon(runtime_root: &Path, state_root: &Path) -> Child {
         .expect("start zero-argument lojix-nexus")
 }
 
-fn wait_for_socket(path: &Path, daemon: &mut Child, listener: &str) {
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
-    loop {
-        if UnixStream::connect(path).is_ok() {
-            return;
+/// Wait for the event the Nexus announces when both listeners are bound, and
+/// answer with the socket paths it named. The wait ends on the announcement, or
+/// on the child's standard output closing — which is what happens when the
+/// Nexus exits before becoming ready, so a failed startup is reported at once
+/// rather than after a deadline.
+fn announced_readiness(daemon: &mut Child, occasion: &str) -> Vec<String> {
+    let stdout = daemon.stdout.take().expect("piped Nexus standard output");
+    let (announced, arrival) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout)
+            .lines()
+            .map_while(std::result::Result::ok)
+        {
+            if line.starts_with(<lojix::NexusConfiguration as NexusReadiness>::READY) {
+                let _ = announced.send(Some(line));
+                return;
+            }
         }
-        if let Some(status) = daemon.try_wait().expect("inspect daemon startup") {
-            panic!("lojix-nexus exited before {listener} became reachable: {status}");
-        }
-        assert!(Instant::now() < deadline, "{listener} was not reachable");
-        thread::sleep(Duration::from_millis(10));
+        let _ = announced.send(None);
+    });
+    match arrival.recv_timeout(READINESS_BACKSTOP) {
+        Ok(Some(line)) => line
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .split_whitespace()
+            .skip(1)
+            .map(str::to_owned)
+            .collect(),
+        Ok(None) => panic!(
+            "lojix-nexus closed its standard output without announcing readiness on {occasion}"
+        ),
+        Err(_) => panic!("lojix-nexus never announced readiness on {occasion}"),
     }
 }
 
