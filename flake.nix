@@ -32,6 +32,9 @@
           "rust-src"
         ];
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
+        # Read rather than repeat: the joined package's name drifted to 1.0.1
+        # while the workspace moved on without it.
+        workspaceVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
         source = pkgs.lib.cleanSourceWith {
           src = ./.;
           filter =
@@ -125,7 +128,7 @@
           '';
         };
         completePackage = pkgs.symlinkJoin {
-          name = "lojix-1.0.1";
+          name = "lojix-${workspaceVersion}";
           paths = [
             nexusPackage
             ordinaryClientPackage
