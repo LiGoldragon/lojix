@@ -507,6 +507,7 @@ impl RequestServable for RequestWorker {
             Ok(DeployAdmission::Rejected(rejected)) => {
                 Ok(sema::MetaEgress::DeployRejected(rejected))
             }
+            Ok(DeployAdmission::Refused(refused)) => Ok(sema::MetaEgress::DeployRefused(refused)),
             // The deploy-job actor is daemon-lifetime; a send error means the
             // runtime is tearing down. Reply a typed internal rejection rather
             // than dropping the connection without a frame.
@@ -700,12 +701,11 @@ impl DeployProcessable for DeployJobs {
                     continue;
                 };
                 match observer.initial_outcome().await {
-                    Ok(crate::schema_runtime::DetachedActivationOutcome::Succeeded) => {
+                    Ok(Some(crate::schema_runtime::DetachedActivationOutcome::Succeeded)) => {
                         if self
                             .store
                             .terminalize_deployment(
                                 deployment_identifier,
-                                sema::DeploymentLifecycle::Completed,
                                 sema::DeploymentTerminal::Succeeded,
                             )
                             .is_ok()
@@ -713,21 +713,24 @@ impl DeployProcessable for DeployJobs {
                             unit.clean().await;
                         }
                     }
-                    Ok(outcome @ crate::schema_runtime::DetachedActivationOutcome::Failed(_))
-                    | Ok(outcome @ crate::schema_runtime::DetachedActivationOutcome::Missing) => {
+                    Ok(
+                        outcome @ Some(
+                            crate::schema_runtime::DetachedActivationOutcome::Failed(_)
+                            | crate::schema_runtime::DetachedActivationOutcome::Missing,
+                        ),
+                    ) => {
                         // A Missing transient is its own evidence: PID 1 no
                         // longer has the unit, so there is nothing it reported.
                         let optional_failure_evidence = match &outcome {
-                            crate::schema_runtime::DetachedActivationOutcome::Failed(observed) => {
-                                Some(crate::schema_runtime::Witnessing::witness(observed))
-                            }
+                            Some(crate::schema_runtime::DetachedActivationOutcome::Failed(
+                                observed,
+                            )) => Some(crate::schema_runtime::Witnessing::witness(observed)),
                             _ => None,
                         };
                         if self
                             .store
                             .terminalize_deployment(
                                 deployment_identifier,
-                                sema::DeploymentLifecycle::Failed,
                                 sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
                                     deployment_failure_stage:
                                         sema::DeploymentFailureStage::Activate,
@@ -741,10 +744,8 @@ impl DeployProcessable for DeployJobs {
                             unit.clean().await;
                         }
                     }
-                    Ok(
-                        crate::schema_runtime::DetachedActivationOutcome::PendingRegistration
-                        | crate::schema_runtime::DetachedActivationOutcome::Running,
-                    ) => {
+                    Ok(None | Some(crate::schema_runtime::DetachedActivationOutcome::Running)) => {
+                        // A registration window (None) or a unit still running.
                         // The exact observer owns both the queued UnitNew and
                         // the subscribe-before-read terminal-state watcher.
                         observer.observe(self.store.clone(), deployment_identifier);
@@ -864,11 +865,9 @@ impl DeployProcessable for DeployJobs {
         if !already_recorded && self.store.record_activation(generation, root).is_err() {
             return;
         }
-        let _ = self.store.terminalize_deployment(
-            deployment_identifier,
-            sema::DeploymentLifecycle::Completed,
-            sema::DeploymentTerminal::Succeeded,
-        );
+        let _ = self
+            .store
+            .terminalize_deployment(deployment_identifier, sema::DeploymentTerminal::Succeeded);
     }
 }
 
@@ -897,6 +896,18 @@ pub struct AdmitDeploy {
 pub enum DeployAdmission {
     Accepted(sema::DeployHandle),
     Rejected(sema::RejectedDeploy),
+    /// Refused with no deployment to name — see `DeploySubmissionOutcome`.
+    Refused(sema::RefusedDeploy),
+}
+
+impl From<DeploySubmissionOutcome> for DeployAdmission {
+    fn from(outcome: DeploySubmissionOutcome) -> Self {
+        match outcome {
+            DeploySubmissionOutcome::Accepted(accepted) => Self::Accepted(accepted),
+            DeploySubmissionOutcome::Rejected(rejected) => Self::Rejected(rejected),
+            DeploySubmissionOutcome::Refused(refused) => Self::Refused(refused),
+        }
+    }
 }
 
 impl Message<AdmitDeploy> for DeployJobs {
@@ -912,7 +923,7 @@ impl Message<AdmitDeploy> for DeployJobs {
                 self.store.clone(),
                 self.configuration.clone(),
             );
-            return DeployAdmission::Rejected(engine.reject_deployment_in_flight(message.request));
+            return engine.reject_deployment_in_flight(message.request).into();
         }
         let mut engine = SchemaRuntime::with_store_and_configuration(
             self.store.clone(),
@@ -924,7 +935,7 @@ impl Message<AdmitDeploy> for DeployJobs {
                 self.launch_pipeline(engine, context.actor_ref().clone());
                 DeployAdmission::Accepted(accepted)
             }
-            DeploySubmissionOutcome::Rejected(rejected) => DeployAdmission::Rejected(rejected),
+            rejected => rejected.into(),
         }
     }
 }

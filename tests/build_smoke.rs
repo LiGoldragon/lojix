@@ -126,9 +126,7 @@ async fn fixture_eval_reserves_a_durable_deployment_before_effects() {
 
     let handle = match engine.submit_deploy(request) {
         DeploySubmissionOutcome::Accepted(handle) => handle,
-        DeploySubmissionOutcome::Rejected(rejected) => {
-            panic!("fixture deploy rejected: {rejected:?}")
-        }
+        other => panic!("fixture deploy was not accepted: {other:?}"),
     };
     let records = engine
         .store()

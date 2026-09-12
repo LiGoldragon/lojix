@@ -266,6 +266,7 @@ pub enum DeploymentTerminalReason {
     ActivationFailed,
     EvaluationFailed,
     BuildFailed,
+    ClosureCopyFailed,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DeploymentFailure {
@@ -690,6 +691,8 @@ pub enum RejectionReason {
     GenerationPinned,
     EventLogPositionOutOfRange,
     ProposalSourceUnreachable,
+    /// The durable write itself failed, so no record was produced.
+    DurableWriteFailed,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
 pub enum QueryRejectionReason {
@@ -755,6 +758,21 @@ pub enum TestRejectionReason {
     InternalError,
 }
 runtime_newtype!(RejectedDeploy, DeploymentRecord);
+/// A deploy refusal that names no deployment, because at the moment of refusal
+/// there is none to name. `RejectedDeploy` carries the record it rejected;
+/// this carries only what happened, in the `reason + marker` shape every other
+/// meta refusal has.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RefusedDeploy {
+    pub deploy_refusal_reason: DeployRefusalReason,
+    pub state_marker: StateMarker,
+}
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
+pub enum DeployRefusalReason {
+    ContinuationBudgetExhausted,
+    NoCorrelatedDeployment,
+    DurableWriteFailed,
+}
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RejectedPin {
     pub pin_rejection_reason: PinRejectionReason,
@@ -827,6 +845,7 @@ pub enum MetaEgress {
     ConfigurationReversed(ConfigurationReceipt),
     DeployAccepted(DeployHandle),
     DeployRejected(RejectedDeploy),
+    DeployRefused(RefusedDeploy),
     DeployTerminal(DeploymentRecord),
     Pinned(AppliedPin),
     PinRejected(RejectedPin),

@@ -1,5 +1,82 @@
 # Upgrades
 
+# 4.0.1 to 5.0.0
+
+Repins `signal-lojix` 5.0.0 (`4271b5ced31ea02f11f29b602301832e83cfe6c2`) and
+`meta-signal-lojix` 6.0.0 (`35deec4ef0a6d023f2f49464515075779cbb4973`). Both
+are wire-breaking; see their UPGRADES.md.
+
+**No production `unreachable!()` remains in the crate.** There were fourteen
+(`src/lib.rs` 1, `src/schema_runtime.rs` 13); six more sit in `#[cfg(test)]`
+modules and are left, because a test that reaches an impossible branch aborts
+one test. Each was decided from the code: either the state it asserted was genuinely
+unrepresentable, in which case the types were changed so the site had nothing
+left to say, or it was reachable, in which case it now answers the peer.
+
+*Made unrepresentable, site removed.*
+
+- `Store::terminalize_deployment` and `Store::begin_terminal_transition` no
+  longer take a `DeploymentLifecycle`. Every caller passed the one that agrees
+  with the `DeploymentTerminal` beside it; the new `TerminalOutcome` trait
+  reads the lifecycle, the deployment phase and the deploy-job phase from the
+  terminal itself. A terminal and a lifecycle that disagree is now
+  inexpressible, and `Store::terminal_phase`/`terminal_job_phase` are gone
+  with it. **Consumers drop the middle argument.**
+- `DeployResumeStage` bears `ResumePoint`: `recorded_phase()` and
+  `deploy_stage()`. The resume path had a `matches!` guard and a match that
+  had to agree about which three stages have a phase receipt; now it reads the
+  one answer.
+- `HostActivation::runs_detached_self_activation() -> bool` becomes
+  `detached_self_activation() -> Option<DetachedSelfActivation>`. The handoff
+  script is total over that type, so there is no action left without one.
+- `DetachedActivationOutcome::PendingRegistration` is deleted. `classify`
+  never produced it; only the pre-GetUnit lookup did, so
+  `DetachedActivationObserver::initial_outcome` now returns
+  `Option<DetachedActivationOutcome>` and the registration window is the
+  absence of an outcome rather than one of its values.
+- `drive_submitted_deploy` folds its `FinishDeployment` special case into the
+  one match over the resume stage, dropping a duplicated cursor lookup.
+- `SchemaRuntime::fail_pipeline` and `finish_deploy_pipeline` take the deploy
+  cursor from their caller, which already holds it.
+- `SchemaRuntime::deploy_rejection` takes the `DeploymentIdentifier` its
+  caller holds, so a rejection with no deployment to name cannot be written.
+
+*Reachable, now answered.*
+
+- `meta-signal-lojix` gains `DeployRefused.RefusedDeploy`. Three refusals
+  name no deployment — the continuation budget exhausted, a completion
+  arriving with no correlated cursor, a durable write failing before the
+  record exists. Each previously aborted the daemon or fabricated a record.
+- Every durable-write failure inside a sema-apply handler now returns
+  `WriteRejected(DurableWriteFailed)` instead of aborting; the cause goes to
+  the daemon journal.
+- `DeploySubmissionOutcome` and `DeployAdmission` each gain a third variant,
+  `Refused`, carrying `RefusedDeploy`. Allocating a rejection is itself a
+  durable write, and `reject_submission` ended in an `expect`: any deploy
+  submitted while the store was unwritable aborted the daemon on the most
+  ordinary path a peer has. **Consumers matching either enum add the arm.**
+- `SchemaRuntime::reject_active_or_meta` reads the deploy cursor **before**
+  clearing it. Clearing first meant every write rejection during a deploy
+  aborted the daemon on the following `expect`.
+- The four deploy preflights in the engine's own meta routing allocated no
+  correlation record and then tried to terminalize one; they now go through
+  `reject_submission`, as the synchronous submit already did. The four checks
+  live in one `submission_rejection`, so the two paths cannot drift.
+
+**`DeploymentTerminalReason::ClosureCopyFailed`** replaces
+`BuilderUnreachable` for a failed closure copy. `nix copy` engages no builder.
+`BuilderUnreachable` is no longer produced anywhere; it stays on the wire for
+a build-stage failure that is one day classified that way.
+
+**`DeploymentPhaseEvent` is unchanged, deliberately.** The discarded
+`_detail: Option<String>` on `DeployPipeline::phase_event` is removed rather
+than carried onto the wire: all four callers of `record_phase` passed `None`,
+so there was no detail to lose. What would have been phase detail — a stage's
+stderr, the command it ran — already rides the terminal record's
+`FailureEvidence`, which the event log carries through
+`optional_deployment_terminal`. Widening the event would have added an
+always-absent field to every phase event in the durable log.
+
 ## 4.0.1 — the producer chain settles, and the VM fixture is produced not written
 
 ### The repin

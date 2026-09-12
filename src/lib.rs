@@ -507,6 +507,41 @@ pub trait LegacyConfigurationMigratable {
 }
 
 /// Capability to persist and transition the standard Nexus configuration.
+/// What a deployment terminal says about the deployment that reached it. The
+/// terminal names the outcome, so the lifecycle and the phases it implies are
+/// read from it rather than carried alongside it — a terminal and a lifecycle
+/// that disagree is a state no caller can now express.
+pub trait TerminalOutcome {
+    fn deployment_lifecycle(&self) -> DeploymentLifecycle;
+    fn deployment_phase(&self) -> crate::runtime_model::DeploymentPhase;
+    fn deploy_job_phase(&self) -> crate::runtime_model::DeployJobPhase;
+}
+
+impl TerminalOutcome for DeploymentTerminal {
+    fn deployment_lifecycle(&self) -> DeploymentLifecycle {
+        match self {
+            Self::Succeeded => DeploymentLifecycle::Completed,
+            Self::Failed(_) => DeploymentLifecycle::Failed,
+            Self::Rejected(_) => DeploymentLifecycle::Rejected,
+        }
+    }
+
+    fn deployment_phase(&self) -> crate::runtime_model::DeploymentPhase {
+        match self {
+            Self::Succeeded => crate::runtime_model::DeploymentPhase::Completed,
+            Self::Failed(_) => crate::runtime_model::DeploymentPhase::Failed,
+            Self::Rejected(_) => crate::runtime_model::DeploymentPhase::Rejected,
+        }
+    }
+
+    fn deploy_job_phase(&self) -> crate::runtime_model::DeployJobPhase {
+        match self {
+            Self::Succeeded => crate::runtime_model::DeployJobPhase::Activated,
+            Self::Failed(_) | Self::Rejected(_) => crate::runtime_model::DeployJobPhase::Failed,
+        }
+    }
+}
+
 pub trait NexusPersistable {
     fn open_with_default_configuration(
         path: impl Into<PathBuf>,
@@ -1988,31 +2023,6 @@ impl Store {
             })
     }
 
-    fn terminal_phase(
-        deployment_lifecycle: DeploymentLifecycle,
-    ) -> Result<crate::runtime_model::DeploymentPhase> {
-        match deployment_lifecycle {
-            DeploymentLifecycle::Completed => Ok(crate::runtime_model::DeploymentPhase::Completed),
-            DeploymentLifecycle::Rejected => Ok(crate::runtime_model::DeploymentPhase::Rejected),
-            DeploymentLifecycle::Failed => Ok(crate::runtime_model::DeploymentPhase::Failed),
-            _ => Err(Error::Invariant(
-                "terminal intent requires a terminal deployment lifecycle".to_string(),
-            )),
-        }
-    }
-
-    fn terminal_job_phase(
-        deployment_lifecycle: DeploymentLifecycle,
-    ) -> crate::runtime_model::DeployJobPhase {
-        match deployment_lifecycle {
-            DeploymentLifecycle::Completed => crate::runtime_model::DeployJobPhase::Activated,
-            DeploymentLifecycle::Rejected | DeploymentLifecycle::Failed => {
-                crate::runtime_model::DeployJobPhase::Failed
-            }
-            _ => unreachable!("terminal job phase requires a terminal lifecycle"),
-        }
-    }
-
     /// Atomically persist the terminal correlation state and its write-ahead
     /// intent.  The job remains durable through dispatch/journal delivery and
     /// is retracted only in the same acknowledgement commit as the intent and
@@ -2020,10 +2030,11 @@ impl Store {
     pub fn begin_terminal_transition(
         &self,
         deployment_identifier: u64,
-        deployment_lifecycle: DeploymentLifecycle,
         deployment_terminal: DeploymentTerminal,
     ) -> Result<u64> {
-        let deployment_phase = Self::terminal_phase(deployment_lifecycle)?;
+        let deployment_lifecycle = deployment_terminal.deployment_lifecycle();
+        let deployment_phase = deployment_terminal.deployment_phase();
+        let deploy_job_phase = deployment_terminal.deploy_job_phase();
         let _write = self.lock_write()?;
         let mut record = self
             .deployment_records_unchecked()?
@@ -2099,7 +2110,7 @@ impl Store {
             .into_iter()
             .find(|job| *job.deployment_identifier.payload() == deployment_identifier)
         {
-            job.deploy_job_phase = Self::terminal_job_phase(deployment_lifecycle);
+            job.deploy_job_phase = deploy_job_phase;
             job.deploy_resume_stage = crate::runtime_model::DeployResumeStage::FinishDeployment;
             commit = commit.mutate(self.deploy_jobs, job);
         }
@@ -2112,14 +2123,9 @@ impl Store {
     pub fn terminalize_deployment(
         &self,
         deployment_identifier: u64,
-        deployment_lifecycle: DeploymentLifecycle,
         deployment_terminal: DeploymentTerminal,
     ) -> Result<DeploymentRecord> {
-        let ordinal = self.begin_terminal_transition(
-            deployment_identifier,
-            deployment_lifecycle,
-            deployment_terminal,
-        )?;
+        let ordinal = self.begin_terminal_transition(deployment_identifier, deployment_terminal)?;
         self.complete_pending_transition_intent(deployment_identifier, ordinal)?;
         let record = self
             .deployment_records_unchecked()?
@@ -2153,7 +2159,7 @@ impl Store {
             generation_identifier: allocation.next_generation_identifier.into(),
             deployment_request_identity,
             optional_admission_marker: None,
-            deployment_lifecycle: DeploymentLifecycle::Rejected,
+            deployment_lifecycle: deployment_terminal.deployment_lifecycle(),
             optional_terminal_marker: None,
             optional_deployment_terminal: Some(deployment_terminal.clone()),
         };
@@ -2162,7 +2168,7 @@ impl Store {
             generation_identifier: record.generation_identifier.clone(),
             cluster_name: record.deployment_request_identity.cluster_name.clone(),
             node_name: record.deployment_request_identity.node_name.clone(),
-            deployment_phase: crate::runtime_model::DeploymentPhase::Rejected,
+            deployment_phase: deployment_terminal.deployment_phase(),
             event_log_position: allocation.next_event_log_position.into(),
             optional_immutable_revision: record
                 .deployment_request_identity
@@ -3308,7 +3314,6 @@ mod transition_intent_tests {
                 let ordinal = store
                     .begin_terminal_transition(
                         deployment_identifier,
-                        ordinary::DeploymentLifecycle::Completed,
                         ordinary::DeploymentTerminal::Succeeded,
                     )
                     .expect("atomically persist completed state and terminal intent");

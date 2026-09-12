@@ -172,7 +172,7 @@ mod meta {
         ProposalSourceUnreachable,
         FlakeReferenceMalformed,
         InvalidDeploymentRouting,
-        BuilderUnreachable,
+        ClosureCopyFailed,
         DeploymentInFlight,
         UnsupportedDeployAction,
         InternalError,
@@ -885,7 +885,11 @@ impl LiveTestVm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeploySubmissionOutcome {
     Accepted(meta::DeployHandle),
+    /// Refused, naming the deployment record the refusal terminalized.
     Rejected(meta::RejectedDeploy),
+    /// Refused with no deployment to name, because the write that would have
+    /// allocated one failed.
+    Refused(meta::RefusedDeploy),
 }
 
 impl From<&NexusConfiguration> for RuntimeConfiguration {
@@ -1704,7 +1708,6 @@ impl DeployPipeline {
         &self,
         phase: ordinary::DeploymentPhase,
         event_log_position: ordinary::EventLogPosition,
-        _detail: Option<String>,
     ) -> ordinary::DeploymentPhaseEvent {
         ordinary::DeploymentPhaseEvent {
             deployment_identifier: self.deployment_identifier.clone(),
@@ -1986,6 +1989,35 @@ impl From<sema::StoredTestRun> for ordinary::TestRunRecord {
     }
 }
 
+/// Where a persisted resume stage sits in the pipeline. A stage either names
+/// the phase whose durable receipt it resumes after, or it does not — the one
+/// answer, read once, instead of a guard and a match that must agree.
+trait ResumePoint {
+    fn recorded_phase(&self) -> Option<ordinary::DeploymentPhase>;
+    fn deploy_stage(&self) -> DeployStage;
+}
+
+impl ResumePoint for sema::DeployResumeStage {
+    fn recorded_phase(&self) -> Option<ordinary::DeploymentPhase> {
+        match self {
+            Self::NixEval => Some(ordinary::DeploymentPhase::Building),
+            Self::ActivateGeneration => Some(ordinary::DeploymentPhase::Copying),
+            Self::RecordGenerationActivated => Some(ordinary::DeploymentPhase::Activated),
+            _ => None,
+        }
+    }
+
+    fn deploy_stage(&self) -> DeployStage {
+        match self {
+            Self::NixEval => DeployStage::Submitted,
+            Self::ActivateGeneration => DeployStage::BuildingRecorded,
+            Self::RecordGenerationActivated => DeployStage::CopyingRecorded,
+            Self::FinishDeployment => DeployStage::ActivatedRecorded,
+            _ => DeployStage::Submitted,
+        }
+    }
+}
+
 impl From<ordinary::DeploymentPhase> for sema::DeployJobPhase {
     /// Mirror the wire phase onto the durable job-row phase cursor. The two
     /// enums carry the same variants; the job row tracks the same lifecycle the
@@ -2076,7 +2108,7 @@ impl SchemaRuntime {
     pub fn reject_deployment_in_flight(
         &self,
         request: sema::DeploySubmission,
-    ) -> sema::RejectedDeploy {
+    ) -> DeploySubmissionOutcome {
         self.reject_submission(request, meta::DeployRejectionReason::DeploymentInFlight)
     }
 
@@ -2089,37 +2121,22 @@ impl SchemaRuntime {
     /// to the deploy-job actor, which drives the pipeline via
     /// [`Self::drive_submitted_deploy`]. The pipeline does NOT run here.
     pub fn submit_deploy(&mut self, request: meta::DeployRequest) -> DeploySubmissionOutcome {
-        if let Some(reason) = Self::unsupported_deploy_reason(&request) {
-            return DeploySubmissionOutcome::Rejected(self.reject_submission(request, reason));
-        }
-        if let Some(reason) = Self::deployment_routing_rejection(&request) {
-            return DeploySubmissionOutcome::Rejected(self.reject_submission(request, reason));
-        }
-        if let Some(reason) = Self::proposal_source_rejection(&request) {
-            return DeploySubmissionOutcome::Rejected(self.reject_submission(request, reason));
-        }
-        if let Some(reason) = Self::source_revision_policy_rejection(&request) {
-            return DeploySubmissionOutcome::Rejected(self.reject_submission(request, reason));
+        if let Some(reason) = Self::submission_rejection(&request) {
+            return self.reject_submission(request, reason);
         }
         self.active_operation = Some(MetaOperation::Deploy);
         let rejected_request = request.clone();
-        let submission = match request {
-            meta::DeployRequest::Host(deployment) => sema::DeploySubmission::Host(deployment),
-            meta::DeployRequest::UserEnvironment(deployment) => {
-                sema::DeploySubmission::UserEnvironment(deployment)
-            }
-        };
-        match self.record_deploy_submitted(submission) {
+        match self.record_deploy_submitted(request) {
             sema::SemaWriteOutput::DeploySubmitted(accepted) => {
                 DeploySubmissionOutcome::Accepted(accepted)
             }
             sema::SemaWriteOutput::WriteRejected(report) => {
                 self.active_operation = None;
                 self.active_deploy = None;
-                DeploySubmissionOutcome::Rejected(self.reject_submission(
+                self.reject_submission(
                     rejected_request,
                     Self::deploy_reason(report.rejection_reason),
-                ))
+                )
             }
             // `record_deploy_submitted` only ever returns the two arms above;
             // any other output is an internal invariant violation surfaced as a
@@ -2127,10 +2144,7 @@ impl SchemaRuntime {
             _ => {
                 self.active_operation = None;
                 self.active_deploy = None;
-                DeploySubmissionOutcome::Rejected(self.reject_submission(
-                    rejected_request,
-                    meta::DeployRejectionReason::InternalError,
-                ))
+                self.reject_submission(rejected_request, meta::DeployRejectionReason::InternalError)
             }
         }
     }
@@ -2220,22 +2234,9 @@ impl SchemaRuntime {
         pipeline.resume_stage = job.deploy_resume_stage;
         pipeline.phase_receipt = job.optional_phase_receipt.clone();
         let mut recovered_phase_receipt = false;
-        if pipeline.phase_receipt.is_none()
-            && matches!(
-                pipeline.resume_stage,
-                sema::DeployResumeStage::NixEval
-                    | sema::DeployResumeStage::ActivateGeneration
-                    | sema::DeployResumeStage::RecordGenerationActivated
-            )
+        if let Some(expected_phase) = pipeline.resume_stage.recorded_phase()
+            && pipeline.phase_receipt.is_none()
         {
-            let expected_phase = match pipeline.resume_stage {
-                sema::DeployResumeStage::NixEval => ordinary::DeploymentPhase::Building,
-                sema::DeployResumeStage::ActivateGeneration => ordinary::DeploymentPhase::Copying,
-                sema::DeployResumeStage::RecordGenerationActivated => {
-                    ordinary::DeploymentPhase::Activated
-                }
-                _ => unreachable!("phase receipt is required only for recorded phases"),
-            };
             let matching_intents: Vec<_> = self
                 .store
                 .pending_transition_intents()?
@@ -2291,13 +2292,7 @@ impl SchemaRuntime {
             pipeline.phase_receipt = matching_receipts.into_iter().next();
             recovered_phase_receipt = true;
         }
-        pipeline.stage = match pipeline.resume_stage {
-            sema::DeployResumeStage::NixEval => DeployStage::Submitted,
-            sema::DeployResumeStage::ActivateGeneration => DeployStage::BuildingRecorded,
-            sema::DeployResumeStage::RecordGenerationActivated => DeployStage::CopyingRecorded,
-            sema::DeployResumeStage::FinishDeployment => DeployStage::ActivatedRecorded,
-            _ => DeployStage::Submitted,
-        };
+        pipeline.stage = pipeline.resume_stage.deploy_stage();
         pipeline.source_revision = job.optional_flake_reference.clone().map(|resolved_ref| {
             ordinary::SourceRevisionRecord {
                 source_revision_policy: job.source_revision_policy,
@@ -2328,43 +2323,34 @@ impl SchemaRuntime {
     /// and tests; the client already has its admission handle and re-observes
     /// the outcome by deployment identifier.
     pub async fn drive_submitted_deploy(&mut self) -> meta::Output {
-        let accepted = match self.active_deploy.as_ref() {
-            Some(pipeline) => meta::DeployHandle {
-                deployment_identifier: pipeline.deployment_identifier.clone(),
-                state_marker: pipeline.accepted_marker.clone(),
-            },
-            None => {
-                return meta::Output::DeployRejected(
-                    self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                );
-            }
+        let Some(pipeline) = self.active_deploy.clone() else {
+            return self.refuse_deploy(
+                sema::DeployRefusalReason::NoCorrelatedDeployment,
+                &"a submitted deploy was driven with no correlated cursor",
+            );
         };
-        let pipeline = self
-            .active_deploy
-            .as_ref()
-            .expect("active deploy checked above");
-        if matches!(
-            pipeline.resume_stage,
-            sema::DeployResumeStage::FinishDeployment
-        ) {
-            return match self.finish_deploy_pipeline() {
-                nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => {
-                    output
-                }
-                _ => meta::Output::DeployRejected(
-                    self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                ),
-            };
-        }
+        let identifier = pipeline.deployment_identifier.clone();
+        let accepted = meta::DeployHandle {
+            deployment_identifier: identifier.clone(),
+            state_marker: pipeline.accepted_marker.clone(),
+        };
         let work = match pipeline.resume_stage {
+            sema::DeployResumeStage::FinishDeployment => {
+                return match self.finish_deploy_pipeline(&pipeline) {
+                    nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => {
+                        output
+                    }
+                    _ => self
+                        .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError),
+                };
+            }
             sema::DeployResumeStage::ResolveFlakeAuth => nexus::NexusWork::SemaWriteCompleted(
                 sema::SemaWriteOutput::DeploySubmitted(accepted),
             ),
             sema::DeployResumeStage::MaterializeHorizon => {
                 let Some(revision) = pipeline.source_revision.clone() else {
-                    return meta::Output::DeployRejected(
-                        self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                    );
+                    return self
+                        .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
                 nexus::NexusWork::EffectCompleted(nexus::EffectResult::flake_resolved(revision))
             }
@@ -2373,17 +2359,15 @@ impl SchemaRuntime {
             ),
             sema::DeployResumeStage::NixEval => {
                 let Some(receipt) = pipeline.phase_receipt.clone() else {
-                    return meta::Output::DeployRejected(
-                        self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                    );
+                    return self
+                        .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
                 nexus::NexusWork::SemaWriteCompleted(sema::SemaWriteOutput::PhaseRecorded(receipt))
             }
             sema::DeployResumeStage::NixBuild => {
                 let Some(closure_path) = pipeline.closure_path.clone() else {
-                    return meta::Output::DeployRejected(
-                        self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                    );
+                    return self
+                        .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
                 nexus::NexusWork::EffectCompleted(nexus::EffectResult::closure_evaluated(
                     nexus::EvaluatedClosure {
@@ -2394,9 +2378,8 @@ impl SchemaRuntime {
             }
             sema::DeployResumeStage::CopyClosure => {
                 let Some(closure_path) = pipeline.closure_path.clone() else {
-                    return meta::Output::DeployRejected(
-                        self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                    );
+                    return self
+                        .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
                 nexus::NexusWork::EffectCompleted(nexus::EffectResult::closure_built(
                     nexus::BuiltClosure {
@@ -2408,20 +2391,16 @@ impl SchemaRuntime {
             sema::DeployResumeStage::ActivateGeneration
             | sema::DeployResumeStage::RecordGenerationActivated => {
                 let Some(receipt) = pipeline.phase_receipt.clone() else {
-                    return meta::Output::DeployRejected(
-                        self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-                    );
+                    return self
+                        .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
                 nexus::NexusWork::SemaWriteCompleted(sema::SemaWriteOutput::PhaseRecorded(receipt))
             }
-            sema::DeployResumeStage::FinishDeployment => unreachable!("handled above"),
         }
         .with_origin_route(nexus::OriginRoute::new(0));
         match self.execute(work).await.into_root() {
             nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => output,
-            _ => meta::Output::DeployRejected(
-                self.deploy_rejection(meta::DeployRejectionReason::InternalError),
-            ),
+            _ => self.deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError),
         }
     }
 
@@ -2616,37 +2595,27 @@ impl SchemaRuntime {
                 nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::ReverseConfiguration)
             }
             meta::Input::Deploy(request) => {
-                if let Some(reason) = Self::unsupported_deploy_reason(&request) {
-                    return Self::reply_meta(meta::Output::DeployRejected(
-                        self.deploy_rejection(reason),
-                    ));
-                }
-                if let Some(reason) = Self::deployment_routing_rejection(&request) {
-                    return Self::reply_meta(meta::Output::DeployRejected(
-                        self.deploy_rejection(reason),
-                    ));
-                }
-                if let Some(reason) = Self::proposal_source_rejection(&request) {
-                    return Self::reply_meta(meta::Output::DeployRejected(
-                        self.deploy_rejection(reason),
-                    ));
-                }
-                if let Some(reason) = Self::source_revision_policy_rejection(&request) {
-                    return Self::reply_meta(meta::Output::DeployRejected(
-                        self.deploy_rejection(reason),
-                    ));
+                // A preflight refusal happens before admission, so there is no
+                // in-flight cursor to terminalize. `reject_submission`
+                // allocates the correlation record first, exactly as
+                // `submit_deploy` does, so the peer is never handed a
+                // rejection with no deployment behind it.
+                if let Some(reason) = Self::submission_rejection(&request) {
+                    return Self::reply_meta(match self.reject_submission(request, reason) {
+                        DeploySubmissionOutcome::Rejected(rejected) => {
+                            meta::Output::DeployRejected(rejected)
+                        }
+                        DeploySubmissionOutcome::Refused(refused) => {
+                            meta::Output::DeployRefused(refused)
+                        }
+                        DeploySubmissionOutcome::Accepted(accepted) => {
+                            meta::Output::DeployAccepted(accepted)
+                        }
+                    });
                 }
                 self.active_operation = Some(MetaOperation::Deploy);
-                let submission = match request {
-                    meta::DeployRequest::Host(deployment) => {
-                        sema::DeploySubmission::Host(deployment)
-                    }
-                    meta::DeployRequest::UserEnvironment(deployment) => {
-                        sema::DeploySubmission::UserEnvironment(deployment)
-                    }
-                };
                 nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordDeploySubmitted(
-                    submission,
+                    request,
                 ))
             }
             meta::Input::Pin(request) => {
@@ -2759,6 +2728,16 @@ impl SchemaRuntime {
     /// supported and enters the effect pipeline. `UnsupportedDeployAction`
     /// stays in the enum for honesty on any future not-yet-implemented shape;
     /// no current action returns it.
+    /// Every preflight a deploy must pass before it is admitted, in one place
+    /// so the synchronous submit and the engine's own routing cannot drift
+    /// apart on which checks run or in what order.
+    fn submission_rejection(request: &meta::DeployRequest) -> Option<meta::DeployRejectionReason> {
+        Self::unsupported_deploy_reason(request)
+            .or_else(|| Self::deployment_routing_rejection(request))
+            .or_else(|| Self::proposal_source_rejection(request))
+            .or_else(|| Self::source_revision_policy_rejection(request))
+    }
+
     fn unsupported_deploy_reason(
         request: &meta::DeployRequest,
     ) -> Option<meta::DeployRejectionReason> {
@@ -2964,7 +2943,13 @@ impl SchemaRuntime {
                 self.begin_deploy_pipeline(accepted)
             }
             sema::SemaWriteOutput::PhaseRecorded(_) => self.advance_after_phase(),
-            sema::SemaWriteOutput::GenerationActivated(_) => self.finish_deploy_pipeline(),
+            sema::SemaWriteOutput::GenerationActivated(_) => match self.active_deploy.clone() {
+                Some(pipeline) => self.finish_deploy_pipeline(&pipeline),
+                None => Self::reply_meta(self.refuse_deploy(
+                    sema::DeployRefusalReason::NoCorrelatedDeployment,
+                    &"an activation committed with no correlated cursor",
+                )),
+            },
             sema::SemaWriteOutput::GenerationPinned(applied) => {
                 self.active_operation = None;
                 Self::reply_meta(meta::Output::Pinned(applied))
@@ -3158,13 +3143,11 @@ impl SchemaRuntime {
         // A phase-transition write committed mid-pipeline. The cursor `stage`
         // names which phase was just recorded; advance to the next effect or
         // the final activation-record write.
-        let pipeline = match self.active_deploy.clone() {
-            Some(pipeline) => pipeline,
-            None => {
-                return Self::reply_meta(meta::Output::DeployRejected(
-                    self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-                ));
-            }
+        let Some(pipeline) = self.active_deploy.clone() else {
+            return Self::reply_meta(self.refuse_deploy(
+                sema::DeployRefusalReason::NoCorrelatedDeployment,
+                &"a phase transition committed with no correlated cursor",
+            ));
         };
         match pipeline.stage {
             DeployStage::Submitted => {
@@ -3186,22 +3169,29 @@ impl SchemaRuntime {
                         closure_path
                     }
                     None => {
-                        return self.fail_pipeline(nexus::EffectFailure {
-                            effect_stage: nexus::EffectStage::Activate,
-                            failure_evidence: StageFailure::from(
-                                "activation reached without a built closure path".to_string(),
-                            )
-                            .witness(),
-                        });
+                        return self.fail_pipeline(
+                            pipeline,
+                            nexus::EffectFailure {
+                                effect_stage: nexus::EffectStage::Activate,
+                                failure_evidence: StageFailure::from(
+                                    "activation reached without a built closure path".to_string(),
+                                )
+                                .witness(),
+                            },
+                        );
                     }
                     Some(_) => {
-                        return self.fail_pipeline(nexus::EffectFailure {
-                            effect_stage: nexus::EffectStage::Activate,
-                            failure_evidence: StageFailure::from(
-                                "activation reached with a noncanonical closure path".to_string(),
-                            )
-                            .witness(),
-                        });
+                        return self.fail_pipeline(
+                            pipeline,
+                            nexus::EffectFailure {
+                                effect_stage: nexus::EffectStage::Activate,
+                                failure_evidence: StageFailure::from(
+                                    "activation reached with a noncanonical closure path"
+                                        .to_string(),
+                                )
+                                .witness(),
+                            },
+                        );
                     }
                 };
                 self.set_stage(DeployStage::CopyingRecorded);
@@ -3219,14 +3209,17 @@ impl SchemaRuntime {
                 let commit = match pipeline.activation_commit() {
                     Some(commit) => commit,
                     None => {
-                        return self.fail_pipeline(nexus::EffectFailure {
-                            effect_stage: nexus::EffectStage::Activate,
-                            failure_evidence: StageFailure::from(
-                                "activation record reached without a built closure path"
-                                    .to_string(),
-                            )
-                            .witness(),
-                        });
+                        return self.fail_pipeline(
+                            pipeline,
+                            nexus::EffectFailure {
+                                effect_stage: nexus::EffectStage::Activate,
+                                failure_evidence: StageFailure::from(
+                                    "activation record reached without a built closure path"
+                                        .to_string(),
+                                )
+                                .witness(),
+                            },
+                        );
                     }
                 };
                 self.set_stage(DeployStage::ActivatedRecorded);
@@ -3234,7 +3227,7 @@ impl SchemaRuntime {
                     sema::SemaWriteInput::RecordGenerationActivated(commit),
                 )
             }
-            DeployStage::ActivatedRecorded => self.finish_deploy_pipeline(),
+            DeployStage::ActivatedRecorded => self.finish_deploy_pipeline(&pipeline),
         }
     }
 
@@ -3244,24 +3237,25 @@ impl SchemaRuntime {
         }
     }
 
-    fn finish_deploy_pipeline(&mut self) -> nexus::NexusAction {
-        let Some(pipeline) = self.active_deploy.clone() else {
-            unreachable!("a deploy pipeline cannot finish without its correlation cursor");
-        };
+    /// The caller passes the cursor it already holds, so a pipeline cannot
+    /// finish without the deployment it belongs to.
+    fn finish_deploy_pipeline(&mut self, pipeline: &DeployPipeline) -> nexus::NexusAction {
         let record = match self.store.terminalize_deployment(
             *pipeline.deployment_identifier.payload(),
-            sema::DeploymentLifecycle::Completed,
             sema::DeploymentTerminal::Succeeded,
         ) {
             Ok(record) => record,
             Err(error) => {
-                return self.fail_pipeline(nexus::EffectFailure {
-                    effect_stage: nexus::EffectStage::Activate,
-                    failure_evidence: StageFailure::from(format!(
-                        "could not persist correlated deployment success: {error}"
-                    ))
-                    .witness(),
-                });
+                return self.fail_pipeline(
+                    pipeline.clone(),
+                    nexus::EffectFailure {
+                        effect_stage: nexus::EffectStage::Activate,
+                        failure_evidence: StageFailure::from(format!(
+                            "could not persist correlated deployment success: {error}"
+                        ))
+                        .witness(),
+                    },
+                );
             }
         };
         self.active_operation = None;
@@ -3272,17 +3266,26 @@ impl SchemaRuntime {
     fn reject_active_or_meta(&mut self, report: sema::RejectionReport) -> nexus::NexusAction {
         // A write rejection aborts any in-flight deploy and replies a typed
         // meta rejection for the operation in flight, carrying the rejection
-        // reason and current marker.
-        self.active_deploy = None;
+        // reason and current marker. The deploy cursor is read BEFORE it is
+        // cleared: a deploy rejection names the deployment it rejects, and
+        // clearing first left nothing to name.
+        let rejected = self.active_deploy.take();
         let operation = self
             .active_operation
             .take()
             .unwrap_or(MetaOperation::Deploy);
         let marker = report.state_marker;
         let output = match operation {
-            MetaOperation::Deploy => meta::Output::DeployRejected(
-                self.deploy_rejection(Self::deploy_reason(report.rejection_reason)),
-            ),
+            MetaOperation::Deploy => match rejected {
+                Some(pipeline) => self.deploy_rejection(
+                    &pipeline.deployment_identifier,
+                    Self::deploy_reason(report.rejection_reason),
+                ),
+                None => self.refuse_deploy(
+                    sema::DeployRefusalReason::NoCorrelatedDeployment,
+                    &format!("write rejected: {:?}", report.rejection_reason),
+                ),
+            },
             MetaOperation::Pin => meta::Output::PinRejected(meta::RejectedPin {
                 pin_rejection_reason: Self::pin_reason(report.rejection_reason),
                 state_marker: marker,
@@ -3327,7 +3330,14 @@ impl SchemaRuntime {
         match reason {
             sema::RejectionReason::PinLabelUnknown => meta::UnpinRejectionReason::PinLabelUnknown,
             sema::RejectionReason::NodeUnknown => meta::UnpinRejectionReason::NodeUnknown,
-            _ => meta::UnpinRejectionReason::GenerationNotPinned,
+            sema::RejectionReason::GenerationUnknown => {
+                meta::UnpinRejectionReason::GenerationNotPinned
+            }
+            // A reason with no unpin-domain meaning — a failed durable write,
+            // a poisoned lock — is an internal invariant failure, as it is for
+            // every other operation. Reporting it as `GenerationNotPinned`
+            // told the operator something false about their generation.
+            _ => meta::UnpinRejectionReason::InternalError,
         }
     }
 
@@ -3380,8 +3390,8 @@ impl SchemaRuntime {
             meta::DeployRejectionReason::InvalidDeploymentRouting => {
                 sema::DeploymentTerminalReason::InvalidDeploymentRouting
             }
-            meta::DeployRejectionReason::BuilderUnreachable => {
-                sema::DeploymentTerminalReason::BuilderUnreachable
+            meta::DeployRejectionReason::ClosureCopyFailed => {
+                sema::DeploymentTerminalReason::ClosureCopyFailed
             }
             meta::DeployRejectionReason::DeploymentInFlight => {
                 sema::DeploymentTerminalReason::DeploymentInFlight
@@ -3436,34 +3446,66 @@ impl SchemaRuntime {
         &self,
         submission: sema::DeploySubmission,
         reason: meta::DeployRejectionReason,
-    ) -> meta::RejectedDeploy {
+    ) -> DeploySubmissionOutcome {
         let identity = DeployPipeline::deployment_request_identity(&submission);
-        let record = self
-            .store
-            .reject_deployment_request(
-                identity,
-                sema::DeploymentTerminal::Rejected(Self::terminal_reason(reason)),
-            )
-            .expect("durable rejected deployment terminal record");
-        meta::RejectedDeploy::new(record)
+        match self.store.reject_deployment_request(
+            identity,
+            sema::DeploymentTerminal::Rejected(Self::terminal_reason(reason)),
+        ) {
+            Ok(record) => DeploySubmissionOutcome::Rejected(meta::RejectedDeploy::new(record)),
+            // Allocating the rejection is itself a durable write. When it
+            // fails there is no record to reject with, and the peer is told
+            // that rather than losing the daemon.
+            Err(error) => DeploySubmissionOutcome::Refused(
+                self.refusal(sema::DeployRefusalReason::DurableWriteFailed, &error),
+            ),
+        }
     }
 
-    fn deploy_rejection(&self, reason: meta::DeployRejectionReason) -> meta::RejectedDeploy {
-        let deployment_identifier = self
-            .active_deploy
-            .as_ref()
-            .expect("deploy rejection requires an active correlated deployment")
-            .deployment_identifier
-            .clone();
-        let record = self
-            .store
-            .terminalize_deployment(
-                *deployment_identifier.payload(),
-                sema::DeploymentLifecycle::Rejected,
-                sema::DeploymentTerminal::Rejected(Self::terminal_reason(reason)),
-            )
-            .expect("durable active deployment rejection record");
-        meta::RejectedDeploy::new(record)
+    /// Terminalize the correlated in-flight deployment as rejected and reply
+    /// with the record that names it. The caller passes the cursor it holds,
+    /// so a rejection with no deployment to name cannot be written here; that
+    /// case is [`Self::refuse_deploy`].
+    fn deploy_rejection(
+        &self,
+        deployment_identifier: &ordinary::DeploymentIdentifier,
+        reason: meta::DeployRejectionReason,
+    ) -> meta::Output {
+        match self.store.terminalize_deployment(
+            *deployment_identifier.payload(),
+            sema::DeploymentTerminal::Rejected(Self::terminal_reason(reason)),
+        ) {
+            Ok(record) => meta::Output::DeployRejected(meta::RejectedDeploy::new(record)),
+            Err(error) => self.refuse_deploy(sema::DeployRefusalReason::DurableWriteFailed, &error),
+        }
+    }
+
+    /// A deploy refusal that names no deployment, because at the moment of
+    /// refusal there is none to name. The marker is the last commit sequence
+    /// the store could report: a true "as of" stamp when the store is healthy,
+    /// and zero when the refusal is that the store itself failed. It
+    /// correlates the refusal to a point in the event log and never claims a
+    /// deployment. The cause goes to the daemon journal, where the operator
+    /// reads it; it is not put on the wire, because a refusal the Nexus owes
+    /// itself is not evidence a retry can act on.
+    fn refuse_deploy(
+        &self,
+        deploy_refusal_reason: sema::DeployRefusalReason,
+        cause: &dyn std::fmt::Display,
+    ) -> meta::Output {
+        meta::Output::DeployRefused(self.refusal(deploy_refusal_reason, cause))
+    }
+
+    fn refusal(
+        &self,
+        deploy_refusal_reason: sema::DeployRefusalReason,
+        cause: &dyn std::fmt::Display,
+    ) -> meta::RefusedDeploy {
+        eprintln!("lojix deploy refused reason={deploy_refusal_reason:?} cause={cause}");
+        meta::RefusedDeploy {
+            deploy_refusal_reason,
+            state_marker: Self::marker(self.store.commit_sequence().unwrap_or(0)),
+        }
     }
 
     fn reply_meta(output: meta::Output) -> nexus::NexusAction {
@@ -3473,18 +3515,22 @@ impl SchemaRuntime {
     // ---- decide: effect completion (drives the deploy chain) ------------
 
     fn decide_effect_completion(&mut self, result: nexus::EffectResult) -> nexus::NexusAction {
-        let pipeline = match self.active_deploy.clone() {
-            Some(pipeline) => pipeline,
-            None => {
-                // Effects outside a deploy (e.g. a standalone GC) just confirm;
-                // an unexpected effect completion replies a rejection.
-                return match result {
-                    nexus::EffectResult::EffectFailed(failure) => self.fail_pipeline(failure),
-                    _ => Self::reply_meta(meta::Output::DeployRejected(
-                        self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-                    )),
-                };
-            }
+        let Some(pipeline) = self.active_deploy.clone() else {
+            // An effect completed with no deployment behind it. There is no
+            // record to name and none is invented; the refusal says which
+            // stage reported what, in the journal, and names itself on the
+            // wire.
+            let cause = match &result {
+                nexus::EffectResult::EffectFailed(failure) => format!(
+                    "{:?}: {}",
+                    failure.effect_stage,
+                    failure.failure_evidence.failure_detail.payload()
+                ),
+                other => format!("{other:?}"),
+            };
+            return Self::reply_meta(
+                self.refuse_deploy(sema::DeployRefusalReason::NoCorrelatedDeployment, &cause),
+            );
         };
         match result {
             nexus::EffectResult::FlakeResolved(resolved) => {
@@ -3494,13 +3540,16 @@ impl SchemaRuntime {
                     sema::DeployResumeStage::RecordBuilding
                 };
                 if !self.set_resolved_flake(resolved, next_stage) {
-                    return self.fail_pipeline(nexus::EffectFailure {
-                        effect_stage: nexus::EffectStage::FlakeAuth,
-                        failure_evidence: StageFailure::from(
-                            "flake resolver did not prove an immutable commit".to_string(),
-                        )
-                        .witness(),
-                    });
+                    return self.fail_pipeline(
+                        pipeline,
+                        nexus::EffectFailure {
+                            effect_stage: nexus::EffectStage::FlakeAuth,
+                            failure_evidence: StageFailure::from(
+                                "flake resolver did not prove an immutable commit".to_string(),
+                            )
+                            .witness(),
+                        },
+                    );
                 }
                 if pipeline.needs_horizon_materialization() {
                     nexus::NexusAction::CommandEffect(nexus::EffectCommand::MaterializeHorizon(
@@ -3509,22 +3558,25 @@ impl SchemaRuntime {
                 } else {
                     // Record Building (stage still Submitted). The phase write
                     // hops back through advance_after_phase, which fires NixEval.
-                    self.record_phase(ordinary::DeploymentPhase::Building, None)
+                    self.record_phase(ordinary::DeploymentPhase::Building)
                 }
             }
             nexus::EffectResult::HorizonMaterialized(inputs) => {
                 self.set_input_overrides(inputs.into_payload());
-                self.record_phase(ordinary::DeploymentPhase::Building, None)
+                self.record_phase(ordinary::DeploymentPhase::Building)
             }
             nexus::EffectResult::ClosureEvaluated(evaluated) => {
                 if !self.set_closure_path(evaluated.closure_path.clone()) {
-                    return self.fail_pipeline(nexus::EffectFailure {
-                        effect_stage: nexus::EffectStage::Eval,
-                        failure_evidence: StageFailure::from(
-                            "effect returned a noncanonical closure path".to_string(),
-                        )
-                        .witness(),
-                    });
+                    return self.fail_pipeline(
+                        pipeline,
+                        nexus::EffectFailure {
+                            effect_stage: nexus::EffectStage::Eval,
+                            failure_evidence: StageFailure::from(
+                                "effect returned a noncanonical closure path".to_string(),
+                            )
+                            .witness(),
+                        },
+                    );
                 }
                 if pipeline.action.produces_closure() {
                     self.persist_job_cursor(
@@ -3541,18 +3593,21 @@ impl SchemaRuntime {
                         sema::DeployJobPhase::Built,
                         sema::DeployResumeStage::FinishDeployment,
                     );
-                    self.finish_deploy_pipeline()
+                    self.finish_deploy_pipeline(&pipeline)
                 }
             }
             nexus::EffectResult::ClosureBuilt(built) => {
                 if !self.set_closure_path(built.closure_path.clone()) {
-                    return self.fail_pipeline(nexus::EffectFailure {
-                        effect_stage: nexus::EffectStage::Build,
-                        failure_evidence: StageFailure::from(
-                            "effect returned a noncanonical closure path".to_string(),
-                        )
-                        .witness(),
-                    });
+                    return self.fail_pipeline(
+                        pipeline,
+                        nexus::EffectFailure {
+                            effect_stage: nexus::EffectStage::Build,
+                            failure_evidence: StageFailure::from(
+                                "effect returned a noncanonical closure path".to_string(),
+                            )
+                            .witness(),
+                        },
+                    );
                 }
                 if pipeline.action.activates() {
                     self.persist_job_cursor(
@@ -3570,13 +3625,13 @@ impl SchemaRuntime {
                         sema::DeployJobPhase::Built,
                         sema::DeployResumeStage::FinishDeployment,
                     );
-                    self.finish_deploy_pipeline()
+                    self.finish_deploy_pipeline(&pipeline)
                 }
             }
             nexus::EffectResult::ClosureCopied(_) => {
                 // Record Copying (stage BuildingRecorded). The phase write hops
                 // back through advance_after_phase, which fires ActivateGeneration.
-                self.record_phase(ordinary::DeploymentPhase::Copying, None)
+                self.record_phase(ordinary::DeploymentPhase::Copying)
             }
             nexus::EffectResult::GenerationActivated(activated) => {
                 // Record Activated (stage CopyingRecorded). The phase write hops
@@ -3585,7 +3640,7 @@ impl SchemaRuntime {
                 // slot returned by the activation effect is persisted on that
                 // commit rather than re-defaulting to Current.
                 self.set_activation_slot(activated.generation_slot);
-                self.record_phase(ordinary::DeploymentPhase::Activated, None)
+                self.record_phase(ordinary::DeploymentPhase::Activated)
             }
             nexus::EffectResult::DetachedTestActivationDispatched => {
                 // The dispatch acknowledgement is not a terminal deployment
@@ -3593,25 +3648,14 @@ impl SchemaRuntime {
                 // observer terminalizes an observed result, while a replaced
                 // predecessor leaves this durable Activating cursor for its
                 // successor to reconcile.
-                let accepted = match self.active_deploy.as_ref() {
-                    Some(pipeline) => meta::DeployHandle {
-                        deployment_identifier: pipeline.deployment_identifier.clone(),
-                        state_marker: pipeline.accepted_marker.clone(),
-                    },
-                    None => {
-                        return self.fail_pipeline(nexus::EffectFailure {
-                            effect_stage: nexus::EffectStage::Activate,
-                            failure_evidence: StageFailure::from(
-                                "detached test activation lost its deploy cursor".to_string(),
-                            )
-                            .witness(),
-                        });
-                    }
+                let accepted = meta::DeployHandle {
+                    deployment_identifier: pipeline.deployment_identifier.clone(),
+                    state_marker: pipeline.accepted_marker.clone(),
                 };
                 self.active_deploy = None;
                 Self::reply_meta(meta::Output::DeployAccepted(accepted))
             }
-            nexus::EffectResult::PathsCollected(_) => self.finish_deploy_pipeline(),
+            nexus::EffectResult::PathsCollected(_) => self.finish_deploy_pipeline(&pipeline),
             // The test-dispatch effect results never reach the DEPLOY effect
             // router — `drive_submitted_test` routes them through
             // `decide_test_effect_completion`. One arriving here is an internal
@@ -3619,14 +3663,17 @@ impl SchemaRuntime {
             // misleading success.
             nexus::EffectResult::HermeticCheckBuilt(_)
             | nexus::EffectResult::TestVmStarted(_)
-            | nexus::EffectResult::TestVmStopped(_) => self.fail_pipeline(nexus::EffectFailure {
-                effect_stage: nexus::EffectStage::Build,
-                failure_evidence: StageFailure::from(
-                    "test effect result on the deploy pipeline".to_string(),
-                )
-                .witness(),
-            }),
-            nexus::EffectResult::EffectFailed(failure) => self.fail_pipeline(failure),
+            | nexus::EffectResult::TestVmStopped(_) => self.fail_pipeline(
+                pipeline,
+                nexus::EffectFailure {
+                    effect_stage: nexus::EffectStage::Build,
+                    failure_evidence: StageFailure::from(
+                        "test effect result on the deploy pipeline".to_string(),
+                    )
+                    .witness(),
+                },
+            ),
+            nexus::EffectResult::EffectFailed(failure) => self.fail_pipeline(pipeline, failure),
         }
     }
 
@@ -3701,11 +3748,7 @@ impl SchemaRuntime {
         true
     }
 
-    fn record_phase(
-        &mut self,
-        phase: ordinary::DeploymentPhase,
-        detail: Option<String>,
-    ) -> nexus::NexusAction {
+    fn record_phase(&mut self, phase: ordinary::DeploymentPhase) -> nexus::NexusAction {
         let resume_stage = match phase {
             ordinary::DeploymentPhase::Building => sema::DeployResumeStage::NixEval,
             ordinary::DeploymentPhase::Copying => sema::DeployResumeStage::ActivateGeneration,
@@ -3714,31 +3757,30 @@ impl SchemaRuntime {
             }
             _ => sema::DeployResumeStage::FinishDeployment,
         };
-        if let Some(pipeline) = self.active_deploy.as_mut() {
-            pipeline.resume_stage = resume_stage;
-        }
-        let event = match self.active_deploy.as_ref() {
-            Some(pipeline) => {
-                let position = match self.store.allocate_event_log_position() {
-                    Ok(position) => position,
-                    Err(error) => {
-                        return self.fail_pipeline(nexus::EffectFailure {
-                            effect_stage: nexus::EffectStage::Gc,
-                            failure_evidence: StageFailure::from(format!(
-                                "could not reserve deployment event position: {error}"
-                            ))
-                            .witness(),
-                        });
-                    }
-                };
-                pipeline.phase_event(phase, ordinary::EventLogPosition::new(position), detail)
-            }
-            None => {
-                return Self::reply_meta(meta::Output::DeployRejected(
-                    self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
-                ));
+        let Some(pipeline) = self.active_deploy.as_mut() else {
+            return Self::reply_meta(self.refuse_deploy(
+                sema::DeployRefusalReason::NoCorrelatedDeployment,
+                &"a phase was recorded with no correlated cursor",
+            ));
+        };
+        pipeline.resume_stage = resume_stage;
+        let pipeline = pipeline.clone();
+        let position = match self.store.allocate_event_log_position() {
+            Ok(position) => position,
+            Err(error) => {
+                return self.fail_pipeline(
+                    pipeline,
+                    nexus::EffectFailure {
+                        effect_stage: nexus::EffectStage::Gc,
+                        failure_evidence: StageFailure::from(format!(
+                            "could not reserve deployment event position: {error}"
+                        ))
+                        .witness(),
+                    },
+                );
             }
         };
+        let event = pipeline.phase_event(phase, ordinary::EventLogPosition::new(position));
         nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordPhaseTransition(event))
     }
 
@@ -3774,15 +3816,20 @@ impl SchemaRuntime {
         }
     }
 
-    fn fail_pipeline(&mut self, failure: nexus::EffectFailure) -> nexus::NexusAction {
+    /// The caller passes the cursor it already holds, so an effect failure
+    /// cannot become permanent without the deployment it belongs to. Clears
+    /// BOTH in-flight slots symmetrically with the finish path (audit R5) — a
+    /// mid-pipeline effect failure must not leak `active_operation`.
+    fn fail_pipeline(
+        &mut self,
+        pipeline: DeployPipeline,
+        failure: nexus::EffectFailure,
+    ) -> nexus::NexusAction {
         eprintln!(
             "lojix deploy pipeline effect failed at {:?}: {}",
             failure.effect_stage,
             failure.failure_evidence.failure_detail.payload()
         );
-        let pipeline = self.active_deploy.clone();
-        // Clear BOTH in-flight slots symmetrically with the finish path (audit
-        // R5) — a mid-pipeline effect failure must not leak `active_operation`.
         let reason = match failure.effect_stage {
             nexus::EffectStage::FlakeAuth => meta::DeployRejectionReason::ProposalSourceUnreachable,
             nexus::EffectStage::MaterializeHorizon => {
@@ -3793,7 +3840,12 @@ impl SchemaRuntime {
             // the contract gained a name for each.
             nexus::EffectStage::Eval => meta::DeployRejectionReason::EvaluationFailed,
             nexus::EffectStage::Build => meta::DeployRejectionReason::BuildFailed,
-            nexus::EffectStage::CopyClosure => meta::DeployRejectionReason::BuilderUnreachable,
+            // A copy runs `nix copy --to <store-uri> <path>` and engages no
+            // builder, so `BuilderUnreachable` was false however the copy
+            // failed — an unreachable target store, a refused signature, a
+            // full disk, a malformed transport. The stage names itself; what
+            // actually happened is in the evidence beside it.
+            nexus::EffectStage::CopyClosure => meta::DeployRejectionReason::ClosureCopyFailed,
             nexus::EffectStage::Activate => meta::DeployRejectionReason::ActivationFailed,
             nexus::EffectStage::Gc => meta::DeployRejectionReason::DeploymentInFlight,
             // The test-only effect stages never reach the DEPLOY pipeline's
@@ -3803,9 +3855,6 @@ impl SchemaRuntime {
             | nexus::EffectStage::BringUpTestVm
             | nexus::EffectStage::TearDownTestVm => meta::DeployRejectionReason::InternalError,
         };
-        let Some(pipeline) = pipeline else {
-            unreachable!("a deploy effect failure cannot occur without a correlation cursor");
-        };
         // The evidence the stage reported travels into the durable record and,
         // through the terminal transition's journal event, into the event log.
         // This is the only place a deploy effect failure becomes permanent.
@@ -3814,19 +3863,20 @@ impl SchemaRuntime {
             deployment_terminal_reason: Self::terminal_reason(reason),
             optional_failure_evidence: Some(failure.failure_evidence),
         });
-        let record = match self.store.terminalize_deployment(
-            *pipeline.deployment_identifier.payload(),
-            sema::DeploymentLifecycle::Failed,
-            terminal,
-        ) {
-            Ok(record) => record,
-            Err(error) => {
-                unreachable!("could not persist correlated deployment failure: {error}");
-            }
-        };
+        let recorded = self
+            .store
+            .terminalize_deployment(*pipeline.deployment_identifier.payload(), terminal);
         self.active_deploy = None;
         self.active_operation = None;
-        Self::reply_meta(meta::Output::DeployTerminal(record))
+        match recorded {
+            Ok(record) => Self::reply_meta(meta::Output::DeployTerminal(record)),
+            // The failure happened and the store could not keep it. Saying so
+            // is the only truthful reply left: claiming a terminal record that
+            // was never written would be worse than the panic it replaces.
+            Err(error) => Self::reply_meta(
+                self.refuse_deploy(sema::DeployRefusalReason::DurableWriteFailed, &error),
+            ),
+        }
     }
 
     // ---- sema apply / observe (the four tables) -------------------------
@@ -3954,12 +4004,16 @@ impl SchemaRuntime {
             .allocate_deployment_record(identity, restart_cursor)
         {
             Ok(record) => record,
-            Err(error) => {
-                unreachable!("cannot issue an uncorrelated deployment rejection: {error}")
-            }
+            // Admission is a durable write and a durable write can fail.
+            // `submit_deploy` already answers a rejected write with a typed
+            // rejection; this reports the real cause to the journal and takes
+            // that path instead of aborting the daemon.
+            Err(error) => return self.reject_durable_write(&error),
         };
         let Some(admission_marker) = record.optional_admission_marker.clone() else {
-            unreachable!("accepted deployment record is missing its admission marker");
+            return self.reject_durable_write(
+                &"an admitted deployment record carries no admission marker",
+            );
         };
         let accepted_marker = admission_marker.into_payload();
         let deployment_identifier = record.deployment_identifier.clone();
@@ -3987,7 +4041,9 @@ impl SchemaRuntime {
         let recorded_phase = event.deployment_phase;
         let event_log_position = event.event_log_position.clone();
         let Some(pipeline) = self.active_deploy.as_ref() else {
-            unreachable!("deployment phase transition requires its active correlation cursor");
+            return self.reject_durable_write(
+                &"a deployment phase transition arrived with no correlated cursor",
+            );
         };
         let job = pipeline.deploy_job(sema::DeployJobPhase::from(recorded_phase));
         let recorded = self.store.advance_deployment_phase(
@@ -4016,9 +4072,7 @@ impl SchemaRuntime {
                 }
                 sema::SemaWriteOutput::PhaseRecorded(receipt)
             }
-            Err(error) => {
-                unreachable!("cannot emit an uncorrelated deployment phase reply: {error}")
-            }
+            Err(error) => self.reject_durable_write(&error),
         }
     }
 
@@ -4027,7 +4081,9 @@ impl SchemaRuntime {
         commit: sema::ActivationCommit,
     ) -> sema::SemaWriteOutput {
         let Some(pipeline) = self.active_deploy.clone() else {
-            unreachable!("generation activation requires an active correlated deployment");
+            return self.reject_durable_write(
+                &"a generation activation arrived with no correlated cursor",
+            );
         };
         let deployment_identifier = pipeline.deployment_identifier.clone();
         let generation_artifact = pipeline.generation_artifact;
@@ -4072,9 +4128,7 @@ impl SchemaRuntime {
                     state_marker: Self::sema_marker(commit_sequence),
                 })
             }
-            Err(error) => {
-                unreachable!("cannot emit an uncorrelated generation activation reply: {error}")
-            }
+            Err(error) => self.reject_durable_write(&error),
         }
     }
 
@@ -4223,6 +4277,20 @@ impl SchemaRuntime {
     /// Build a write-rejection at a known commit sequence. The caller passes
     /// the sequence it already read under the store lock — this method never
     /// re-locks, so it is safe to call while the store guard is still held.
+    /// A durable write that could not be made. The cause goes to the daemon
+    /// journal; the typed rejection travels back through
+    /// [`Self::reject_active_or_meta`], which answers the peer in the
+    /// vocabulary of whatever operation was in flight. Reading the commit
+    /// sequence is best-effort: the store that just refused a write may
+    /// equally refuse to report its sequence.
+    fn reject_durable_write(&self, cause: &dyn std::fmt::Display) -> sema::SemaWriteOutput {
+        eprintln!("lojix durable write rejected: {cause}");
+        Self::write_rejected(
+            self.store.commit_sequence().unwrap_or(0),
+            sema::RejectionReason::DurableWriteFailed,
+        )
+    }
+
     fn write_rejected(
         commit_sequence: u64,
         reason: sema::RejectionReason,
@@ -5408,7 +5476,7 @@ impl Activation {
                 if matches!(
                     activation.action,
                     ordinary::HostDeployAction::TestActivation
-                ) && activation.runs_detached_self_activation() =>
+                ) && activation.detached_self_activation().is_some() =>
             {
                 Some(DetachedActivationUnit::new(
                     activation.self_switch_unit_name(),
@@ -5417,6 +5485,19 @@ impl Activation {
             _ => None,
         }
     }
+}
+
+/// The two host actions that hand activation to a PID-1-owned transient unit
+/// on the daemon's own node. Every other action activates in the foreground
+/// and has no handoff script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetachedSelfActivation {
+    /// `switch-to-configuration switch`, run detached so the daemon restart it
+    /// triggers cannot kill it mid-flight.
+    Switch,
+    /// `switch-to-configuration test`, whose PID-1 receipt is retained for the
+    /// successor daemon to read.
+    Test,
 }
 
 /// Host activation on the target.
@@ -5547,14 +5628,23 @@ impl HostActivation {
     /// which would kill a foreground ssh and deadlock the deploy; the detached
     /// transient unit survives the restart (report 150 self-Switch). Always
     /// false when the daemon host is unknown or the target is a different node.
-    fn runs_detached_self_activation(&self) -> bool {
-        matches!(
-            self.action,
-            ordinary::HostDeployAction::ActivateNow | ordinary::HostDeployAction::TestActivation
-        ) && self
+    /// Which detached self-activation this is, or `None` when the activation
+    /// is not one. The two actions that hand off to a transient unit are the
+    /// only ones with a handoff script, so naming them as their own type is
+    /// what makes [`Self::self_switch_script`] total.
+    fn detached_self_activation(&self) -> Option<DetachedSelfActivation> {
+        let is_self_target = self
             .daemon_host
             .as_ref()
-            .is_some_and(|host| host.payload() == self.node_name.payload())
+            .is_some_and(|host| host.payload() == self.node_name.payload());
+        if !is_self_target {
+            return None;
+        }
+        match self.action {
+            ordinary::HostDeployAction::ActivateNow => Some(DetachedSelfActivation::Switch),
+            ordinary::HostDeployAction::TestActivation => Some(DetachedSelfActivation::Test),
+            _ => None,
+        }
     }
 
     /// The deterministic transient unit name for a detached self-Switch:
@@ -5574,10 +5664,10 @@ impl HostActivation {
     /// activation runs inside the transient unit, so the daemon restart `switch`
     /// triggers cannot kill it mid-flight; the post-switch reconcile rides along
     /// in the same PID-1-owned unit rather than a (now-dead) foreground ssh.
-    fn self_switch_script(&self) -> String {
+    fn self_switch_script(&self, activation: DetachedSelfActivation) -> String {
         let store = &self.store_path;
-        match self.action {
-            ordinary::HostDeployAction::ActivateNow => format!(
+        match activation {
+            DetachedSelfActivation::Switch => format!(
                 "export PATH=/run/current-system/sw/bin:/run/wrappers/bin:$PATH\n\
                  set -eu\n\
                  nix-env -p /nix/var/nix/profiles/system --set {store}\n\
@@ -5585,12 +5675,11 @@ impl HostActivation {
                  bootctl set-default ''\n\
                  bootctl set-oneshot ''\n"
             ),
-            ordinary::HostDeployAction::TestActivation => format!(
+            DetachedSelfActivation::Test => format!(
                 "export PATH=/run/current-system/sw/bin:/run/wrappers/bin:$PATH\n\
                  set -eu\n\
                  {store}/bin/switch-to-configuration test\n"
             ),
-            _ => unreachable!("only detached self activations have a handoff script"),
         }
     }
 
@@ -5620,8 +5709,10 @@ impl HostActivation {
     }
 
     async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
-        if self.runs_detached_self_activation() {
-            return self.run_detached_self_activation(execution).await;
+        if let Some(activation) = self.detached_self_activation() {
+            return self
+                .run_detached_self_activation(execution, activation)
+                .await;
         }
         match self.action {
             ordinary::HostDeployAction::ScheduleBootOnce => self.run_boot_once(execution).await,
@@ -5636,19 +5727,17 @@ impl HostActivation {
     async fn run_detached_self_activation(
         &self,
         execution: &EffectExecution,
+        activation: DetachedSelfActivation,
     ) -> std::result::Result<(), StageFailure> {
         let unit_name = self.self_switch_unit_name();
-        if matches!(self.action, ordinary::HostDeployAction::ActivateNow) {
-            return self
-                .detached_invocation(&unit_name, self.self_switch_script())
-                .run(execution)
-                .await
-                .map(|_| ());
+        let script = self.self_switch_script(activation);
+        match activation {
+            DetachedSelfActivation::Switch => self.detached_invocation(&unit_name, script),
+            DetachedSelfActivation::Test => self.retained_detached_invocation(&unit_name, script),
         }
-        self.retained_detached_invocation(&unit_name, self.self_switch_script())
-            .run(execution)
-            .await
-            .map(|_| ())
+        .run(execution)
+        .await
+        .map(|_| ())
     }
 
     /// Dispatch a test activation without tying its lifetime to the old daemon
@@ -5759,10 +5848,6 @@ impl Witnessing for DetachedActivationFailure {
 pub(crate) enum DetachedActivationOutcome {
     Succeeded,
     Failed(DetachedActivationFailure),
-    /// `UnitNew` is already subscribed, but PID 1 has not yet made this
-    /// exact transient visible to GetUnit. This is only a registration window,
-    /// never an activation failure.
-    PendingRegistration,
     Missing,
     Running,
 }
@@ -5809,33 +5894,25 @@ impl DetachedActivationUnit {
 
     fn terminal_outcome(
         outcome: Option<DetachedActivationOutcome>,
-    ) -> Option<(sema::DeploymentLifecycle, sema::DeploymentTerminal)> {
+    ) -> Option<sema::DeploymentTerminal> {
         match outcome {
-            Some(DetachedActivationOutcome::Succeeded) => Some((
-                sema::DeploymentLifecycle::Completed,
-                sema::DeploymentTerminal::Succeeded,
-            )),
-            Some(DetachedActivationOutcome::Failed(observed)) => Some((
-                sema::DeploymentLifecycle::Failed,
-                sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
+            Some(DetachedActivationOutcome::Succeeded) => Some(sema::DeploymentTerminal::Succeeded),
+            Some(DetachedActivationOutcome::Failed(observed)) => {
+                Some(sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
                     deployment_failure_stage: sema::DeploymentFailureStage::Activate,
                     deployment_terminal_reason: sema::DeploymentTerminalReason::ActivationFailed,
                     optional_failure_evidence: Some(observed.witness()),
-                }),
-            )),
+                }))
+            }
             Some(DetachedActivationOutcome::Missing)
-            | Some(DetachedActivationOutcome::PendingRegistration)
             | Some(DetachedActivationOutcome::Running)
             | None => None,
         }
     }
 
     #[cfg(test)]
-    fn needs_completion_observer(outcome: DetachedActivationOutcome) -> bool {
-        matches!(
-            outcome,
-            DetachedActivationOutcome::PendingRegistration | DetachedActivationOutcome::Running
-        )
+    fn needs_completion_observer(outcome: Option<DetachedActivationOutcome>) -> bool {
+        matches!(outcome, None | Some(DetachedActivationOutcome::Running))
     }
 
     async fn manager_proxy<'a>(
@@ -5947,10 +6024,14 @@ impl DetachedActivationObserver {
     /// activation failure.
     pub(crate) async fn initial_outcome(
         &self,
-    ) -> std::result::Result<DetachedActivationOutcome, String> {
+    ) -> std::result::Result<Option<DetachedActivationOutcome>, String> {
         match self.unit.unit_proxy(&self.connection).await? {
-            Some(proxy) => Ok(DetachedActivationUnit::classify(&proxy).await),
-            None => Ok(DetachedActivationOutcome::PendingRegistration),
+            Some(proxy) => Ok(Some(DetachedActivationUnit::classify(&proxy).await)),
+            // PID 1 has not yet made this exact transient visible to GetUnit.
+            // A registration window is the absence of an outcome, not one of
+            // its values: `classify` reads a resolved unit and cannot report
+            // one.
+            None => Ok(None),
         }
     }
 
@@ -5978,9 +6059,9 @@ impl DetachedActivationObserver {
                 deployment_identifier, self.unit.name
             );
             let terminal = DetachedActivationUnit::terminal_outcome(outcome);
-            if let Some((lifecycle, terminal)) = terminal
+            if let Some(terminal) = terminal
                 && store
-                    .terminalize_deployment(deployment_identifier, lifecycle, terminal)
+                    .terminalize_deployment(deployment_identifier, terminal)
                     .is_ok()
             {
                 self.unit.clean().await;
@@ -6030,9 +6111,6 @@ impl DetachedActivationObserver {
                 }
                 DetachedActivationOutcome::Missing => {
                     return Ok(Some(DetachedActivationOutcome::Missing));
-                }
-                DetachedActivationOutcome::PendingRegistration => {
-                    unreachable!("only a pre-GetUnit lookup can be pending registration");
                 }
                 DetachedActivationOutcome::Running => {}
             }
@@ -6578,8 +6656,9 @@ impl nexus::NexusEngine for SchemaRuntime {
         &self,
         _exhausted: triad_runtime::ContinuationExhausted,
     ) -> nexus::SignalOutput {
-        nexus::SignalOutput::MetaOutput(meta::Output::DeployRejected(
-            self.deploy_rejection(meta::DeployRejectionReason::DeploymentInFlight),
+        nexus::SignalOutput::MetaOutput(self.refuse_deploy(
+            sema::DeployRefusalReason::ContinuationBudgetExhausted,
+            &"the Nexus runner exhausted its continuation budget",
         ))
     }
 
@@ -7149,7 +7228,6 @@ mod tests {
                 .phase_event(
                     ordinary::DeploymentPhase::Building,
                     ordinary::EventLogPosition::new(7),
-                    None,
                 )
                 .optional_immutable_revision
                 .is_none()
@@ -7344,7 +7422,7 @@ mod tests {
             let event = {
                 let pipeline = engine.active_deploy.as_mut().expect("pipeline");
                 pipeline.resume_stage = resume_stage;
-                pipeline.phase_event(phase, ordinary::EventLogPosition::new(position), None)
+                pipeline.phase_event(phase, ordinary::EventLogPosition::new(position))
             };
             let receipt = match engine.record_phase_transition(event) {
                 sema::SemaWriteOutput::PhaseRecorded(receipt) => receipt,
@@ -7406,7 +7484,6 @@ mod tests {
         let event = pipeline.phase_event(
             ordinary::DeploymentPhase::Building,
             ordinary::EventLogPosition::new(1),
-            None,
         );
         assert_eq!(event.deployment_identifier, pipeline.deployment_identifier);
         assert!(matches!(
@@ -7757,12 +7834,12 @@ mod tests {
 
     #[test]
     fn running_successor_retained_unit_attaches_the_completion_observer() {
-        assert!(DetachedActivationUnit::needs_completion_observer(
-            DetachedActivationOutcome::Running,
-        ));
-        assert!(!DetachedActivationUnit::needs_completion_observer(
-            DetachedActivationOutcome::Succeeded,
-        ));
+        assert!(DetachedActivationUnit::needs_completion_observer(Some(
+            DetachedActivationOutcome::Running
+        )));
+        assert!(!DetachedActivationUnit::needs_completion_observer(Some(
+            DetachedActivationOutcome::Succeeded
+        )));
     }
 
     #[test]
@@ -7780,9 +7857,9 @@ mod tests {
         // On successor start the manager subscription is established before
         // GetUnit. A momentary NoSuchUnit must adopt the deterministic UnitNew
         // handoff, not write ActivationFailed before PID 1 registers it.
-        assert!(DetachedActivationUnit::needs_completion_observer(
-            DetachedActivationOutcome::PendingRegistration,
-        ));
+        // A registration window is the absence of an outcome: `initial_outcome`
+        // answers `None` when PID 1 has not yet made the transient visible.
+        assert!(DetachedActivationUnit::needs_completion_observer(None));
         let unit = DetachedActivationUnit::new("lojix-self-switch-deploy-41.service".to_string());
         assert!(unit.is_expected_unit_new("lojix-self-switch-deploy-41.service"));
     }
@@ -7824,12 +7901,16 @@ mod tests {
         let activation =
             host_activation_on_host(ordinary::HostDeployAction::ActivateNow, Some(node()));
         assert!(
-            activation.runs_detached_self_activation(),
+            activation.detached_self_activation().is_some(),
             "self-host Switch must take the detached shape"
         );
         let invocation = activation.detached_invocation(
             &activation.self_switch_unit_name(),
-            activation.self_switch_script(),
+            activation.self_switch_script(
+                activation
+                    .detached_self_activation()
+                    .expect("detached self activation"),
+            ),
         );
         assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
@@ -7861,12 +7942,16 @@ mod tests {
         let activation =
             host_activation_on_host(ordinary::HostDeployAction::TestActivation, Some(node()));
         assert!(
-            activation.runs_detached_self_activation(),
+            activation.detached_self_activation().is_some(),
             "same-host TestActivation must survive the service replacement"
         );
         let invocation = activation.retained_detached_invocation(
             &activation.self_switch_unit_name(),
-            activation.self_switch_script(),
+            activation.self_switch_script(
+                activation
+                    .detached_self_activation()
+                    .expect("detached self activation"),
+            ),
         );
         let argv = invocation.joined_arguments();
         assert!(argv.contains("systemd-run"), "PID-1-owned unit: {argv}");
@@ -8047,9 +8132,9 @@ mod tests {
             ordinary::HostDeployAction::ActivateNow,
             Some(ordinary::NodeName::new("some-other-node")),
         );
-        assert!(!foreign.runs_detached_self_activation());
+        assert!(foreign.detached_self_activation().is_none());
         let no_context = host_activation(ordinary::HostDeployAction::ActivateNow);
-        assert!(!no_context.runs_detached_self_activation());
+        assert!(no_context.detached_self_activation().is_none());
         // The foreground Switch invocation is still available and well-shaped.
         let invocation = no_context.ssh_invocation().expect("foreground switch");
         assert_eq!(invocation.program(), "ssh");
@@ -8067,10 +8152,10 @@ mod tests {
         // transient unit).
         let boot =
             host_activation_on_host(ordinary::HostDeployAction::SetBootProfile, Some(node()));
-        assert!(!boot.runs_detached_self_activation());
+        assert!(boot.detached_self_activation().is_none());
         let boot_once =
             host_activation_on_host(ordinary::HostDeployAction::ScheduleBootOnce, Some(node()));
-        assert!(!boot_once.runs_detached_self_activation());
+        assert!(boot_once.detached_self_activation().is_none());
     }
 
     // ---- Step 3: BootOnce transient-unit argv + script snapshot ----

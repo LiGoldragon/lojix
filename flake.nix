@@ -199,6 +199,17 @@
             }
           );
 
+          # What the Nexus says when it cannot do what was asked: a copy
+          # failure naming the copy stage, and a deploy refusal that names no
+          # deployment instead of aborting the daemon.
+          deploy-honesty = craneLib.cargoTest (
+            commonArguments
+            // {
+              inherit cargoArtifacts;
+              cargoExtraArgs = "-p lojix --test deploy_honesty";
+            }
+          );
+
           nexus-startup-rejects-arguments =
             let
               package = self.packages.${system}.default;

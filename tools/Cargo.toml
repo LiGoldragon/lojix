@@ -1,6 +1,6 @@
 [package]
 name = "lojix-offline-tools"
-version = "4.0.1"
+version = "5.0.0"
 edition = "2024"
 rust-version = "1.89"
 publish = false
@@ -36,5 +36,5 @@ unsafe_code = "forbid"
 
 [dev-dependencies]
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "171b21f65337983ab624b7b906397a4f1f92c5a3" }
-signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "5c94485c84d20d5b1496d867a2b40f2d908a02e3" }
+signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "4271b5ced31ea02f11f29b602301832e83cfe6c2" }
 tempfile = "3"

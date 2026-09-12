@@ -65,7 +65,11 @@ fn capacity_rejection_is_a_correlated_terminal_record() {
     let proposal_source = directory.path().join("horizon-definition.datom");
     common::write_single_node(&proposal_source);
     let engine = SchemaRuntime::new();
-    let rejected = engine.reject_deployment_in_flight(host_submission(&proposal_source));
+    let lojix::schema_runtime::DeploySubmissionOutcome::Rejected(rejected) =
+        engine.reject_deployment_in_flight(host_submission(&proposal_source))
+    else {
+        panic!("a healthy store rejects with the record it allocated")
+    };
     let record = rejected.into_payload();
     assert_ne!(*record.deployment_identifier.payload(), 0);
     assert!(record.optional_admission_marker.is_none());

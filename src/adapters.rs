@@ -338,7 +338,8 @@ shared_unit_enum!(DeploymentTerminalReason {
     BuilderUnreachable,
     SubstituterUnreachable,
     EvaluationFailed,
-    BuildFailed
+    BuildFailed,
+    ClosureCopyFailed
 });
 owner_unit_enum!(PinRejectionReason {
     PinSlotExhausted,
@@ -359,6 +360,11 @@ owner_unit_enum!(UnpinRejectionReason {
     PinLabelUnknown,
     InternalError,
     NodeUnknown
+});
+owner_unit_enum!(DeployRefusalReason {
+    ContinuationBudgetExhausted,
+    NoCorrelatedDeployment,
+    DurableWriteFailed
 });
 owner_unit_enum!(TestRejectionReason {
     SubstrateUnavailable,
@@ -701,6 +707,7 @@ owner_raise_struct!(RejectedPin => RejectedPin { pin_rejection_reason => pin_rej
 owner_raise_struct!(RejectedUnpin => RejectedUnpin { unpin_rejection_reason => unpin_rejection_reason, database_marker => state_marker });
 owner_raise_struct!(RejectedRetire => RejectedRetire { retire_rejection_reason => retire_rejection_reason, database_marker => state_marker });
 owner_raise_struct!(RejectedTest => RejectedTest { test_rejection_reason => test_rejection_reason, database_marker => state_marker });
+owner_raise_struct!(RefusedDeploy => RefusedDeploy { deploy_refusal_reason => deploy_refusal_reason, database_marker => state_marker });
 
 impl Raisable<ordinary::RejectedWatch> for sema::RejectedWatch {
     fn raise(self) -> Result<ordinary::RejectedWatch, WireShapeError> {
@@ -835,6 +842,9 @@ impl Raisable<owner::Response> for sema::MetaEgress {
                 owner::Response::ConfigurationReversed(value.raise()?)
             }
             sema::MetaEgress::PinRejected(value) => owner::Response::PinRejected(value.raise()?),
+            sema::MetaEgress::DeployRefused(value) => {
+                owner::Response::DeployRefused(value.raise()?)
+            }
             sema::MetaEgress::DeployRejected(value) => {
                 owner::Response::DeployRejected(value.raise()?)
             }
