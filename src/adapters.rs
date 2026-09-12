@@ -801,7 +801,7 @@ impl Raisable<ordinary::Response> for sema::OrdinaryEgress {
                 })
             }
             sema::OrdinaryEgress::ConfigurationRejected(value) => {
-                ordinary::Response::ConfigurationRejected(configuration_rejection(value))
+                ordinary::Response::ConfigurationRejected(value.raise()?)
             }
             sema::OrdinaryEgress::TestRunsQueried(value) => {
                 ordinary::Response::TestRunsQueried(value.raise()?)
@@ -827,14 +827,12 @@ impl Raisable<ordinary::Response> for sema::OrdinaryEgress {
 impl Raisable<owner::Response> for sema::MetaEgress {
     fn raise(self) -> Result<owner::Response, WireShapeError> {
         Ok(match self {
-            sema::MetaEgress::Configured(value) => {
-                owner::Response::Configured(configuration_receipt(value))
-            }
+            sema::MetaEgress::Configured(value) => owner::Response::Configured(value.raise()?),
             sema::MetaEgress::ConfigurationRejected(value) => {
-                owner::Response::ConfigurationRejected(configuration_rejection(value))
+                owner::Response::ConfigurationRejected(value.raise()?)
             }
             sema::MetaEgress::ConfigurationReversed(value) => {
-                owner::Response::ConfigurationReversed(configuration_receipt(value))
+                owner::Response::ConfigurationReversed(value.raise()?)
             }
             sema::MetaEgress::PinRejected(value) => owner::Response::PinRejected(value.raise()?),
             sema::MetaEgress::DeployRejected(value) => {
@@ -861,25 +859,27 @@ impl Raisable<owner::Response> for sema::MetaEgress {
     }
 }
 
-fn configuration_receipt(value: sema::ConfigurationReceipt) -> ordinary::ConfigurationReceipt {
-    ordinary::ConfigurationReceipt {
-        lojix_nexus_configuration: value.configuration,
-        meta_configure_occurred: value.meta_configure_occurred,
+impl Raisable<ordinary::ConfigurationReceipt> for sema::ConfigurationReceipt {
+    fn raise(self) -> Result<ordinary::ConfigurationReceipt, WireShapeError> {
+        Ok(ordinary::ConfigurationReceipt {
+            lojix_nexus_configuration: self.configuration,
+            meta_configure_occurred: self.meta_configure_occurred,
+        })
     }
 }
 
-fn configuration_rejection(
-    value: sema::ConfigurationRejection,
-) -> ordinary::ConfigurationRejection {
-    ordinary::ConfigurationRejection {
-        configuration_rejection_reason: match value.reason {
-            sema::ConfigurationRejectionReason::OrdinaryConfigureClosed => {
-                ordinary::ConfigurationRejectionReason::OrdinaryConfigureClosed
-            }
-            sema::ConfigurationRejectionReason::InvalidConfiguration => {
-                ordinary::ConfigurationRejectionReason::InvalidConfiguration
-            }
-        },
+impl Raisable<ordinary::ConfigurationRejection> for sema::ConfigurationRejection {
+    fn raise(self) -> Result<ordinary::ConfigurationRejection, WireShapeError> {
+        Ok(ordinary::ConfigurationRejection {
+            configuration_rejection_reason: match self.reason {
+                sema::ConfigurationRejectionReason::OrdinaryConfigureClosed => {
+                    ordinary::ConfigurationRejectionReason::OrdinaryConfigureClosed
+                }
+                sema::ConfigurationRejectionReason::InvalidConfiguration => {
+                    ordinary::ConfigurationRejectionReason::InvalidConfiguration
+                }
+            },
+        })
     }
 }
 

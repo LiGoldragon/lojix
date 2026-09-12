@@ -1,4 +1,5 @@
 use horizon_lib::DatomDecoding;
+use lojix::InlineDatomArguments as _;
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
@@ -47,7 +48,7 @@ impl Invocable for Client {
         Self::from_arguments(std::env::args_os().skip(1))?.run()
     }
     fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> lojix::Result<Self> {
-        let source = lojix::single_inline_datom_argument(arguments)?;
+        let source = (arguments).single_inline_datom()?;
         let input = Potential::<meta_signal_lojix::ClientQuery>::from(source)
             .actualize(&mut <Self as Invocable>::budget())
             .map_err(|fault| lojix::Error::DatomRequestText(format!("{fault:?}")))?;

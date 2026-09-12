@@ -25,7 +25,7 @@ use crate::runtime_model::{
     ContainerLifecycleRecord, DeployJob, DeploymentRecord, EventLogEntry, GcRoot,
     IdentifierAllocation, LiveGeneration, StoredTestRun,
 };
-use crate::{Error, Result, ingress, single_inline_datom_argument};
+use crate::{Error, InlineDatomArguments as _, Result, ingress};
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");
@@ -57,8 +57,8 @@ impl StoreInspectionCommand {
     }
 
     pub fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
-        let text = single_inline_datom_argument(arguments)?;
-        let path = parse_inspect_store_request(&text)?;
+        let text = (arguments).single_inline_datom()?;
+        let path = text.inspected_store_path()?;
         Ok(Self {
             path: PathBuf::from(path),
         })
@@ -69,15 +69,24 @@ impl StoreInspectionCommand {
     }
 }
 
-/// Decode exactly one inline current Datom `InspectStore.{ <path> }` request.
-/// The CLI never hands its operand to a file-classifying component parser, so
-/// an existing request-like path remains plain rejected text rather than input.
-fn parse_inspect_store_request(text: &str) -> Result<String> {
-    let request = Potential::<ingress::InspectionRequest>::from(text.to_owned())
-        .actualize(&mut <crate::Ingress as crate::Budgeted>::budget())
-        .map_err(|fault| Error::DatomRequestText(format!("{fault:?}")))?;
-    let ingress::InspectionRequest::InspectStore(ingress::InspectStore { string: path }) = request;
-    Ok(path)
+/// Reading the CLI's one inline operand as the request it must be.
+trait InspectionRequestText {
+    /// Decode exactly one inline current Datom `InspectStore.{ <path> }`
+    /// request and answer with the store path it names. The CLI never hands
+    /// its operand to a file-classifying component parser, so an existing
+    /// request-like path remains plain rejected text rather than input.
+    fn inspected_store_path(&self) -> Result<String>;
+}
+
+impl InspectionRequestText for str {
+    fn inspected_store_path(&self) -> Result<String> {
+        let request = Potential::<ingress::InspectionRequest>::from(self.to_owned())
+            .actualize(&mut <crate::Ingress as crate::Budgeted>::budget())
+            .map_err(|fault| Error::DatomRequestText(format!("{fault:?}")))?;
+        let ingress::InspectionRequest::InspectStore(ingress::InspectStore { string: path }) =
+            request;
+        Ok(path)
+    }
 }
 
 pub struct StoreInspector {

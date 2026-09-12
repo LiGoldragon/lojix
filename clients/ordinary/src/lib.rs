@@ -1,3 +1,4 @@
+use lojix::InlineDatomArguments as _;
 use std::ffi::OsString;
 
 use datom_codec::{Actualizing, Budget, Potential};
@@ -43,7 +44,7 @@ impl Invocable for Client {
         Self::from_arguments(std::env::args_os().skip(1))?.run()
     }
     fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> lojix::Result<Self> {
-        let source = lojix::single_inline_datom_argument(arguments)?;
+        let source = (arguments).single_inline_datom()?;
         let input = Potential::<signal_lojix::Query>::from(source)
             .actualize(&mut <Self as Invocable>::budget())
             .map_err(|fault| lojix::Error::DatomRequestText(format!("{fault:?}")))?;

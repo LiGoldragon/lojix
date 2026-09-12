@@ -33,19 +33,32 @@ use triad_runtime::{
 /// serial accept loop (audit R2). A legitimate client sends immediately.
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn decode_meta_request(bytes: &[u8]) -> Result<meta_signal_lojix::Query> {
-    use signal::{Restorable, Signal};
-    Signal::<meta_signal_lojix::Query>::from(bytes.to_vec())
-        .restore()
-        .map_err(|fault| Error::Wire(format!("{fault:?}")))
+/// Reading one meta-socket frame body as the request it archives.
+trait MetaRequestFraming {
+    fn meta_request(&self) -> Result<meta_signal_lojix::Query>;
 }
 
-fn encode_meta_response(response: meta_signal_lojix::Response) -> Result<Vec<u8>> {
-    use signal::{ByteViewable, Signalizable};
-    response
-        .signalize()
-        .map(|signal| signal.bytes().to_vec())
-        .map_err(|fault| Error::Wire(format!("{fault:?}")))
+impl MetaRequestFraming for [u8] {
+    fn meta_request(&self) -> Result<meta_signal_lojix::Query> {
+        use signal::{Restorable, Signal};
+        Signal::<meta_signal_lojix::Query>::from(self.to_vec())
+            .restore()
+            .map_err(|fault| Error::Wire(format!("{fault:?}")))
+    }
+}
+
+/// Writing one meta-socket reply as the frame body that carries it.
+trait MetaResponseFraming {
+    fn meta_frame(self) -> Result<Vec<u8>>;
+}
+
+impl MetaResponseFraming for meta_signal_lojix::Response {
+    fn meta_frame(self) -> Result<Vec<u8>> {
+        use signal::{ByteViewable, Signalizable};
+        self.signalize()
+            .map(|signal| signal.bytes().to_vec())
+            .map_err(|fault| Error::Wire(format!("{fault:?}")))
+    }
 }
 
 use crate::adapters::{Lowerable as _, Raisable as _};
@@ -141,11 +154,11 @@ async fn run_daemon(daemon_configuration: Daemon) -> Result<()> {
         .with_concurrency_limit(RequestConcurrencyLimit::new(MAXIMUM_CONCURRENT_REQUESTS))
         .bind()
         .await
-        .map_err(|error| map_daemon_error(AsyncMultiListenerDaemonError::Listener(error)))?;
+        .map_err(|error| Error::from(AsyncMultiListenerDaemonError::Listener(error)))?;
     daemon
         .start()
         .await
-        .map_err(|error| map_daemon_error(AsyncMultiListenerDaemonError::Start(error)))?;
+        .map_err(|error| Error::from(AsyncMultiListenerDaemonError::Start(error)))?;
 
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
@@ -154,26 +167,28 @@ async fn run_daemon(daemon_configuration: Daemon) -> Result<()> {
             _ = terminate.recv() => break,
             _ = interrupt.recv() => break,
             result = daemon.serve_next_connection_at(0) => {
-                result.map_err(|error| map_daemon_error(AsyncMultiListenerDaemonError::Listener(error)))?;
+                result.map_err(|error| Error::from(AsyncMultiListenerDaemonError::Listener(error)))?;
             }
             result = daemon.serve_next_connection_at(1) => {
-                result.map_err(|error| map_daemon_error(AsyncMultiListenerDaemonError::Listener(error)))?;
+                result.map_err(|error| Error::from(AsyncMultiListenerDaemonError::Listener(error)))?;
             }
         }
     }
     daemon
         .stop()
         .await
-        .map_err(|error| map_daemon_error(AsyncMultiListenerDaemonError::Stop(error)))
+        .map_err(|error| Error::from(AsyncMultiListenerDaemonError::Stop(error)))
 }
 
-fn map_daemon_error(error: AsyncMultiListenerDaemonError<Error>) -> Error {
-    match error {
-        AsyncMultiListenerDaemonError::Listener(listener_error) => Error::SignalFrame(
-            signal::FrameError::Io(std::io::Error::other(listener_error.to_string())),
-        ),
-        AsyncMultiListenerDaemonError::Start(error)
-        | AsyncMultiListenerDaemonError::Stop(error) => error,
+impl From<AsyncMultiListenerDaemonError<Error>> for Error {
+    fn from(error: AsyncMultiListenerDaemonError<Error>) -> Self {
+        match error {
+            AsyncMultiListenerDaemonError::Listener(listener_error) => Self::SignalFrame(
+                signal::FrameError::Io(std::io::Error::other(listener_error.to_string())),
+            ),
+            AsyncMultiListenerDaemonError::Start(error)
+            | AsyncMultiListenerDaemonError::Stop(error) => error,
+        }
     }
 }
 
@@ -447,7 +462,7 @@ impl RequestServable for RequestWorker {
     async fn serve_owner(&self, connection: &mut AcceptedConnection) -> Result<()> {
         self.owner_authority.authorize(connection.context())?;
         let body = self.read_body(connection).await?;
-        let input = decode_meta_request(body.bytes())?;
+        let input = body.bytes().meta_request()?;
         let input = input.lower()?;
         // A `Deploy` decouples from this connection task: the deploy-job actor
         // owns the pipeline, this task only submits and replies the accepted
@@ -468,7 +483,7 @@ impl RequestServable for RequestWorker {
             }
         };
         let reply = reply.raise()?;
-        let frame = encode_meta_response(reply)?;
+        let frame = reply.meta_frame()?;
         connection
             .stream_mut()
             .write_frame(&FrameBody::from(frame), self.capacity)

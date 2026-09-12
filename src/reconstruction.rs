@@ -20,8 +20,8 @@ use rkyv::rancor;
 use sema_engine::TableRegistration;
 
 use crate::{
-    Error, LegacyConfigurationArchivable as _, LegacyStartupConfiguration, Result, Store, ingress,
-    single_inline_datom_argument,
+    Error, InlineDatomArguments as _, LegacyConfigurationArchivable as _,
+    LegacyStartupConfiguration, Result, Store, ingress,
 };
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");
@@ -107,24 +107,26 @@ impl StoreResetCommand {
         arguments: impl IntoIterator<Item = OsString>,
         configuration_path: impl Into<PathBuf>,
     ) -> Result<Self> {
-        let text = single_inline_datom_argument(arguments)?;
-        parse_reset_request(&text)?;
+        let text = (arguments).single_inline_datom()?;
+        text.require_reset_store()?;
         Ok(Self {
             configuration_path: configuration_path.into(),
         })
     }
 
     pub fn run(&self) -> Result<StoreResetOutcome> {
-        let configuration_path = canonical_regular_file(&self.configuration_path, "configuration")?;
+        let configuration_path = self
+            .configuration_path
+            .canonical_regular_file("configuration")?;
         let configuration = LegacyStartupConfiguration::from_rkyv_file(&configuration_path)?;
-        let path = canonical_regular_file(Path::new(&configuration.store_path), "store")?;
-        let schema = recognised_lojix_schema(&path)?;
+        let path = Path::new(&configuration.store_path).canonical_regular_file("store")?;
+        let schema = path.recognised_lojix_schema()?;
         if schema == CURRENT_SCHEMA {
             return Ok(StoreResetOutcome::AlreadyCurrent { path });
         }
         debug_assert!(RESETTABLE_SCHEMAS.contains(&schema));
 
-        let sidecars = validated_sidecars(&path)?;
+        let sidecars = path.validated_sidecars()?;
         fs::remove_file(&path).map_err(|error| {
             Error::StoreMaintenance(format!("remove reset store {}: {error}", path.display()))
         })?;
@@ -146,267 +148,322 @@ impl StoreResetCommand {
     }
 }
 
-/// `ResetStore` is a bare current Datom command. It is deliberately
-/// parsed structurally rather than treated as a magic string so extra fields,
-/// another delimiter, and a malformed document are all rejected at the same
-/// boundary.
-fn parse_reset_request(text: &str) -> Result<()> {
-    let request = Potential::<ingress::ResetStoreRequest>::from(text.to_owned())
-        .actualize(&mut <crate::Ingress as crate::Budgeted>::budget())
-        .map_err(|fault| Error::DatomRequestText(format!("{fault:?}")))?;
-    let ingress::ResetStoreRequest::ResetStore = request;
-    Ok(())
+/// Reading the reset command's one inline operand as the request it must be.
+trait ResetRequestText {
+    /// `ResetStore` is a bare current Datom command. It is deliberately parsed
+    /// structurally rather than treated as a magic string so extra fields,
+    /// another delimiter, and a malformed document are all rejected at the
+    /// same boundary.
+    fn require_reset_store(&self) -> Result<()>;
 }
 
-fn canonical_regular_file(candidate: &Path, subject: &str) -> Result<PathBuf> {
-    if !candidate.is_absolute()
-        || candidate.file_name().is_none()
-        || candidate
-            .components()
-            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
-    {
-        return Err(Error::StoreMaintenance(format!(
-            "reset {subject} must be an exact absolute, traversal-free file path"
-        )));
+impl ResetRequestText for str {
+    fn require_reset_store(&self) -> Result<()> {
+        let request = Potential::<ingress::ResetStoreRequest>::from(self.to_owned())
+            .actualize(&mut <crate::Ingress as crate::Budgeted>::budget())
+            .map_err(|fault| Error::DatomRequestText(format!("{fault:?}")))?;
+        let ingress::ResetStoreRequest::ResetStore = request;
+        Ok(())
     }
-    let file_name = candidate.file_name().expect("checked above");
-    let parent = candidate.parent().ok_or_else(|| {
-        Error::StoreMaintenance(format!(
-            "reset {subject} path must have an existing canonical parent directory"
-        ))
-    })?;
-    let parent = fs::canonicalize(parent).map_err(|error| {
-        Error::StoreMaintenance(format!(
-            "reset {subject} parent {} must exist and be canonicalizable: {error}",
-            parent.display(),
-        ))
-    })?;
-    let metadata = fs::metadata(&parent).map_err(|error| {
-        Error::StoreMaintenance(format!(
-            "reset {subject} parent {} is unreadable: {error}",
-            parent.display()
-        ))
-    })?;
-    if !metadata.is_dir() {
-        return Err(Error::StoreMaintenance(format!(
-            "reset {subject} parent is not a directory"
-        )));
-    }
-    let path = parent.join(file_name);
-    let metadata = fs::symlink_metadata(&path).map_err(|error| {
-        Error::StoreMaintenance(format!(
-            "reset {subject} {} must exist and be readable: {error}",
-            path.display(),
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(Error::StoreMaintenance(format!(
-            "reset {subject} {} must be a regular non-symlink file",
-            path.display(),
-        )));
-    }
-    Ok(path)
 }
 
-fn sidecars_for(path: &Path) -> Vec<PathBuf> {
-    SIDECAR_SUFFIXES
-        .iter()
-        .map(|suffix| PathBuf::from(format!("{}{}", path.display(), suffix)))
-        .collect()
+/// What the reset command asks of the two paths it is given: the generated
+/// configuration archive, and the store that archive names.
+trait ResetSubject {
+    /// The path as an exact absolute, traversal-free, existing regular
+    /// non-symlink file, with its parent directory canonicalized. `subject`
+    /// names the path in the rejection.
+    fn canonical_regular_file(&self, subject: &str) -> Result<PathBuf>;
+
+    /// Every protocol-owned sidecar this store could have, existing or not.
+    fn sidecars(&self) -> Vec<PathBuf>;
+
+    /// The sidecars that do exist, each proved to be a regular non-symlink
+    /// file. A sidecar of any other kind aborts the reset.
+    fn validated_sidecars(&self) -> Result<Vec<PathBuf>>;
+
+    /// The store's schema version, admitted only when the version is one lojix
+    /// recognises and the catalog is wholly a Lojix layout.
+    fn recognised_lojix_schema(&self) -> Result<u64>;
 }
 
-fn validated_sidecars(path: &Path) -> Result<Vec<PathBuf>> {
-    let mut sidecars = Vec::new();
-    for sidecar in sidecars_for(path) {
-        let metadata = match fs::symlink_metadata(&sidecar) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
+impl ResetSubject for Path {
+    fn canonical_regular_file(&self, subject: &str) -> Result<PathBuf> {
+        if !self.is_absolute()
+            || self.file_name().is_none()
+            || self
+                .components()
+                .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+        {
+            return Err(Error::StoreMaintenance(format!(
+                "reset {subject} must be an exact absolute, traversal-free file path"
+            )));
+        }
+        let file_name = self.file_name().expect("checked above");
+        let parent = self.parent().ok_or_else(|| {
+            Error::StoreMaintenance(format!(
+                "reset {subject} path must have an existing canonical parent directory"
+            ))
+        })?;
+        let parent = fs::canonicalize(parent).map_err(|error| {
+            Error::StoreMaintenance(format!(
+                "reset {subject} parent {} must exist and be canonicalizable: {error}",
+                parent.display(),
+            ))
+        })?;
+        let metadata = fs::metadata(&parent).map_err(|error| {
+            Error::StoreMaintenance(format!(
+                "reset {subject} parent {} is unreadable: {error}",
+                parent.display()
+            ))
+        })?;
+        if !metadata.is_dir() {
+            return Err(Error::StoreMaintenance(format!(
+                "reset {subject} parent is not a directory"
+            )));
+        }
+        let path = parent.join(file_name);
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            Error::StoreMaintenance(format!(
+                "reset {subject} {} must exist and be readable: {error}",
+                path.display(),
+            ))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(Error::StoreMaintenance(format!(
+                "reset {subject} {} must be a regular non-symlink file",
+                path.display(),
+            )));
+        }
+        Ok(path)
+    }
+
+    fn sidecars(&self) -> Vec<PathBuf> {
+        SIDECAR_SUFFIXES
+            .iter()
+            .map(|suffix| PathBuf::from(format!("{}{}", self.display(), suffix)))
+            .collect()
+    }
+
+    fn validated_sidecars(&self) -> Result<Vec<PathBuf>> {
+        let mut sidecars = Vec::new();
+        for sidecar in self.sidecars() {
+            let metadata = match fs::symlink_metadata(&sidecar) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(Error::StoreMaintenance(format!(
+                        "inspect Lojix reset sidecar {}: {error}",
+                        sidecar.display(),
+                    )));
+                }
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
                 return Err(Error::StoreMaintenance(format!(
-                    "inspect Lojix reset sidecar {}: {error}",
+                    "Lojix reset sidecar {} must be a regular non-symlink file",
                     sidecar.display(),
                 )));
             }
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            sidecars.push(sidecar);
+        }
+        Ok(sidecars)
+    }
+
+    fn recognised_lojix_schema(&self) -> Result<u64> {
+        let database = redb::ReadOnlyDatabase::open(self).map_err(|error| {
+            Error::StoreMaintenance(format!(
+                "store {} did not open read-only: {error}",
+                self.display(),
+            ))
+        })?;
+        let version = database.schema_version()?;
+        if !RECOGNISED_SCHEMAS.contains(&version) {
             return Err(Error::StoreMaintenance(format!(
-                "Lojix reset sidecar {} must be a regular non-symlink file",
-                sidecar.display(),
+                "reset store {} has unsupported schema {version}; refusing to remove an unrecognised file",
+                self.display(),
             )));
         }
-        sidecars.push(sidecar);
+        database.validate_lojix_catalog(version)?;
+        Ok(version)
     }
-    Ok(sidecars)
 }
 
-fn recognised_lojix_schema(path: &Path) -> Result<u64> {
-    let database = redb::ReadOnlyDatabase::open(path).map_err(|error| {
-        Error::StoreMaintenance(format!(
-            "store {} did not open read-only: {error}",
-            path.display(),
-        ))
-    })?;
-    let version = schema_version_from_database(&database)?;
-    if !RECOGNISED_SCHEMAS.contains(&version) {
-        return Err(Error::StoreMaintenance(format!(
-            "reset store {} has unsupported schema {version}; refusing to remove an unrecognised file",
-            path.display(),
-        )));
-    }
-    validate_lojix_catalog(&database, version)?;
-    Ok(version)
+/// Reading the durable identity a reset source claims.
+trait LojixStoreDatabase {
+    fn schema_version(&self) -> Result<u64>;
+
+    /// Verify the persisted sema-engine catalog belongs wholly to one of the
+    /// Lojix store layouts. Schema v2 has the six core families; v3/v4/v5 add
+    /// the deployment correlation families (and v3's retired quarantine
+    /// family). A valid reset source must contain every core family and no
+    /// foreign family.
+    fn validate_lojix_catalog(&self, version: u64) -> Result<()>;
 }
 
-#[cfg(test)]
-fn schema_version(path: &Path) -> Result<u64> {
-    let database = redb::ReadOnlyDatabase::open(path).map_err(|error| {
-        Error::StoreMaintenance(format!(
-            "store {} did not open read-only: {error}",
-            path.display(),
-        ))
-    })?;
-    schema_version_from_database(&database)
-}
-
-fn schema_version_from_database(database: &redb::ReadOnlyDatabase) -> Result<u64> {
-    let transaction = database
-        .begin_read()
-        .map_err(|error| Error::StoreMaintenance(format!("store metadata read failed: {error}")))?;
-    let table = transaction.open_table(META_TABLE).map_err(|error| {
-        Error::StoreMaintenance(format!("store metadata table missing: {error}"))
-    })?;
-    let version = table
-        .get(SCHEMA_VERSION_KEY)
-        .map_err(|error| {
-            Error::StoreMaintenance(format!("store schema version read failed: {error}"))
-        })?
-        .ok_or_else(|| Error::StoreMaintenance("store schema version is missing".to_string()))?;
-    Ok(version.value())
-}
-
-/// Verify the persisted sema-engine catalog belongs wholly to one of the
-/// Lojix store layouts. Schema v2 has the six core families; v3/v4/v5 add the
-/// deployment correlation families (and v3's retired quarantine family). A
-/// valid reset source must contain every core family and no foreign family.
-fn validate_lojix_catalog(database: &redb::ReadOnlyDatabase, version: u64) -> Result<()> {
-    let transaction = database
-        .begin_read()
-        .map_err(|error| Error::StoreMaintenance(format!("store catalog read failed: {error}")))?;
-    let table = transaction.open_table(CATALOG_TABLE).map_err(|error| {
-        Error::StoreMaintenance(format!("store catalog table missing: {error}"))
-    })?;
-    let mut actual = BTreeSet::new();
-    for row in table.iter().map_err(|error| {
-        Error::StoreMaintenance(format!("store catalog iteration failed: {error}"))
-    })? {
-        let (_key, value) = row.map_err(|error| {
-            Error::StoreMaintenance(format!("store catalog row read failed: {error}"))
+impl LojixStoreDatabase for redb::ReadOnlyDatabase {
+    fn schema_version(&self) -> Result<u64> {
+        let transaction = self.begin_read().map_err(|error| {
+            Error::StoreMaintenance(format!("store metadata read failed: {error}"))
         })?;
-        let registration = rkyv::from_bytes::<TableRegistration, rancor::Error>(value.value())
+        let table = transaction.open_table(META_TABLE).map_err(|error| {
+            Error::StoreMaintenance(format!("store metadata table missing: {error}"))
+        })?;
+        let version = table
+            .get(SCHEMA_VERSION_KEY)
             .map_err(|error| {
-                Error::StoreMaintenance(format!("store catalog decode failed: {error}"))
+                Error::StoreMaintenance(format!("store schema version read failed: {error}"))
+            })?
+            .ok_or_else(|| {
+                Error::StoreMaintenance("store schema version is missing".to_string())
             })?;
-        actual.insert(lojix_identity(&registration));
+        Ok(version.value())
     }
-    let recognised = recognised_lojix_identities();
-    let core = core_lojix_identities();
-    if actual.is_empty() || !core.is_subset(&actual) || !actual.is_subset(&recognised) {
-        return Err(Error::StoreMaintenance(format!(
-            "reset store catalog is not a recognised Lojix family/schema layout for schema {version}; refusing removal"
-        )));
+
+    fn validate_lojix_catalog(&self, version: u64) -> Result<()> {
+        let transaction = self.begin_read().map_err(|error| {
+            Error::StoreMaintenance(format!("store catalog read failed: {error}"))
+        })?;
+        let table = transaction.open_table(CATALOG_TABLE).map_err(|error| {
+            Error::StoreMaintenance(format!("store catalog table missing: {error}"))
+        })?;
+        let mut actual = BTreeSet::new();
+        for row in table.iter().map_err(|error| {
+            Error::StoreMaintenance(format!("store catalog iteration failed: {error}"))
+        })? {
+            let (_key, value) = row.map_err(|error| {
+                Error::StoreMaintenance(format!("store catalog row read failed: {error}"))
+            })?;
+            let registration = rkyv::from_bytes::<TableRegistration, rancor::Error>(value.value())
+                .map_err(|error| {
+                    Error::StoreMaintenance(format!("store catalog decode failed: {error}"))
+                })?;
+            actual.insert(registration.lojix_identity());
+        }
+        let LojixCatalog(recognised) = LojixCatalog::recognised();
+        let LojixCatalog(core) = LojixCatalog::core();
+        if actual.is_empty() || !core.is_subset(&actual) || !actual.is_subset(&recognised) {
+            return Err(Error::StoreMaintenance(format!(
+                "reset store catalog is not a recognised Lojix family/schema layout for schema {version}; refusing removal"
+            )));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 type StoreFamilyIdentity = (String, String, [u8; 32]);
 
-fn lojix_identity(registration: &TableRegistration) -> StoreFamilyIdentity {
-    (
-        registration.table_name().to_string(),
-        registration.identity().family().as_str().to_string(),
-        *registration.identity().schema_hash().bytes(),
-    )
+/// How a sema-engine table registration names itself in a Lojix catalog.
+trait CatalogRegistration {
+    fn lojix_identity(&self) -> StoreFamilyIdentity;
 }
 
-fn core_lojix_identities() -> BTreeSet<StoreFamilyIdentity> {
-    lojix_identities([
+impl CatalogRegistration for TableRegistration {
+    fn lojix_identity(&self) -> StoreFamilyIdentity {
         (
-            crate::LIVE_SET_TABLE.as_str(),
-            crate::LIVE_SET_FAMILY,
-            crate::LIVE_SET_SCHEMA_HASH,
-        ),
-        (
-            crate::GC_ROOTS_TABLE.as_str(),
-            crate::GC_ROOTS_FAMILY,
-            crate::GC_ROOTS_SCHEMA_HASH,
-        ),
-        (
-            crate::EVENT_LOG_TABLE.as_str(),
-            crate::EVENT_LOG_FAMILY,
-            crate::EVENT_LOG_SCHEMA_HASH,
-        ),
-        (
-            crate::CONTAINER_LIFECYCLE_TABLE.as_str(),
-            crate::CONTAINER_LIFECYCLE_FAMILY,
-            crate::CONTAINER_LIFECYCLE_SCHEMA_HASH,
-        ),
-        (
-            crate::DEPLOY_JOB_TABLE.as_str(),
-            crate::DEPLOY_JOB_FAMILY,
-            crate::DEPLOY_JOB_SCHEMA_HASH,
-        ),
-        (
-            crate::TEST_RUN_TABLE.as_str(),
-            crate::TEST_RUN_FAMILY,
-            crate::TEST_RUN_SCHEMA_HASH,
-        ),
-    ])
+            self.table_name().to_string(),
+            self.identity().family().as_str().to_string(),
+            *self.identity().schema_hash().bytes(),
+        )
+    }
 }
 
-fn recognised_lojix_identities() -> BTreeSet<StoreFamilyIdentity> {
-    let mut identities = core_lojix_identities();
-    identities.extend(lojix_identities([
-        (
-            crate::DEPLOYMENT_RECORD_TABLE.as_str(),
-            crate::DEPLOYMENT_RECORD_FAMILY,
-            crate::DEPLOYMENT_RECORD_SCHEMA_HASH,
-        ),
-        (
-            crate::IDENTIFIER_ALLOCATION_TABLE.as_str(),
-            crate::IDENTIFIER_ALLOCATION_FAMILY,
-            crate::IDENTIFIER_ALLOCATION_SCHEMA_HASH,
-        ),
-        (
-            crate::DEPLOYMENT_OUTBOX_TABLE.as_str(),
-            crate::DEPLOYMENT_OUTBOX_FAMILY,
-            crate::DEPLOYMENT_OUTBOX_SCHEMA_HASH,
-        ),
-        (
-            crate::PENDING_TRANSITION_INTENT_TABLE.as_str(),
-            crate::PENDING_TRANSITION_INTENT_FAMILY,
-            crate::PENDING_TRANSITION_INTENT_SCHEMA_HASH,
-        ),
-        (
-            crate::NEXUS_CONFIGURATION_TABLE.as_str(),
-            crate::NEXUS_CONFIGURATION_FAMILY,
-            crate::NEXUS_CONFIGURATION_SCHEMA_HASH,
-        ),
-        (
-            "legacy-deployment-event-quarantine",
-            "LegacyDeploymentEventQuarantineFamily",
-            [10; 32],
-        ),
-    ]));
-    identities
+/// A set of table family identities read as one store layout.
+struct LojixCatalog(BTreeSet<StoreFamilyIdentity>);
+
+impl<const COUNT: usize> From<[(&str, &str, [u8; 32]); COUNT]> for LojixCatalog {
+    fn from(identities: [(&str, &str, [u8; 32]); COUNT]) -> Self {
+        Self(
+            identities
+                .into_iter()
+                .map(|(table, family, hash)| (table.to_string(), family.to_string(), hash))
+                .collect(),
+        )
+    }
 }
 
-fn lojix_identities<const COUNT: usize>(
-    identities: [(&str, &str, [u8; 32]); COUNT],
-) -> BTreeSet<StoreFamilyIdentity> {
-    identities
-        .into_iter()
-        .map(|(table, family, hash)| (table.to_string(), family.to_string(), hash))
-        .collect()
+/// The two layouts a reset source is compared against.
+trait StoreLayouts {
+    /// The six families every recognised Lojix store must carry.
+    fn core() -> Self;
+
+    /// Every family a recognised Lojix store may carry — the core six plus the
+    /// deployment correlation families and v3's retired quarantine family.
+    fn recognised() -> Self;
+}
+
+impl StoreLayouts for LojixCatalog {
+    fn core() -> Self {
+        Self::from([
+            (
+                crate::LIVE_SET_TABLE.as_str(),
+                crate::LIVE_SET_FAMILY,
+                crate::LIVE_SET_SCHEMA_HASH,
+            ),
+            (
+                crate::GC_ROOTS_TABLE.as_str(),
+                crate::GC_ROOTS_FAMILY,
+                crate::GC_ROOTS_SCHEMA_HASH,
+            ),
+            (
+                crate::EVENT_LOG_TABLE.as_str(),
+                crate::EVENT_LOG_FAMILY,
+                crate::EVENT_LOG_SCHEMA_HASH,
+            ),
+            (
+                crate::CONTAINER_LIFECYCLE_TABLE.as_str(),
+                crate::CONTAINER_LIFECYCLE_FAMILY,
+                crate::CONTAINER_LIFECYCLE_SCHEMA_HASH,
+            ),
+            (
+                crate::DEPLOY_JOB_TABLE.as_str(),
+                crate::DEPLOY_JOB_FAMILY,
+                crate::DEPLOY_JOB_SCHEMA_HASH,
+            ),
+            (
+                crate::TEST_RUN_TABLE.as_str(),
+                crate::TEST_RUN_FAMILY,
+                crate::TEST_RUN_SCHEMA_HASH,
+            ),
+        ])
+    }
+
+    fn recognised() -> Self {
+        let Self(mut identities) = Self::core();
+        let Self(correlation) = Self::from([
+            (
+                crate::DEPLOYMENT_RECORD_TABLE.as_str(),
+                crate::DEPLOYMENT_RECORD_FAMILY,
+                crate::DEPLOYMENT_RECORD_SCHEMA_HASH,
+            ),
+            (
+                crate::IDENTIFIER_ALLOCATION_TABLE.as_str(),
+                crate::IDENTIFIER_ALLOCATION_FAMILY,
+                crate::IDENTIFIER_ALLOCATION_SCHEMA_HASH,
+            ),
+            (
+                crate::DEPLOYMENT_OUTBOX_TABLE.as_str(),
+                crate::DEPLOYMENT_OUTBOX_FAMILY,
+                crate::DEPLOYMENT_OUTBOX_SCHEMA_HASH,
+            ),
+            (
+                crate::PENDING_TRANSITION_INTENT_TABLE.as_str(),
+                crate::PENDING_TRANSITION_INTENT_FAMILY,
+                crate::PENDING_TRANSITION_INTENT_SCHEMA_HASH,
+            ),
+            (
+                crate::NEXUS_CONFIGURATION_TABLE.as_str(),
+                crate::NEXUS_CONFIGURATION_FAMILY,
+                crate::NEXUS_CONFIGURATION_SCHEMA_HASH,
+            ),
+            (
+                "legacy-deployment-event-quarantine",
+                "LegacyDeploymentEventQuarantineFamily",
+                [10; 32],
+            ),
+        ]);
+        identities.extend(correlation);
+        Self(identities)
+    }
 }
 
 #[cfg(test)]
@@ -491,10 +548,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("configured-lojix-store.db");
         drop(Store::open(&path).expect("create v5 store"));
-        let sidecar = sidecars_for(&path)
-            .into_iter()
-            .next()
-            .expect("sidecar path");
+        let sidecar = path.sidecars().into_iter().next().expect("sidecar path");
         fs::write(&sidecar, "must survive with v5 primary").expect("sidecar witness");
         let before = fs::read(&path).expect("read v5 store before reset");
         let archive = startup_archive(directory.path(), &path);
@@ -513,7 +567,7 @@ mod tests {
         let path = directory.path().join("configured-lojix-store.db");
         drop(Store::open(&path).expect("create recognised Lojix source"));
         mark_pre_v5(&path);
-        for sidecar in sidecars_for(&path) {
+        for sidecar in path.sidecars() {
             fs::write(sidecar, "stale Lojix sidecar").expect("write sidecar");
         }
         let spirit = directory.path().join("spirit.sema");
@@ -522,14 +576,17 @@ mod tests {
         let outcome = reset_command(&archive).run().expect("reset pre-v5 source");
         assert!(matches!(outcome, StoreResetOutcome::Recreated { .. }));
         assert_eq!(
-            schema_version(&path).expect("fresh v5 schema"),
+            redb::ReadOnlyDatabase::open(&path)
+                .expect("open fresh v5 store")
+                .schema_version()
+                .expect("fresh v5 schema"),
             CURRENT_SCHEMA
         );
         assert_eq!(
             fs::read_to_string(spirit).expect("Spirit witness"),
             "must survive"
         );
-        assert!(sidecars_for(&path).iter().all(|sidecar| !sidecar.exists()));
+        assert!(path.sidecars().iter().all(|sidecar| !sidecar.exists()));
     }
 
     #[test]

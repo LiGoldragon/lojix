@@ -12,8 +12,10 @@
 //! routing Nexus execution through a blocking-pool bridge.
 
 use crate::inspected_text::{
-    CredentialBearing, InspectedText, NixStorePath, PercentEncodedText, StoreItemShape,
+    CredentialBearing, InspectedText, NixStorePath, OfferedPath, PathAdmission, PercentEncodedText,
+    StoreItemShape,
 };
+use crate::{HorizonArchitecture as _, SourceRevisionText as _};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -1214,7 +1216,7 @@ impl<'a> FlakeReferencePolicy<'a> {
                 _ => return false,
             }
         }
-        revision.is_some_and(|value| crate::immutable_revision(value).is_some())
+        revision.is_some_and(|value| (value).immutable_revision().is_some())
     }
 
     fn is_resolve_and_record(&self) -> bool {
@@ -1277,7 +1279,7 @@ impl<'a> FlakeReferencePolicy<'a> {
                         .split('&')
                         .find_map(|parameter| parameter.strip_prefix("rev="))
                 })
-                .and_then(crate::immutable_revision)
+                .and_then(|value| value.immutable_revision())
                 .expect("validated immutable reference has exactly one revision")
         })
     }
@@ -1715,7 +1717,7 @@ impl DeployPipeline {
             optional_immutable_revision: self
                 .source_revision
                 .as_ref()
-                .and_then(|record| crate::immutable_revision(&record.string)),
+                .and_then(|record| record.string.immutable_revision()),
             optional_deployment_terminal: None,
         }
     }
@@ -3664,7 +3666,7 @@ impl SchemaRuntime {
         resume_stage: sema::DeployResumeStage,
     ) -> bool {
         let source_revision = resolved.into_payload();
-        let Some(immutable_revision) = crate::immutable_revision(&source_revision.string) else {
+        let Some(immutable_revision) = source_revision.string.immutable_revision() else {
             return false;
         };
         let mut snapshot = None;
@@ -5001,7 +5003,15 @@ impl ClusterSecretsDirectory {
             sema::SecretsInput::NoSecrets => Ok(Self { path: None }),
             sema::SecretsInput::SecretsDirectory(directory) => {
                 let raw = directory.payload();
-                let path = safe_secrets_directory(raw)?;
+                // Caller-provided secret authority is admitted on the same
+                // no-symlink contract as every other lojix path: the daemon
+                // copies ciphertext later, so a link must not be resolvable
+                // after admission.
+                let path = OfferedPath::new(raw).existing_directory().map_err(|_| {
+                    Error::StoreMaintenance(
+                        "secrets input must be an existing absolute directory".to_string(),
+                    )
+                })?;
                 Ok(Self { path: Some(path) })
             }
         }
@@ -5031,45 +5041,6 @@ impl ClusterSecretsDirectory {
         files.sort_by(|left, right| left.sort_key().cmp(right.sort_key()));
         Ok(files)
     }
-}
-
-/// Validate caller-provided secret authority with the same no-symlink path
-/// traversal contract used by bootstrap inputs.  The daemon copies ciphertext
-/// later, so every existing component must be checked through metadata rather
-/// than letting filesystem operations resolve a link after admission.
-fn safe_secrets_directory(value: &str) -> Result<PathBuf> {
-    use std::path::Component;
-
-    let invalid = || {
-        Error::StoreMaintenance("secrets input must be an existing absolute directory".to_string())
-    };
-    if value.is_empty() || value.chars().any(char::is_control) {
-        return Err(invalid());
-    }
-    let path = PathBuf::from(value);
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
-    {
-        return Err(invalid());
-    }
-    let mut prefix = PathBuf::from("/");
-    for component in path.components() {
-        let Component::Normal(component) = component else {
-            continue;
-        };
-        prefix.push(component);
-        let metadata = fs::symlink_metadata(&prefix).map_err(|_| invalid())?;
-        if metadata.file_type().is_symlink() {
-            return Err(invalid());
-        }
-    }
-    let metadata = fs::symlink_metadata(&path).map_err(|_| invalid())?;
-    if !metadata.file_type().is_dir() {
-        return Err(invalid());
-    }
-    Ok(path)
 }
 
 /// One sops-encrypted secret file in the cluster `secrets/` directory. Its
@@ -5136,7 +5107,7 @@ struct NixSystemName(&'static str);
 
 impl NixSystemName {
     fn from_horizon_architecture(architecture: &str) -> Option<Self> {
-        crate::nix_system_from_horizon_architecture(architecture).map(Self)
+        (architecture).nix_system().map(Self)
     }
 
     fn as_str(self) -> &'static str {

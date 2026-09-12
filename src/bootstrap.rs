@@ -10,6 +10,7 @@
 //! path.
 
 use crate::inspected_text::{NixStorePath, StoreItemShape};
+use crate::{HorizonArchitecture as _, InlineDatomArguments as _};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -344,7 +345,7 @@ pub fn run_from_environment() -> std::result::Result<BootstrapTerminal, Bootstra
 pub fn decode_single_inline(
     arguments: impl IntoIterator<Item = OsString>,
 ) -> std::result::Result<BootstrapRun, BootstrapError> {
-    let text = crate::single_inline_datom_argument(arguments)?;
+    let text = (arguments).single_inline_datom()?;
     let request = Potential::<ingress::BootstrapRequest>::from(text)
         .actualize(&mut <crate::Ingress as crate::Budgeted>::budget())
         .map_err(|fault| BootstrapError::Decode(format!("{fault:?}")))?;
@@ -841,9 +842,7 @@ fn materialize<E: BootstrapExecutor>(
     let horizon = definition
         .project(&input.node_name)
         .map_err(|_| BootstrapError::Materialization)?;
-    let Some(projected_system) =
-        crate::nix_system_from_horizon_architecture(&horizon.node.machine.architecture)
-    else {
+    let Some(projected_system) = horizon.node.machine.architecture.nix_system() else {
         return Err(BootstrapError::Materialization);
     };
     if projected_system != input.nix_system {
@@ -2514,16 +2513,11 @@ fn absolute_normal_path(value: &str) -> std::result::Result<PathBuf, BootstrapEr
 
 #[cfg(test)]
 mod tests {
+    use crate::HorizonArchitecture as _;
     #[test]
     fn horizon_architecture_is_compared_as_a_nix_system() {
-        assert_eq!(
-            crate::nix_system_from_horizon_architecture("x86_64"),
-            Some("x86_64-linux")
-        );
-        assert_eq!(
-            crate::nix_system_from_horizon_architecture("aarch64"),
-            Some("aarch64-linux")
-        );
-        assert_eq!(crate::nix_system_from_horizon_architecture("riscv64"), None);
+        assert_eq!(("x86_64").nix_system(), Some("x86_64-linux"));
+        assert_eq!(("aarch64").nix_system(), Some("aarch64-linux"));
+        assert_eq!(("riscv64").nix_system(), None);
     }
 }

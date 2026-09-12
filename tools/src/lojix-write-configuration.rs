@@ -1,6 +1,7 @@
 //! `lojix-write-configuration` encodes one generated current Datom request into the daemon's rkyv startup archive.
 use datom_codec::{Actualizing, Potential};
 use horizon_lib::DatomDecoding;
+use lojix::InlineDatomArguments as _;
 use lojix::ingress;
 use lojix::{
     Error as LojixError, LegacyConfigurationArchivable as _, LegacyStartupConfiguration,
@@ -36,7 +37,8 @@ impl ConfigurationWritable for ConfigurationWriterCli {
         Ok(())
     }
     fn source(&self) -> Result<String, ConfigurationWriterError> {
-        lojix::single_inline_datom_argument(std::env::args_os().skip(1))
+        (std::env::args_os().skip(1))
+            .single_inline_datom()
             .map_err(ConfigurationWriterError::Request)
     }
 }

@@ -77,16 +77,24 @@ impl Budgeted for Ingress {
     }
 }
 
-/// The supported Nix platform for a resolved Horizon machine architecture.
+/// A Horizon machine architecture, read as the Nix platform it means.
 ///
 /// Horizon deliberately models hardware architecture without an operating
-/// system suffix.  Every materializer converts through this one table before
-/// it compares or emits a Nix platform string.
-pub(crate) fn nix_system_from_horizon_architecture(architecture: &str) -> Option<&'static str> {
-    match architecture {
-        "x86_64" => Some("x86_64-linux"),
-        "aarch64" => Some("aarch64-linux"),
-        _ => None,
+/// system suffix. Every materializer converts through this one table before it
+/// compares or emits a Nix platform string.
+pub(crate) trait HorizonArchitecture {
+    /// The supported Nix platform for this architecture, or `None` when lojix
+    /// does not build for it.
+    fn nix_system(&self) -> Option<&'static str>;
+}
+
+impl HorizonArchitecture for str {
+    fn nix_system(&self) -> Option<&'static str> {
+        match self {
+            "x86_64" => Some("x86_64-linux"),
+            "aarch64" => Some("aarch64-linux"),
+            _ => None,
+        }
     }
 }
 
@@ -257,27 +265,33 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Select one inline Datom operand without classifying filesystem paths.
-/// Component operator surfaces use this instead of `ComponentCommand`: that
-/// helper intentionally recognises request files, whereas these bounded CLIs
-/// must never read a caller-selected path.
-pub fn single_inline_datom_argument(
-    arguments: impl IntoIterator<Item = OsString>,
-) -> Result<String> {
-    let mut arguments = arguments.into_iter();
-    let Some(argument) = arguments.next() else {
-        return Err(Error::ExpectedSingleArgument);
-    };
-    if arguments.next().is_some() {
-        return Err(Error::ExpectedSingleArgument);
+/// Selecting one inline Datom operand from a process's arguments without
+/// classifying filesystem paths. Component operator surfaces use this instead
+/// of `ComponentCommand`: that helper intentionally recognises request files,
+/// whereas these bounded CLIs must never read a caller-selected path.
+pub trait InlineDatomArguments {
+    /// The single inline Datom operand, or `ExpectedSingleArgument`.
+    fn single_inline_datom(self) -> Result<String>;
+}
+
+impl<Arguments: IntoIterator<Item = OsString>> InlineDatomArguments for Arguments {
+    fn single_inline_datom(self) -> Result<String> {
+        let arguments = self;
+        let mut arguments = arguments.into_iter();
+        let Some(argument) = arguments.next() else {
+            return Err(Error::ExpectedSingleArgument);
+        };
+        if arguments.next().is_some() {
+            return Err(Error::ExpectedSingleArgument);
+        }
+        let argument = argument
+            .into_string()
+            .map_err(|_| Error::InlineDatomRequired)?;
+        if argument.starts_with('-') {
+            return Err(Error::FlagArgument(argument));
+        }
+        Ok(argument)
     }
-    let argument = argument
-        .into_string()
-        .map_err(|_| Error::InlineDatomRequired)?;
-    if argument.starts_with('-') {
-        return Err(Error::FlagArgument(argument));
-    }
-    Ok(argument)
 }
 
 /// Daemon configuration: the two authority-tiered socket paths and their unix
@@ -347,16 +361,22 @@ pub enum TestMode {
 const DEFAULT_RUNTIME_DIRECTORY: &str = "/run/lojix";
 const DEFAULT_STATE_DIRECTORY: &str = "/var/lib/lojix";
 
-fn nexus_runtime_directory() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .map(|path| path.join("lojix"))
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_RUNTIME_DIRECTORY))
-}
-
 /// Capability supplied by Lojix's generated Nexus configuration.
 pub trait LojixNexusConfigurable {
     fn built_in() -> Self;
+
+    /// Where the Nexus opens its sockets: the caller's `XDG_RUNTIME_DIR`
+    /// subdirectory when one is set, else the system default.
+    fn runtime_directory() -> PathBuf
+    where
+        Self: Sized,
+    {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .map(|path| path.join("lojix"))
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_RUNTIME_DIRECTORY))
+    }
+
     fn state_directory() -> PathBuf;
     fn store_path() -> PathBuf;
     fn validate(&self) -> Result<()>;
@@ -364,7 +384,7 @@ pub trait LojixNexusConfigurable {
 
 impl LojixNexusConfigurable for NexusConfiguration {
     fn built_in() -> Self {
-        let runtime = nexus_runtime_directory();
+        let runtime = Self::runtime_directory();
         let state = Self::state_directory();
         Self {
             ordinary_socket_path: runtime.join("ordinary.sock").to_string_lossy().into_owned(),
@@ -614,51 +634,96 @@ impl std::fmt::Debug for Store {
     }
 }
 
-fn next_identifier(value: u64) -> Result<u64> {
-    value
-        .checked_add(1)
-        .ok_or_else(|| Error::StoreMaintenance("identifier space exhausted".to_string()))
+/// A durable counter that must never wrap: allocating past its end is a store
+/// fault, not a silent reuse of an identifier already spent.
+pub(crate) trait IdentifierSpace {
+    fn next_identifier(self) -> Result<u64>;
 }
 
-fn state_marker(commit_sequence: u64) -> StateMarker {
-    StateMarker {
-        commit_sequence: CommitSequence::new(commit_sequence),
-        state_digest: StateDigest::new(commit_sequence),
+impl IdentifierSpace for u64 {
+    fn next_identifier(self) -> Result<u64> {
+        self.checked_add(1)
+            .ok_or_else(|| Error::StoreMaintenance("identifier space exhausted".to_string()))
     }
 }
 
-/// The only representation we treat as a publicly truthful immutable source
-/// revision: a complete 40-hex Git commit.  Nix metadata can contain nar
-/// hashes and other opaque values, which must remain private rather than being
-/// projected as a source revision.
-pub(crate) fn immutable_revision(value: &str) -> Option<ImmutableRevision> {
-    (value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then(|| ImmutableRevision::new(value))
-}
-
-fn validate_fresh_closure_path(value: &str, record_kind: &str) -> Result<()> {
-    if NixStorePath::new(value).is_canonical_item_root() {
-        Ok(())
-    } else {
-        Err(Error::Invariant(format!(
-            "fresh {record_kind} requires a canonical immutable store-item root"
-        )))
+impl From<u64> for StateMarker {
+    /// A commit sequence is the whole of a state marker: the digest is derived
+    /// from it, so the two never disagree.
+    fn from(commit_sequence: u64) -> Self {
+        Self {
+            commit_sequence: CommitSequence::new(commit_sequence),
+            state_digest: StateDigest::new(commit_sequence),
+        }
     }
 }
 
-fn validate_fresh_deploy_job(job: &DeployJob) -> Result<()> {
-    if let Some(closure_path) = job.optional_closure_path.as_ref() {
-        validate_fresh_closure_path(closure_path.payload(), "deploy job")?;
+/// Reading raw text as the source identity it may carry.
+pub(crate) trait SourceRevisionText {
+    /// The only representation lojix treats as a publicly truthful immutable
+    /// source revision: a complete 40-hex Git commit. Nix metadata can contain
+    /// nar hashes and other opaque values, which must remain private rather
+    /// than being projected as a source revision.
+    fn immutable_revision(&self) -> Option<ImmutableRevision>;
+
+    /// Admit this text as a durable record's closure path, or say which kind of
+    /// record rejected it.
+    fn validate_as_closure_path(&self, record_kind: &str) -> Result<()>;
+}
+
+impl SourceRevisionText for str {
+    fn immutable_revision(&self) -> Option<ImmutableRevision> {
+        (self.len() == 40 && self.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| ImmutableRevision::new(self))
     }
-    Ok(())
+
+    fn validate_as_closure_path(&self, record_kind: &str) -> Result<()> {
+        if NixStorePath::new(self).is_canonical_item_root() {
+            Ok(())
+        } else {
+            Err(Error::Invariant(format!(
+                "fresh {record_kind} requires a canonical immutable store-item root"
+            )))
+        }
+    }
 }
 
-fn validate_persisted_deploy_job(job: &DeployJob) -> Result<()> {
-    validate_fresh_deploy_job(job)
+/// Records whose closure path must name a canonical immutable store item
+/// before the store will hold them.
+pub(crate) trait ClosureRecord {
+    /// The kind name this record uses when it rejects a closure path.
+    const RECORD_KIND: &'static str;
+
+    fn validate_fresh(&self) -> Result<()>;
+
+    /// A record already on disk is held to the same contract as a fresh one:
+    /// a store that acquired an uncanonical closure path is a store fault.
+    fn validate_persisted(&self) -> Result<()> {
+        self.validate_fresh()
+    }
 }
 
-fn validate_fresh_gc_root(root: &GcRoot) -> Result<()> {
-    validate_fresh_closure_path(root.closure_path.payload(), "GC root")
+impl ClosureRecord for DeployJob {
+    const RECORD_KIND: &'static str = "deploy job";
+
+    fn validate_fresh(&self) -> Result<()> {
+        match self.optional_closure_path.as_ref() {
+            Some(closure_path) => closure_path
+                .payload()
+                .validate_as_closure_path(Self::RECORD_KIND),
+            None => Ok(()),
+        }
+    }
+}
+
+impl ClosureRecord for GcRoot {
+    const RECORD_KIND: &'static str = "GC root";
+
+    fn validate_fresh(&self) -> Result<()> {
+        self.closure_path
+            .payload()
+            .validate_as_closure_path(Self::RECORD_KIND)
+    }
 }
 
 impl Store {
@@ -1181,7 +1246,7 @@ impl Store {
                     .map(|job| *job.deployment_identifier.payload()),
             )
             .max()
-            .map(next_identifier)
+            .map(u64::next_identifier)
             .transpose()?
             .unwrap_or(1);
         let next_generation_identifier = self
@@ -1194,7 +1259,7 @@ impl Store {
                     .map(|job| *job.generation_identifier.payload()),
             )
             .max()
-            .map(next_identifier)
+            .map(u64::next_identifier)
             .transpose()?
             .unwrap_or(1);
         let next_event_log_position = self
@@ -1202,7 +1267,7 @@ impl Store {
             .iter()
             .map(|entry| *entry.event_log_position.payload())
             .max()
-            .map(next_identifier)
+            .map(u64::next_identifier)
             .transpose()?
             .unwrap_or(0);
         self.database.assert(Assertion::new(
@@ -1320,7 +1385,7 @@ impl Store {
             })
             .collect();
         match candidates.as_slice() {
-            [entry] => Ok(TransitionMarker::new(state_marker(
+            [entry] => Ok(TransitionMarker::new(StateMarker::from(
                 entry.commit_sequence().value(),
             ))),
             [] => Err(Error::Invariant(
@@ -1472,7 +1537,7 @@ impl Store {
         if matches!(outbox.outbox_delivery_state, OutboxDeliveryState::Pending) {
             outbox.outbox_delivery_state = OutboxDeliveryState::Dispatched;
             outbox.outbox_retry_count =
-                OutboxRetryCount::new(next_identifier(*outbox.outbox_retry_count.payload())?);
+                OutboxRetryCount::new((*outbox.outbox_retry_count.payload()).next_identifier()?);
             self.database
                 .mutate(Mutation::new(self.deployment_outbox, outbox))?;
         }
@@ -1829,7 +1894,7 @@ impl Store {
                 IdentifierAllocation {
                     next_deployment_identifier: allocation.next_deployment_identifier,
                     next_generation_identifier: allocation.next_generation_identifier,
-                    next_event_log_position: next_identifier(position)?,
+                    next_event_log_position: (position).next_identifier()?,
                 },
             ))?;
         Ok(position)
@@ -1844,7 +1909,7 @@ impl Store {
         deployment_request_identity: DeploymentRequestIdentity,
         mut deploy_job: DeployJob,
     ) -> Result<DeploymentRecord> {
-        validate_fresh_deploy_job(&deploy_job)?;
+        deploy_job.validate_fresh()?;
         let _write = self.lock_write()?;
         let allocation = self.identifier_allocation()?;
         let record = DeploymentRecord {
@@ -1890,15 +1955,12 @@ impl Store {
                 .mutate(
                     self.identifier_allocation,
                     IdentifierAllocation {
-                        next_deployment_identifier: next_identifier(
-                            allocation.next_deployment_identifier,
-                        )?,
-                        next_generation_identifier: next_identifier(
-                            allocation.next_generation_identifier,
-                        )?,
-                        next_event_log_position: next_identifier(
-                            allocation.next_event_log_position,
-                        )?,
+                        next_deployment_identifier: (allocation.next_deployment_identifier)
+                            .next_identifier()?,
+                        next_generation_identifier: (allocation.next_generation_identifier)
+                            .next_identifier()?,
+                        next_event_log_position: (allocation.next_event_log_position)
+                            .next_identifier()?,
                     },
                 )
                 .assert(self.deployment_records, record.clone())
@@ -1995,7 +2057,7 @@ impl Store {
             .filter(|intent| *intent.deployment_identifier.payload() == deployment_identifier)
             .map(|intent| *intent.transition_ordinal.payload())
             .max()
-            .map(next_identifier)
+            .map(u64::next_identifier)
             .transpose()?
             .unwrap_or(0);
         let allocation = self.identifier_allocation()?;
@@ -2026,7 +2088,8 @@ impl Store {
                 IdentifierAllocation {
                     next_deployment_identifier: allocation.next_deployment_identifier,
                     next_generation_identifier: allocation.next_generation_identifier,
-                    next_event_log_position: next_identifier(allocation.next_event_log_position)?,
+                    next_event_log_position: (allocation.next_event_log_position)
+                        .next_identifier()?,
                 },
             )
             .mutate(self.deployment_records, record)
@@ -2116,15 +2179,12 @@ impl Store {
                 .mutate(
                     self.identifier_allocation,
                     IdentifierAllocation {
-                        next_deployment_identifier: next_identifier(
-                            allocation.next_deployment_identifier,
-                        )?,
-                        next_generation_identifier: next_identifier(
-                            allocation.next_generation_identifier,
-                        )?,
-                        next_event_log_position: next_identifier(
-                            allocation.next_event_log_position,
-                        )?,
+                        next_deployment_identifier: (allocation.next_deployment_identifier)
+                            .next_identifier()?,
+                        next_generation_identifier: (allocation.next_generation_identifier)
+                            .next_identifier()?,
+                        next_event_log_position: (allocation.next_event_log_position)
+                            .next_identifier()?,
                     },
                 )
                 .assert(self.deployment_records, record.clone())
@@ -2191,7 +2251,7 @@ impl Store {
         immutable_revision: crate::runtime_model::ImmutableRevision,
         deploy_job: DeployJob,
     ) -> Result<()> {
-        validate_fresh_deploy_job(&deploy_job)?;
+        deploy_job.validate_fresh()?;
         let _write = self.lock_write()?;
         let mut record = self
             .deployment_records_unchecked()?
@@ -2254,7 +2314,7 @@ impl Store {
                     IdentifierAllocation {
                         next_deployment_identifier: allocation.next_deployment_identifier,
                         next_generation_identifier: allocation.next_generation_identifier,
-                        next_event_log_position: next_identifier(position)?,
+                        next_event_log_position: (position).next_identifier()?,
                     },
                 );
             }
@@ -2285,7 +2345,7 @@ impl Store {
                 "terminal deployment phases require a terminal correlation transition".to_string(),
             ));
         }
-        validate_fresh_deploy_job(&deploy_job)?;
+        deploy_job.validate_fresh()?;
         let _write = self.lock_write()?;
         if *deploy_job.deployment_identifier.payload() != deployment_identifier {
             return Err(Error::Invariant(
@@ -2350,7 +2410,7 @@ impl Store {
             .filter(|intent| *intent.deployment_identifier.payload() == deployment_identifier)
             .map(|intent| *intent.transition_ordinal.payload())
             .max()
-            .map(next_identifier)
+            .map(u64::next_identifier)
             .transpose()?
             .unwrap_or(0);
         record.deployment_lifecycle = deployment_lifecycle;
@@ -2459,10 +2519,10 @@ impl Store {
                     IdentifierAllocation {
                         next_deployment_identifier: allocation
                             .next_deployment_identifier
-                            .max(next_identifier(deployment_identifier)?),
+                            .max((deployment_identifier).next_identifier()?),
                         next_generation_identifier: allocation
                             .next_generation_identifier
-                            .max(next_identifier(generation_identifier)?),
+                            .max((generation_identifier).next_identifier()?),
                         next_event_log_position: allocation.next_event_log_position,
                     },
                 ),
@@ -2514,10 +2574,10 @@ impl Store {
                 IdentifierAllocation {
                     next_deployment_identifier: allocation
                         .next_deployment_identifier
-                        .max(next_identifier(deployment_identifier)?),
+                        .max((deployment_identifier).next_identifier()?),
                     next_generation_identifier: allocation
                         .next_generation_identifier
-                        .max(next_identifier(generation_identifier)?),
+                        .max((generation_identifier).next_identifier()?),
                     next_event_log_position: allocation.next_event_log_position,
                 },
             );
@@ -2539,7 +2599,7 @@ impl Store {
 
     /// Append one GC-root, keyed by its generation identifier (decision 4).
     pub fn append_gc_root(&self, root: GcRoot) -> Result<()> {
-        validate_fresh_gc_root(&root)?;
+        root.validate_fresh()?;
         let _write = self.lock_write()?;
         self.database.assert(Assertion::new(self.gc_roots, root))?;
         Ok(())
@@ -2548,7 +2608,7 @@ impl Store {
     /// Overwrite one GC-root in place (a slot/label change), keyed by its
     /// generation identifier.
     pub fn mutate_gc_root(&self, root: GcRoot) -> Result<()> {
-        validate_fresh_gc_root(&root)?;
+        root.validate_fresh()?;
         let _write = self.lock_write()?;
         self.database.mutate(Mutation::new(self.gc_roots, root))?;
         Ok(())
@@ -2600,7 +2660,7 @@ impl Store {
             .records()
             .to_vec();
         for job in &jobs {
-            validate_persisted_deploy_job(job)?;
+            job.validate_persisted()?;
         }
         Ok(jobs)
     }
@@ -2610,7 +2670,7 @@ impl Store {
     /// row on each phase transition — so the persisted phase cursor always
     /// reflects the latest committed step (up9q durable resume).
     pub fn upsert_deploy_job(&self, job: DeployJob) -> Result<()> {
-        validate_fresh_deploy_job(&job)?;
+        job.validate_fresh()?;
         let _write = self.lock_write()?;
         let key = *job.deployment_identifier.payload();
         let present = self
@@ -2934,7 +2994,7 @@ mod transition_intent_tests {
             node_name: record.deployment_request_identity.node_name.clone(),
             deployment_phase: ordinary::DeploymentPhase::Building,
             event_log_position: ordinary::EventLogPosition::new(position),
-            state_marker: state_marker(0),
+            state_marker: StateMarker::from(0),
             optional_immutable_revision: record
                 .deployment_request_identity
                 .optional_immutable_revision

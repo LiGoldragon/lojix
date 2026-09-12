@@ -153,3 +153,113 @@ impl CredentialBearing for NixStorePath<'_> {
         InspectedText::new(self.0).names_credential_material()
     }
 }
+
+/// Why text offered as a path was not admitted.
+#[derive(Debug)]
+pub(crate) enum PathFault {
+    /// Empty, control-bearing, relative, or carrying a `.`/`..`/prefix
+    /// component. Nothing was touched on disk.
+    Malformed,
+    /// A component of the path is a symbolic link. Admitting it would let the
+    /// link be re-pointed between the check and the use.
+    Symlinked,
+    /// The path exists but is not the kind of entry that was required.
+    WrongKind,
+    /// The path could not be read to decide.
+    Unreadable(std::io::Error),
+}
+
+/// Text offered as a filesystem path, before anything is done with it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OfferedPath<'text>(&'text str);
+
+impl<'text> OfferedPath<'text> {
+    pub(crate) fn new(text: &'text str) -> Self {
+        Self(text)
+    }
+}
+
+/// The path admissions lojix shares. Every one of them decides through
+/// `symlink_metadata` rather than letting a filesystem operation resolve a
+/// link after admission, so a link cannot be swapped in behind the check.
+pub(crate) trait PathAdmission {
+    /// Absolute, non-empty, control-free, and built only of root and normal
+    /// components. Nothing is read from disk.
+    fn absolute_normal(&self) -> Result<std::path::PathBuf, PathFault>;
+
+    /// `absolute_normal`, and no component of it is a symbolic link. Every
+    /// component must exist.
+    fn existing_symlink_free(&self) -> Result<std::path::PathBuf, PathFault>;
+
+    /// `existing_symlink_free`, and the entry itself is a directory.
+    fn existing_directory(&self) -> Result<std::path::PathBuf, PathFault>;
+
+    /// `existing_symlink_free`, and the entry itself is a regular file bearing
+    /// exactly `required_file_name`.
+    fn existing_regular_file(
+        &self,
+        required_file_name: &str,
+    ) -> Result<std::path::PathBuf, PathFault>;
+}
+
+impl PathAdmission for OfferedPath<'_> {
+    fn absolute_normal(&self) -> Result<std::path::PathBuf, PathFault> {
+        use std::path::{Component, PathBuf};
+
+        if self.0.is_empty() || self.0.chars().any(char::is_control) {
+            return Err(PathFault::Malformed);
+        }
+        let path = PathBuf::from(self.0);
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+        {
+            return Err(PathFault::Malformed);
+        }
+        Ok(path)
+    }
+
+    fn existing_symlink_free(&self) -> Result<std::path::PathBuf, PathFault> {
+        use std::path::{Component, PathBuf};
+
+        let path = self.absolute_normal()?;
+        let mut prefix = PathBuf::from("/");
+        for component in path.components() {
+            let Component::Normal(component) = component else {
+                continue;
+            };
+            prefix.push(component);
+            let metadata = std::fs::symlink_metadata(&prefix).map_err(PathFault::Unreadable)?;
+            if metadata.file_type().is_symlink() {
+                return Err(PathFault::Symlinked);
+            }
+        }
+        Ok(path)
+    }
+
+    fn existing_directory(&self) -> Result<std::path::PathBuf, PathFault> {
+        let path = self.existing_symlink_free()?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(PathFault::Unreadable)?;
+        if metadata.file_type().is_dir() {
+            Ok(path)
+        } else {
+            Err(PathFault::WrongKind)
+        }
+    }
+
+    fn existing_regular_file(
+        &self,
+        required_file_name: &str,
+    ) -> Result<std::path::PathBuf, PathFault> {
+        let path = self.existing_symlink_free()?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(PathFault::Unreadable)?;
+        if metadata.file_type().is_file()
+            && path.file_name().and_then(|value| value.to_str()) == Some(required_file_name)
+        {
+            Ok(path)
+        } else {
+            Err(PathFault::WrongKind)
+        }
+    }
+}
