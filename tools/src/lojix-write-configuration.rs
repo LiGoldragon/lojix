@@ -31,7 +31,7 @@ impl ConfigurationWritable for ConfigurationWriterCli {
             .actualize(&mut <lojix::Ingress as lojix::Budgeted>::budget())
             .map_err(|fault| ConfigurationWriterError::Decode(format!("{fault:?}")))?;
         let ingress::ConfigurationWriterInput::ConfigurationWriteRequest(request) = request;
-        let output_path = write_configuration(request)?;
+        let output_path = request.write()?;
         println!("ConfigurationWritten.{{ {} }}", output_path.display());
         Ok(())
     }
@@ -40,110 +40,151 @@ impl ConfigurationWritable for ConfigurationWriterCli {
             .map_err(ConfigurationWriterError::Request)
     }
 }
-fn text(value: String) -> String {
-    value
-}
-fn mode(value: i64) -> Result<u32, ConfigurationWriterError> {
-    u32::try_from(value).map_err(|_| ConfigurationWriterError::InvalidMode(value))
-}
-fn write_configuration(
-    ingress::ConfigurationWriteRequest {
-        first_writer_path: ordinary_socket_path,
-        first_writer_mode: ordinary_socket_mode,
-        second_writer_path: owner_socket_path,
-        second_writer_mode: owner_socket_mode,
-        third_writer_path: state_directory_path,
-        fourth_writer_path: store_path,
-        writer_cluster: daemon_host,
-        writer_test_defaults_choice: test_defaults,
-        fifth_writer_path: output_path,
-    }: ingress::ConfigurationWriteRequest,
-) -> Result<PathBuf, ConfigurationWriterError> {
-    let output_path = PathBuf::from(text(output_path));
-    let configuration = LegacyStartupConfiguration {
-        ordinary_socket_path: text(ordinary_socket_path),
-        ordinary_socket_mode: mode(ordinary_socket_mode)?,
-        owner_socket_path: text(owner_socket_path),
-        owner_socket_mode: mode(owner_socket_mode)?,
-        state_directory_path: text(state_directory_path),
-        store_path: text(store_path),
-        daemon_host: text(daemon_host),
-        test_defaults: match test_defaults {
-            ingress::WriterTestDefaultsChoice::NoTestDefaults => None,
-            ingress::WriterTestDefaultsChoice::TestDefaults(ingress::WriterTestDefaults {
-                first_writer_cluster: cluster,
-                second_writer_cluster: default_vm_host,
-                writer_test_mode: default_mode,
-                third_writer_cluster: test_flake,
-                fourth_writer_cluster: test_nix_system,
-                fifth_writer_cluster: test_output_selector,
-                writer_path: proposal_source,
-            }) => Some(TestDefaults {
-                cluster: text(cluster),
-                default_vm_host: text(default_vm_host),
-                default_mode: match default_mode {
-                    ingress::WriterTestMode::Hermetic => TestMode::Hermetic,
-                    ingress::WriterTestMode::Live => TestMode::Live,
-                },
-                test_flake: text(test_flake),
-                test_nix_system: text(test_nix_system),
-                test_output_selector: text(test_output_selector),
-                horizon_definition: actualize_horizon_definition(&proposal_source)?,
-            }),
-        },
-    };
-    configuration
-        .write_rkyv_file(&output_path)
-        .map_err(ConfigurationWriterError::WriteConfiguration)?;
-    Ok(output_path)
+/// A Unix socket permission mode as the configuration archive holds it. The
+/// request carries it as a signed Datom integer, so narrowing is fallible and
+/// the narrowing is the type's own.
+struct SocketMode(u32);
+
+impl TryFrom<i64> for SocketMode {
+    type Error = ConfigurationWriterError;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        u32::try_from(value)
+            .map(Self)
+            .map_err(|_| ConfigurationWriterError::InvalidMode(value))
+    }
 }
 
-fn actualize_horizon_definition(
-    source: &str,
-) -> Result<Option<horizon_lib::HorizonDefinition>, ConfigurationWriterError> {
-    if source.is_empty() {
-        return Ok(None);
-    }
-    const ARTIFACT: &str = "horizon-definition.datom";
-    let path = PathBuf::from(source);
-    if source.chars().any(char::is_control)
-        || !path.is_absolute()
-        || path.file_name().and_then(|name| name.to_str()) != Some(ARTIFACT)
-        || path.components().any(|component| {
-            !matches!(
-                component,
-                std::path::Component::RootDir | std::path::Component::Normal(_)
-            )
-        })
-    {
-        return Err(ConfigurationWriterError::Horizon(
-            "proposal source is not a safe canonical Horizon artifact".into(),
-        ));
-    }
-    let mut prefix = PathBuf::from(Path::new("/"));
-    for component in path.components() {
-        let std::path::Component::Normal(part) = component else {
-            continue;
+/// Turning one decoded write request into the archive it asks for.
+trait ConfigurationWriting {
+    /// Write the startup archive and answer with the path written.
+    fn write(self) -> Result<PathBuf, ConfigurationWriterError>;
+}
+
+impl ConfigurationWriting for ingress::ConfigurationWriteRequest {
+    fn write(self) -> Result<PathBuf, ConfigurationWriterError> {
+        let ingress::ConfigurationWriteRequest {
+            first_writer_path: ordinary_socket_path,
+            first_writer_mode: ordinary_socket_mode,
+            second_writer_path: owner_socket_path,
+            second_writer_mode: owner_socket_mode,
+            third_writer_path: state_directory_path,
+            fourth_writer_path: store_path,
+            writer_cluster: daemon_host,
+            writer_test_defaults_choice: test_defaults,
+            fifth_writer_path: output_path,
+        } = self;
+        let output_path = PathBuf::from(output_path);
+        let configuration = LegacyStartupConfiguration {
+            ordinary_socket_path,
+            ordinary_socket_mode: SocketMode::try_from(ordinary_socket_mode)?.0,
+            owner_socket_path,
+            owner_socket_mode: SocketMode::try_from(owner_socket_mode)?.0,
+            state_directory_path,
+            store_path,
+            daemon_host,
+            test_defaults: match test_defaults {
+                ingress::WriterTestDefaultsChoice::NoTestDefaults => None,
+                ingress::WriterTestDefaultsChoice::TestDefaults(ingress::WriterTestDefaults {
+                    first_writer_cluster: cluster,
+                    second_writer_cluster: default_vm_host,
+                    writer_test_mode: default_mode,
+                    third_writer_cluster: test_flake,
+                    fourth_writer_cluster: test_nix_system,
+                    fifth_writer_cluster: test_output_selector,
+                    writer_path: proposal_source,
+                }) => Some(TestDefaults {
+                    cluster,
+                    default_vm_host,
+                    default_mode: match default_mode {
+                        ingress::WriterTestMode::Hermetic => TestMode::Hermetic,
+                        ingress::WriterTestMode::Live => TestMode::Live,
+                    },
+                    test_flake,
+                    test_nix_system,
+                    test_output_selector,
+                    horizon_definition: HorizonArtifact(&proposal_source).definition()?,
+                }),
+            },
         };
-        prefix.push(part);
-        if std::fs::symlink_metadata(&prefix)?.file_type().is_symlink() {
+        configuration
+            .write_rkyv_file(&output_path)
+            .map_err(ConfigurationWriterError::WriteConfiguration)?;
+        Ok(output_path)
+    }
+}
+
+/// The text a write request offers as the path of a Horizon definition file.
+/// Empty means the request names none.
+struct HorizonArtifact<'request>(&'request str);
+
+/// Reading a named Horizon artifact, and the path check that must precede it.
+trait HorizonArtifactReading {
+    /// `None` when no artifact is named.
+    fn definition(
+        &self,
+    ) -> Result<Option<horizon_lib::HorizonDefinition>, ConfigurationWriterError>;
+
+    /// The artifact path, accepted only as an absolute, traversal-free,
+    /// symlink-free regular file named `horizon-definition.datom`.
+    fn checked_path(&self) -> Result<PathBuf, ConfigurationWriterError>;
+}
+
+impl HorizonArtifactReading for HorizonArtifact<'_> {
+    fn definition(
+        &self,
+    ) -> Result<Option<horizon_lib::HorizonDefinition>, ConfigurationWriterError> {
+        if self.0.is_empty() {
+            return Ok(None);
+        }
+        let authored = std::fs::read_to_string(self.checked_path()?)?;
+        horizon_lib::HorizonDefinition::decode(&authored)
+            .map(Some)
+            .map_err(|_| {
+                ConfigurationWriterError::Horizon(
+                    "proposal source is not a Horizon definition".into(),
+                )
+            })
+    }
+
+    fn checked_path(&self) -> Result<PathBuf, ConfigurationWriterError> {
+        const ARTIFACT: &str = "horizon-definition.datom";
+        let path = PathBuf::from(self.0);
+        if self.0.chars().any(char::is_control)
+            || !path.is_absolute()
+            || path.file_name().and_then(|name| name.to_str()) != Some(ARTIFACT)
+            || path.components().any(|component| {
+                !matches!(
+                    component,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                )
+            })
+        {
             return Err(ConfigurationWriterError::Horizon(
-                "proposal source traverses a symbolic link".into(),
+                "proposal source is not a safe canonical Horizon artifact".into(),
             ));
         }
+        let mut prefix = PathBuf::from(Path::new("/"));
+        for component in path.components() {
+            let std::path::Component::Normal(part) = component else {
+                continue;
+            };
+            prefix.push(part);
+            if std::fs::symlink_metadata(&prefix)?.file_type().is_symlink() {
+                return Err(ConfigurationWriterError::Horizon(
+                    "proposal source traverses a symbolic link".into(),
+                ));
+            }
+        }
+        if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
+            return Err(ConfigurationWriterError::Horizon(
+                "proposal source is not a regular file".into(),
+            ));
+        }
+        Ok(path)
     }
-    if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
-        return Err(ConfigurationWriterError::Horizon(
-            "proposal source is not a regular file".into(),
-        ));
-    }
-    let authored = std::fs::read_to_string(path)?;
-    horizon_lib::HorizonDefinition::decode(&authored)
-        .map(Some)
-        .map_err(|_| {
-            ConfigurationWriterError::Horizon("proposal source is not a Horizon definition".into())
-        })
 }
+
 #[derive(Debug, Error)]
 enum ConfigurationWriterError {
     #[error("io error: {0}")]

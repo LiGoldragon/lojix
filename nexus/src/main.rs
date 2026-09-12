@@ -3,21 +3,19 @@
 //! authority-tiered sockets.
 
 use lojix::daemon::EnvironmentConstructible as _;
-use lojix::daemon::Runnable as _;
 
 fn main() {
-    match run() {
-        Ok(()) => {}
-        Err(error) => {
-            eprintln!("lojix-nexus: {error}");
-            std::process::exit(2);
-        }
+    // The argument guard and the serve call are the whole of this entry point,
+    // so they stay in `fn main` rather than becoming a floating verb: a Nexus
+    // takes no arguments, and everything it then does is `Daemon`'s.
+    let served = if std::env::args_os().nth(1).is_some() {
+        Err(lojix::Error::UnexpectedNexusArguments)
+    } else {
+        lojix::daemon::Daemon::from_environment()
+            .and_then(<lojix::daemon::Daemon as lojix::daemon::Runnable>::run)
+    };
+    if let Err(error) = served {
+        eprintln!("lojix-nexus: {error}");
+        std::process::exit(2);
     }
-}
-
-fn run() -> lojix::Result<()> {
-    if std::env::args_os().nth(1).is_some() {
-        return Err(lojix::Error::UnexpectedNexusArguments);
-    }
-    lojix::daemon::Daemon::from_environment()?.run()
 }

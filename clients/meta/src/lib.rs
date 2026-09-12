@@ -17,6 +17,11 @@ pub struct Client {
 }
 
 pub trait Invocable {
+    /// The decode budget this client actualizes its one inline Datom argument
+    /// under. It belongs to the client, which is the thing that has a budget.
+    fn budget() -> Budget
+    where
+        Self: Sized;
     fn run_from_environment() -> lojix::Result<meta_signal_lojix::Response>
     where
         Self: Sized;
@@ -30,16 +35,24 @@ pub trait Invocable {
 }
 
 impl Invocable for Client {
+    fn budget() -> Budget {
+        Budget {
+            remaining: 16_384,
+            reader: ReaderBudget { remaining: 16_384 },
+            depth: 0,
+            maximum_depth: 16_384,
+        }
+    }
     fn run_from_environment() -> lojix::Result<meta_signal_lojix::Response> {
         Self::from_arguments(std::env::args_os().skip(1))?.run()
     }
     fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> lojix::Result<Self> {
         let source = lojix::single_inline_datom_argument(arguments)?;
         let input = Potential::<meta_signal_lojix::ClientQuery>::from(source)
-            .actualize(&mut budget())
+            .actualize(&mut <Self as Invocable>::budget())
             .map_err(|fault| lojix::Error::DatomRequestText(format!("{fault:?}")))?;
         Ok(Self {
-            input: actualize(input)?,
+            input: input.actualized()?,
         })
     }
     fn input(&self) -> &meta_signal_lojix::Query {
@@ -58,99 +71,123 @@ impl Invocable for Client {
     }
 }
 
-fn actualize(input: meta_signal_lojix::ClientQuery) -> lojix::Result<meta_signal_lojix::Query> {
-    use meta_signal_lojix::{ClientQuery, Query};
-    Ok(match input {
-        ClientQuery::Configure(value) => Query::Configure(value),
-        ClientQuery::ReverseConfiguration => Query::ReverseConfiguration,
-        ClientQuery::Retire(value) => Query::Retire(value),
-        ClientQuery::Pin(value) => Query::Pin(value),
-        ClientQuery::Test(value) => Query::Test(value),
-        ClientQuery::Unpin(value) => Query::Unpin(value),
-        ClientQuery::Deploy(value) => {
-            let horizon_definition_option = match &value {
-                meta_signal_lojix::DeploySubmission::Host(deployment) => actualize_horizon(
-                    &deployment.deployment_input_mode,
-                    &deployment.proposal_source,
-                )?,
-                meta_signal_lojix::DeploySubmission::UserEnvironment(deployment) => {
-                    actualize_horizon(
-                        &deployment.deployment_input_mode,
-                        &deployment.proposal_source,
-                    )?
-                }
-            };
-            Query::Deploy(meta_signal_lojix::ActualizedDeploySubmission {
-                deploy_submission: value,
-                horizon_definition_option,
-            })
-        }
-    })
+/// A `ClientQuery` carries the *reference* to a Horizon proposal; the Nexus is
+/// sent the actualized definition. Raising one to a wire `Query` is the client's
+/// own verb, so it is homed on the query it raises.
+trait ClientQueryActualizing {
+    fn actualized(self) -> lojix::Result<meta_signal_lojix::Query>;
 }
 
-fn actualize_horizon(
-    mode: &signal_lojix::DeploymentInputMode,
-    source: &signal_lojix::ProposalSource,
-) -> lojix::Result<Option<horizon_lib::HorizonDefinition>> {
-    match mode {
-        signal_lojix::DeploymentInputMode::Direct => Ok(None),
-        signal_lojix::DeploymentInputMode::Horizon => {
-            let path = checked_horizon_path(source)?;
-            let authored = std::fs::read_to_string(path)?;
-            let definition = horizon_lib::HorizonDefinition::decode(&authored).map_err(|_| {
-                lojix::Error::DatomRequestText("proposal source is not a Horizon definition".into())
-            })?;
-            Ok(Some(definition))
-        }
-    }
-}
-
-fn checked_horizon_path(source: &str) -> lojix::Result<PathBuf> {
-    const ARTIFACT: &str = "horizon-definition.datom";
-    if source.is_empty() || source.chars().any(char::is_control) {
-        return Err(lojix::Error::DatomRequestText(
-            "proposal source is not a safe canonical Horizon artifact".into(),
-        ));
-    }
-    let path = PathBuf::from(source);
-    if !path.is_absolute()
-        || path.file_name().and_then(|name| name.to_str()) != Some(ARTIFACT)
-        || path.components().any(|component| {
-            !matches!(
-                component,
-                std::path::Component::RootDir | std::path::Component::Normal(_)
-            )
+impl ClientQueryActualizing for meta_signal_lojix::ClientQuery {
+    fn actualized(self) -> lojix::Result<meta_signal_lojix::Query> {
+        use meta_signal_lojix::{ClientQuery, Query};
+        Ok(match self {
+            ClientQuery::Configure(value) => Query::Configure(value),
+            ClientQuery::ReverseConfiguration => Query::ReverseConfiguration,
+            ClientQuery::Retire(value) => Query::Retire(value),
+            ClientQuery::Pin(value) => Query::Pin(value),
+            ClientQuery::Test(value) => Query::Test(value),
+            ClientQuery::Unpin(value) => Query::Unpin(value),
+            ClientQuery::Deploy(value) => {
+                let horizon_definition_option = match &value {
+                    meta_signal_lojix::DeploySubmission::Host(deployment) => HorizonProposal {
+                        mode: &deployment.deployment_input_mode,
+                        source: &deployment.proposal_source,
+                    }
+                    .definition()?,
+                    meta_signal_lojix::DeploySubmission::UserEnvironment(deployment) => {
+                        HorizonProposal {
+                            mode: &deployment.deployment_input_mode,
+                            source: &deployment.proposal_source,
+                        }
+                        .definition()?
+                    }
+                };
+                Query::Deploy(meta_signal_lojix::ActualizedDeploySubmission {
+                    deploy_submission: value,
+                    horizon_definition_option,
+                })
+            }
         })
-    {
-        return Err(lojix::Error::DatomRequestText(
-            "proposal source is not a safe canonical Horizon artifact".into(),
-        ));
     }
-    let mut prefix = PathBuf::from(Path::new("/"));
-    for component in path.components() {
-        let std::path::Component::Normal(part) = component else {
-            continue;
-        };
-        prefix.push(part);
-        if std::fs::symlink_metadata(&prefix)?.file_type().is_symlink() {
+}
+
+/// A deployment's claim about where its Horizon definition comes from: the
+/// input mode paired with the source it names. The pair is the noun — neither
+/// half decides on its own whether a definition is to be read, or from where.
+struct HorizonProposal<'submission> {
+    mode: &'submission signal_lojix::DeploymentInputMode,
+    source: &'submission signal_lojix::ProposalSource,
+}
+
+/// Reading a proposal's definition off disk, and the path check that must
+/// precede the read.
+trait HorizonProposing {
+    /// `None` for a direct deployment, which names no Horizon artifact.
+    fn definition(&self) -> lojix::Result<Option<horizon_lib::HorizonDefinition>>;
+
+    /// The artifact path, accepted only as an absolute, traversal-free,
+    /// symlink-free regular file named `horizon-definition.datom`.
+    fn checked_path(&self) -> lojix::Result<PathBuf>;
+}
+
+impl HorizonProposing for HorizonProposal<'_> {
+    fn definition(&self) -> lojix::Result<Option<horizon_lib::HorizonDefinition>> {
+        match self.mode {
+            signal_lojix::DeploymentInputMode::Direct => Ok(None),
+            signal_lojix::DeploymentInputMode::Horizon => {
+                let authored = std::fs::read_to_string(self.checked_path()?)?;
+                let definition =
+                    horizon_lib::HorizonDefinition::decode(&authored).map_err(|_| {
+                        lojix::Error::DatomRequestText(
+                            "proposal source is not a Horizon definition".into(),
+                        )
+                    })?;
+                Ok(Some(definition))
+            }
+        }
+    }
+
+    fn checked_path(&self) -> lojix::Result<PathBuf> {
+        const ARTIFACT: &str = "horizon-definition.datom";
+        let source: &str = self.source;
+        if source.is_empty() || source.chars().any(char::is_control) {
             return Err(lojix::Error::DatomRequestText(
-                "proposal source traverses a symbolic link".into(),
+                "proposal source is not a safe canonical Horizon artifact".into(),
             ));
         }
-    }
-    if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
-        return Err(lojix::Error::DatomRequestText(
-            "proposal source is not a regular file".into(),
-        ));
-    }
-    Ok(path)
-}
-fn budget() -> Budget {
-    Budget {
-        remaining: 16_384,
-        reader: ReaderBudget { remaining: 16_384 },
-        depth: 0,
-        maximum_depth: 16_384,
+        let path = PathBuf::from(source);
+        if !path.is_absolute()
+            || path.file_name().and_then(|name| name.to_str()) != Some(ARTIFACT)
+            || path.components().any(|component| {
+                !matches!(
+                    component,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                )
+            })
+        {
+            return Err(lojix::Error::DatomRequestText(
+                "proposal source is not a safe canonical Horizon artifact".into(),
+            ));
+        }
+        let mut prefix = PathBuf::from(Path::new("/"));
+        for component in path.components() {
+            let std::path::Component::Normal(part) = component else {
+                continue;
+            };
+            prefix.push(part);
+            if std::fs::symlink_metadata(&prefix)?.file_type().is_symlink() {
+                return Err(lojix::Error::DatomRequestText(
+                    "proposal source traverses a symbolic link".into(),
+                ));
+            }
+        }
+        if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
+            return Err(lojix::Error::DatomRequestText(
+                "proposal source is not a regular file".into(),
+            ));
+        }
+        Ok(path)
     }
 }
 

@@ -13,6 +13,11 @@ pub struct Client {
 }
 
 pub trait Invocable {
+    /// The decode budget this client actualizes its one inline Datom argument
+    /// under. It belongs to the client, which is the thing that has a budget.
+    fn budget() -> Budget
+    where
+        Self: Sized;
     fn run_from_environment() -> lojix::Result<signal_lojix::Response>
     where
         Self: Sized;
@@ -26,13 +31,21 @@ pub trait Invocable {
 }
 
 impl Invocable for Client {
+    fn budget() -> Budget {
+        Budget {
+            remaining: 16_384,
+            reader: ReaderBudget { remaining: 16_384 },
+            depth: 0,
+            maximum_depth: 16_384,
+        }
+    }
     fn run_from_environment() -> lojix::Result<signal_lojix::Response> {
         Self::from_arguments(std::env::args_os().skip(1))?.run()
     }
     fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> lojix::Result<Self> {
         let source = lojix::single_inline_datom_argument(arguments)?;
         let input = Potential::<signal_lojix::Query>::from(source)
-            .actualize(&mut budget())
+            .actualize(&mut <Self as Invocable>::budget())
             .map_err(|fault| lojix::Error::DatomRequestText(format!("{fault:?}")))?;
         Ok(Self { input })
     }
@@ -49,14 +62,6 @@ impl Invocable for Client {
         Signal::<signal_lojix::Response>::from(reply)
             .restore()
             .map_err(|fault| lojix::Error::Wire(format!("{fault:?}")))
-    }
-}
-fn budget() -> Budget {
-    Budget {
-        remaining: 16_384,
-        reader: ReaderBudget { remaining: 16_384 },
-        depth: 0,
-        maximum_depth: 16_384,
     }
 }
 
