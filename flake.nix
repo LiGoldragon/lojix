@@ -9,6 +9,14 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane.url = "github:ipetkov/crane";
+    # The same horizon-rs revision every workspace manifest pins. The VM
+    # fixture below is composed by this revision's own `horizon-compose`, so a
+    # fixture that has gone stale against the pinned schema fails the check at
+    # build time instead of inside a booted guest.
+    horizon = {
+      url = "github:LiGoldragon/horizon-rs/40d04d2504fee619e9b2b2564b8a769a3a9d6049";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -18,6 +26,7 @@
       flake-utils,
       fenix,
       crane,
+      horizon,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -302,7 +311,21 @@
                 for argument in "$@"; do command="$argument"; done
                 exec /bin/sh -c "$command"
               '';
-              proposal = "{ { [] { criome [] } } { alpha [ { atlas Live.{} Max Max Metal.{ X86_64 { 4 None None None None None } } { Qwerty None } { [] None None [] None } { “ssh-ed25519 AAAAfixture” None None } Some.True [] } ] [] [] [] { Max [] [] [] } } }";
+              # The fixture Horizon definition is produced by the real
+              # producer: the pinned horizon-rs `horizon-compose` reading the
+              # authored HorizonConfiguration and ClusterDefinition beside this
+              # flake. Nothing here restates the Horizon schema, so the fixture
+              # cannot drift from the revision lojix pins.
+              horizonDefinition =
+                pkgs.runCommand "lojix-fixture-horizon-definition"
+                  {
+                    nativeBuildInputs = [ horizon.packages.${system}.horizon-compose ];
+                  }
+                  ''
+                    mkdir -p "$out"
+                    horizon-compose "Compose.{ ${./checks/horizon/horizon-configuration.datom} ${./checks/horizon/cluster-definition.datom} }" \
+                      > "$out/horizon-definition.datom"
+                  '';
             in
             pkgs.testers.nixosTest {
               name = "lojix-same-host-test-activation";
@@ -331,7 +354,7 @@
                     }";
                   };
                   preStart = ''
-                    printf '%s' '${proposal}' > /var/lib/lojix/horizon-definition.datom
+                    install -m 0644 ${horizonDefinition}/horizon-definition.datom /var/lib/lojix/horizon-definition.datom
                   '';
                 };
               };
@@ -339,6 +362,11 @@
                 start_all()
                 machine.wait_for_unit("lojix.service")
                 machine.wait_until_succeeds("test -S /run/lojix/ordinary.sock && test -S /run/lojix/meta.sock")
+                # The composed fixture is read back through lojix's own
+                # Horizon reader before anything else runs: a definition the
+                # pinned horizon-lib refuses fails here, named, rather than
+                # sitting inert in a Direct-mode request that never reads it.
+                machine.succeed("${package}/bin/lojix-write-configuration 'ConfigurationWriteRequest.{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon TestDefaults.{fixture-cluster atlas Hermetic github:fixture-owner/fixture-flake x86_64-linux checks.fixture-a /var/lib/lojix/horizon-definition.datom} /run/lojix-fixture-startup.rkyv}' | grep -F 'ConfigurationWritten.'")
                 machine.succeed("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Configure.{ /run/lojix/ordinary.sock 432 /run/lojix/meta.sock 384 /var/lib/lojix atlas NoTestDefaults }' | grep -F Configured")
                 machine.succeed("systemctl restart lojix.service")
                 machine.wait_for_unit("lojix.service")

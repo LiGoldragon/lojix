@@ -1,5 +1,42 @@
 # Upgrades
 
+## 4.0.1 — the producer chain settles, and the VM fixture is produced not written
+
+### The repin
+
+Every workspace manifest moves to the final producer heads: `protos` 0.30.1
+(`171b21f65337983ab624b7b906397a4f1f92c5a3`), `datom-codec` 0.26.3
+(`627db67f2655efd9f786864009955005fd8ab2ad`), `ethos-zero` 8.0.1
+(`de3d9928b156f2e1a92d060b7817af201abfdbef`), `signal` 3.0.2
+(`8f9a0deb701cebbea518679548df4a795affc918`), `horizon-lib` 0.10.1
+(`40d04d2504fee619e9b2b2564b8a769a3a9d6049`), `signal-lojix` 4.1.1
+(`5c94485c84d20d5b1496d867a2b40f2d908a02e3`), `meta-signal-lojix` 5.1.1
+(`2fdc7742eef200ac3ac3057792f2fa4f4bad9f39`). No wire type and no Rust surface
+changed. `Cargo.lock` carries exactly one revision of each of our crates.
+
+### The VM fixture no longer restates the Horizon schema
+
+`checks.same-host-test-activation` carried its Horizon definition as a literal
+string in `flake.nix`. That string had gone stale against the `horizon-lib`
+this workspace itself pins: its `NodeDefinition` had ten fields where eleven
+are required, and `HorizonDefinition::decode` refuses it with
+`Arity { expected: 11, found: 10 }`. The check stayed green regardless,
+because the deployment it drives selects `Direct` input mode, and a `Direct`
+deployment never reads its proposal source — `actualize_horizon` returns
+`None` for it in the meta client, and `proposal_source_rejection` requires
+exactly that. The fixture proved nothing and said it proved something.
+
+It is now produced by the real producer. `checks/horizon/` holds an authored
+`HorizonConfiguration` and `ClusterDefinition`; the pinned horizon-rs
+`horizon-compose` turns them into `horizon-definition.datom` while the check
+builds, and the test script reads that file back through lojix's own Horizon
+reader (`lojix-write-configuration` with a `TestDefaults` naming it) before
+the deployment runs. A fixture that has drifted from the pinned schema now
+fails at build time, named, instead of booting a guest that ignores it.
+
+Nothing in the package changed. A consumer repins the revision.
+
+
 ## 4.0.0 — behavior is homed on the thing it belongs to
 
 ### What changed
