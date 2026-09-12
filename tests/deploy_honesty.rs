@@ -20,6 +20,7 @@
 use lojix::Payload as _;
 use lojix::runtime_flow::{Routable as _, Routed as _};
 use lojix::schema_runtime::DaemonRuntime as _;
+use lojix::schema_runtime::{DeployDriving as _, RuntimeCore as _};
 use lojix::{DeploymentLedger as _, DurableStore as _};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

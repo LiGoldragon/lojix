@@ -260,6 +260,10 @@
             pkgs.runCommand "lojix-no-free-functions" { src = lawSource; }
               (builtins.readFile ./checks/no-free-functions.sh);
 
+          no-inherent-methods =
+            pkgs.runCommand "lojix-no-inherent-methods" { src = lawSource; }
+              (builtins.readFile ./checks/no-inherent-methods.sh);
+
           clippy = craneLib.cargoClippy (
             commonArguments
             // {

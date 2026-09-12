@@ -2,6 +2,7 @@
 //! detailed dispatch coverage stays in the runtime unit tests; this target
 //! guards that the public test path does not require a legacy text protocol.
 
+use lojix::schema_runtime::RuntimeCore as _;
 use lojix::schema_runtime::SchemaRuntime;
 
 #[test]

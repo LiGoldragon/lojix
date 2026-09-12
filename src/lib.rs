@@ -21,6 +21,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
+use rkyv::api::high::HighDeserializer;
+use rkyv::bytecheck::CheckBytes;
+use rkyv::rancor::{self, Strategy};
+use rkyv::validation::Validator;
+use rkyv::validation::archive::ArchiveValidator;
+use rkyv::validation::shared::SharedValidator;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, Engine as SemaDatabase, EngineOpen, EngineRecord, EngineStoredRecord,
@@ -156,15 +162,9 @@ const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(5);
 /// correct until a version bump.
 pub trait LojixRecord: EngineStoredRecord + Send + Sync + 'static
 where
-    Self::Archived: RkyvDeserialize<Self, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
-        + for<'validation> rkyv::bytecheck::CheckBytes<
-            rkyv::rancor::Strategy<
-                rkyv::validation::Validator<
-                    rkyv::validation::archive::ArchiveValidator<'validation>,
-                    rkyv::validation::shared::SharedValidator,
-                >,
-                rkyv::rancor::Error,
-            >,
+    Self::Archived: RkyvDeserialize<Self, HighDeserializer<rancor::Error>>
+        + for<'validation> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
         >,
 {
     const TABLE: &'static str;
@@ -956,8 +956,9 @@ pub trait DurableStore {
     /// Open or create the durable SEMA database at `path`. A fresh file is
     /// created with empty engine counters; an existing file resumes its
     /// persisted commit sequence and records straight back through sema-engine.
-    /// The six `register_table` calls are idempotent, so opening doubles as the
-    /// resume — there is no separate load path (ur16).
+    /// Building the family directory registers every table, and registration is
+    /// idempotent, so opening doubles as the resume — there is no separate load
+    /// path (ur16).
     fn open(path: impl Into<PathBuf>) -> Result<Self>
     where
         Self: Sized;
@@ -978,15 +979,9 @@ pub trait DurableStore {
     fn records<Record>(&self) -> Result<Vec<Record>>
     where
         Record: LojixRecord,
-        Record::Archived: RkyvDeserialize<Record, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
-            + for<'validation> rkyv::bytecheck::CheckBytes<
-                rkyv::rancor::Strategy<
-                    rkyv::validation::Validator<
-                        rkyv::validation::archive::ArchiveValidator<'validation>,
-                        rkyv::validation::shared::SharedValidator,
-                    >,
-                    rkyv::rancor::Error,
-                >,
+        Record::Archived: RkyvDeserialize<Record, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >;
 }
 
@@ -1394,15 +1389,9 @@ impl DurableStore for Store {
     fn records<Record>(&self) -> Result<Vec<Record>>
     where
         Record: LojixRecord,
-        Record::Archived: RkyvDeserialize<Record, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
-            + for<'validation> rkyv::bytecheck::CheckBytes<
-                rkyv::rancor::Strategy<
-                    rkyv::validation::Validator<
-                        rkyv::validation::archive::ArchiveValidator<'validation>,
-                        rkyv::validation::shared::SharedValidator,
-                    >,
-                    rkyv::rancor::Error,
-                >,
+        Record::Archived: RkyvDeserialize<Record, HighDeserializer<rancor::Error>>
+            + for<'validation> CheckBytes<
+                Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
     {
         Ok(self

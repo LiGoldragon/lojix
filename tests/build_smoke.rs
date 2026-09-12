@@ -3,6 +3,7 @@
 use lojix::DurableStore as _;
 use lojix::Payload as _;
 use lojix::adapters::{Lowerable as _, Raisable as _};
+use lojix::schema_runtime::{DeployDriving as _, RuntimeCore as _};
 use lojix::schema_runtime::{DeploySubmissionOutcome, SchemaRuntime};
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
 

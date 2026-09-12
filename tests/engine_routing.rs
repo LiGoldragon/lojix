@@ -4,6 +4,7 @@
 
 use lojix::DurableStore as _;
 use lojix::Payload as _;
+use lojix::schema_runtime::{DeployDriving as _, RuntimeCore as _};
 use std::path::Path;
 
 use lojix::runtime_model as sema;

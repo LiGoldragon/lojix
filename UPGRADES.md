@@ -1,5 +1,123 @@
 # Upgrades
 
+# 5.0.0 to 6.0.0
+
+**Every method lojix calls now lives in a trait, and `checks/no-inherent-methods.sh`
+is a Nix check.** The wire is unchanged: `signal-lojix` 5.0.0 and
+`meta-signal-lojix` 6.0.0 are the same pins, the store schema is still v4, and
+no request or reply gained or lost a word. What changed is the Rust surface.
+
+## Bring the traits into scope
+
+Nothing was renamed and no signature moved except where this file says so, but
+a trait method needs its trait in scope. A consumer of `lojix` adds the traits
+it uses:
+
+```rust
+use lojix::{DurableStore, DeploymentLedger, GenerationLedger, EventHistory,
+            IdentifierAllocating, TransitionJournal, TestRunLedger,
+            NexusPersistable, Payload, Named};
+use lojix::schema_runtime::{RuntimeCore, DeployDriving, TestDriving};
+use lojix::client::NexusSocket;
+```
+
+## The store is read by record kind, not by method name
+
+Eleven readers — `live_generations`, `gc_roots`, `event_log_entries`,
+`container_lifecycle_records`, `deployment_records`, `identifier_allocations`,
+`deployment_outbox`, `pending_transition_intents`, `test_runs`,
+`nexus_configuration_records` and their private twins — were eleven spellings
+of one question. They are replaced by one generic reader on `DurableStore`:
+
+```rust
+store.records::<LiveGeneration>()?      // was store.live_generations()
+store.records::<GcRoot>()?              // was store.gc_roots()
+store.records::<DeploymentRecord>()?    // was store.deployment_records()
+store.records::<StoredTestRun>()?       // was store.test_runs()
+```
+
+`deploy_jobs()` remains its own verb on `DeploymentLedger`, because reading a
+deploy job validates its persisted closure path.
+
+The same trait, `LojixRecord`, now carries each family's table name, family
+name, schema hash and operator-facing role. The thirty-three module constants
+that used to spell those three lists in parallel are gone, and so are the
+eleven `register_table` blocks, the eleven startup validators and the eight
+`TableInspectionTarget` constants in `inspection.rs`.
+
+One message changed with it: the startup-gate stage for a single-row family is
+now `validating identifier-allocation rows` and `validating nexus-configuration
+rows`, plural like every other family. `Error::StoreStartupCompatibility`'s
+`stage` field is a `String` rather than a `&'static str`.
+
+## Newtypes answer `Payload`
+
+Every `flow_newtype!`, `flow_text!`, `runtime_newtype!` and `runtime_text!`
+type — and `OriginRoute` and `EventLogRetention` — implements
+`lojix::Payload` instead of carrying its own `new`/`payload`/`into_payload`
+triple. `new` now takes the carried value exactly; a text newtype built from a
+`&str` uses `From`:
+
+```rust
+ClusterName::from("alpha")             // was ClusterName::new("alpha")
+ClusterName::new(name_string)          // unchanged, with `Payload` in scope
+```
+
+`EventLogRetention::default_policy()` becomes `EventLogRetention::default()`
+and `maximum_entries()` becomes `*retention.payload()`.
+
+## Inspection reports are data
+
+`StoreInspection` and `TableInspection` expose their fields directly; their
+accessor methods are gone. `inspection.path()` becomes `inspection.path`,
+`table.status()` becomes `table.status`, and so on. `table_named` remains, on
+`InspectedTables`. `StoreInspector::new(path)` becomes
+`StoreInspector { path }`, and `inspect()` is on `StoreInspecting`.
+
+`StoreInspectionCommand` and `StoreResetCommand` are two shapes of one kind and
+now share `lojix::OfflineCommand` (`from_environment`, `from_arguments`, `run`).
+`StoreResetCommand::from_arguments_with_configuration` moved to
+`reconstruction::StoreResetting`.
+
+## What was deleted as dead
+
+- **The effect barrier.** `EffectBarrier`, `RuntimeConfiguration::test_with_effect_barrier`
+  and the `await` in front of the pipeline's first effect were the up9b
+  decoupling witness. Nothing constructed a barrier any more — the test that
+  did is gone — so production carried an always-`None` option and a branch that
+  was never taken. All of it is removed.
+- `impl NexusPersistable for Store` was five methods that forwarded to five
+  identically named inherent methods. The bodies moved into the trait impl.
+- `Nexus::root()`, `StoreInspection::catalog()`, `StoreInspection::tables()`
+  and `TableInspection::role()` had no callers.
+- `NexusWork::sema_write_completed`, `sema_read_completed`, `effect_completed`
+  and `NexusAction::reply_to_signal` wrapped one enum variant each; the variant
+  is the constructor.
+
+## Conversions are conversions
+
+`JournalStage::from_effect`/`effect`, `EffectResult::flake_resolved` and its
+three siblings, `SchemaRuntime::marker`/`sema_marker`,
+`SchemaRuntime::configuration_receipt`/`configuration_rejection` and
+`SchemaRuntime::reply_meta` are `From` impls now.
+
+## Nexus Core is seven questions, not ninety-seven methods
+
+`impl SchemaRuntime` held 101 methods. Twenty-four of them were verbs of their
+arguments and moved there: `RejectionVocabulary` on `RejectionReason`,
+`TerminalReason` on `DeployRejectionReason`, `FailureStaging` on `EffectStage`,
+`PhaseLifecycle` on `DeploymentPhase`, `ActivationSlot` on `ActivationEffect`,
+`TestRunSelecting` on `TestRunLookup`, `GenerationSelecting` on `Selection`,
+and `DeployAdmission` on `DeployRequest` — a deploy request now judges itself.
+The rest are `RuntimeCore`, `SignalDeciding`, `DeployDriving`, `TestDriving`,
+`SemaApplying`, `SemaObserving` and `EffectRunning`.
+
+Seven effect types — `NixCommand`, `ClosureCopy`, `Activation`,
+`HostActivation`, `UserEnvironmentActivation`, `HermeticCheck` and
+`HorizonMaterialization` — share one `Effect` trait. `HorizonMaterialization::run`
+takes the `EffectExecution` explicitly like every other effect rather than
+reaching into its own configuration for one.
+
 # 4.0.1 to 5.0.0
 
 Repins `signal-lojix` 5.0.0 (`4271b5ced31ea02f11f29b602301832e83cfe6c2`) and
