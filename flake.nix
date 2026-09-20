@@ -9,12 +9,12 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane.url = "github:ipetkov/crane";
-    # The same horizon-rs revision every workspace manifest pins. The VM
+    # The same Horizon revision used by the deployed proposal producer pair. The VM
     # fixture below is composed by this revision's own `horizon-compose`, so a
     # fixture that has gone stale against the pinned schema fails the check at
     # build time instead of inside a booted guest.
     horizon = {
-      url = "github:LiGoldragon/horizon-rs/40d04d2504fee619e9b2b2564b8a769a3a9d6049";
+      url = "github:LiGoldragon/horizon-rs/ee8d6f8d27eb6e200504807971ffdd26aaca7ed1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };

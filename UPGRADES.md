@@ -1,5 +1,16 @@
 # Upgrades
 
+# 6.0.0 to 7.0.0
+
+This provisional proposal consumes `horizon-rs` `ee8d6f8d27eb6e200504807971ffdd26aaca7ed1`,
+`signal-lojix` 5.0.0 at `3f550fc278b8e14c37158036d420e7e3ed1d7c7b`, and
+`meta-signal-lojix` 6.0.0 at `a2a42e9d0c66d586aff7e0bb349a3c2c1d455a85`.
+Those two Signal revisions change the socket request contract and must be
+deployed together with Lojix 7.0.0. A mixed producer/consumer pair is
+incompatible. This major version records that wire incompatibility. It is only a source and lock proposal pending the queued remote
+codec checks; it is not evidence for a socket round trip, build, Realize, or
+activation.
+
 # 5.0.0 to 6.0.0
 
 **Every method lojix calls now lives in a trait, and `checks/no-inherent-methods.sh`
