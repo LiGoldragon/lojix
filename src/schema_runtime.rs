@@ -6320,6 +6320,9 @@ impl NixCommand {
             "--option".to_string(),
             "max-jobs".to_string(),
             "0".to_string(),
+            "--option".to_string(),
+            "fallback".to_string(),
+            "false".to_string(),
             "--builders".to_string(),
             builder_spec.to_string(),
             Self::output_installable(closure_path),
@@ -7545,24 +7548,23 @@ mod tests {
         let builder_spec = "ssh-ng://fixture-builder.invalid x86_64-linux - 4 2 k1";
         let invocation = NixCommand::build_closure_remote(DERIVATION, builder_spec, &[]);
         assert_eq!(invocation.program(), "nix");
-        let argv = invocation.joined_arguments();
-        assert!(
-            argv.contains(&format!("--builders {builder_spec}")),
-            "{argv}"
-        );
-        assert!(!argv.contains("/etc/nix/machines"), "{argv}");
-        assert!(argv.contains("--option max-jobs 0"), "{argv}");
-        assert!(argv.contains("--print-out-paths"), "{argv}");
-        assert!(
-            argv.contains(&format!("{DERIVATION}^*")),
-            "remote build installable must carry the `^*` output selector: {argv}"
-        );
-        assert!(
-            !invocation
-                .arguments
-                .iter()
-                .any(|argument| argument == DERIVATION),
-            "bare .drv must not appear as an installable token: {argv}"
+        assert_eq!(
+            invocation.arguments,
+            vec![
+                "build",
+                "--no-link",
+                "--print-out-paths",
+                "--option",
+                "max-jobs",
+                "0",
+                "--option",
+                "fallback",
+                "false",
+                "--builders",
+                builder_spec,
+                "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-mercury.drv^*",
+            ],
+            "remote build must use only the request builder and prohibit local fallback"
         );
     }
 
