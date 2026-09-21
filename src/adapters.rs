@@ -338,7 +338,8 @@ shared_unit_enum!(DeploymentTerminalReason {
     BuilderUnreachable,
     SubstituterUnreachable,
     EvaluationFailed,
-    BuildFailed
+    BuildFailed,
+    ClosureCopyFailed
 });
 owner_unit_enum!(PinRejectionReason {
     PinSlotExhausted,

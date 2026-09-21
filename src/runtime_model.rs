@@ -266,6 +266,7 @@ pub enum DeploymentTerminalReason {
     ActivationFailed,
     EvaluationFailed,
     BuildFailed,
+    ClosureCopyFailed,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DeploymentFailure {
