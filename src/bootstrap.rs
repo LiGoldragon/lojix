@@ -24,7 +24,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use datom_codec::{Actualizing, Potential};
-use horizon_lib::{DatomDecoding, HorizonDefinition, Projecting};
+use horizon_lib::name::{ClusterName, NodeName};
+use horizon_lib::{ClusterProposal, Viewpoint};
+use protos::ReaderBudget;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -1462,6 +1464,7 @@ struct BootstrapDirectInputValidated {
 #[derive(Debug)]
 struct BootstrapHorizonInputValidated {
     proposal_source: PathBuf,
+    cluster_name: String,
     node_name: String,
     materialization_shape: BootstrapMaterializationShape,
     secrets_input: BootstrapSecretsInputValidated,
@@ -1974,10 +1977,11 @@ impl TryFrom<BootstrapInput> for BootstrapInputValidated {
                 output_selector: input.output_selector.0.validated_output_selector()?,
             })),
             BootstrapInput::Horizon(input) => {
-                input.cluster_name.0.validated_horizon_name()?;
+                let cluster_name = input.cluster_name.0.validated_horizon_name()?;
                 Ok(Self::Horizon(BootstrapHorizonInputValidated {
                     proposal_source: OfferedPath::from(input.proposal_source.0.as_str())
                         .existing_regular_file("horizon-definition.datom")?,
+                    cluster_name,
                     node_name: input.node_name.0.validated_horizon_name()?,
                     materialization_shape: input.materialization_shape,
                     secrets_input: match input.secrets_input {
@@ -2700,13 +2704,31 @@ impl BootstrapExecution for ValidatedBootstrapRun {
         };
         let proposal_text = fs::read_to_string(&input.proposal_source)
             .map_err(|_| BootstrapError::Materialization)?;
-        let definition: HorizonDefinition = HorizonDefinition::decode(&proposal_text)
+        let wire: signal_lojix::ClusterProposalWire = datom_codec::Potential::from(proposal_text)
+            .actualize(&mut datom_codec::Budget {
+                remaining: 4_096,
+                reader: ReaderBudget { remaining: 4_096 },
+                depth: 0,
+                maximum_depth: 256,
+            })
             .map_err(|_| BootstrapError::Materialization)?;
+        let definition = horizon_lib::ClusterProposal::try_from(wire)
+            .map_err(|_| BootstrapError::Materialization)?;
+        let viewpoint = Viewpoint {
+            cluster: ClusterName::try_new(&input.cluster_name)
+                .map_err(|_| BootstrapError::Materialization)?,
+            node: NodeName::try_new(&input.node_name)
+                .map_err(|_| BootstrapError::Materialization)?,
+        };
         let horizon = definition
-            .project(&input.node_name)
+            .project(&viewpoint)
             .map_err(|_| BootstrapError::Materialization)?;
-        let Some(projected_system) = horizon.node.machine.architecture.nix_system() else {
+        let Some(arch) = horizon.node.machine.arch else {
             return Err(BootstrapError::Materialization);
+        };
+        let projected_system = match arch.system() {
+            horizon_lib::species::System::X86_64Linux => "x86_64-linux",
+            horizon_lib::species::System::Aarch64Linux => "aarch64-linux",
         };
         if projected_system != input.nix_system {
             return Err(BootstrapError::Materialization);

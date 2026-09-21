@@ -1,6 +1,5 @@
 //! `lojix-write-configuration` encodes one generated current Datom request into the daemon's rkyv startup archive.
 use datom_codec::{Actualizing, Potential};
-use horizon_lib::DatomDecoding;
 use lojix::InlineDatomArguments as _;
 use lojix::ingress;
 use lojix::{
@@ -105,7 +104,7 @@ impl ConfigurationWriting for ingress::ConfigurationWriteRequest {
                     test_flake,
                     test_nix_system,
                     test_output_selector,
-                    horizon_definition: HorizonArtifact(&proposal_source).definition()?,
+                    cluster_proposal_wire_option: HorizonArtifact(&proposal_source).definition()?,
                 }),
             },
         };
@@ -125,7 +124,7 @@ trait HorizonArtifactReading {
     /// `None` when no artifact is named.
     fn definition(
         &self,
-    ) -> Result<Option<horizon_lib::HorizonDefinition>, ConfigurationWriterError>;
+    ) -> Result<Option<signal_lojix::ClusterProposalWire>, ConfigurationWriterError>;
 
     /// The artifact path, accepted only as an absolute, traversal-free,
     /// symlink-free regular file named `horizon-definition.datom`.
@@ -135,12 +134,13 @@ trait HorizonArtifactReading {
 impl HorizonArtifactReading for HorizonArtifact<'_> {
     fn definition(
         &self,
-    ) -> Result<Option<horizon_lib::HorizonDefinition>, ConfigurationWriterError> {
+    ) -> Result<Option<signal_lojix::ClusterProposalWire>, ConfigurationWriterError> {
         if self.0.is_empty() {
             return Ok(None);
         }
         let authored = std::fs::read_to_string(self.checked_path()?)?;
-        horizon_lib::HorizonDefinition::decode(&authored)
+        datom_codec::Potential::<signal_lojix::ClusterProposalWire>::from(authored)
+            .actualize(&mut datom_codec::Budget::default())
             .map(Some)
             .map_err(|_| {
                 ConfigurationWriterError::Horizon(

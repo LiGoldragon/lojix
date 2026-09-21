@@ -28,7 +28,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use horizon_lib::{Horizon, HorizonDefinition, Projecting};
+use horizon_lib::name::{ClusterName, NodeName};
+use horizon_lib::{ClusterProposal, Horizon, Viewpoint};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use zbus::proxy::{Builder as ProxyBuilder, CacheProperties, SignalStream};
@@ -304,7 +305,7 @@ pub struct TestDefaults {
     test_output_selector: sema::DeploymentOutputSelector,
     /// The already-actualized Horizon definition used to validate `(OnHost h)`
     /// and resolve `All`. The configuration writer owns authored-file input.
-    horizon_definition: Option<HorizonDefinition>,
+    cluster_proposal_wire: Option<signal_lojix::ClusterProposalWire>,
 }
 
 /// Lowering an operator's test request onto the runs it actually means, using
@@ -429,7 +430,7 @@ impl TestLowering for TestDefaults {
             test_output_selector: sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new(
                 "checks.fixture-a".to_string(),
             )),
-            horizon_definition: None,
+            cluster_proposal_wire: None,
         }
     }
 
@@ -443,9 +444,9 @@ impl TestLowering for TestDefaults {
     }
 
     fn projection(&self) -> Option<ClusterProjection> {
-        self.horizon_definition
+        self.cluster_proposal_wire
             .clone()
-            .map(ClusterProjection::from_definition)
+            .map(|wire| ClusterProjection::from_definition(wire, self.cluster.clone()))
     }
 }
 
@@ -463,7 +464,7 @@ impl From<&crate::TestDefaults> for TestDefaults {
             test_output_selector: sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new(
                 defaults.test_output_selector.clone(),
             )),
-            horizon_definition: defaults.horizon_definition.clone(),
+            cluster_proposal_wire: defaults.cluster_proposal_wire_option.clone(),
         }
     }
 }
@@ -714,13 +715,17 @@ pub enum TestSubmissionOutcome {
 /// performed by Horizon before Lojix reads this value.
 #[derive(Debug, Clone)]
 pub(crate) struct ClusterProjection {
-    definition: HorizonDefinition,
+    wire: signal_lojix::ClusterProposalWire,
+    cluster: ordinary::ClusterName,
 }
 
 /// What the projected cluster says about where a node may run and which hosts
 /// carry it.
 trait ClusterTopology {
-    fn from_definition(definition: HorizonDefinition) -> Self
+    fn from_definition(
+        definition: signal_lojix::ClusterProposalWire,
+        cluster: ordinary::ClusterName,
+    ) -> Self
     where
         Self: Sized;
 
@@ -743,8 +748,14 @@ trait ClusterTopology {
 }
 
 impl ClusterTopology for ClusterProjection {
-    fn from_definition(definition: HorizonDefinition) -> Self {
-        Self { definition }
+    fn from_definition(
+        definition: signal_lojix::ClusterProposalWire,
+        cluster: ordinary::ClusterName,
+    ) -> Self {
+        Self {
+            wire: definition,
+            cluster,
+        }
     }
 
     fn validate_host_for_node(
@@ -763,32 +774,41 @@ impl ClusterTopology for ClusterProjection {
     }
 
     fn host_set_of(&self, node: &ordinary::NodeName) -> Option<Vec<String>> {
-        let horizon = self.definition.project(node.payload()).ok()?;
-        let mut hosts = horizon.node.machine.host.into_iter().collect::<Vec<_>>();
-        hosts.extend(horizon.node.machine.additional_hosts);
-        Some(hosts)
+        let proposal = horizon_lib::ClusterProposal::try_from(self.wire.clone()).ok()?;
+        let viewpoint = Viewpoint {
+            cluster: ClusterName::try_new(self.cluster.payload()).ok()?,
+            node: NodeName::try_new(node.payload()).ok()?,
+        };
+        let horizon = proposal.project(&viewpoint).ok()?;
+        Some(
+            horizon
+                .node
+                .machine
+                .host_set()
+                .into_iter()
+                .map(|host| host.as_str().to_string())
+                .collect(),
+        )
     }
 
     fn hosted_pod_nodes(&self) -> Vec<ordinary::NodeName> {
-        self.definition
-            .resolve()
-            .map(|resolved| {
-                resolved
-                    .nodes
-                    .keys()
-                    .filter_map(|name| {
-                        self.definition.project(name).ok().and_then(|horizon| {
-                            horizon
-                                .node
-                                .machine
-                                .host
-                                .is_some()
-                                .then(|| ordinary::NodeName::new(name.clone()))
-                        })
-                    })
-                    .collect()
+        let proposal = match horizon_lib::ClusterProposal::try_from(self.wire.clone()) {
+            Ok(proposal) => proposal,
+            Err(_) => return Vec::new(),
+        };
+        proposal
+            .nodes
+            .keys()
+            .filter_map(|node| {
+                let viewpoint = Viewpoint {
+                    cluster: ClusterName::try_new(self.cluster.payload()).ok()?,
+                    node: node.clone(),
+                };
+                let horizon = proposal.project(&viewpoint).ok()?;
+                (!horizon.node.machine.host_set().is_empty())
+                    .then(|| ordinary::NodeName::new(node.as_str().to_string()))
             })
-            .unwrap_or_default()
+            .collect()
     }
 }
 
@@ -1114,7 +1134,7 @@ impl From<&signal_lojix::TestDefaults> for TestDefaults {
                     defaults.deployment_output_selector.flake_attribute.clone(),
                 ),
             ),
-            horizon_definition: defaults.horizon_definition_option.clone(),
+            cluster_proposal_wire: defaults.cluster_proposal_wire_option.clone(),
         }
     }
 }
@@ -1157,7 +1177,7 @@ pub struct DeployPipeline {
     /// supplies an implicit route or output name.
     deployment_transport: sema::DeploymentTransport,
     deployment_input_mode: sema::DeploymentInputMode,
-    horizon_definition_option: Option<HorizonDefinition>,
+    cluster_proposal_wire_option: Option<signal_lojix::ClusterProposalWire>,
     deployment_output_selector: sema::DeploymentOutputSelector,
     activation_backend: sema::ActivationBackend,
     /// The deploy action (host action, or user-environment action + user). Owns the
@@ -1685,7 +1705,7 @@ impl DeployCursor for DeployPipeline {
                 flake: deployment.flake_reference,
                 deployment_transport: deployment.deployment_transport,
                 deployment_input_mode: deployment.deployment_input_mode,
-                horizon_definition_option: deployment.horizon_definition_option,
+                cluster_proposal_wire_option: deployment.cluster_proposal_wire_option,
                 deployment_output_selector: deployment.deployment_output_selector,
                 activation_backend: deployment.activation_backend,
                 action: DeployAction::Host(deployment.host_deploy_action),
@@ -1716,7 +1736,7 @@ impl DeployCursor for DeployPipeline {
                 flake: deployment.flake_reference,
                 deployment_transport: deployment.deployment_transport,
                 deployment_input_mode: deployment.deployment_input_mode,
-                horizon_definition_option: deployment.horizon_definition_option,
+                cluster_proposal_wire_option: deployment.cluster_proposal_wire_option,
                 deployment_output_selector: deployment.deployment_output_selector,
                 activation_backend: deployment.activation_backend,
                 action: DeployAction::UserEnvironment {
@@ -1811,8 +1831,8 @@ impl DeployCursor for DeployPipeline {
         nexus::HorizonMaterializationCommand {
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
-            horizon_definition: self
-                .horizon_definition_option
+            cluster_proposal_wire: self
+                .cluster_proposal_wire_option
                 .clone()
                 .expect("Horizon admission requires an actualized definition"),
             secrets_input: self.secrets_input.clone(),
@@ -2749,22 +2769,35 @@ impl DeployAdmission for meta::DeployRequest {
     /// admitting any effect.
     fn proposal_source_rejection(&self) -> Option<meta::DeployRejectionReason> {
         let request = self;
-        let (mode, definition, node) = match request {
+        let (mode, definition, cluster, node) = match request {
             meta::DeployRequest::Host(deployment) => (
                 deployment.deployment_input_mode,
-                deployment.horizon_definition_option.as_ref(),
+                deployment.cluster_proposal_wire_option.as_ref(),
+                &deployment.cluster_name,
                 &deployment.node_name,
             ),
             meta::DeployRequest::UserEnvironment(deployment) => (
                 deployment.deployment_input_mode,
-                deployment.horizon_definition_option.as_ref(),
+                deployment.cluster_proposal_wire_option.as_ref(),
+                &deployment.cluster_name,
                 &deployment.node_name,
             ),
         };
         match (mode, definition) {
             (sema::DeploymentInputMode::Direct, None) => None,
             (sema::DeploymentInputMode::Horizon, Some(definition))
-                if definition.project(node.payload()).is_ok() =>
+                if horizon_lib::ClusterProposal::try_from(definition.clone())
+                    .ok()
+                    .and_then(|proposal| {
+                        Some((
+                            proposal,
+                            Viewpoint {
+                                cluster: ClusterName::try_new(cluster.payload()).ok()?,
+                                node: NodeName::try_new(node.payload()).ok()?,
+                            },
+                        ))
+                    })
+                    .is_some_and(|(proposal, viewpoint)| proposal.project(&viewpoint).is_ok()) =>
             {
                 None
             }
@@ -5420,10 +5453,25 @@ trait HorizonMaterializing {
 
 impl HorizonMaterializing for HorizonMaterialization {
     async fn materialize(&self, execution: &EffectExecution) -> Result<nexus::MaterializedInputs> {
-        let horizon = self
-            .command
-            .horizon_definition
-            .project(self.command.node_name.payload())?;
+        let proposal =
+            horizon_lib::ClusterProposal::try_from(self.command.cluster_proposal_wire.clone())
+                .map_err(|error| match error {
+                    signal_lojix::horizon_wire::HorizonWireConversionError::DuplicateKey {
+                        map,
+                        key,
+                    } => Error::Invariant(format!("duplicate {map} key {key}")),
+                    signal_lojix::horizon_wire::HorizonWireConversionError::InvalidValue {
+                        field,
+                        value,
+                    } => Error::Invariant(format!("invalid {field}: {value}")),
+                })?;
+        let viewpoint = Viewpoint {
+            cluster: ClusterName::try_new(self.command.cluster_name.payload())
+                .map_err(|error| Error::Invariant(error.to_string()))?,
+            node: NodeName::try_new(self.command.node_name.payload())
+                .map_err(|error| Error::Invariant(error.to_string()))?,
+        };
+        let horizon = proposal.project(&viewpoint)?;
         let root = MaterializationRoot::new(self.configuration.materialization_root(&self.command));
         root.prepare()?;
         let secrets_source = ClusterSecretsDirectory::from_input(&self.command.secrets_input)?;
@@ -5522,7 +5570,15 @@ impl InputSetWriting for MaterializedInputSet {
         inputs.push(
             self.root
                 .input_directory(GeneratedInputName::System)
-                .write_system(&self.horizon.node.machine.architecture)?
+                .write_system(match self.horizon.node.machine.arch {
+                    Some(horizon_lib::species::Arch::X86_64) => "x86_64-linux",
+                    Some(horizon_lib::species::Arch::Arm64) => "aarch64-linux",
+                    None => {
+                        return Err(Error::Invariant(
+                            "projected machine has no architecture".into(),
+                        ));
+                    }
+                })?
                 .to_override(GeneratedInputName::System, execution)
                 .await?,
         );
@@ -7703,7 +7759,7 @@ mod tests {
             flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
             deployment_transport: fixture_transport(),
             deployment_input_mode: sema::DeploymentInputMode::Direct,
-            horizon_definition_option: None,
+            cluster_proposal_wire_option: None,
             deployment_output_selector: fixture_output_selector(),
             activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
             host_deploy_action: action,
@@ -7732,7 +7788,7 @@ mod tests {
             flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
             deployment_transport: fixture_transport(),
             deployment_input_mode: sema::DeploymentInputMode::Direct,
-            horizon_definition_option: None,
+            cluster_proposal_wire_option: None,
             deployment_output_selector: fixture_output_selector(),
             activation_backend: sema::ActivationBackend::HomeManagerNixProfileV1,
             user_environment_action: meta::UserEnvironmentAction::ActivateNow,
@@ -7904,7 +7960,7 @@ mod tests {
             flake_reference: ordinary::FlakeReference::from(flake),
             deployment_transport: fixture_transport(),
             deployment_input_mode: sema::DeploymentInputMode::Direct,
-            horizon_definition_option: None,
+            cluster_proposal_wire_option: None,
             deployment_output_selector: fixture_output_selector(),
             activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
             host_deploy_action: ordinary::HostDeployAction::Evaluate,
@@ -8546,7 +8602,7 @@ mod tests {
                 flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
                 deployment_transport: fixture_transport(),
                 deployment_input_mode: sema::DeploymentInputMode::Direct,
-                horizon_definition_option: None,
+                cluster_proposal_wire_option: None,
                 deployment_output_selector: fixture_output_selector(),
                 activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
                 host_deploy_action: action,
@@ -8573,7 +8629,7 @@ mod tests {
                 flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
                 deployment_transport: fixture_transport(),
                 deployment_input_mode: sema::DeploymentInputMode::Direct,
-                horizon_definition_option: None,
+                cluster_proposal_wire_option: None,
                 deployment_output_selector: fixture_output_selector(),
                 activation_backend: sema::ActivationBackend::HomeManagerNixProfileV1,
                 user_environment_action: mode,

@@ -526,7 +526,7 @@ pub struct TestDefaults {
     pub test_flake: String,
     pub test_nix_system: String,
     pub test_output_selector: String,
-    pub horizon_definition: Option<horizon_lib::HorizonDefinition>,
+    pub cluster_proposal_wire_option: Option<signal_lojix::ClusterProposalWire>,
 }
 
 /// The rkyv-stored test mode. A daemon-local mirror of the shared
@@ -665,7 +665,7 @@ impl From<&LegacyStartupConfiguration> for NexusConfiguration {
                         deployment_output_selector: signal_lojix::DeploymentOutputSelector {
                             flake_attribute: defaults.test_output_selector.clone(),
                         },
-                        horizon_definition_option: defaults.horizon_definition.clone(),
+                        cluster_proposal_wire_option: defaults.cluster_proposal_wire_option.clone(),
                     })
                 },
             ),

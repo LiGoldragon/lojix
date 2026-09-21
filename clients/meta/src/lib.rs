@@ -1,4 +1,3 @@
-use horizon_lib::DatomDecoding;
 use lojix::InlineDatomArguments as _;
 use std::{
     ffi::OsString,
@@ -90,7 +89,7 @@ impl ClientQueryActualizing for meta_signal_lojix::ClientQuery {
             ClientQuery::Test(value) => Query::Test(value),
             ClientQuery::Unpin(value) => Query::Unpin(value),
             ClientQuery::Deploy(value) => {
-                let horizon_definition_option = match &value {
+                let cluster_proposal_wire_option = match &value {
                     meta_signal_lojix::DeploySubmission::Host(deployment) => HorizonProposal {
                         mode: &deployment.deployment_input_mode,
                         source: &deployment.proposal_source,
@@ -106,7 +105,7 @@ impl ClientQueryActualizing for meta_signal_lojix::ClientQuery {
                 };
                 Query::Deploy(meta_signal_lojix::ActualizedDeploySubmission {
                     deploy_submission: value,
-                    horizon_definition_option,
+                    cluster_proposal_wire_option,
                 })
             }
         })
@@ -125,7 +124,7 @@ struct HorizonProposal<'submission> {
 /// precede the read.
 trait HorizonProposing {
     /// `None` for a direct deployment, which names no Horizon artifact.
-    fn definition(&self) -> lojix::Result<Option<horizon_lib::HorizonDefinition>>;
+    fn definition(&self) -> lojix::Result<Option<signal_lojix::ClusterProposalWire>>;
 
     /// The artifact path, accepted only as an absolute, traversal-free,
     /// symlink-free regular file named `horizon-definition.datom`.
@@ -133,13 +132,14 @@ trait HorizonProposing {
 }
 
 impl HorizonProposing for HorizonProposal<'_> {
-    fn definition(&self) -> lojix::Result<Option<horizon_lib::HorizonDefinition>> {
+    fn definition(&self) -> lojix::Result<Option<signal_lojix::ClusterProposalWire>> {
         match self.mode {
             signal_lojix::DeploymentInputMode::Direct => Ok(None),
             signal_lojix::DeploymentInputMode::Horizon => {
                 let authored = std::fs::read_to_string(self.checked_path()?)?;
-                let definition =
-                    horizon_lib::HorizonDefinition::decode(&authored).map_err(|_| {
+                let definition = Potential::<signal_lojix::ClusterProposalWire>::from(authored)
+                    .actualize(&mut Client::budget())
+                    .map_err(|_| {
                         lojix::Error::DatomRequestText(
                             "proposal source is not a Horizon definition".into(),
                         )

@@ -14,7 +14,7 @@
     # fixture that has gone stale against the pinned schema fails the check at
     # build time instead of inside a booted guest.
     horizon = {
-      url = "github:LiGoldragon/horizon-rs/ee8d6f8d27eb6e200504807971ffdd26aaca7ed1";
+      url = "github:LiGoldragon/horizon-rs/b45d6ad48b5ee5d28eb0127f17c6e0084b696e60";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -326,20 +326,20 @@
                 for argument in "$@"; do command="$argument"; done
                 exec /bin/sh -c "$command"
               '';
-              # The fixture Horizon definition is produced by the real
-              # producer: the pinned horizon-rs `horizon-compose` reading the
-              # authored HorizonConfiguration and ClusterDefinition beside this
-              # flake. Nothing here restates the Horizon schema, so the fixture
-              # cannot drift from the revision lojix pins.
+              # The fixture is authored in Horizon's current Datomic proposal
+              # format. The pinned Horizon CLI must project it before the VM
+              # uses it, so an obsolete proposal fails this check at build time.
               horizonDefinition =
                 pkgs.runCommand "lojix-fixture-horizon-definition"
                   {
-                    nativeBuildInputs = [ horizon.packages.${system}.horizon-compose ];
+                    nativeBuildInputs = [ horizon.packages.${system}.default ];
                   }
                   ''
                     mkdir -p "$out"
-                    horizon-compose "Compose.{ ${./checks/horizon/horizon-configuration.datom} ${./checks/horizon/cluster-definition.datom} }" \
-                      > "$out/horizon-definition.datom"
+                    install -m 0644 ${./checks/horizon/usb-gateway-proposal.datomic} \
+                      "$out/horizon-definition.datom"
+                    horizon-cli --cluster fixture-cluster --node atlas \
+                      < "$out/horizon-definition.datom" > "$out/horizon.json"
                   '';
             in
             pkgs.testers.nixosTest {

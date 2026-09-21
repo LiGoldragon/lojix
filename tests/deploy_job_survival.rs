@@ -23,7 +23,7 @@ fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
             ssh_destination: sema::SshDestination::from("fixture-login@fixture-activate.invalid"),
         },
         deployment_input_mode: sema::DeploymentInputMode::Horizon,
-        horizon_definition_option: Some(common::read_horizon(proposal_source)),
+        cluster_proposal_wire_option: Some(common::read_horizon(proposal_source)),
         deployment_output_selector: sema::DeploymentOutputSelector::new(
             sema::FlakeAttribute::from("checks.fixture-a"),
         ),

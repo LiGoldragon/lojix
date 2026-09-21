@@ -16,7 +16,6 @@ default = ["tools"]
 tools = [
   "dep:datom-codec",
   "dep:protos",
-  "horizon-lib/datom",
   "meta-signal-lojix/datom",
   "signal-lojix/datom",
 ]
@@ -26,13 +25,13 @@ name = "lojix"
 path = "src/lib.rs"
 
 [dependencies]
-horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "ee8d6f8d27eb6e200504807971ffdd26aaca7ed1", package = "horizon-lib", default-features = false }
-datom-codec       = { git = "https://github.com/LiGoldragon/datom-codec", rev = "627db67f2655efd9f786864009955005fd8ab2ad", optional = true }
-protos            = { git = "https://github.com/LiGoldragon/protos", rev = "171b21f65337983ab624b7b906397a4f1f92c5a3", optional = true }
+horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "b45d6ad48b5ee5d28eb0127f17c6e0084b696e60", package = "horizon-lib", default-features = false }
+datom-codec       = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09e2a9d52bf7f2f11e51d15cb6c3177f72c6c927", optional = true }
+protos            = { git = "https://github.com/LiGoldragon/protos", rev = "1febca7836bf8d5f5973a302fdd50aa9c84c159b", optional = true }
 kameo             = "0.20"
 nexus             = { git = "https://github.com/LiGoldragon/nexus", rev = "a84bfa960c0d5c02d30048c4bbbc67dfef79a67c" }
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "a2a42e9d0c66d586aff7e0bb349a3c2c1d455a85" }
-signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "3f550fc278b8e14c37158036d420e7e3ed1d7c7b" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "be64334d3282f094c60f6023a9e3503e1d2a9fc3" }
+signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "66bfa297b25494a92e6317165d569ed6e8a4d549" }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "8f9a0deb701cebbea518679548df4a795affc918", default-features = false, features = ["transport"] }
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 redb              = "4"

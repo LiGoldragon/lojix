@@ -1041,7 +1041,7 @@ mod tests {
                 ssh_destination: sema::SshDestination::from("root@fixture-daemon.invalid"),
             },
             deployment_input_mode: sema::DeploymentInputMode::Direct,
-            horizon_definition_option: None,
+            cluster_proposal_wire_option: None,
             deployment_output_selector: sema::DeploymentOutputSelector::new(
                 sema::FlakeAttribute::new(
                     "nixosConfigurations.fixture-daemon.config.system.build.toplevel".to_string(),

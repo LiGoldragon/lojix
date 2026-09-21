@@ -18,13 +18,13 @@ pub trait Lowerable<T> {
 pub trait Raisable<T> {
     fn raise(self) -> Result<T, WireShapeError>;
 }
-impl Lowerable<horizon_lib::HorizonDefinition> for horizon_lib::HorizonDefinition {
-    fn lower(self) -> Result<horizon_lib::HorizonDefinition, WireShapeError> {
+impl Lowerable<ordinary::ClusterProposalWire> for ordinary::ClusterProposalWire {
+    fn lower(self) -> Result<ordinary::ClusterProposalWire, WireShapeError> {
         Ok(self)
     }
 }
-impl Raisable<horizon_lib::HorizonDefinition> for horizon_lib::HorizonDefinition {
-    fn raise(self) -> Result<horizon_lib::HorizonDefinition, WireShapeError> {
+impl Raisable<ordinary::ClusterProposalWire> for ordinary::ClusterProposalWire {
+    fn raise(self) -> Result<ordinary::ClusterProposalWire, WireShapeError> {
         Ok(self)
     }
 }
@@ -629,7 +629,7 @@ owner_struct_with_none!(HostDeployment => HostDeployment {
     deployment_output_selector => deployment_output_selector, activation_backend => activation_backend,
     host_deploy_action => host_deploy_action, source_revision_policy => source_revision_policy,
     nix_builder_spec_option => optional_nix_builder_spec, extra_substituter_vector => extra_substituter_vector
-}, horizon_definition_option);
+}, cluster_proposal_wire_option);
 owner_struct_with_none!(UserEnvironmentDeployment => UserEnvironmentDeployment {
     cluster_name => cluster_name, node_name => node_name, user_name => user_name,
     proposal_source => proposal_source, secrets_input => secrets_input, flake_reference => flake_reference,
@@ -637,17 +637,17 @@ owner_struct_with_none!(UserEnvironmentDeployment => UserEnvironmentDeployment {
     deployment_output_selector => deployment_output_selector, activation_backend => activation_backend,
     user_environment_action => user_environment_action, source_revision_policy => source_revision_policy,
     nix_builder_spec_option => optional_nix_builder_spec, extra_substituter_vector => extra_substituter_vector
-}, horizon_definition_option);
+}, cluster_proposal_wire_option);
 
 impl Lowerable<sema::DeploySubmission> for owner::ActualizedDeploySubmission {
     fn lower(self) -> Result<sema::DeploySubmission, WireShapeError> {
         let mut submission = self.deploy_submission.lower()?;
         match &mut submission {
             sema::DeploySubmission::Host(value) => {
-                value.horizon_definition_option = self.horizon_definition_option;
+                value.cluster_proposal_wire_option = self.cluster_proposal_wire_option;
             }
             sema::DeploySubmission::UserEnvironment(value) => {
-                value.horizon_definition_option = self.horizon_definition_option;
+                value.cluster_proposal_wire_option = self.cluster_proposal_wire_option;
             }
         }
         Ok(submission)

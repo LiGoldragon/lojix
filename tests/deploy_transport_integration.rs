@@ -81,7 +81,7 @@ fn user_environment_request_with_secrets(
         flake_reference: ordinary::FlakeReference::from(FLAKE),
         deployment_transport: transport(nix_store_uri, ssh_destination),
         deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
-        horizon_definition_option: Some(common::read_horizon(source)),
+        cluster_proposal_wire_option: Some(common::read_horizon(source)),
         deployment_output_selector: selector("packages.x86_64-linux.fixture-home"),
         activation_backend: ordinary::ActivationBackend::HomeManagerNixProfileV1,
         user_environment_action: meta::UserEnvironmentAction::ActivateNow,

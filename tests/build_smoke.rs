@@ -43,7 +43,7 @@ fn host_deploy_with_secrets(
                 extra_substituter_vector: Vec::new(),
             },
         ),
-        horizon_definition_option: None,
+        cluster_proposal_wire_option: None,
     })
 }
 

@@ -130,7 +130,7 @@ pub enum MaterializationShape {
 pub struct HorizonMaterializationCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-    pub horizon_definition: horizon_lib::HorizonDefinition,
+    pub cluster_proposal_wire: signal_lojix::ClusterProposalWire,
     pub secrets_input: SecretsInput,
     pub materialization_shape: MaterializationShape,
 }

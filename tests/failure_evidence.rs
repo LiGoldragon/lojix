@@ -98,7 +98,7 @@ fn user_environment_request(source: &Path) -> meta::DeploySubmission {
             "root@fixture-activate.invalid",
         ),
         deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
-        horizon_definition_option: Some(common::read_horizon(source)),
+        cluster_proposal_wire_option: Some(common::read_horizon(source)),
         deployment_output_selector: ordinary::DeploymentOutputSelector::new(
             ordinary::FlakeAttribute::from("homeConfigurations.bird.activationPackage"),
         ),

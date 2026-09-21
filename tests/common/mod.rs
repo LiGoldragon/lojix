@@ -2,118 +2,118 @@
 
 use std::path::Path;
 
-use datom_codec::Datomizable;
-use horizon_lib::*;
+use datom_codec::{Actualizing, Budget, Datomizable, Potential};
 use protos::{Protosizable, Textualizable};
+use signal_lojix::{ClusterProposalWire, horizon_wire_types::*};
 
-pub fn read_horizon(path: &std::path::Path) -> horizon_lib::HorizonDefinition {
-    HorizonDefinition::decode(&std::fs::read_to_string(path).expect("read Horizon fixture"))
-        .expect("actualize Horizon fixture")
+pub fn read_horizon(path: &Path) -> ClusterProposalWire {
+    let authored = std::fs::read_to_string(path).expect("read Horizon proposal fixture");
+    Potential::<ClusterProposalWire>::from(authored)
+        .actualize(&mut Budget::default())
+        .expect("actualize typed Horizon proposal fixture")
 }
 
-fn hardware() -> Hardware {
-    Hardware {
-        integer: 4,
-        model_name_option: None,
-        mother_board_option: None,
-        first_integer_option: None,
-        second_integer_option: None,
-        location_option: None,
+fn machine(species: MachineSpeciesWire, super_node: Option<&str>) -> MachineWire {
+    MachineWire {
+        species,
+        arch: Some(ArchWire::X86_64),
+        cores: 4,
+        model: None,
+        mother_board: None,
+        super_node: super_node.map(|name| NodeNameWire(name.into())),
+        super_user: None,
+        chip_gen: None,
+        ram_gb: None,
+        disk_gb: None,
+        location: None,
+        super_nodes: vec![],
     }
 }
 
-fn node(name: &str, machine_definition: MachineDefinition) -> NodeDefinition {
-    NodeDefinition {
-        node_name: name.to_owned(),
-        node_variant: NodeVariant::Live(LiveDefinition {}),
-        first_magnitude: Magnitude::Max,
-        second_magnitude: Magnitude::Max,
-        machine_definition,
-        node_environment: NodeEnvironment {
-            keyboard: Keyboard::Qwerty,
-            compressed_swap_option: None,
-        },
-        node_network: NodeNetwork {
-            link_local_ip_vector: vec![],
-            node_ip_option: None,
-            wireguard_pub_key_option: None,
-            wireguard_proxy_vector: vec![],
-            router_interfaces_option: None,
-        },
-        node_keys: NodeKeys {
-            ssh_pub_key: "ssh-ed25519 AAAAfixture".to_owned(),
-            nix_pub_key_option: None,
-            yggdrasil_key_option: None,
-        },
-        boolean_option: Some(true),
-        capabilities: vec![],
-        fixed_location_option: None,
-    }
-}
-
-fn definition(nodes: Vec<NodeDefinition>) -> HorizonDefinition {
-    HorizonDefinition {
-        horizon_configuration: HorizonConfiguration {
-            generic_nodes: vec![],
-            domain_configuration: DomainConfiguration {
-                string: "criome".to_owned(),
-                domain_name_vector: vec![],
+fn node(name: &str, species: NodeSpeciesWire, machine: MachineWire) -> NodeProposalEntryWire {
+    NodeProposalEntryWire {
+        name: NodeNameWire(name.into()),
+        proposal: NodeProposalWire {
+            species,
+            size: MagnitudeWire::Max,
+            trust: MagnitudeWire::Max,
+            machine,
+            io: IoWire {
+                keyboard: KeyboardWire::Qwerty,
+                bootloader: BootloaderWire::Uefi,
+                disks: vec![],
+                swap_devices: vec![],
+                compressed_swap: None,
             },
+            pub_keys: NodePubKeysWire {
+                ssh: SshPubKeyWire("AAA=".into()),
+                nix: None,
+                yggdrasil: None,
+            },
+            link_local_ips: vec![],
+            node_ip: None,
+            wireguard_pub_key: None,
+            nordvpn: false,
+            wifi_cert: false,
+            wireguard_untrusted_proxies: vec![],
+            wants_printing: false,
+            wants_hw_video_accel: false,
+            router_interfaces: None,
+            online: Some(true),
+            services: vec![],
         },
-        cluster_definition: ClusterDefinition {
-            cluster_name: "alpha".to_owned(),
-            cluster_nodes: nodes,
-            generic_node_names: vec![],
+    }
+}
+
+fn proposal(nodes: Vec<NodeProposalEntryWire>) -> ClusterProposalWire {
+    ClusterProposalWire {
+        nodes,
+        users: vec![],
+        domains: vec![],
+        trust: ClusterTrustWire {
+            cluster: MagnitudeWire::Max,
+            clusters: vec![],
+            nodes: vec![],
             users: vec![],
-            domains: vec![],
-            cluster_trust: ClusterTrust {
-                magnitude: Magnitude::Max,
-                cluster_trust_entry_vector: vec![],
-                node_trust_entry_vector: vec![],
-                user_trust_entry_vector: vec![],
-            },
+        },
+        domain_configuration: DomainConfigurationWire {
+            internal_suffix: InternalDomainSuffixWire("criome".into()),
+            public_cluster_domains: vec![],
         },
     }
 }
 
-fn write(path: &Path, value: HorizonDefinition) {
+fn write(path: &Path, value: ClusterProposalWire) {
     std::fs::write(path, value.datomize(vec![]).protosize().textualize())
-        .expect("write HorizonDefinition");
+        .expect("write typed Horizon proposal fixture");
 }
 
 pub fn write_single_node(path: &Path) {
     write(
         path,
-        definition(vec![node(
+        proposal(vec![node(
             "node-1",
-            MachineDefinition::Metal(Metal_Data {
-                architecture: Architecture::X86_64,
-                hardware: hardware(),
-            }),
+            NodeSpeciesWire::Center,
+            machine(MachineSpeciesWire::Metal, None),
         )]),
     );
 }
 
 pub fn write_hosted_pair(path: &Path) {
-    let atlas = node(
+    let mut atlas = node(
         "atlas",
-        MachineDefinition::Metal(Metal_Data {
-            architecture: Architecture::X86_64,
-            hardware: hardware(),
-        }),
+        NodeSpeciesWire::Center,
+        machine(MachineSpeciesWire::Metal, None),
     );
+    atlas.proposal.services.push(NodeServiceWire::VmHost {
+        guest_subnet: TapSubnetWire("169.254.100.0/22".into()),
+        kvm: KvmAvailabilityWire::Available,
+        maximum_guests: Some(4),
+    });
     let beacon = node(
         "beacon",
-        MachineDefinition::VirtualMachine(VirtualMachine_Data {
-            virtual_machine_host: VirtualMachineHost::Cluster(Cluster_Data {
-                node_name: "atlas".to_owned(),
-                node_name_vector: vec![],
-                user_name_option: Some("operator".to_owned()),
-                architecture_option: None,
-            }),
-            hardware: hardware(),
-            integer_option: Some(20),
-        }),
+        NodeSpeciesWire::TestVm,
+        machine(MachineSpeciesWire::Pod, Some("atlas")),
     );
-    write(path, definition(vec![atlas, beacon]));
+    write(path, proposal(vec![atlas, beacon]));
 }
