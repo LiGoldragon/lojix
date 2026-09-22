@@ -2,15 +2,16 @@
 
 use std::path::Path;
 
-use datom_codec::{Actualizing, Budget, Datomizable, Potential};
-use protos::{Protosizable, Textualizable};
+use datomic::TextEdge as _;
+use horizon_protos::Text;
 use signal_lojix::{ClusterProposalWire, horizon_wire_types::*};
 
 pub fn read_horizon(path: &Path) -> ClusterProposalWire {
     let authored = std::fs::read_to_string(path).expect("read Horizon proposal fixture");
-    Potential::<ClusterProposalWire>::from(authored)
-        .actualize(&mut Budget::default())
-        .expect("actualize typed Horizon proposal fixture")
+    let proposal = Text::<horizon_lib::ClusterProposal>::from(authored.as_str())
+        .embody()
+        .expect("actualize authored Horizon proposal fixture");
+    ClusterProposalWire::try_from(proposal).expect("convert authored proposal to typed Signal")
 }
 
 fn machine(species: MachineSpeciesWire, super_node: Option<&str>) -> MachineWire {
@@ -84,8 +85,10 @@ fn proposal(nodes: Vec<NodeProposalEntryWire>) -> ClusterProposalWire {
 }
 
 fn write(path: &Path, value: ClusterProposalWire) {
-    std::fs::write(path, value.datomize(vec![]).protosize().textualize())
-        .expect("write typed Horizon proposal fixture");
+    let authored = horizon_lib::ClusterProposal::try_from(value)
+        .expect("convert typed fixture to authored Horizon proposal");
+    std::fs::write(path, authored.textualize().as_ref())
+        .expect("write authored Horizon proposal fixture");
 }
 
 pub fn write_single_node(path: &Path) {

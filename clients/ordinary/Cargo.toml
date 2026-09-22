@@ -13,7 +13,7 @@ path = "src/main.rs"
 lojix = { path = "../..", default-features = false }
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09e2a9d52bf7f2f11e51d15cb6c3177f72c6c927" }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "1febca7836bf8d5f5973a302fdd50aa9c84c159b" }
-signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "66bfa297b25494a92e6317165d569ed6e8a4d549", features = ["datom"] }
+signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "01ae2b1e6fdf7319cb4498e524cfd9e893d6de01", features = ["datom"] }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "8f9a0deb701cebbea518679548df4a795affc918", default-features = false }
 
 [lints.rust]

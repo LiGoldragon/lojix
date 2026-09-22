@@ -56,9 +56,9 @@ fn write_configuration_round_trips_through_rkyv() {
         "github:fixture-owner/fixture-test-flake"
     );
     let horizon = test_defaults
-        .horizon_definition
+        .cluster_proposal_wire_option
         .expect("configuration writer actualizes the Horizon artifact");
-    assert_eq!(horizon.cluster_definition.cluster_name, "alpha");
+    assert_eq!(horizon.nodes[0].name.0, "node-1");
 }
 
 /// The production posture: a `NoTestDefaults` choice lowers to `None`, so the

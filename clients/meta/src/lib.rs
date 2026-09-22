@@ -5,6 +5,8 @@ use std::{
 };
 
 use datom_codec::{Actualizing, Budget, Potential};
+use datomic::TextEdge as _;
+use horizon_protos::Text;
 use lojix::client::{NexusSocket, SocketExchange};
 use protos::ReaderBudget;
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
@@ -137,14 +139,17 @@ impl HorizonProposing for HorizonProposal<'_> {
             signal_lojix::DeploymentInputMode::Direct => Ok(None),
             signal_lojix::DeploymentInputMode::Horizon => {
                 let authored = std::fs::read_to_string(self.checked_path()?)?;
-                let definition = Potential::<signal_lojix::ClusterProposalWire>::from(authored)
-                    .actualize(&mut Client::budget())
+                let proposal = Text::<horizon_lib::ClusterProposal>::from(authored.as_str())
+                    .embody()
                     .map_err(|_| {
-                        lojix::Error::DatomRequestText(
-                            "proposal source is not a Horizon definition".into(),
-                        )
+                        lojix::Error::DatomRequestText("invalid authored Horizon proposal".into())
                     })?;
-                Ok(Some(definition))
+                let wire = signal_lojix::ClusterProposalWire::try_from(proposal).map_err(|_| {
+                    lojix::Error::DatomRequestText(
+                        "Horizon proposal cannot be encoded as typed Signal".into(),
+                    )
+                })?;
+                Ok(Some(wire))
             }
         }
     }
@@ -222,28 +227,18 @@ mod tests {
         assert!(Client::from_arguments([OsString::from("--pretty")]).is_err());
     }
 
-    fn horizon_definition() -> horizon_lib::HorizonDefinition {
-        horizon_lib::HorizonDefinition {
-            horizon_configuration: horizon_lib::HorizonConfiguration {
-                generic_nodes: vec![],
-                domain_configuration: horizon_lib::DomainConfiguration {
-                    string: "internal.invalid".into(),
-                    domain_name_vector: vec![],
-                },
+    fn horizon_definition() -> horizon_lib::ClusterProposal {
+        horizon_lib::ClusterProposal {
+            nodes: Default::default(),
+            users: Default::default(),
+            domains: Default::default(),
+            trust: horizon_lib::proposal::ClusterTrust {
+                cluster: horizon_lib::magnitude::Magnitude::Zero,
+                clusters: Default::default(),
+                nodes: Default::default(),
+                users: Default::default(),
             },
-            cluster_definition: horizon_lib::ClusterDefinition {
-                cluster_name: "fixture-cluster".into(),
-                cluster_nodes: vec![],
-                generic_node_names: vec![],
-                users: vec![],
-                domains: vec![],
-                cluster_trust: horizon_lib::ClusterTrust {
-                    magnitude: horizon_lib::Magnitude::Zero,
-                    cluster_trust_entry_vector: vec![],
-                    node_trust_entry_vector: vec![],
-                    user_trust_entry_vector: vec![],
-                },
-            },
+            domain_configuration: Default::default(),
         }
     }
 
@@ -252,11 +247,8 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary authored input");
         let path = directory.path().join("horizon-definition.datom");
         let definition = horizon_definition();
-        std::fs::write(
-            &path,
-            definition.clone().datomize(vec![]).protosize().textualize(),
-        )
-        .expect("write authored Horizon fixture");
+        std::fs::write(&path, definition.clone().textualize().as_ref())
+            .expect("write authored Horizon fixture");
         let client_query = meta_signal_lojix::ClientQuery::Deploy(
             meta_signal_lojix::DeploySubmission::Host(meta_signal_lojix::HostDeployment {
                 cluster_name: "fixture-cluster".into(),
@@ -288,8 +280,8 @@ mod tests {
             panic!("expected actualized deployment")
         };
         assert_eq!(
-            actualized.horizon_definition_option.as_ref(),
-            Some(&definition)
+            actualized.cluster_proposal_wire_option.as_ref(),
+            Some(&signal_lojix::ClusterProposalWire::try_from(definition).unwrap())
         );
         assert!(matches!(
             &actualized.deploy_submission,

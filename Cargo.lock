@@ -746,6 +746,7 @@ name = "lojix"
 version = "7.0.0"
 dependencies = [
  "datom-codec 0.31.0",
+ "datomic",
  "ethos-zero 8.0.1",
  "futures-util",
  "horizon-lib",
@@ -797,6 +798,7 @@ name = "lojix-offline-tools"
 version = "7.0.0"
 dependencies = [
  "datom-codec 0.31.0",
+ "datomic",
  "horizon-lib",
  "lojix",
  "protos 0.31.0",
@@ -825,6 +827,7 @@ name = "meta-lojix-client"
 version = "7.0.0"
 dependencies = [
  "datom-codec 0.31.0",
+ "datomic",
  "horizon-lib",
  "lojix",
  "meta-signal-lojix",
@@ -837,7 +840,7 @@ dependencies = [
 [[package]]
 name = "meta-signal-lojix"
 version = "6.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix?rev=be64334d3282f094c60f6023a9e3503e1d2a9fc3#be64334d3282f094c60f6023a9e3503e1d2a9fc3"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix?rev=8fb526c471f0cfab3413673b2b3f2f34dd67a3b1#8fb526c471f0cfab3413673b2b3f2f34dd67a3b1"
 dependencies = [
  "datom-codec 0.31.0",
  "ethos-zero 10.0.0",
@@ -1302,7 +1305,7 @@ dependencies = [
 [[package]]
 name = "signal-lojix"
 version = "5.0.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix?rev=66bfa297b25494a92e6317165d569ed6e8a4d549#66bfa297b25494a92e6317165d569ed6e8a4d549"
+source = "git+https://github.com/LiGoldragon/signal-lojix?rev=01ae2b1e6fdf7319cb4498e524cfd9e893d6de01#01ae2b1e6fdf7319cb4498e524cfd9e893d6de01"
 dependencies = [
  "datom-codec 0.31.0",
  "ethos-zero 10.0.0",

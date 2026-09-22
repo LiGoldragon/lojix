@@ -24,8 +24,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use datom_codec::{Actualizing, Potential};
+use datomic::TextEdge as _;
 use horizon_lib::name::{ClusterName, NodeName};
 use horizon_lib::{ClusterProposal, Viewpoint};
+use horizon_protos::Text;
 use protos::ReaderBudget;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sha2::{Digest, Sha256};
@@ -2704,15 +2706,8 @@ impl BootstrapExecution for ValidatedBootstrapRun {
         };
         let proposal_text = fs::read_to_string(&input.proposal_source)
             .map_err(|_| BootstrapError::Materialization)?;
-        let wire: signal_lojix::ClusterProposalWire = datom_codec::Potential::from(proposal_text)
-            .actualize(&mut datom_codec::Budget {
-                remaining: 4_096,
-                reader: ReaderBudget { remaining: 4_096 },
-                depth: 0,
-                maximum_depth: 256,
-            })
-            .map_err(|_| BootstrapError::Materialization)?;
-        let definition = horizon_lib::ClusterProposal::try_from(wire)
+        let definition = Text::<ClusterProposal>::from(proposal_text.as_str())
+            .embody()
             .map_err(|_| BootstrapError::Materialization)?;
         let viewpoint = Viewpoint {
             cluster: ClusterName::try_new(&input.cluster_name)

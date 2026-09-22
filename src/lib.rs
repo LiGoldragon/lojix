@@ -516,8 +516,8 @@ pub struct LegacyStartupConfiguration {
 ///
 /// `test_flake`, `test_nix_system`, and `test_output_selector` make the
 /// shorthand's hermetic execution profile fully explicit in startup
-/// configuration. `horizon_definition` is actualized by the configuration
-/// writer before the binary startup archive crosses into the daemon.
+/// configuration. The authored Horizon proposal is converted to typed Signal
+/// by the configuration writer before the binary startup archive crosses into the daemon.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq)]
 pub struct TestDefaults {
     pub cluster: String,

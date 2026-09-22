@@ -9,10 +9,8 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane.url = "github:ipetkov/crane";
-    # The same Horizon revision used by the deployed proposal producer pair. The VM
-    # fixture below is composed by this revision's own `horizon-compose`, so a
-    # fixture that has gone stale against the pinned schema fails the check at
-    # build time instead of inside a booted guest.
+    # The same Horizon revision used by the proposal producer pair. Its CLI
+    # parses and projects the VM fixture, so stale source fails the check.
     horizon = {
       url = "github:LiGoldragon/horizon-rs/b45d6ad48b5ee5d28eb0127f17c6e0084b696e60";
       inputs.nixpkgs.follows = "nixpkgs";

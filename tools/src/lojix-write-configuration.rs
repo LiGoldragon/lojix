@@ -1,5 +1,7 @@
 //! `lojix-write-configuration` encodes one generated current Datom request into the daemon's rkyv startup archive.
 use datom_codec::{Actualizing, Potential};
+use datomic::TextEdge as _;
+use horizon_protos::Text;
 use lojix::InlineDatomArguments as _;
 use lojix::ingress;
 use lojix::{
@@ -139,12 +141,16 @@ impl HorizonArtifactReading for HorizonArtifact<'_> {
             return Ok(None);
         }
         let authored = std::fs::read_to_string(self.checked_path()?)?;
-        datom_codec::Potential::<signal_lojix::ClusterProposalWire>::from(authored)
-            .actualize(&mut datom_codec::Budget::default())
+        let proposal = Text::<horizon_lib::ClusterProposal>::from(authored.as_str())
+            .embody()
+            .map_err(|_| {
+                ConfigurationWriterError::Horizon("invalid authored Horizon proposal".into())
+            })?;
+        signal_lojix::ClusterProposalWire::try_from(proposal)
             .map(Some)
             .map_err(|_| {
                 ConfigurationWriterError::Horizon(
-                    "proposal source is not a Horizon definition".into(),
+                    "Horizon proposal cannot be encoded as typed Signal".into(),
                 )
             })
     }

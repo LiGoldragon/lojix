@@ -128,7 +128,7 @@ fn exact_pre_nexus_store_is_never_opened_in_place_and_migrates_on_a_copy() {
             test_flake: "github:example/test".to_string(),
             test_nix_system: "x86_64-linux".to_string(),
             test_output_selector: "checks.fixture".to_string(),
-            horizon_definition: None,
+            cluster_proposal_wire_option: None,
         }),
     };
     let migrated = Store::migrate_configuration_copy(&source, &target, &legacy)
