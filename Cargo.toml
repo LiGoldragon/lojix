@@ -27,12 +27,12 @@ path = "src/lib.rs"
 
 [dependencies]
 horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "ee8d6f8d27eb6e200504807971ffdd26aaca7ed1", package = "horizon-lib", default-features = false }
-datom-codec       = { git = "https://github.com/LiGoldragon/datom-codec", rev = "627db67f2655efd9f786864009955005fd8ab2ad", optional = true }
-protos            = { git = "https://github.com/LiGoldragon/protos", rev = "171b21f65337983ab624b7b906397a4f1f92c5a3", optional = true }
+datom-codec       = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09e2a9d52bf7f2f11e51d15cb6c3177f72c6c927", optional = true }
+protos            = { git = "https://github.com/LiGoldragon/protos", rev = "1febca7836bf8d5f5973a302fdd50aa9c84c159b", optional = true }
 kameo             = "0.20"
 nexus             = { git = "https://github.com/LiGoldragon/nexus", rev = "a84bfa960c0d5c02d30048c4bbbc67dfef79a67c" }
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "a2a42e9d0c66d586aff7e0bb349a3c2c1d455a85" }
-signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "3f550fc278b8e14c37158036d420e7e3ed1d7c7b" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "b500561f0ce813917366997581412b7a79aebc99" }
+signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "f7866bf013499503d21491bcdaadaf88ea6c810c" }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "8f9a0deb701cebbea518679548df4a795affc918", default-features = false, features = ["transport"] }
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 redb              = "4"
@@ -47,7 +47,7 @@ futures-util      = "0.3"
 zbus              = "4.4"
 
 [dev-dependencies]
-ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "de3d9928b156f2e1a92d060b7817af201abfdbef" }
+ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "4bf73cae8d4f5a2072c76a11cd2f00aa3fe9f8e3" }
 tempfile = "3"
 
 [lints.rust]
