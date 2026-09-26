@@ -103,10 +103,37 @@ pub enum ActivationBackend {
 }
 flow_text!(NixBuilderSpec);
 flow_text!(NixSystem);
+/// Where a deploy's closure is realized.
+///
+/// `Local` and `Remote` realize into the daemon host's own store (`Remote`
+/// offloads the derivations to an explicit builder and imports the outputs
+/// back). `TargetStore` realizes in the deployment transport's store: the
+/// locally evaluated derivation closure is copied there and the target's own
+/// daemon builds or substitutes it, so no output stages on the daemon host.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BuildTarget {
     Local,
     Remote(NixBuilderSpec),
+    TargetStore(TargetStoreBuild),
+}
+/// A build realized in the target's own store. `operator_node` is the daemon
+/// host, which names the target-side GC root; `ignored_builder_option` carries
+/// a request builder specification that does not apply to this build, so the
+/// effect can say once that it was ignored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetStoreBuild {
+    pub deployment_transport: DeploymentTransport,
+    pub node_name: NodeName,
+    pub operator_node: NodeName,
+    pub ignored_builder_option: Option<NixBuilderSpec>,
+}
+/// Which store holds the built closure when the copy stage runs. A
+/// `TargetStore` closure is already on the target, so its copy is a presence
+/// check rather than a transfer.
+#[derive(Clone, Debug, PartialEq, Eq, Copy)]
+pub enum ClosureOrigin {
+    DaemonStore,
+    TargetStore,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtraSubstituter {
@@ -170,6 +197,7 @@ pub struct CopyClosureCommand {
     pub node_name: NodeName,
     pub deployment_transport: DeploymentTransport,
     pub closure_path: ClosurePath,
+    pub closure_origin: ClosureOrigin,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UserEnvironmentActivationProfile {

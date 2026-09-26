@@ -1,5 +1,79 @@
 # Upgrades
 
+# 8.0.0 to 8.1.0
+
+A deploy behaviour change with no wire change and no store change: the
+signal-lojix and meta-signal-lojix contracts, the store schema (v5) and the
+`DeployResumeStage` set are unchanged, and no migration runs.
+
+## A node other than the daemon host realizes in its own store
+
+Before 8.1.0 every deployment evaluated and built on the daemon host and then
+copied the closure to the target, so every Realize or activating deploy of a
+remote node staged the whole closure (model weights included) in the daemon
+host's store, and nothing rooted it there.
+
+Now, when the deployed node is not the daemon host, the Build step does three
+things, in order, all idempotent:
+
+1. `nix copy --derivation --to <nix_store_uri> <drv>` — the locally evaluated
+   derivation closure goes to the target.
+2. `nix build --no-link --print-out-paths --store <nix_store_uri> <drv>^*` —
+   the target's daemon builds or substitutes the outputs with its own
+   settings and caches.
+3. `ssh <ssh_destination> nix-store --add-root <root> --realise <out>` — a GC
+   root on the target at
+   `/nix/var/nix/gcroots/lojix/<daemon-host>/generation-<id>` for a `root`
+   login, or `$HOME/.local/state/lojix/gcroots/<daemon-host>/generation-<id>`
+   (an indirect root) for any other login.
+
+Evaluation stays on the daemon host: it never runs against an ssh-ng store
+(the 0.3.9 deadlock). The closure path Lojix records (job cursor, live
+generation, GC root row) is the output as it exists in the target's store.
+
+The copy stage stays in the pipeline but becomes
+`nix path-info --store <nix_store_uri> <out>`: a presence check, not a
+transfer. A missing output fails the copy stage with that command as evidence.
+
+A resume from `NixBuild` reruns the whole triple.
+
+When the deployed node is the daemon host, nothing changes.
+
+## The builder field applies only to the daemon host
+
+`optional_nix_builder_spec` (for example `Some.@/etc/nix/machines`) still
+offloads a daemon-host build through `--builders`. For any other node it is
+ignored, because the target daemon builds with its own settings. Each such
+build logs one line on standard error:
+
+```
+lojix-nexus: BuilderIgnored.{ <node> TargetStore «<builder-spec>» }
+```
+
+and each successful target-store build logs:
+
+```
+lojix-nexus: TargetStoreRealized.{ <node> <nix_store_uri> <output> <gc-root> }
+```
+
+## What the operator needs
+
+- The SSH login in `ssh_destination` must be able to run `nix-store` on the
+  target (a NixOS target has it on the login PATH). The ssh-ng login in
+  `nix_store_uri` must be a trusted user of the target daemon for
+  `nix copy --derivation` and for forwarded substituter options.
+- Retiring a generation does not yet remove its target-side root; remove
+  `/nix/var/nix/gcroots/lojix/<daemon-host>/generation-<id>` by hand when the
+  closure should become collectable.
+
+## Library consumers
+
+`BuildTarget` gained `TargetStore(TargetStoreBuild)`. `CopyClosureCommand`
+gained `closure_origin: ClosureOrigin`. `DaemonRuntime` gained
+`with_daemon_host`. The pipeline's `build_target`, `nix_eval_command`,
+`nix_build_command` and `copy_closure_command` take the daemon host.
+
+
 # 7.0.0 to 8.0.0
 
 This major version rides the horizon-rs 0.12.0 → 0.13.0 bump, which changes the

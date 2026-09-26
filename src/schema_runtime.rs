@@ -222,8 +222,9 @@ pub struct RuntimeConfiguration {
     generated_inputs_directory: PathBuf,
     /// The node this daemon runs on. Activation uses this to
     /// recognize a self-targeting system switch and retain its detached-safe
-    /// behavior. Deploy evaluation/build is local for every target and does
-    /// not use this name to select a remote Nix store.
+    /// behavior. Evaluation is local for every target; the build is local
+    /// only for this node, and every other node realizes in its transport's
+    /// own Nix store (`BuildTarget::TargetStore`).
     daemon_host: ordinary::NodeName,
     /// Program resolution shared by every external Nix, SSH, and process
     /// effect. Production uses the declarative service PATH; focused tests use
@@ -1031,6 +1032,12 @@ pub trait DaemonRuntime {
     where
         Self: Sized;
 
+    /// The same configuration running on `daemon_host`, so a focused test can
+    /// deploy the daemon's own node or another one.
+    fn with_daemon_host(self, daemon_host: ordinary::NodeName) -> Self
+    where
+        Self: Sized;
+
     fn effect_execution(&self) -> &EffectExecution;
 
     /// The node this daemon runs on — used to detect a self-targeting deploy so
@@ -1065,6 +1072,13 @@ impl DaemonRuntime for RuntimeConfiguration {
             daemon_host: ordinary::NodeName::from("daemon-host"),
             effect_execution: EffectExecution::test(program_directory),
             test_defaults: Some(TestDefaults::test_default()),
+        }
+    }
+
+    fn with_daemon_host(self, daemon_host: ordinary::NodeName) -> Self {
+        Self {
+            daemon_host,
+            ..self
         }
     }
 
@@ -1558,10 +1572,18 @@ trait DeployCursor {
         substituters: Vec<meta::ExtraSubstituter>,
     ) -> Vec<nexus::ExtraSubstituter>;
 
-    /// The build command runs through the local daemon Nix client. An explicit
-    /// builder specification is passed verbatim to Nix; its result is imported
-    /// locally before the explicit transport copies the exact closure onward.
-    fn build_target(&self) -> nexus::BuildTarget;
+    /// Where the closure is realized. A deployment whose node is the daemon
+    /// host builds through the local daemon Nix client (an explicit builder
+    /// specification is passed verbatim to Nix and its result imported
+    /// locally). Every other node realizes in the transport's own store: the
+    /// locally evaluated derivation closure is copied there and the target's
+    /// daemon builds it, so no output stages on the daemon host. The builder
+    /// specification does not apply to such a build and is carried only so the
+    /// effect can say it was ignored.
+    fn build_target(&self, daemon_host: &ordinary::NodeName) -> nexus::BuildTarget;
+
+    /// The transport as the effect vocabulary carries it.
+    fn effect_transport(&self) -> nexus::DeploymentTransport;
 
     fn flake_auth_request(&self) -> nexus::FlakeAuthRequest;
 
@@ -1571,13 +1593,18 @@ trait DeployCursor {
 
     fn materialization_shape(&self) -> nexus::MaterializationShape;
 
-    fn nix_eval_command(&self) -> nexus::NixEvalCommand;
+    fn nix_eval_command(&self, daemon_host: &ordinary::NodeName) -> nexus::NixEvalCommand;
 
-    fn nix_build_command(&self, closure_path: ordinary::ClosurePath) -> nexus::NixBuildCommand;
+    fn nix_build_command(
+        &self,
+        closure_path: ordinary::ClosurePath,
+        daemon_host: &ordinary::NodeName,
+    ) -> nexus::NixBuildCommand;
 
     fn copy_closure_command(
         &self,
         closure_path: ordinary::ClosurePath,
+        daemon_host: &ordinary::NodeName,
     ) -> nexus::CopyClosureCommand;
 
     fn activate_generation_command(
@@ -1784,12 +1811,33 @@ impl DeployCursor for DeployPipeline {
             .collect()
     }
 
-    fn build_target(&self) -> nexus::BuildTarget {
-        match &self.builder {
-            Some(builder) => {
-                nexus::BuildTarget::Remote(nexus::NixBuilderSpec::new(builder.payload().clone()))
-            }
+    fn build_target(&self, daemon_host: &ordinary::NodeName) -> nexus::BuildTarget {
+        let builder_option = self
+            .builder
+            .as_ref()
+            .map(|builder| nexus::NixBuilderSpec::new(builder.payload().clone()));
+        if self.node_name != *daemon_host {
+            return nexus::BuildTarget::TargetStore(nexus::TargetStoreBuild {
+                deployment_transport: self.effect_transport(),
+                node_name: self.node_name.clone(),
+                operator_node: daemon_host.clone(),
+                ignored_builder_option: builder_option,
+            });
+        }
+        match builder_option {
+            Some(builder) => nexus::BuildTarget::Remote(builder),
             None => nexus::BuildTarget::Local,
+        }
+    }
+
+    fn effect_transport(&self) -> nexus::DeploymentTransport {
+        nexus::DeploymentTransport {
+            nix_store_uri: nexus::NixStoreUri::new(
+                self.deployment_transport.nix_store_uri.payload().clone(),
+            ),
+            ssh_destination: nexus::SshDestination::new(
+                self.deployment_transport.ssh_destination.payload().clone(),
+            ),
         }
     }
 
@@ -1839,7 +1887,7 @@ impl DeployCursor for DeployPipeline {
         }
     }
 
-    fn nix_eval_command(&self) -> nexus::NixEvalCommand {
+    fn nix_eval_command(&self, daemon_host: &ordinary::NodeName) -> nexus::NixEvalCommand {
         nexus::NixEvalCommand {
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
@@ -1853,18 +1901,22 @@ impl DeployCursor for DeployPipeline {
                 ),
             ),
             flake_input_override_vector: self.input_overrides.clone(),
-            // The ordinary owner transport resolves and realizes locally, then
-            // copies the exact closure to the target. This deliberately never
-            // selects an ssh-ng evaluation store.
-            build_target: self.build_target(),
+            // Evaluation always stays in the daemon host's own store, whatever
+            // the build target: an ssh-ng evaluation store can deadlock in
+            // remote transport (lojix 0.3.9). Only the build moves.
+            build_target: self.build_target(daemon_host),
         }
     }
 
-    fn nix_build_command(&self, closure_path: ordinary::ClosurePath) -> nexus::NixBuildCommand {
+    fn nix_build_command(
+        &self,
+        closure_path: ordinary::ClosurePath,
+        daemon_host: &ordinary::NodeName,
+    ) -> nexus::NixBuildCommand {
         nexus::NixBuildCommand {
             generation_identifier: self.generation_identifier.clone(),
             closure_path,
-            build_target: self.build_target(),
+            build_target: self.build_target(daemon_host),
             extra_substituter_vector: self.substituters.clone(),
         }
     }
@@ -1872,19 +1924,20 @@ impl DeployCursor for DeployPipeline {
     fn copy_closure_command(
         &self,
         closure_path: ordinary::ClosurePath,
+        daemon_host: &ordinary::NodeName,
     ) -> nexus::CopyClosureCommand {
+        let closure_origin = match self.build_target(daemon_host) {
+            nexus::BuildTarget::TargetStore(_) => nexus::ClosureOrigin::TargetStore,
+            nexus::BuildTarget::Local | nexus::BuildTarget::Remote(_) => {
+                nexus::ClosureOrigin::DaemonStore
+            }
+        };
         nexus::CopyClosureCommand {
             generation_identifier: self.generation_identifier.clone(),
             node_name: self.node_name.clone(),
-            deployment_transport: nexus::DeploymentTransport {
-                nix_store_uri: nexus::NixStoreUri::new(
-                    self.deployment_transport.nix_store_uri.payload().clone(),
-                ),
-                ssh_destination: nexus::SshDestination::new(
-                    self.deployment_transport.ssh_destination.payload().clone(),
-                ),
-            },
+            deployment_transport: self.effect_transport(),
             closure_path,
+            closure_origin,
         }
     }
 
@@ -3420,7 +3473,10 @@ impl SignalDeciding for SchemaRuntime {
                         sema::DeployResumeStage::NixBuild,
                     );
                     nexus::NexusAction::CommandEffect(nexus::EffectCommand::NixBuild(
-                        pipeline.nix_build_command(evaluated.closure_path),
+                        pipeline.nix_build_command(
+                            evaluated.closure_path,
+                            self.configuration.daemon_host(),
+                        ),
                     ))
                 } else {
                     // Host `Evaluate`: the derivation path is the result — finish
@@ -3451,7 +3507,10 @@ impl SignalDeciding for SchemaRuntime {
                         sema::DeployResumeStage::CopyClosure,
                     );
                     nexus::NexusAction::CommandEffect(nexus::EffectCommand::CopyClosure(
-                        pipeline.copy_closure_command(built.closure_path),
+                        pipeline.copy_closure_command(
+                            built.closure_path,
+                            self.configuration.daemon_host(),
+                        ),
                     ))
                 } else {
                     // Non-activating action (`Build`): the closure is realised —
@@ -4020,7 +4079,7 @@ impl DeployDriving for SchemaRuntime {
             DeployStage::Submitted => {
                 self.set_stage(DeployStage::BuildingRecorded);
                 nexus::NexusAction::CommandEffect(nexus::EffectCommand::NixEval(
-                    pipeline.nix_eval_command(),
+                    pipeline.nix_eval_command(self.configuration.daemon_host()),
                 ))
             }
             DeployStage::BuildingRecorded => {
@@ -5147,6 +5206,14 @@ pub(crate) trait EffectRunning {
         stage: nexus::EffectStage,
         reported: impl Into<StageFailure>,
     ) -> nexus::EffectResult;
+
+    /// The `TargetStore` arm of the build effect: derivation copy, build in
+    /// the target's store, target-side GC root, in that order.
+    async fn run_target_store_build(
+        &self,
+        command: &nexus::NixBuildCommand,
+        build: &nexus::TargetStoreBuild,
+    ) -> nexus::EffectResult;
 }
 
 impl EffectRunning for SchemaRuntime {
@@ -5223,11 +5290,16 @@ impl EffectRunning for SchemaRuntime {
     }
 
     async fn run_nix_build(&self, command: nexus::NixBuildCommand) -> nexus::EffectResult {
-        // The default owner transport realizes in the authenticated local Lojix
-        // context. An explicit builder still uses the local Nix client and
-        // imports its result locally; no deploy stage builds through an ssh-ng
-        // target store. The following copy stage transports this exact output.
+        // A daemon-host deployment realizes in the authenticated local Lojix
+        // context; an explicit builder still uses the local Nix client and
+        // imports its result locally, and the copy stage transports it. Any
+        // other node realizes in its own store (`TargetStore`): the derivation
+        // closure goes over, the target daemon builds, and a target-side GC
+        // root holds the output until activation.
         let invocation = match &command.build_target {
+            nexus::BuildTarget::TargetStore(build) => {
+                return self.run_target_store_build(&command, build).await;
+            }
             nexus::BuildTarget::Local => NixCommand::build_closure(
                 command.closure_path.payload(),
                 &command.extra_substituter_vector,
@@ -5250,6 +5322,40 @@ impl EffectRunning for SchemaRuntime {
                 }
                 nexus::EffectResult::ClosureBuilt(nexus::BuiltClosure {
                     generation_identifier: command.generation_identifier,
+                    closure_path: ordinary::ClosurePath::new(closure_path),
+                })
+            }
+            Err(detail) => Self::effect_failed(nexus::EffectStage::Build, detail),
+        }
+    }
+
+    async fn run_target_store_build(
+        &self,
+        command: &nexus::NixBuildCommand,
+        build: &nexus::TargetStoreBuild,
+    ) -> nexus::EffectResult {
+        let realization = match TargetStoreRealization::from_command(command, build) {
+            Ok(realization) => realization,
+            Err(detail) => return Self::effect_failed(nexus::EffectStage::Build, detail),
+        };
+        if let Some(builder) = &build.ignored_builder_option {
+            eprintln!(
+                "lojix-nexus: BuilderIgnored.{{ {} TargetStore «{}» }}",
+                build.node_name.payload(),
+                builder.payload(),
+            );
+        }
+        match realization.run(self.configuration.effect_execution()).await {
+            Ok(closure_path) => {
+                eprintln!(
+                    "lojix-nexus: TargetStoreRealized.{{ {} {} {} {} }}",
+                    build.node_name.payload(),
+                    build.deployment_transport.nix_store_uri.payload(),
+                    closure_path,
+                    realization.gc_root_text(),
+                );
+                nexus::EffectResult::ClosureBuilt(nexus::BuiltClosure {
+                    generation_identifier: command.generation_identifier.clone(),
                     closure_path: ordinary::ClosurePath::new(closure_path),
                 })
             }
@@ -6148,10 +6254,15 @@ impl ShellQuoting for ShellArgument {
 /// Always passes `--substitute-on-destination` so the target pulls signed paths
 /// from the cluster cache when available; unsigned daemon-to-daemon transfer
 /// is rejected under `require-sigs` (risk R6).
+///
+/// A closure realized in the target's own store is not transferred: the copy
+/// only confirms, with `nix path-info --store <uri>`, that the output is valid
+/// there, and fails with that command's evidence when it is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClosureCopy {
     store_path: String,
     store_uri: String,
+    closure_origin: nexus::ClosureOrigin,
 }
 
 /// Copying one closure to the store the deployment names.
@@ -6167,12 +6278,25 @@ impl ClosureCopying for ClosureCopy {
         Ok(Self {
             store_path: command.closure_path.payload().clone(),
             store_uri: target.nix_store_uri,
+            closure_origin: command.closure_origin,
         })
     }
 
     /// Copy is idempotent: if the closure already exists on the target, Nix
-    /// exits successfully without changing the activation state.
+    /// exits successfully without changing the activation state. A closure the
+    /// target built itself is only checked for presence there.
     fn invocation(&self) -> NixCommand {
+        if matches!(self.closure_origin, nexus::ClosureOrigin::TargetStore) {
+            return NixCommand::new(
+                "nix",
+                vec![
+                    "path-info".to_string(),
+                    "--store".to_string(),
+                    self.store_uri.clone(),
+                    self.store_path.clone(),
+                ],
+            );
+        }
         let arguments: Vec<String> = vec![
             "copy".to_string(),
             "--substitute-on-destination".to_string(),
@@ -6189,6 +6313,211 @@ impl Effect for ClosureCopy {
 
     async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
         self.invocation().run(execution).await.map(|_| ())
+    }
+}
+
+/// Realizing a locally evaluated derivation in the deployment's own store.
+///
+/// Evaluation already happened in the daemon host's store (never over ssh-ng;
+/// see `eval_drv_path`). Three commands follow, each idempotent, so a resumed
+/// `NixBuild` stage simply runs them again:
+///
+/// 1. `nix copy --derivation --to <uri> <drv>` sends the derivation closure;
+/// 2. `nix build --no-link --print-out-paths --store <uri> <drv>^*` has the
+///    target's daemon build or substitute the outputs with its own settings
+///    (no `--builders`, no `max-jobs`: the operator's builder list is not the
+///    target's);
+/// 3. `ssh <destination> nix-store --add-root <root> --realise <out>` roots
+///    the output on the target so its garbage collector keeps it until the
+///    copy and activation stages have run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TargetStoreRealization {
+    derivation_path: String,
+    target: SshTarget,
+    gc_root: TargetGcRoot,
+    substituters: Vec<nexus::ExtraSubstituter>,
+}
+
+/// Where the target-side GC root for one generation lives. A root login
+/// writes a direct root under `/nix/var/nix/gcroots/lojix/<operator>/`; any
+/// other login writes an indirect root under its own
+/// `$HOME/.local/state/lojix/gcroots/<operator>/`, which the target daemon
+/// registers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TargetGcRoot {
+    directory: TargetGcRootDirectory,
+    operator_node: String,
+    generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetGcRootDirectory {
+    SystemRoots,
+    LoginHome,
+}
+
+/// Naming and writing the target-side GC root.
+trait TargetGcRooting {
+    fn for_login(ssh_destination: &str, operator_node: &str, generation: u64) -> Self
+    where
+        Self: Sized;
+
+    /// The root directory as remote shell text (`$HOME` is expanded there).
+    fn directory_text(&self) -> String;
+
+    /// The root path as readable text, for the daemon log.
+    fn display_text(&self) -> String;
+
+    /// The remote shell body that creates the directory and the root.
+    fn shell_command(&self, output_path: &str) -> ShellCommand;
+}
+
+impl TargetGcRooting for TargetGcRoot {
+    fn for_login(ssh_destination: &str, operator_node: &str, generation: u64) -> Self {
+        let login = ssh_destination
+            .split_once('@')
+            .map(|(login, _)| login)
+            .unwrap_or(ssh_destination);
+        let directory = if login == "root" {
+            TargetGcRootDirectory::SystemRoots
+        } else {
+            TargetGcRootDirectory::LoginHome
+        };
+        Self {
+            directory,
+            operator_node: operator_node.to_string(),
+            generation,
+        }
+    }
+
+    fn directory_text(&self) -> String {
+        let operator = ShellArgument::new(self.operator_node.clone()).to_command_text();
+        match self.directory {
+            TargetGcRootDirectory::SystemRoots => {
+                format!("/nix/var/nix/gcroots/lojix/{operator}")
+            }
+            TargetGcRootDirectory::LoginHome => {
+                format!("\"$HOME\"/.local/state/lojix/gcroots/{operator}")
+            }
+        }
+    }
+
+    fn display_text(&self) -> String {
+        let directory = match self.directory {
+            TargetGcRootDirectory::SystemRoots => "/nix/var/nix/gcroots/lojix",
+            TargetGcRootDirectory::LoginHome => "$HOME/.local/state/lojix/gcroots",
+        };
+        format!(
+            "{directory}/{}/generation-{}",
+            self.operator_node, self.generation
+        )
+    }
+
+    fn shell_command(&self, output_path: &str) -> ShellCommand {
+        let directory = self.directory_text();
+        let output = ShellArgument::new(output_path).to_command_text();
+        ShellCommand::from_raw(format!(
+            "export PATH=/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:$PATH \
+             && mkdir -p {directory} \
+             && nix-store --add-root {directory}/generation-{generation} --realise {output}",
+            generation = self.generation,
+        ))
+    }
+}
+
+/// Building one derivation in the deployment's own store.
+trait TargetStoreRealizing: Sized {
+    fn from_command(
+        command: &nexus::NixBuildCommand,
+        build: &nexus::TargetStoreBuild,
+    ) -> std::result::Result<Self, String>;
+
+    fn derivation_copy_invocation(&self) -> NixCommand;
+
+    fn build_invocation(&self) -> NixCommand;
+
+    fn gc_root_invocation(&self, output_path: &str) -> NixCommand;
+
+    fn gc_root_text(&self) -> String;
+}
+
+impl TargetStoreRealizing for TargetStoreRealization {
+    fn from_command(
+        command: &nexus::NixBuildCommand,
+        build: &nexus::TargetStoreBuild,
+    ) -> std::result::Result<Self, String> {
+        let target = SshTarget::from_transport(&build.deployment_transport)?;
+        let derivation_path = command.closure_path.payload().clone();
+        if !NixStorePath::from(derivation_path.as_str()).is_canonical_item_root()
+            || !derivation_path.ends_with(".drv")
+        {
+            return Err(
+                "target-store build needs the evaluated derivation path, not an output".to_string(),
+            );
+        }
+        let gc_root = TargetGcRoot::for_login(
+            &target.ssh_destination,
+            build.operator_node.payload(),
+            *command.generation_identifier.payload(),
+        );
+        Ok(Self {
+            derivation_path,
+            target,
+            gc_root,
+            substituters: command.extra_substituter_vector.clone(),
+        })
+    }
+
+    fn derivation_copy_invocation(&self) -> NixCommand {
+        NixCommand::new(
+            "nix",
+            vec![
+                "copy".to_string(),
+                "--derivation".to_string(),
+                "--to".to_string(),
+                self.target.nix_store_uri.clone(),
+                self.derivation_path.clone(),
+            ],
+        )
+    }
+
+    fn build_invocation(&self) -> NixCommand {
+        let mut arguments = vec![
+            "build".to_string(),
+            "--no-link".to_string(),
+            "--print-out-paths".to_string(),
+            "--store".to_string(),
+            self.target.nix_store_uri.clone(),
+            NixCommand::output_installable(&self.derivation_path),
+        ];
+        arguments.extend(NixCommand::substituter_options(&self.substituters));
+        NixCommand::new("nix", arguments)
+    }
+
+    fn gc_root_invocation(&self, output_path: &str) -> NixCommand {
+        self.target
+            .remote_invocation(self.gc_root.shell_command(output_path))
+    }
+
+    fn gc_root_text(&self) -> String {
+        self.gc_root.display_text()
+    }
+}
+
+impl Effect for TargetStoreRealization {
+    type Product = String;
+
+    async fn run(&self, execution: &EffectExecution) -> std::result::Result<String, StageFailure> {
+        self.derivation_copy_invocation().run(execution).await?;
+        let output = self.build_invocation().run(execution).await?;
+        let output_path = NixCommand::first_line(&output);
+        if !NixStorePath::from(output_path.as_str()).is_canonical_item_root() {
+            return Err(StageFailure::from(format!(
+                "nix build in the target store returned a noncanonical output path: {output_path:?}"
+            )));
+        }
+        self.gc_root_invocation(&output_path).run(execution).await?;
+        Ok(output_path)
     }
 }
 
@@ -7251,8 +7580,9 @@ trait NixInvoking {
     /// Resolve the toplevel `.drvPath` before building in the daemon's local
     /// Nix context. The target parameter is retained in the generated command
     /// contract, but it deliberately contributes no `--store` redirect: an
-    /// ssh-ng evaluation can deadlock in remote transport. The exact built
-    /// output is copied to the target in the next stage instead.
+    /// ssh-ng evaluation can deadlock in remote transport (lojix 0.3.9). A
+    /// `TargetStore` build copies the evaluated derivation closure to the
+    /// target afterwards instead.
     fn eval_drv_path(
         attribute: &str,
         overrides: &[nexus::FlakeInputOverride],
@@ -7765,6 +8095,11 @@ mod tests {
         ordinary::NodeName::from("node-1")
     }
 
+    /// The daemon host every `RuntimeConfiguration::test_default` names.
+    fn daemon_host() -> ordinary::NodeName {
+        ordinary::NodeName::from("daemon-host")
+    }
+
     fn fixture_transport() -> sema::DeploymentTransport {
         sema::DeploymentTransport {
             nix_store_uri: sema::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
@@ -8124,7 +8459,7 @@ mod tests {
                 .requested_ref,
             ordinary::FlakeReference::from("github:owner/repo/main")
         );
-        let command = pipeline.nix_eval_command();
+        let command = pipeline.nix_eval_command(&daemon_host());
         assert_eq!(
             command.source_revision_record.string,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -8261,7 +8596,7 @@ mod tests {
         pipeline.source_revision = Some(source_revision(
             ordinary::SourceRevisionPolicy::ResolveAndRecord,
         ));
-        let eval = pipeline.nix_eval_command();
+        let eval = pipeline.nix_eval_command(&daemon_host());
         let build = nexus::NixBuildCommand {
             generation_identifier: ordinary::GenerationIdentifier::new(1),
             closure_path: ordinary::ClosurePath::from(STORE),
@@ -8659,6 +8994,7 @@ mod tests {
             node_name: node(),
             deployment_transport: nexus_fixture_transport(),
             closure_path: ordinary::ClosurePath::from(STORE),
+            closure_origin: nexus::ClosureOrigin::DaemonStore,
         }
     }
 
@@ -9214,36 +9550,325 @@ mod tests {
         assert!(pipeline.boot_once_unit().is_none());
     }
 
-    // ---- local owner transport: selection of the build context ----
+    // ---- build context: the daemon host's own store, or the target's ----
+
+    const FIXTURE_BUILDER: &str = "ssh-ng://fixture-builder.invalid x86_64-linux - 4 2 k1";
 
     #[test]
-    fn build_on_a_different_target_stays_in_the_local_owner_context() {
-        // Remote activation targets now evaluate/build locally and copy their
-        // exact immutable output afterwards; no eval or build targets ssh-ng.
+    fn build_on_a_different_target_realizes_in_the_transport_store() {
+        // A node other than the daemon host builds in the store its transport
+        // names; the target store carries the exact request transport and the
+        // daemon host, which names the target-side GC root.
         let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
-        assert!(matches!(pipeline.build_target(), nexus::BuildTarget::Local));
+        let nexus::BuildTarget::TargetStore(build) = pipeline.build_target(&daemon_host()) else {
+            panic!("a remote node must realize in its own store");
+        };
+        assert_eq!(
+            build.deployment_transport.nix_store_uri.payload(),
+            "ssh-ng://fixture-copy.invalid"
+        );
+        assert_eq!(
+            build.deployment_transport.ssh_destination.payload(),
+            "fixture-login@fixture-activate.invalid"
+        );
+        assert_eq!(build.node_name, node());
+        assert_eq!(build.operator_node, daemon_host());
+        assert!(build.ignored_builder_option.is_none());
+    }
+
+    #[test]
+    fn realize_on_a_different_target_also_realizes_in_the_transport_store() {
+        // Realize does not activate, but it too leaves the closure on the
+        // target rather than on the daemon host.
+        let pipeline = host_pipeline(ordinary::HostDeployAction::Realize);
+        assert!(matches!(
+            pipeline.build_target(&daemon_host()),
+            nexus::BuildTarget::TargetStore(_)
+        ));
     }
 
     #[test]
     fn build_on_the_daemon_host_stays_local() {
-        // Deploying the daemon's own host also stays local. The same transport
-        // invariant applies to every target, including the daemon host.
+        // Deploying the daemon's own host is unchanged: local build, no
+        // target store.
         let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
-        assert!(matches!(pipeline.build_target(), nexus::BuildTarget::Local));
+        assert!(matches!(
+            pipeline.build_target(&node()),
+            nexus::BuildTarget::Local
+        ));
     }
 
     #[test]
-    fn explicit_builder_override_wins_over_the_default_local_builder() {
-        // An operator-named builder still dispatches to that Nix builder machine
-        // through the local Nix client; only the default has no named builder.
+    fn explicit_builder_offloads_only_a_daemon_host_build() {
+        // An operator-named builder still dispatches the daemon host's own
+        // build to that machine through the local Nix client.
         let mut pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
-        pipeline.builder = Some(sema::NixBuilderSpec::new(
-            "ssh-ng://fixture-builder.invalid x86_64-linux - 4 2 k1".to_string(),
-        ));
+        pipeline.builder = Some(sema::NixBuilderSpec::new(FIXTURE_BUILDER.to_string()));
         assert!(matches!(
-            pipeline.build_target(),
+            pipeline.build_target(&node()),
             nexus::BuildTarget::Remote(_)
         ));
+    }
+
+    #[test]
+    fn explicit_builder_is_carried_as_ignored_for_a_remote_target() {
+        // For any other node the target daemon builds with its own settings;
+        // the builder must not win (lojix 0.3.5) and is carried only so the
+        // effect can log that it was ignored.
+        let mut pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
+        pipeline.builder = Some(sema::NixBuilderSpec::new(FIXTURE_BUILDER.to_string()));
+        let nexus::BuildTarget::TargetStore(build) = pipeline.build_target(&daemon_host()) else {
+            panic!("a remote node realizes in its own store even with a builder");
+        };
+        assert_eq!(
+            build
+                .ignored_builder_option
+                .as_ref()
+                .map(|builder| builder.payload().as_str()),
+            Some(FIXTURE_BUILDER)
+        );
+        let realization = TargetStoreRealization::from_command(
+            &pipeline.nix_build_command(ordinary::ClosurePath::from(DERIVATION), &daemon_host()),
+            &build,
+        )
+        .expect("target-store realization");
+        for invocation in [
+            realization.derivation_copy_invocation(),
+            realization.build_invocation(),
+        ] {
+            let argv = invocation.joined_arguments();
+            assert!(!argv.contains("--builders"), "{argv}");
+            assert!(!argv.contains("max-jobs"), "{argv}");
+            assert!(!argv.contains("fixture-builder"), "{argv}");
+        }
+    }
+
+    #[test]
+    fn eval_never_redirects_even_for_a_target_store_build() {
+        // The 0.3.9 deadlock guard: whatever the build target, evaluation
+        // writes its derivations into the daemon host's own store.
+        let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
+        let command = pipeline.nix_eval_command(&daemon_host());
+        assert!(matches!(
+            command.build_target,
+            nexus::BuildTarget::TargetStore(_)
+        ));
+        let invocation = NixCommand::eval_drv_path(
+            ".#toplevel",
+            &[],
+            &command.build_target,
+            EvalRefresh::ForceRefresh,
+        );
+        let argv = invocation.joined_arguments();
+        assert!(
+            !argv.contains("--store") && !argv.contains("--eval-store"),
+            "eval must remain local: {argv}"
+        );
+        assert!(!argv.contains("ssh-ng"), "{argv}");
+    }
+
+    fn target_store_realization(
+        ssh_destination: &str,
+        substituters: Vec<nexus::ExtraSubstituter>,
+    ) -> TargetStoreRealization {
+        let build = nexus::TargetStoreBuild {
+            deployment_transport: nexus::DeploymentTransport {
+                nix_store_uri: nexus::NixStoreUri::from("ssh-ng://root@fixture-target.invalid"),
+                ssh_destination: nexus::SshDestination::from(ssh_destination),
+            },
+            node_name: node(),
+            operator_node: daemon_host(),
+            ignored_builder_option: None,
+        };
+        let command = nexus::NixBuildCommand {
+            generation_identifier: ordinary::GenerationIdentifier::new(7),
+            closure_path: ordinary::ClosurePath::from(DERIVATION),
+            build_target: nexus::BuildTarget::TargetStore(build.clone()),
+            extra_substituter_vector: substituters,
+        };
+        TargetStoreRealization::from_command(&command, &build).expect("target-store realization")
+    }
+
+    #[test]
+    fn target_store_build_copies_the_derivation_closure_to_the_transport_store() {
+        let realization = target_store_realization("root@fixture-target.invalid", Vec::new());
+        let invocation = realization.derivation_copy_invocation();
+        assert_eq!(invocation.program(), "nix");
+        assert_eq!(
+            invocation.joined_arguments(),
+            format!("copy --derivation --to ssh-ng://root@fixture-target.invalid {DERIVATION}")
+        );
+    }
+
+    #[test]
+    fn target_store_build_builds_the_outputs_in_the_transport_store() {
+        let realization = target_store_realization(
+            "root@fixture-target.invalid",
+            vec![nexus::ExtraSubstituter {
+                url: "https://cache.fixture.invalid".to_string(),
+                public_key: "cache.fixture.invalid-1:key".to_string(),
+            }],
+        );
+        let invocation = realization.build_invocation();
+        assert_eq!(invocation.program(), "nix");
+        let argv = invocation.joined_arguments();
+        assert!(
+            argv.starts_with(&format!(
+                "build --no-link --print-out-paths --store ssh-ng://root@fixture-target.invalid {DERIVATION}^*"
+            )),
+            "{argv}"
+        );
+        assert!(
+            argv.contains("--option extra-substituters https://cache.fixture.invalid"),
+            "{argv}"
+        );
+        assert!(!argv.contains("--eval-store"), "{argv}");
+        assert!(!argv.contains("--builders"), "{argv}");
+        assert!(!argv.contains("max-jobs"), "{argv}");
+    }
+
+    #[test]
+    fn target_store_build_roots_the_output_on_the_target_over_ssh() {
+        let realization = target_store_realization("root@fixture-target.invalid", Vec::new());
+        let invocation = realization.gc_root_invocation(STORE);
+        assert_eq!(invocation.program(), "ssh");
+        let argv = invocation.joined_arguments();
+        assert!(
+            argv.starts_with("-o BatchMode=yes root@fixture-target.invalid "),
+            "{argv}"
+        );
+        assert!(
+            argv.contains("mkdir -p /nix/var/nix/gcroots/lojix/daemon-host"),
+            "{argv}"
+        );
+        assert!(
+            argv.contains(&format!(
+                "nix-store --add-root /nix/var/nix/gcroots/lojix/daemon-host/generation-7 --realise {STORE}"
+            )),
+            "{argv}"
+        );
+        assert_eq!(
+            realization.gc_root_text(),
+            "/nix/var/nix/gcroots/lojix/daemon-host/generation-7"
+        );
+    }
+
+    #[test]
+    fn target_store_gc_root_for_a_user_login_is_an_indirect_root_in_its_home() {
+        let realization = target_store_realization("bird@fixture-target.invalid", Vec::new());
+        let argv = realization.gc_root_invocation(STORE).joined_arguments();
+        assert!(
+            argv.contains(
+                "nix-store --add-root \"$HOME\"/.local/state/lojix/gcroots/daemon-host/generation-7"
+            ),
+            "{argv}"
+        );
+        assert!(!argv.contains("/nix/var/nix/gcroots"), "{argv}");
+    }
+
+    #[test]
+    fn target_store_build_refuses_an_output_path_in_place_of_a_derivation() {
+        let build = nexus::TargetStoreBuild {
+            deployment_transport: nexus_fixture_transport(),
+            node_name: node(),
+            operator_node: daemon_host(),
+            ignored_builder_option: None,
+        };
+        let command = nexus::NixBuildCommand {
+            generation_identifier: ordinary::GenerationIdentifier::new(1),
+            closure_path: ordinary::ClosurePath::from(STORE),
+            build_target: nexus::BuildTarget::TargetStore(build.clone()),
+            extra_substituter_vector: Vec::new(),
+        };
+        assert!(TargetStoreRealization::from_command(&command, &build).is_err());
+    }
+
+    #[test]
+    fn copy_after_a_target_store_build_is_a_presence_check() {
+        let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
+        let command =
+            pipeline.copy_closure_command(ordinary::ClosurePath::from(STORE), &daemon_host());
+        assert_eq!(command.closure_origin, nexus::ClosureOrigin::TargetStore);
+        let argv = ClosureCopy::from_command(&command)
+            .expect("copy transport")
+            .invocation()
+            .joined_arguments();
+        assert_eq!(
+            argv,
+            format!("path-info --store ssh-ng://fixture-copy.invalid {STORE}")
+        );
+    }
+
+    #[test]
+    fn copy_after_a_daemon_host_build_still_transfers() {
+        let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
+        let command = pipeline.copy_closure_command(ordinary::ClosurePath::from(STORE), &node());
+        assert_eq!(command.closure_origin, nexus::ClosureOrigin::DaemonStore);
+        let argv = ClosureCopy::from_command(&command)
+            .expect("copy transport")
+            .invocation()
+            .joined_arguments();
+        assert!(
+            argv.starts_with("copy --substitute-on-destination --to"),
+            "{argv}"
+        );
+    }
+
+    #[test]
+    fn rerunning_a_target_store_build_repeats_the_same_idempotent_triple() {
+        // A resume from `DeployResumeStage::NixBuild` reruns the build effect
+        // from the recovered cursor. The triple is the same both times: the
+        // derivation copy and the build skip what the target already holds,
+        // and the GC root is replaced in place.
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary fake program directory");
+        for (program, reply) in [
+            ("nix", format!("printf '%s\\n' '{STORE}'")),
+            ("ssh", String::new()),
+        ] {
+            let path = directory.path().join(program);
+            fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '{program}' >> \"$(dirname \"$0\")/commands\"\nfor arg in \"$@\"; do printf ' <%s>' \"$arg\" >> \"$(dirname \"$0\")/commands\"; done\nprintf '\\n' >> \"$(dirname \"$0\")/commands\"\n{reply}\n"
+                ),
+            )
+            .expect("write fake program");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                .expect("make fake program executable");
+        }
+        let configuration = Arc::new(RuntimeConfiguration::test_with_effect_program_directory(
+            directory.path().join("inputs"),
+            directory.path().to_path_buf(),
+        ));
+        let store = Arc::new(Store::open(directory.path().join("lojix.sema")).expect("open store"));
+        let engine = SchemaRuntime::with_store_and_configuration(store, configuration);
+        let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
+        let command =
+            pipeline.nix_build_command(ordinary::ClosurePath::from(DERIVATION), &daemon_host());
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        for _ in 0..2 {
+            let result = runtime.block_on(engine.run_nix_build(command.clone()));
+            assert!(
+                matches!(&result, nexus::EffectResult::ClosureBuilt(built)
+                    if built.closure_path.payload() == STORE),
+                "{result:?}"
+            );
+        }
+        let commands: Vec<String> = fs::read_to_string(directory.path().join("commands"))
+            .expect("read fake command log")
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(commands.len(), 6, "{commands:?}");
+        assert_eq!(commands[..3], commands[3..], "{commands:?}");
+        assert!(
+            commands[0].starts_with("nix <copy> <--derivation>"),
+            "{commands:?}"
+        );
+        assert!(commands[1].starts_with("nix <build>"), "{commands:?}");
+        assert!(commands[2].starts_with("ssh "), "{commands:?}");
     }
 
     #[test]

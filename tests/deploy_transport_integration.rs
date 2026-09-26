@@ -1,9 +1,16 @@
 //! Focused deploy-transport witnesses using hermetic fake Nix and SSH programs.
 //!
 //! These tests execute the same submit/drive pipeline as the daemon-owned job
-//! actor. They prove the production order without opening a network connection:
-//! local immutable evaluation/build, target copy, root-mediated Home Manager
-//! profile set, then target-user activation.
+//! actor. They prove the production order without opening a network connection.
+//!
+//! When the deployed node is the daemon host: local immutable evaluation and
+//! build, target copy, root-mediated Home Manager profile set, then
+//! target-user activation (unchanged since lojix 8.0.0).
+//!
+//! When the deployed node is any other node: local evaluation, the derivation
+//! closure copied to the transport store, the build in that store, a GC root
+//! on the target, a copy stage that only checks the output is there, then
+//! the same activation.
 
 use lojix::Payload as _;
 use lojix::schema_runtime::DaemonRuntime as _;
@@ -23,6 +30,10 @@ const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 const FLAKE: &str =
     "github:fixture-owner/fixture-flake?rev=0123456789abcdef0123456789abcdef01234567";
 const OUTPUT: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-home-manager-generation";
+const DERIVATION: &str = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-home-manager-generation.drv";
+/// The node every fixture request deploys. A runtime on this node is the
+/// daemon host case; the default test runtime runs on `daemon-host`.
+const TARGET_NODE: &str = "beacon";
 
 mod common;
 
@@ -32,14 +43,49 @@ fn write_executable(path: &Path, text: &str) {
 }
 
 fn fake_programs(directory: &Path, fail_copy: bool, fail_activation: bool) {
+    fake_programs_with(
+        directory,
+        FakeFailures {
+            copy: fail_copy,
+            activation: fail_activation,
+            ..FakeFailures::default()
+        },
+    );
+}
+
+/// Which fake effect exits nonzero. `copy` fails every `nix copy`;
+/// `derivation_copy` only `nix copy --derivation` (a `.drv` that is not in
+/// the daemon host's store); `presence` fails `nix path-info` (an output the
+/// target does not hold).
+#[derive(Default, Clone, Copy)]
+struct FakeFailures {
+    copy: bool,
+    derivation_copy: bool,
+    presence: bool,
+    activation: bool,
+}
+
+fn fake_programs_with(directory: &Path, failures: FakeFailures) {
     fs::create_dir_all(directory).expect("create fake command directory");
-    let copy_failure = if fail_copy { "copy) exit 41 ;;" } else { "" };
+    let copy_failure = if failures.copy {
+        "copy) exit 41 ;;"
+    } else if failures.derivation_copy {
+        "copy) [ \"$2\" = --derivation ] && exit 43 ;;"
+    } else {
+        ""
+    };
+    let presence_failure = if failures.presence {
+        "path-info) exit 44 ;;"
+    } else {
+        ""
+    };
     write_executable(
         &directory.join("nix"),
         &format!(
-            "#!/bin/sh\nset -eu\ndir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nprintf 'nix' >> \"$dir/commands\"\nfor arg in \"$@\"; do printf ' <%s>' \"$arg\" >> \"$dir/commands\"; done\nprintf '\\n' >> \"$dir/commands\"\ncase \"$1\" in\n  flake) printf '%s\\n' '{{\"url\":\"{FLAKE}\",\"locked\":{{\"rev\":\"{REVISION}\"}}}}' ;;\n  hash) printf '%s\\n' 'sha256-transport-test=' ;;\n  eval) printf '%s\\n' '/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-home-manager-generation.drv' ;;\n  build) printf '%s\\n' '{OUTPUT}' ;;\n  {copy_failure}\nesac\n"
+            "#!/bin/sh\nset -eu\ndir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nprintf 'nix' >> \"$dir/commands\"\nfor arg in \"$@\"; do printf ' <%s>' \"$arg\" >> \"$dir/commands\"; done\nprintf '\\n' >> \"$dir/commands\"\ncase \"$1\" in\n  flake) printf '%s\\n' '{{\"url\":\"{FLAKE}\",\"locked\":{{\"rev\":\"{REVISION}\"}}}}' ;;\n  hash) printf '%s\\n' 'sha256-transport-test=' ;;\n  eval) printf '%s\\n' '{DERIVATION}' ;;\n  build) printf '%s\\n' '{OUTPUT}' ;;\n  {copy_failure}\n  {presence_failure}\nesac\n"
         ),
     );
+    let fail_activation = failures.activation;
     let activation_failure = if fail_activation {
         "case \"$*\" in */activate*) exit 42 ;; esac\n"
     } else {
@@ -74,7 +120,7 @@ fn user_environment_request_with_secrets(
 ) -> meta::DeploySubmission {
     meta::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
         cluster_name: ordinary::ClusterName::from("alpha"),
-        node_name: ordinary::NodeName::from("beacon"),
+        node_name: ordinary::NodeName::from(TARGET_NODE),
         user_name: ordinary::UserName::from("bird"),
         proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
         secrets_input,
@@ -102,12 +148,25 @@ fn selector(value: &str) -> ordinary::DeploymentOutputSelector {
     ordinary::DeploymentOutputSelector::new(ordinary::FlakeAttribute::from(value))
 }
 
+/// A daemon running on the deployed node itself: the daemon-host path.
 fn runtime(directory: &Path, programs: &Path) -> SchemaRuntime {
+    runtime_on(directory, programs, TARGET_NODE)
+}
+
+/// A daemon running on another node: the target-store path.
+fn remote_runtime(directory: &Path, programs: &Path) -> SchemaRuntime {
+    runtime_on(directory, programs, "daemon-host")
+}
+
+fn runtime_on(directory: &Path, programs: &Path, daemon_host: &str) -> SchemaRuntime {
     let store = Arc::new(Store::open(directory.join("lojix.sema")).expect("open test store"));
-    let configuration = Arc::new(RuntimeConfiguration::test_with_effect_program_directory(
-        directory.join("generated-inputs"),
-        programs.to_path_buf(),
-    ));
+    let configuration = Arc::new(
+        RuntimeConfiguration::test_with_effect_program_directory(
+            directory.join("generated-inputs"),
+            programs.to_path_buf(),
+        )
+        .with_daemon_host(ordinary::NodeName::from(daemon_host)),
+    );
     SchemaRuntime::with_store_and_configuration(store, configuration)
 }
 
@@ -189,6 +248,19 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
     assert!(commands[profile].contains(OUTPUT));
     assert!(commands[activate].contains("runuser --login --command"));
     assert!(commands[activate].contains(OUTPUT));
+
+    assert!(
+        commands.iter().all(|line| !line.contains("--derivation")
+            && !line.contains("--store")
+            && !line.starts_with("nix <path-info>")
+            && !line.contains("gcroots")),
+        "the daemon-host path must not realize in a target store: {commands:?}"
+    );
+    assert!(
+        commands[copy].starts_with("nix <copy> <--substitute-on-destination>"),
+        "{}",
+        commands[copy]
+    );
 
     let generations = engine
         .store()
@@ -453,4 +525,328 @@ async fn copy_and_activation_failures_are_terminal_rejections() {
                 .is_empty()
         );
     }
+}
+
+// ---- a node other than the daemon host realizes in its own store ----
+
+fn position(commands: &[String], what: &str, predicate: impl Fn(&str) -> bool) -> usize {
+    commands
+        .iter()
+        .position(|line| predicate(line))
+        .unwrap_or_else(|| panic!("no {what} in {commands:?}"))
+}
+
+fn terminal_failure(outcome: meta::MetaEgress) -> meta::DeploymentFailure {
+    let meta::MetaEgress::DeployTerminal(record) = outcome else {
+        panic!("expected a terminal deployment, got {outcome:?}");
+    };
+    let Some(meta::DeploymentTerminal::Failed(failure)) = record.optional_deployment_terminal
+    else {
+        panic!("expected a failed deployment, got {record:?}");
+    };
+    failure
+}
+
+#[tokio::test]
+async fn remote_node_builds_in_its_own_store_roots_the_output_and_skips_the_transfer() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let programs = directory.path().join("programs");
+    fake_programs(&programs, false, false);
+    let source = directory.path().join("horizon-definition.datom");
+    common::write_hosted_pair(&source);
+    let mut engine = remote_runtime(directory.path(), &programs);
+    let store_uri = "ssh-ng://root@fixture-target.invalid";
+    let destination = "root@fixture-target.invalid";
+
+    assert!(matches!(
+        submit_and_drive(
+            &mut engine,
+            user_environment_request(&source, store_uri, destination),
+        )
+        .await,
+        meta::MetaEgress::DeployTerminal(record)
+            if matches!(record.optional_deployment_terminal, Some(meta::DeploymentTerminal::Succeeded))
+    ));
+
+    let commands = command_lines(&programs);
+    let eval = position(&commands, "local eval", |line| {
+        line.starts_with("nix <eval>")
+    });
+    let derivation_copy = position(&commands, "derivation copy", |line| {
+        line.starts_with("nix <copy> <--derivation>")
+    });
+    let build = position(&commands, "target-store build", |line| {
+        line.starts_with("nix <build>")
+    });
+    let root = position(&commands, "target GC root", |line| {
+        line.starts_with("ssh ") && line.contains("nix-store --add-root")
+    });
+    let presence = position(&commands, "presence check", |line| {
+        line.starts_with("nix <path-info>")
+    });
+    let profile = position(&commands, "profile set", |line| {
+        line.starts_with("ssh ") && line.contains("nix-env -p")
+    });
+    let activate = position(&commands, "activation", |line| {
+        line.starts_with("ssh ") && line.contains("/activate")
+    });
+    assert!(
+        eval < derivation_copy
+            && derivation_copy < build
+            && build < root
+            && root < presence
+            && presence < profile
+            && profile < activate,
+        "{commands:?}"
+    );
+
+    assert!(
+        !commands[eval].contains("--store") && !commands[eval].contains("ssh-ng"),
+        "eval must stay in the daemon host's store: {}",
+        commands[eval]
+    );
+    assert_eq!(
+        commands[derivation_copy],
+        format!("nix <copy> <--derivation> <--to> <{store_uri}> <{DERIVATION}>")
+    );
+    assert_eq!(
+        commands[build],
+        format!(
+            "nix <build> <--no-link> <--print-out-paths> <--store> <{store_uri}> <{DERIVATION}^*>"
+        )
+    );
+    assert!(commands[root].contains(destination), "{}", commands[root]);
+    assert!(
+        commands[root].contains(&format!(
+            "nix-store --add-root /nix/var/nix/gcroots/lojix/daemon-host/generation-1 --realise {OUTPUT}"
+        )),
+        "{}",
+        commands[root]
+    );
+    assert_eq!(
+        commands[presence],
+        format!("nix <path-info> <--store> <{store_uri}> <{OUTPUT}>")
+    );
+    assert!(
+        commands
+            .iter()
+            .all(|line| !line.contains("--substitute-on-destination")),
+        "the output is already on the target; nothing is transferred: {commands:?}"
+    );
+    assert!(
+        commands
+            .iter()
+            .all(|line| !line.contains("--builders") && !line.contains("max-jobs")),
+        "{commands:?}"
+    );
+
+    let generations = engine
+        .store()
+        .matching_live_generations(|_| true)
+        .expect("read current generation");
+    assert_eq!(generations.len(), 1);
+    assert_eq!(generations[0].closure_path.payload(), OUTPUT);
+}
+
+#[tokio::test]
+async fn remote_realize_leaves_the_rooted_closure_on_the_target_and_nothing_more() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let programs = directory.path().join("programs");
+    fake_programs(&programs, false, false);
+    let source = directory.path().join("horizon-definition.datom");
+    common::write_hosted_pair(&source);
+    let mut engine = remote_runtime(directory.path(), &programs);
+    let mut request = user_environment_request(
+        &source,
+        "ssh-ng://root@fixture-target.invalid",
+        "root@fixture-target.invalid",
+    );
+    let meta::DeploySubmission::UserEnvironment(deployment) = &mut request else {
+        unreachable!()
+    };
+    deployment.user_environment_action = meta::UserEnvironmentAction::Realize;
+
+    assert!(matches!(
+        submit_and_drive(&mut engine, request).await,
+        meta::MetaEgress::DeployTerminal(record)
+            if matches!(record.optional_deployment_terminal, Some(meta::DeploymentTerminal::Succeeded))
+    ));
+    let commands = command_lines(&programs);
+    let effects: Vec<_> = commands
+        .iter()
+        .filter(|line| !line.starts_with("nix <flake>") && !line.starts_with("nix <hash>"))
+        .collect();
+    assert_eq!(effects.len(), 4, "{effects:?}");
+    assert!(effects[0].starts_with("nix <eval>"), "{effects:?}");
+    assert!(
+        effects[1].starts_with("nix <copy> <--derivation>"),
+        "{effects:?}"
+    );
+    assert!(effects[2].starts_with("nix <build>") && effects[2].contains("<--store>"));
+    assert!(effects[3].starts_with("ssh ") && effects[3].contains("nix-store --add-root"));
+}
+
+#[tokio::test]
+async fn remote_node_ignores_the_request_builder() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let programs = directory.path().join("programs");
+    fake_programs(&programs, false, false);
+    let source = directory.path().join("horizon-definition.datom");
+    common::write_hosted_pair(&source);
+    let mut engine = remote_runtime(directory.path(), &programs);
+    let mut request = user_environment_request(
+        &source,
+        "ssh-ng://root@fixture-target.invalid",
+        "root@fixture-target.invalid",
+    );
+    let meta::DeploySubmission::UserEnvironment(deployment) = &mut request else {
+        unreachable!()
+    };
+    deployment.optional_nix_builder_spec =
+        Some(ordinary::NixBuilderSpec::from("@/etc/nix/machines"));
+
+    assert!(matches!(
+        submit_and_drive(&mut engine, request).await,
+        meta::MetaEgress::DeployTerminal(record)
+            if matches!(record.optional_deployment_terminal, Some(meta::DeploymentTerminal::Succeeded))
+    ));
+    let commands = command_lines(&programs);
+    assert!(
+        commands
+            .iter()
+            .all(|line| !line.contains("/etc/nix/machines")
+                && !line.contains("--builders")
+                && !line.contains("max-jobs")),
+        "{commands:?}"
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|line| line.starts_with("nix <build>") && line.contains("<--store>")),
+        "{commands:?}"
+    );
+}
+
+#[tokio::test]
+async fn daemon_host_builder_still_offloads_through_the_local_client() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let programs = directory.path().join("programs");
+    fake_programs(&programs, false, false);
+    let source = directory.path().join("horizon-definition.datom");
+    common::write_hosted_pair(&source);
+    let mut engine = runtime(directory.path(), &programs);
+    let mut request = user_environment_request(
+        &source,
+        "ssh-ng://fixture-copy-a.invalid",
+        "root@fixture-activate-a.invalid",
+    );
+    let meta::DeploySubmission::UserEnvironment(deployment) = &mut request else {
+        unreachable!()
+    };
+    deployment.optional_nix_builder_spec =
+        Some(ordinary::NixBuilderSpec::from("@/etc/nix/machines"));
+
+    assert!(matches!(
+        submit_and_drive(&mut engine, request).await,
+        meta::MetaEgress::DeployTerminal(record)
+            if matches!(record.optional_deployment_terminal, Some(meta::DeploymentTerminal::Succeeded))
+    ));
+    let commands = command_lines(&programs);
+    let build = position(&commands, "local build", |line| {
+        line.starts_with("nix <build>")
+    });
+    assert!(
+        commands[build].contains("<--builders> <@/etc/nix/machines>")
+            && !commands[build].contains("<--store>"),
+        "{}",
+        commands[build]
+    );
+}
+
+#[tokio::test]
+async fn missing_local_derivation_fails_the_build_stage_before_any_remote_build() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let programs = directory.path().join("programs");
+    fake_programs_with(
+        &programs,
+        FakeFailures {
+            derivation_copy: true,
+            ..FakeFailures::default()
+        },
+    );
+    let source = directory.path().join("horizon-definition.datom");
+    common::write_hosted_pair(&source);
+    let mut engine = remote_runtime(directory.path(), &programs);
+
+    let failure = terminal_failure(
+        submit_and_drive(
+            &mut engine,
+            user_environment_request(
+                &source,
+                "ssh-ng://root@fixture-target.invalid",
+                "root@fixture-target.invalid",
+            ),
+        )
+        .await,
+    );
+    assert_eq!(
+        failure.deployment_failure_stage,
+        ordinary::DeploymentFailureStage::Build
+    );
+    let command = failure
+        .optional_failure_evidence
+        .and_then(|evidence| evidence.optional_failed_command)
+        .expect("the failing command is recorded");
+    let argv: Vec<_> = command
+        .command_argument_vector
+        .iter()
+        .map(|argument| argument.payload().clone())
+        .collect();
+    assert_eq!(argv[..2], ["copy".to_string(), "--derivation".to_string()]);
+    let commands = command_lines(&programs);
+    assert!(
+        commands
+            .iter()
+            .all(|line| !line.starts_with("nix <build>") && !line.starts_with("ssh ")),
+        "{commands:?}"
+    );
+}
+
+#[tokio::test]
+async fn output_missing_on_the_target_fails_the_copy_stage_before_activation() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let programs = directory.path().join("programs");
+    fake_programs_with(
+        &programs,
+        FakeFailures {
+            presence: true,
+            ..FakeFailures::default()
+        },
+    );
+    let source = directory.path().join("horizon-definition.datom");
+    common::write_hosted_pair(&source);
+    let mut engine = remote_runtime(directory.path(), &programs);
+
+    let failure = terminal_failure(
+        submit_and_drive(
+            &mut engine,
+            user_environment_request(
+                &source,
+                "ssh-ng://root@fixture-target.invalid",
+                "root@fixture-target.invalid",
+            ),
+        )
+        .await,
+    );
+    assert_eq!(
+        failure.deployment_failure_stage,
+        ordinary::DeploymentFailureStage::CopyClosure
+    );
+    let commands = command_lines(&programs);
+    assert!(
+        commands
+            .iter()
+            .all(|line| !line.contains("nix-env -p") && !line.contains("/activate")),
+        "{commands:?}"
+    );
 }

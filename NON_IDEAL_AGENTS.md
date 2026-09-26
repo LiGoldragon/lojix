@@ -25,10 +25,28 @@ any deployment effect. Logical node identity never changes that choice.
 
 The same request also owns its input mode, exact flake output selector,
 activation backend, and optional Nix builder specification. `Horizon` is an
-explicit input mode; `Direct` does no Horizon materialization. A supplied
-builder specification is passed to Nix through `--builders`; no machine-file
-fallback exists. The daemon's evaluation stays local, and the route used for
-copy and activation is private daemon state.
+explicit input mode; `Direct` does no Horizon materialization. The daemon's
+evaluation always stays local, and the route used for copy and activation is
+private daemon state.
+
+Where the closure is realized depends on the node (lojix 8.1.0):
+
+- **The daemon host itself.** Built by the local Nix client. A supplied
+  builder specification is passed to Nix through `--builders`; no
+  machine-file fallback exists. The copy stage runs `nix copy
+  --substitute-on-destination --to <nix_store_uri>`.
+- **Any other node.** Built in the target's own store: `nix copy
+  --derivation --to <nix_store_uri> <drv>`, then `nix build --no-link
+  --print-out-paths --store <nix_store_uri> <drv>^*`, then over
+  `ssh_destination` `nix-store --add-root
+  /nix/var/nix/gcroots/lojix/<daemon-host>/generation-<id> --realise <out>`
+  (a non-root login roots under `$HOME/.local/state/lojix/gcroots/` instead).
+  Only the `.drv` closure stages on the daemon host. The target's daemon
+  builds and substitutes with its own settings; a request builder
+  specification is ignored, and `lojix-nexus: BuilderIgnored.{ … }` is
+  logged. The copy stage becomes `nix path-info --store <nix_store_uri>
+  <out>`: a presence check, not a transfer. Lojix does not yet remove the
+  target-side root when a generation is retired.
 
 ## Runtime configuration
 

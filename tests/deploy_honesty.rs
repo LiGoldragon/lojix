@@ -93,12 +93,17 @@ fn user_environment_request(source: &Path) -> meta::DeploySubmission {
     })
 }
 
+/// A daemon running on the deployed node, so the closure is built in its own
+/// store and the copy stage really transfers it (the stage under test).
 fn runtime(directory: &Path, programs: &Path) -> SchemaRuntime {
     let store = Arc::new(Store::open(directory.join("lojix.sema")).expect("open test store"));
-    let configuration = Arc::new(RuntimeConfiguration::test_with_effect_program_directory(
-        directory.join("generated-inputs"),
-        programs.to_path_buf(),
-    ));
+    let configuration = Arc::new(
+        RuntimeConfiguration::test_with_effect_program_directory(
+            directory.join("generated-inputs"),
+            programs.to_path_buf(),
+        )
+        .with_daemon_host(ordinary::NodeName::from("beacon")),
+    );
     SchemaRuntime::with_store_and_configuration(store, configuration)
 }
 

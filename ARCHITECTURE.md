@@ -22,8 +22,16 @@ client. Both clients speak portable typed Signals over Unix sockets.
 > login, output attribute, builder-file location, or target route from cluster
 > and node names. Nix copy uses `nix_store_uri` verbatim; remote activation uses
 > `ssh_destination` verbatim, including an explicitly requested `root` login.
-> The daemon evaluates locally and a supplied builder specification is passed to
-> Nix verbatim through `--builders`; it does not use `/etc/nix/machines`.
+> The daemon always evaluates locally (never over an ssh-ng evaluation store).
+> When the deployed node is the daemon host, it builds locally and a supplied
+> builder specification is passed to Nix verbatim through `--builders`; it does
+> not use `/etc/nix/machines`. When the deployed node is any other node, the
+> closure is realized in `nix_store_uri`: the derivation closure is copied
+> there (`nix copy --derivation`), the target's daemon builds it
+> (`nix build --store`), a GC root is written on the target over
+> `ssh_destination`, and the copy stage only checks the output is present.
+> The builder specification is ignored for such a build, and the daemon logs
+> `BuilderIgnored` once per build.
 > The `BootOnce` transient-unit name is the deterministic
 > `lojix-boot-once-deploy-<deployment-identifier>` — the same string the
 > durable resume cursor persists — so a daemon crash inside the BootOnce

@@ -136,6 +136,21 @@
               --set LOJIX_BOOTSTRAP_OPENSSH ${pkgs.openssh}/bin/ssh
           '';
         };
+        # The fixture Horizon definition is produced by the real
+        # producer: the pinned horizon-rs `horizon-compose` reading the
+        # authored HorizonConfiguration and ClusterDefinition beside this
+        # flake. Nothing here restates the Horizon schema, so the fixture
+        # cannot drift from the revision lojix pins.
+        horizonDefinition =
+          pkgs.runCommand "lojix-fixture-horizon-definition"
+            {
+              nativeBuildInputs = [ horizon.packages.${system}.horizon-compose ];
+            }
+            ''
+              mkdir -p "$out"
+              horizon-compose "Compose.{ ${./checks/horizon/horizon-configuration.datom} ${./checks/horizon/cluster-definition.datom} }" \
+                > "$out/horizon-definition.datom"
+            '';
         completePackage = pkgs.symlinkJoin {
           name = "lojix-${workspaceVersion}";
           paths = [
@@ -298,6 +313,15 @@
             '';
           };
 
+          # A deployment of a node other than the daemon host realizes in the
+          # target's own store: derivation copy, remote build, target GC root,
+          # a presence-only copy stage, and an ignored builder. Real Nix and
+          # SSH between two machines; see the file for the one fake boundary.
+          target-store-realization = import ./checks/target-store-realization.nix {
+            inherit pkgs horizonDefinition;
+            package = self.packages.${system}.default;
+          };
+
           # An actual owner request drives the real daemon through Nix/SSH into
           # a same-host `test` candidate which replaces `lojix.service`. The
           # successor must expose both typed sockets, terminalize this exact
@@ -326,21 +350,6 @@
                 for argument in "$@"; do command="$argument"; done
                 exec /bin/sh -c "$command"
               '';
-              # The fixture Horizon definition is produced by the real
-              # producer: the pinned horizon-rs `horizon-compose` reading the
-              # authored HorizonConfiguration and ClusterDefinition beside this
-              # flake. Nothing here restates the Horizon schema, so the fixture
-              # cannot drift from the revision lojix pins.
-              horizonDefinition =
-                pkgs.runCommand "lojix-fixture-horizon-definition"
-                  {
-                    nativeBuildInputs = [ horizon.packages.${system}.horizon-compose ];
-                  }
-                  ''
-                    mkdir -p "$out"
-                    horizon-compose "Compose.{ ${./checks/horizon/horizon-configuration.datom} ${./checks/horizon/cluster-definition.datom} }" \
-                      > "$out/horizon-definition.datom"
-                  '';
             in
             pkgs.testers.nixosTest {
               name = "lojix-same-host-test-activation";
