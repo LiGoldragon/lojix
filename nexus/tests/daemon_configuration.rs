@@ -165,6 +165,82 @@ fn zero_argument_daemon_persists_lifecycle_and_uses_desired_sockets_on_restart()
     stop_daemon(restarted, "restarted daemon");
 }
 
+/// The Nexus over a live-shaped store whose deploy-job row and configuration
+/// row were archived in a layout the current schema cannot read: it starts,
+/// sets both aside, logs each by table and key, rebuilds its configuration from
+/// its built-in one, and answers a Query.
+#[test]
+fn nexus_over_undecodable_rows_quarantines_them_and_answers_a_query() {
+    let directory = tempfile::tempdir().expect("temporary isolation roots");
+    let runtime_root = directory.path().join("runtime");
+    let state_root = directory.path().join("state");
+    let store = state_root.join("lojix").join("lojix.sema");
+    fs::create_dir_all(store.parent().expect("store directory")).expect("state directory");
+    fs::create_dir_all(&runtime_root).expect("isolated runtime root");
+    drop(<lojix::Store as lojix::DurableStore>::open(&store).expect("create current store"));
+
+    let database = redb::Database::open(&store).expect("open redb to plant undecodable rows");
+    let transaction = database.begin_write().expect("begin write");
+    {
+        let archived_before: &[u8] = b"a row archived before the Horizon bump";
+        let mut deploy_jobs = transaction
+            .open_table(redb::TableDefinition::<String, &[u8]>::new("deploy-job"))
+            .expect("deploy-job");
+        deploy_jobs
+            .insert("19".to_string(), &archived_before)
+            .expect("plant deploy-job row");
+        let mut configuration = transaction
+            .open_table(redb::TableDefinition::<String, &[u8]>::new(
+                "nexus-configuration",
+            ))
+            .expect("nexus-configuration");
+        configuration
+            .insert("desired".to_string(), &archived_before)
+            .expect("plant configuration row");
+    }
+    transaction.commit().expect("commit undecodable rows");
+    drop(database);
+
+    let mut daemon = start_daemon(&runtime_root, &state_root);
+    let ordinary_socket = runtime_root.join("lojix").join("ordinary.sock");
+    assert_eq!(
+        announced_readiness(&mut daemon, "start over undecodable rows"),
+        vec![
+            ordinary_socket.display().to_string(),
+            runtime_root
+                .join("lojix")
+                .join("meta.sock")
+                .display()
+                .to_string(),
+        ],
+        "the rebuilt configuration is the Nexus's built-in one"
+    );
+    let reply = ordinary_exchange(
+        &ordinary_socket,
+        signal_lojix::Query::Query(signal_lojix::Selection::ByNode(
+            signal_lojix::NodeSelector {
+                cluster_name: text("fixture-cluster"),
+                node_name: text("fixture-node"),
+                requested_generation_artifact_option: None,
+            },
+        )),
+    );
+    assert!(matches!(reply, signal_lojix::Response::Queried(_)));
+    let output = stopped_daemon_output(daemon, "daemon over undecodable rows");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for line in [
+        "lojix-nexus: RowQuarantined.{ deploy-job 19 «",
+        "lojix-nexus: RowQuarantined.{ nexus-configuration desired «",
+        "lojix-nexus: NexusConfigurationRebuilt.{ nexus-configuration BuiltIn }",
+    ] {
+        assert_eq!(
+            stderr.matches(line).count(),
+            1,
+            "expected exactly one {line:?} in the Nexus log:\n{stderr}"
+        );
+    }
+}
+
 fn configuration(
     ordinary_socket: &Path,
     meta_socket: &Path,
@@ -254,12 +330,17 @@ fn meta_exchange(socket: &Path, request: meta_signal_lojix::Query) -> meta_signa
 }
 
 fn stop_daemon(daemon: Child, name: &str) {
+    stopped_daemon_output(daemon, name);
+}
+
+fn stopped_daemon_output(daemon: Child, name: &str) -> Output {
     let process_identifier =
         rustix::process::Pid::from_raw(daemon.id() as i32).expect("child process identifier");
     rustix::process::kill_process(process_identifier, rustix::process::Signal::TERM)
         .expect("send service-manager SIGTERM");
     let output = daemon.wait_with_output().expect("wait for daemon stop");
     assert!(output.status.success(), "{name}: {}", output_text(&output));
+    output
 }
 
 fn output_text(output: &Output) -> String {

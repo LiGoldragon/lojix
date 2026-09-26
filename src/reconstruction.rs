@@ -430,6 +430,7 @@ impl StoreLayouts for LojixCatalog {
             DeploymentOutboxRecord::family_identity(),
             PendingTransitionIntent::family_identity(),
             crate::NexusConfigurationRecord::family_identity(),
+            crate::quarantine::QuarantinedRow::family_identity(),
             (
                 "legacy-deployment-event-quarantine".to_string(),
                 "LegacyDeploymentEventQuarantineFamily".to_string(),

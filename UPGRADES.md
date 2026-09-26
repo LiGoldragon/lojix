@@ -1,5 +1,60 @@
 # Upgrades
 
+# 7.0.0 to 8.0.0
+
+This major version rides the horizon-rs 0.12.0 → 0.13.0 bump, which changes the
+archived layout of `HorizonDefinition`. The repin itself (horizon-rs,
+signal-lojix, meta-signal-lojix and the wire break it carries) lands in its own
+commit on top of this entry and extends it. The store schema stays v5.
+
+## Rows that no longer decode are quarantined, never served
+
+Two families can hold a `HorizonDefinition`: `deploy-job` (inside
+`optional_deploy_submission`) and `nexus-configuration` (inside the test
+defaults). Before this release the startup gate decoded every row of every
+family and refused the whole store on the first failure, so one in-flight
+deploy-job row archived by 7.0.0 would have left Nexus 8 crash-looping on a v5
+store that `lojix-reset-store` does not reset.
+
+Now each open reads every family row by row, before anything reads a family
+whole. A row that decodes stays. Any other row is moved, in one atomic commit
+with its retraction, into the new `quarantined-row` family
+(`QuarantinedRowFamily`, schema hash `[13; 32]`) as a `QuarantinedRow` holding
+its table, its stored key, its original archive bytes and the decode error. No
+earlier layout is carried forward: a quarantined row is evidence only. The
+Nexus logs one line per row, on standard error, from the open that moved it:
+
+```
+lojix-nexus: RowQuarantined.{ deploy-job 19 «<decode error>» }
+```
+
+**The configuration row is rebuilt.** When the `nexus-configuration` row is the
+one set aside, the Nexus seeds the row again from its built-in configuration —
+the same value a fresh store receives — and logs
+`lojix-nexus: NexusConfigurationRebuilt.{ nexus-configuration BuiltIn }`. The
+Nexus reads no startup archive (the `lojix-write-configuration` archive belongs
+only to the reset unit), so the built-in configuration is the one source it
+has. A layer that an ordinary or meta `Configure` had added is lost with the
+row; its bytes stay in quarantine, and ordinary `Configure` is open again on the
+rebuilt row.
+
+**What a quarantined deploy job means.** The deployment it tracked does not
+resume. Its deployment record and events stay as they were.
+
+**Inspection.** `lojix-inspect-store` now covers every family, including
+`deployment-outbox`, `pending-transition-intent`, `nexus-configuration` and
+`quarantined-row`. A family with undecodable rows reports
+`decode-failed undecodable_row_count=<n> row_count=<m> [<first error>]` rather
+than stopping at the first, and the report ends with
+`Quarantine quarantined_row_count=<n> undecodable_row_count=<m>`: the rows
+already set aside, and the rows the next open will set aside. Run it on a copy
+of the live store before the Nexus 8 restart to know both in advance.
+
+**Consumers.** `TableInspectionStatus::DecodeFailed` gained
+`undecodable_row_count` and `row_count`. `Store` now reports its opening through
+`lojix::quarantine::OpenedStore`, and the quarantine through
+`lojix::quarantine::RowQuarantine`.
+
 # 6.0.0 to 7.0.0
 
 This release consumes `horizon-rs` `ee8d6f8d27eb6e200504807971ffdd26aaca7ed1`,

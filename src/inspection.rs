@@ -21,9 +21,10 @@ use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use sema_engine::TableRegistration;
 
+use crate::quarantine::QuarantinedRow;
 use crate::runtime_model::{
-    ContainerLifecycleRecord, DeployJob, DeploymentRecord, EventLogEntry, GcRoot,
-    IdentifierAllocation, LiveGeneration, StoredTestRun,
+    ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, DeploymentRecord, EventLogEntry,
+    GcRoot, IdentifierAllocation, LiveGeneration, PendingTransitionIntent, StoredTestRun,
 };
 use crate::{Error, InlineDatomArguments as _, LojixRecord, OfflineCommand, Result, ingress};
 
@@ -153,11 +154,42 @@ pub struct StoreInspection {
 /// Finding one family's row in a whole-store report.
 pub trait InspectedTables {
     fn table_named(&self, name: &str) -> Option<&TableInspection>;
+
+    /// How many rows the Nexus has set aside because they no longer decode.
+    /// A store the Nexus has not yet opened under this schema has none.
+    fn quarantined_row_count(&self) -> usize;
+
+    /// How many rows would be set aside the next time the Nexus opens the
+    /// store: the rows the current schema does not read, across every family.
+    fn undecodable_row_count(&self) -> usize;
 }
 
 impl InspectedTables for StoreInspection {
     fn table_named(&self, name: &str) -> Option<&TableInspection> {
         self.tables.iter().find(|table| table.name == name)
+    }
+
+    fn quarantined_row_count(&self) -> usize {
+        match self
+            .table_named(QuarantinedRow::TABLE)
+            .map(|table| &table.status)
+        {
+            Some(TableInspectionStatus::Readable { row_count }) => *row_count,
+            _ => 0,
+        }
+    }
+
+    fn undecodable_row_count(&self) -> usize {
+        self.tables
+            .iter()
+            .map(|table| match table.status {
+                TableInspectionStatus::DecodeFailed {
+                    undecodable_row_count,
+                    ..
+                } => undecodable_row_count,
+                _ => 0,
+            })
+            .sum()
     }
 }
 
@@ -170,6 +202,12 @@ impl std::fmt::Display for StoreInspection {
         for table in &self.tables {
             writeln!(formatter, "Table {table}")?;
         }
+        writeln!(
+            formatter,
+            "Quarantine quarantined_row_count={} undecodable_row_count={}",
+            self.quarantined_row_count(),
+            self.undecodable_row_count()
+        )?;
         Ok(())
     }
 }
@@ -271,9 +309,20 @@ impl std::fmt::Display for TableInspection {
 pub enum TableInspectionStatus {
     Missing,
     Empty,
-    Readable { row_count: usize },
-    ReadFailed { message: String },
-    DecodeFailed { message: String },
+    Readable {
+        row_count: usize,
+    },
+    ReadFailed {
+        message: String,
+    },
+    /// Some rows do not decode under the current schema; the Nexus sets
+    /// them aside when it next opens the store. `message` is the first
+    /// failure's decode error.
+    DecodeFailed {
+        undecodable_row_count: usize,
+        row_count: usize,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for TableInspectionStatus {
@@ -283,7 +332,14 @@ impl std::fmt::Display for TableInspectionStatus {
             Self::Empty => write!(formatter, "empty row_count=0"),
             Self::Readable { row_count } => write!(formatter, "readable row_count={row_count}"),
             Self::ReadFailed { message } => write!(formatter, "read-failed [{message}]"),
-            Self::DecodeFailed { message } => write!(formatter, "decode-failed [{message}]"),
+            Self::DecodeFailed {
+                undecodable_row_count,
+                row_count,
+                message,
+            } => write!(
+                formatter,
+                "decode-failed undecodable_row_count={undecodable_row_count} row_count={row_count} [{message}]"
+            ),
         }
     }
 }
@@ -415,6 +471,10 @@ impl InspectionReader for StoreTableReader<'_> {
             self.inspect::<StoredTestRun>(),
             self.inspect::<DeploymentRecord>(),
             self.inspect::<IdentifierAllocation>(),
+            self.inspect::<DeploymentOutboxRecord>(),
+            self.inspect::<PendingTransitionIntent>(),
+            self.inspect::<crate::NexusConfigurationRecord>(),
+            self.inspect::<QuarantinedRow>(),
         ]
     }
 }
@@ -495,6 +555,8 @@ impl FamilyInspecting for StoreTableReader<'_> {
             }
         };
         let mut row_count = 0;
+        let mut undecodable_row_count = 0;
+        let mut first_failure = None;
         for row in rows {
             let (_key, value) = match row {
                 Ok(row) => row,
@@ -504,13 +566,19 @@ impl FamilyInspecting for StoreTableReader<'_> {
                     };
                 }
             };
-            if let Err(error) = rkyv::from_bytes::<Record, rancor::Error>(value.value()) {
-                return TableInspectionStatus::DecodeFailed {
-                    message: error.to_string(),
-                };
-            }
             row_count += 1;
+            if let Err(error) = rkyv::from_bytes::<Record, rancor::Error>(value.value()) {
+                undecodable_row_count += 1;
+                first_failure.get_or_insert_with(|| error.to_string());
+            }
         }
-        TableInspectionStatus::Readable { row_count }
+        match first_failure {
+            Some(message) => TableInspectionStatus::DecodeFailed {
+                undecodable_row_count,
+                row_count,
+                message,
+            },
+            None => TableInspectionStatus::Readable { row_count },
+        }
     }
 }

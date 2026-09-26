@@ -16,6 +16,7 @@
 //! fosp sema-engine-exclusive, ur16 self-resume).
 
 use crate::inspected_text::{NixStorePath, StoreItemShape};
+use crate::quarantine::{OpeningReport as _, RowQuarantine as _};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -72,6 +73,7 @@ pub mod ingress;
 mod inspected_text;
 #[cfg(feature = "tools")]
 pub mod inspection;
+pub mod quarantine;
 #[cfg(feature = "tools")]
 pub mod reconstruction;
 pub mod runtime_flow;
@@ -782,6 +784,9 @@ pub struct Store {
     /// state, not durable state — they do NOT persist across restart — so an
     /// in-memory atomic is the correct issuer (decision 5).
     subscription_sequence: AtomicU64,
+    /// What this open set aside or rebuilt; empty on a store that needed
+    /// neither.
+    opening: quarantine::StoreOpening,
 }
 
 pub struct LojixDirectory {
@@ -796,6 +801,7 @@ pub struct LojixDirectory {
     deployment_outbox: TableReference<DeploymentOutboxRecord>,
     pending_transition_intents: TableReference<PendingTransitionIntent>,
     nexus_configuration: TableReference<NexusConfigurationRecord>,
+    quarantined_rows: TableReference<quarantine::QuarantinedRow>,
 }
 
 /// The one place that says which families a lojix store holds. Registration is
@@ -818,6 +824,7 @@ impl LojixTables for LojixDirectory {
             deployment_outbox: DeploymentOutboxRecord::register(database, path)?,
             pending_transition_intents: PendingTransitionIntent::register(database, path)?,
             nexus_configuration: NexusConfigurationRecord::register(database, path)?,
+            quarantined_rows: quarantine::QuarantinedRow::register(database, path)?,
         })
     }
 }
@@ -841,6 +848,7 @@ impl FamilyDirectory for LojixDirectory {
             DeploymentOutboxRecord::TABLE => row.apply(self.deployment_outbox),
             PendingTransitionIntent::TABLE => row.apply(self.pending_transition_intents),
             NexusConfigurationRecord::TABLE => row.apply(self.nexus_configuration),
+            quarantine::QuarantinedRow::TABLE => row.apply(self.quarantined_rows),
             table => Err(sema_engine::Error::TableNotRegistered {
                 table: table.to_owned(),
             }),
@@ -1025,11 +1033,13 @@ pub trait NexusPersistable {
     where
         Self: Sized;
 
+    /// Seed the configuration row when it is absent. Answers true when the
+    /// row was rebuilt because the stored one had been quarantined.
     fn ensure_nexus_configuration(
         &self,
         default_configuration: NexusConfiguration,
         seed_existing_state: bool,
-    ) -> Result<()>;
+    ) -> Result<bool>;
 
     fn nexus_configuration_state(&self) -> Result<NexusConfigurationState>;
 
@@ -1495,6 +1505,7 @@ impl StoreIntegrity for Store {
             deployment_outbox: self.directory.deployment_outbox,
             pending_transition_intents: self.directory.pending_transition_intents,
             nexus_configuration: self.directory.nexus_configuration,
+            quarantined_rows: self.directory.quarantined_rows,
         })?;
         Ok(())
     }
@@ -1546,7 +1557,11 @@ impl NexusPersistable for Store {
                 ))
             })?;
         }
-        Self::open_unchecked(path, default_configuration, false)
+        let store = Self::open_unchecked(path, default_configuration, false)?;
+        for line in store.opening.report_lines() {
+            eprintln!("lojix-nexus: {line}");
+        }
+        Ok(store)
     }
 
     fn open_unchecked(
@@ -1567,14 +1582,19 @@ impl NexusPersistable for Store {
             source: Box::new(source),
         })?;
         let directory = LojixDirectory::register(&mut database, &path)?;
-        let store = Self {
+        let mut store = Self {
             database,
             directory,
             path,
             write_gate: Mutex::new(()),
             subscription_sequence: AtomicU64::new(0),
+            opening: quarantine::StoreOpening::default(),
         };
-        store.ensure_nexus_configuration(default_configuration, seed_existing_state)?;
+        // Rows the current schema does not read are set aside before anything
+        // reads a family whole, so no such row can refuse the store.
+        store.opening.quarantined_rows = store.quarantine_undecodable_rows()?;
+        store.opening.configuration_rebuilt =
+            store.ensure_nexus_configuration(default_configuration, seed_existing_state)?;
         store.ensure_identifier_allocation()?;
         store.resume_compaction()?;
         store.validate_startup_compatibility()?;
@@ -1588,11 +1608,20 @@ impl NexusPersistable for Store {
         &self,
         default_configuration: NexusConfiguration,
         seed_existing_state: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         use nexus::Configurable as _;
 
         match self.records::<NexusConfigurationRecord>()?.as_slice() {
             [] => {
+                // A configuration row set aside because it no longer decodes is
+                // rebuilt from the configuration this Nexus seeds a fresh store
+                // with. The Nexus reads no startup archive, so its built-in
+                // configuration is the one source it has; the set-aside bytes
+                // stay in quarantine for an operator to read.
+                let configuration_quarantined = self
+                    .quarantined_rows()?
+                    .iter()
+                    .any(|row| row.table == NexusConfigurationRecord::TABLE);
                 let legacy_state_exists = !self.records::<LiveGeneration>()?.is_empty()
                     || !self.records::<GcRoot>()?.is_empty()
                     || !self.records::<EventLogEntry>()?.is_empty()
@@ -1603,7 +1632,7 @@ impl NexusPersistable for Store {
                     || !self.records::<IdentifierAllocation>()?.is_empty()
                     || !self.records::<DeploymentOutboxRecord>()?.is_empty()
                     || !self.records::<PendingTransitionIntent>()?.is_empty();
-                if legacy_state_exists && !seed_existing_state {
+                if legacy_state_exists && !seed_existing_state && !configuration_quarantined {
                     return Err(Error::StoreMaintenance(
                         "existing Lojix Sema has no Nexus configuration; migrate its legacy startup archive into a validated copy before opening it"
                             .to_string(),
@@ -1616,9 +1645,9 @@ impl NexusPersistable for Store {
                         state: NexusConfigurationState::from_default(default_configuration),
                     },
                 ))?;
-                Ok(())
+                Ok(configuration_quarantined)
             }
-            [_] => Ok(()),
+            [_] => Ok(false),
             _ => Err(Error::StoreMaintenance(
                 "nexus configuration table contains more than one row".to_string(),
             )),

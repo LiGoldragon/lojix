@@ -211,7 +211,16 @@ the workspace actor-systems doctrine. No zero-state holders.
   advances to a later effect before acknowledgement. Retention can compact an
   acknowledged event and outbox together, while the acknowledged intent keeps
   restart from reconstructing or re-delivering that historical transition.
-  There is no migration or legacy resume path. With the daemon stopped, the
+  There is no migration or legacy resume path. A row that no longer decodes
+  under the current schema — a deploy job or the Nexus configuration archived
+  with an earlier `HorizonDefinition` layout — is not served and does not stop
+  the Nexus: each open reads every family row by row and moves each such row,
+  with its retraction in one commit, into the `quarantined-row` family
+  (table, key, original bytes, decode error), logging
+  `lojix-nexus: RowQuarantined.{ <table> <key> «<error>» }`. A quarantined
+  configuration row is rebuilt from the Nexus's built-in configuration and
+  logged `NexusConfigurationRebuilt`. `lojix-inspect-store` reports both the
+  quarantined rows and the rows the next open will set aside. With the daemon stopped, the
   manually started `lojix-reset-store` accepts only the inline `ResetStore` Datom word. Its
   service-owned `LOJIX_CONFIGURATION` archive supplies the exact store path;
   an existing archive and primary must be absolute, regular, and non-symlinked.
