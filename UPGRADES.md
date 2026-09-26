@@ -55,6 +55,27 @@ of the live store before the Nexus 8 restart to know both in advance.
 `lojix::quarantine::OpenedStore`, and the quarantine through
 `lojix::quarantine::RowQuarantine`.
 
+## The Horizon 0.13.0 repin and its wire break
+
+This release consumes `horizon-rs` 0.13.0 at
+`a3ddaf8685b920093a2328b85ba350a04e11477a`, `signal-lojix` 6.0.0 at
+`cd164896311af9849e2ddf1cdbdd35b5feedcdd1`, and `meta-signal-lojix` 7.0.0 at
+`c0f883c5cc428ce94ffa109fa20a5a28f7902481`, in the root and in every member
+manifest; `flake.nix` pins the same `horizon-rs` revision for the fixture
+composer. `ethos-zero` and `datom-codec` are unchanged.
+
+Horizon 0.13.0 changes the archived layout of `HorizonDefinition`:
+`NodeCapability::TailnetClient` carries a `SecretReference`,
+`NodeCapability::TailnetController` carries the certificate authority and the
+TLS certificate and key references, `NodeCapability` gains `UsbDownlink`, and
+`RouterInterfaces` gains an eighth field, `country_code`. Both socket contracts
+embed the definition, so a 7.0.0 client and an 8.0.0 Nexus (or the reverse)
+cannot talk: the clients, the Nexus and both Signal contracts deploy together.
+The store schema stays v5. A `deploy-job` row archived by 7.0.0 with a Horizon
+definition no longer decodes and is quarantined on the first open;
+`tests/horizon_layout_fixture.rs` proves it on a store written at the 0.12
+layout.
+
 # 6.0.0 to 7.0.0
 
 This release consumes `horizon-rs` `ee8d6f8d27eb6e200504807971ffdd26aaca7ed1`,
