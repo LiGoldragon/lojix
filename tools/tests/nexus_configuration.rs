@@ -7,10 +7,7 @@ use lojix::{
     LegacyStartupConfiguration, NexusConfiguration, NexusConfigurationState, NexusPersistable as _,
     Store, TestDefaults, TestMode,
 };
-use signal_lojix::{
-    DeploymentOutputSelector, LojixNexusConfiguration, TestDefaults as WireTestDefaults,
-    TestDefaultsChoice,
-};
+use signal_lojix::{LojixNexusConfiguration, TestDefaultsChoice};
 
 fn configuration(directory: &std::path::Path, name: &str) -> NexusConfiguration {
     LojixNexusConfiguration {
@@ -88,7 +85,7 @@ fn configuration_lifecycle_persists_the_meta_marker_and_desired_state() {
 }
 
 #[test]
-fn exact_pre_nexus_store_is_never_opened_in_place_and_migrates_on_a_copy() {
+fn configuration_only_migration_refuses_v5_without_modifying_it() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let source = directory.path().join("legacy.sema");
     let target = directory.path().join("migrated.sema");
@@ -131,40 +128,16 @@ fn exact_pre_nexus_store_is_never_opened_in_place_and_migrates_on_a_copy() {
             horizon_definition: None,
         }),
     };
-    let migrated = Store::migrate_configuration_copy(&source, &target, &legacy)
-        .expect("migrate disposable copy");
-    assert_eq!(fs::read(&source).expect("source after migration"), before);
-    assert_eq!(migrated.path(), target);
-    let state = migrated
-        .nexus_configuration_state()
-        .expect("migrated config");
-    assert!(!state.meta_configure_occurred);
-    assert_eq!(
-        state.desired_configuration,
-        NexusConfiguration::from(&legacy)
+    assert!(
+        Store::migrate_configuration_copy(&source, &target, &legacy).is_err(),
+        "configuration-only migration must not reinterpret schema 5 as schema 6"
     );
-    assert!(matches!(
-        state.desired_configuration.test_defaults_choice,
-        TestDefaultsChoice::TestDefaults(WireTestDefaults {
-            deployment_output_selector: DeploymentOutputSelector { ref flake_attribute },
-            ..
-        }) if flake_attribute == "checks.fixture"
-    ));
-    let migrated_sequence = migrated.commit_sequence().expect("migrated sequence");
-    drop(migrated);
-
-    let reopened =
-        Store::open_with_default_configuration(&target, configuration(directory.path(), "ignored"))
-            .expect("reopen migrated store");
-    assert_eq!(reopened.nexus_configuration_state().expect("state"), state);
-    assert_eq!(
-        reopened.commit_sequence().expect("sequence"),
-        migrated_sequence
-    );
+    assert_eq!(fs::read(&source).expect("source after refusal"), before);
+    assert!(!target.exists(), "no accepted partial destination");
 }
 
 #[test]
-fn offline_migration_executable_uses_the_legacy_archive_as_its_source_authority() {
+fn configuration_only_migration_cli_refuses_v5_without_a_partial_target() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let source = directory.path().join("legacy.sema");
     let target = directory.path().join("migrated.sema");
@@ -193,18 +166,13 @@ fn offline_migration_executable_uses_the_legacy_archive_as_its_source_authority(
         .output()
         .expect("run one-shot migration executable");
     assert!(
-        output.status.success(),
-        "migration executable failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "configuration-only migration refuses v5"
     );
-    let store =
-        Store::open_with_default_configuration(&target, configuration(directory.path(), "ignored"))
-            .expect("open executable output");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("MigrationRejected"));
     assert_eq!(
-        store
-            .nexus_configuration_state()
-            .expect("migrated state")
-            .desired_configuration,
-        NexusConfiguration::from(&legacy)
+        fs::read(&source).expect("source after refusal"),
+        include_bytes!("../../tests/fixtures/lojix-v5-pre-nexus-cf231859.sema")
     );
+    assert!(!target.exists(), "no partial target is accepted");
 }

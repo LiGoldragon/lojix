@@ -9,54 +9,24 @@
 //! deploys its own host. The file is not regenerated: after the Horizon bump,
 //! regenerating it would write the new layout and prove nothing.
 //!
-//! This crate now carries the Horizon 0.13 layout. The same store opens, the
-//! inspector counts `deploy-job 1` as undecodable before the open, the open
-//! quarantines it, and the store still serves.
+//! This crate carries Horizon 0.14 and store schema 6. The old store is
+//! refused intact; an in-flight job must not disappear through quarantine.
 
 use lojix::DurableStore as _;
-use lojix::inspection::{InspectedTables as _, StoreInspecting as _, StoreInspector};
-use lojix::quarantine::{OpenedStore as _, RowQuarantine as _};
-use lojix::{DeploymentLedger as _, Store};
+use lojix::Store;
 use tempfile::TempDir;
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/lojix-v5-horizon-0.12-deploy-job.sema");
 
 #[test]
-fn a_horizon_0_12_deploy_job_row_is_quarantined_under_the_horizon_0_13_layout() {
+fn old_horizon_deploy_job_fixture_is_refused_without_quarantine_or_loss() {
     let directory = TempDir::new().expect("tempdir");
     let path = directory.path().join("lojix.sema");
-    std::fs::write(&path, FIXTURE).expect("copy fixture store");
-
-    let before = StoreInspector { path: path.clone() }.inspect();
-    assert_eq!(
-        before.undecodable_row_count(),
-        1,
-        "the inspector must count the Horizon 0.12 row the open will set aside:\n{before}"
-    );
-
-    let store = Store::open(&path).expect("the store still opens across the Horizon bump");
-
-    let opening = store.opening();
-    assert_eq!(opening.quarantined_rows.len(), 1, "{opening:?}");
-    let row = &opening.quarantined_rows[0];
-    assert_eq!(row.table, "deploy-job");
-    assert_eq!(row.key, "1");
-    assert!(!row.archive.is_empty());
-    assert!(!row.decode_error.is_empty());
-    assert!(!opening.configuration_rebuilt, "{opening:?}");
-    assert_eq!(
-        store.quarantined_rows().expect("persisted quarantine"),
-        opening.quarantined_rows
-    );
+    std::fs::write(&path, FIXTURE).expect("copy immutable v5 fixture");
+    let before = std::fs::read(&path).expect("original store");
     assert!(
-        store.deploy_jobs().expect("deploy jobs read").is_empty(),
-        "a Horizon 0.12 deploy-job row is never served"
+        Store::open(&path).is_err(),
+        "v6 must not reinterpret a v5 in-flight job"
     );
-    drop(store);
-
-    let reopened = Store::open(&path).expect("reopen after quarantine");
-    assert!(
-        reopened.opening().quarantined_rows.is_empty(),
-        "a second open sets nothing aside"
-    );
+    assert_eq!(std::fs::read(&path).expect("preserved store"), before);
 }
