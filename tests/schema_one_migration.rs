@@ -107,3 +107,30 @@ fn v5_refuses_the_v4_deploy_submission_layout_until_explicit_reset() {
         .expect("replace known Lojix schema");
     Store::open(&path).expect("fresh v5 store opens");
 }
+
+#[test]
+fn horizon_layout_change_refuses_v5_open_and_destructive_reset() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("configured-lojix-store.db");
+    drop(Store::open(&path).expect("create current fixture"));
+    let database = Database::open(&path).expect("open disposable fixture");
+    let write = database.begin_write().expect("begin write");
+    write
+        .open_table(META_TABLE)
+        .expect("metadata")
+        .insert("schema_version", 5)
+        .expect("v5 marker");
+    write.commit().expect("commit marker");
+    drop(database);
+    let before = std::fs::read(&path).expect("read v5 source");
+    assert!(
+        Store::open(&path).is_err(),
+        "new Horizon layout must refuse schema 5"
+    );
+    let archive = startup_archive(directory.path(), &path);
+    assert!(
+        reset_command(&archive).run().is_err(),
+        "schema 5 needs preserved-state migration, not reset"
+    );
+    assert_eq!(std::fs::read(&path).expect("read preserved source"), before);
+}
