@@ -724,7 +724,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lojix"
-version = "8.2.0"
+version = "9.0.0"
 dependencies = [
  "datom-codec 0.31.0",
  "ethos-zero 10.0.0",

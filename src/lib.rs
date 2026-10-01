@@ -147,11 +147,11 @@ impl HorizonArchitecture for str {
     }
 }
 
-/// The Lojix durable-store schema version. v5 adds the explicit `SecretsInput`
-/// to the persisted deploy-submission snapshot, so it deliberately does not
-/// decode or migrate v4 or earlier layouts. Use the path-scoped
-/// `lojix-reset-store` primitive while the daemon is stopped.
-const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(5);
+/// v6 carries the hardware-role Horizon schema in configuration and deploy rows.
+/// It deliberately refuses v5 without decoding or modifying it. Keep the old
+/// store and startup archive for explicit state migration and recovery; the
+/// destructive reset primitive does not accept v5.
+const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(6);
 
 /// A record kind the lojix store holds. Every family is one durable table
 /// carrying one row per element — the sema-engine model — and everything the
@@ -257,7 +257,7 @@ impl LojixRecord for ContainerLifecycleRecord {
 impl LojixRecord for DeployJob {
     const TABLE: &'static str = "deploy-job";
     const FAMILY: &'static str = "DeployJobFamily";
-    const SCHEMA_HASH: [u8; 32] = [5; 32];
+    const SCHEMA_HASH: [u8; 32] = [15; 32];
     const ROLE: &'static str = "in-flight deploy job rows";
 
     fn table(directory: &LojixDirectory) -> TableReference<Self> {
@@ -323,7 +323,7 @@ impl LojixRecord for PendingTransitionIntent {
 impl LojixRecord for NexusConfigurationRecord {
     const TABLE: &'static str = "nexus-configuration";
     const FAMILY: &'static str = "NexusConfigurationFamily";
-    const SCHEMA_HASH: [u8; 32] = [12; 32];
+    const SCHEMA_HASH: [u8; 32] = [16; 32];
     const ROLE: &'static str = "nexus configuration row";
 
     fn table(directory: &LojixDirectory) -> TableReference<Self> {

@@ -1,6 +1,6 @@
-//! Explicit, configuration-scoped reset support for the v5 Lojix store.
+//! Configuration-scoped reset for v2-v4 stores; v5 is preserved, not reset.
 //!
-//! v5 intentionally has no decoder or migration path for older layouts. A
+//! v6 intentionally has no decoder or migration path for older layouts. A
 //! caller that has stopped the daemon may reconstruct a recognised pre-v5
 //! Lojix store with [`StoreResetCommand`]. The reset takes one inline Datom
 //! request with no path. It derives the path only from the generated startup
@@ -31,7 +31,7 @@ use crate::{
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");
 const SCHEMA_VERSION_KEY: &str = "schema_version";
-const CURRENT_SCHEMA: u64 = 5;
+const CURRENT_SCHEMA: u64 = 6;
 const RECOGNISED_SCHEMAS: &[u64] = &[2, 3, 4, CURRENT_SCHEMA];
 const RESETTABLE_SCHEMAS: &[u64] = &[2, 3, 4];
 /// The reset service receives this from the NixOS module. It is deliberately
@@ -46,9 +46,9 @@ const SIDECAR_SUFFIXES: &[&str] = &[
     ".schema-v3.pending.owner",
 ];
 
-/// Result of a guarded reset. A current v5 store is observed but never
+/// Result of a guarded reset. A current v6 store is observed but never
 /// rewritten: callers receive [`Self::AlreadyCurrent`] without deleting any
-/// data. A recognised v2/v3/v4 store is removed and recreated as v5.
+/// data. A recognised v2/v3/v4 store is removed and recreated as v6.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreResetOutcome {
     Recreated {
@@ -68,14 +68,14 @@ impl std::fmt::Display for StoreResetOutcome {
                 removed_sidecars,
             } => write!(
                 formatter,
-                "(LojixStoreReset path={} schema=5 removed_sidecars={})",
+                "(LojixStoreReset path={} schema=6 removed_sidecars={})",
                 path.display(),
                 removed_sidecars.len(),
             ),
             Self::AlreadyCurrent { path } => {
                 write!(
                     formatter,
-                    "(LojixStoreAlreadyCurrent path={} schema=5)",
+                    "(LojixStoreAlreadyCurrent path={} schema=6)",
                     path.display()
                 )
             }
@@ -157,7 +157,7 @@ impl StoreResetting for StoreResetCommand {
                 ))
             })?;
         }
-        // Store::open is the sole initializer. It stamps a new v5 schema and
+        // Store::open is the sole initializer. It stamps a new v6 schema and
         // proves that the replacement is usable before this command succeeds.
         drop(Store::open(&path)?);
         Ok(StoreResetOutcome::Recreated {
@@ -358,8 +358,20 @@ impl LojixStoreDatabase for redb::ReadOnlyDatabase {
                 })?;
             actual.insert(registration.lojix_identity());
         }
-        let LojixCatalog(recognised) = LojixCatalog::recognised();
-        let LojixCatalog(core) = LojixCatalog::core();
+        let LojixCatalog(mut recognised) = LojixCatalog::recognised();
+        let LojixCatalog(mut core) = LojixCatalog::core();
+        // Only the already-supported v2-v4 destructive reset uses the old
+        // catalog identities. v5 is deliberately absent from recognised schemas.
+        if version < CURRENT_SCHEMA {
+            for identities in [&mut recognised, &mut core] {
+                let current = DeployJob::family_identity();
+                identities.remove(&current);
+                identities.insert((current.0, current.1, [5; 32]));
+            }
+            let current = crate::NexusConfigurationRecord::family_identity();
+            recognised.remove(&current);
+            recognised.insert((current.0, current.1, [12; 32]));
+        }
         if actual.is_empty() || !core.is_subset(&actual) || !actual.is_subset(&recognised) {
             return Err(Error::StoreMaintenance(format!(
                 "reset store catalog is not a recognised Lojix family/schema layout for schema {version}; refusing removal"
@@ -519,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_returns_already_current_without_touching_v5_data_or_sidecars() {
+    fn reset_returns_already_current_without_touching_current_data_or_sidecars() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("configured-lojix-store.db");
         drop(Store::open(&path).expect("create v5 store"));
@@ -540,7 +552,11 @@ mod tests {
     fn reset_recreates_only_a_recognised_pre_v5_lojix_store_and_its_sidecars() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("configured-lojix-store.db");
-        drop(Store::open(&path).expect("create recognised Lojix source"));
+        fs::write(
+            &path,
+            include_bytes!("../tests/fixtures/lojix-v5-pre-nexus-cf231859.sema"),
+        )
+        .expect("materialize legacy family catalog");
         mark_pre_v5(&path);
         for sidecar in path.sidecars() {
             fs::write(sidecar, "stale Lojix sidecar").expect("write sidecar");

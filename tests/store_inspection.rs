@@ -78,7 +78,7 @@ fn registered_tables_with_no_rows_report_empty() {
     let inspection = StoreInspector { path: path.clone() }.inspect();
 
     assert!(matches!(inspection.database, DatabaseInspection::Opened));
-    assert_eq!(inspection.schema, SchemaInspection::Matches { version: 5 });
+    assert_eq!(inspection.schema, SchemaInspection::Matches { version: 6 });
     assert_eq!(
         inspection
             .table_named("live-set")
