@@ -1,0 +1,33 @@
+[package]
+name = "lojix-migrate-v5-v6"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# This offline converter intentionally carries both schemas. It is never a
+# member or dependency of the runtime/client/tools workspace.
+[workspace]
+
+[dependencies]
+old = { package = "lojix", git = "https://github.com/LiGoldragon/lojix", rev = "3fc95f0cf4eaf14ff62898c4783ebbc670fdf96b" }
+new = { package = "lojix", path = ".." }
+old-horizon = { package = "horizon-lib", git = "https://github.com/LiGoldragon/horizon-rs", rev = "a3ddaf8685b920093a2328b85ba350a04e11477a", features = ["datom"] }
+new-horizon = { package = "horizon-lib", git = "https://github.com/LiGoldragon/horizon-rs", rev = "12b2a25bcbad08ebcbac6d1fc25821de3008908d", features = ["datom"] }
+old-signal = { package = "signal-lojix", git = "https://github.com/LiGoldragon/signal-lojix", rev = "cd164896311af9849e2ddf1cdbdd35b5feedcdd1", features = ["datom"] }
+new-signal = { package = "signal-lojix", git = "https://github.com/LiGoldragon/signal-lojix", rev = "c22af7453ebaf717f491efd70e70a79c53c7ae16", features = ["datom"] }
+nexus = { git = "https://github.com/LiGoldragon/nexus", rev = "a84bfa960c0d5c02d30048c4bbbc67dfef79a67c" }
+sema-engine = { git = "https://github.com/LiGoldragon/sema-engine", rev = "27e814a721439af67721c530d48b4d2101141f74" }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09e2a9d52bf7f2f11e51d15cb6c3177f72c6c927" }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "1febca7836bf8d5f5973a302fdd50aa9c84c159b" }
+rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
+redb = "4"
+rustix = { version = "1", features = ["fs"] }
+sha2 = "0.10"
+serde_json = "1"
+
+[patch."https://github.com/LiGoldragon/kameo.git"]
+kameo = "0.20"
+kameo_macros = "0.20"
+
+[lints.rust]
+unsafe_code = "forbid"
