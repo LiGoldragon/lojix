@@ -127,10 +127,18 @@ fn raw_rows(db: &redb::ReadOnlyDatabase, name: &str) -> Result<Vec<(String, Vec<
     let tx = db.begin_read()?;
     let table = match tx.open_table(TableDefinition::<String, &[u8]>::new(name)) {
         Ok(table) => table,
-        Err(redb::TableError::TableDoesNotExist(_))
-            if FAMILIES.iter().any(|(family, _, _)| *family == name)
-                || name == "quarantined-row" =>
-        {
+        Err(redb::TableError::TableDoesNotExist(_)) => {
+            // Old writers register a family before materializing its first row.
+            // An absent physical table is empty only when this store registers it.
+            // The caller validates the complete catalog's identities and schema.
+            let catalog = tx.open_table(CATALOG)?;
+            let archived = catalog.get(name)?.ok_or("missing table is not registered")?;
+            let registration =
+                rkyv::from_bytes::<sema_engine::TableRegistration, Error>(archived.value())?;
+            require(
+                registration.table_name() == name,
+                "missing table catalog key differs from registration",
+            )?;
             return Ok(Vec::new());
         }
         Err(error) => return Err(error.into()),
