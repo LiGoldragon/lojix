@@ -798,9 +798,9 @@ fn migrate(args: Vec<PathBuf>) -> Result<Value> {
     fault("commit-receipt-written")?;
     sync(&stage_fd)?;
     sync(&parent_file)?;
+    fault("before-success")?;
     same_directory(&parent_file, parent)?;
     same_directory(&stage_fd, destination)?;
-    fault("before-success")?;
     Ok(manifest)
 }
 fn opened_internal(directory: &File, name: &str) -> Result<File> {

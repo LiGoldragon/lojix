@@ -126,11 +126,13 @@
           pname = "lojix-migrate-v5-v6";
           LOJIX_MIGRATION_SOURCE_REVISION = self.rev or "unqualified-source";
           version = "0.1.0";
-          cargoExtraArgs = "--manifest-path migration-v5-v6/Cargo.toml";
+          cargoExtraArgs = "";
           # Crane's dependency-only dummy source retains the root workspace
           # lock. This independent workspace also needs its own exact lock.
           postConfigure = ''
             cp ${./migration-v5-v6/Cargo.lock} migration-v5-v6/Cargo.lock
+            export CARGO_TARGET_DIR="$PWD/target"
+            cd migration-v5-v6
           '';
           cargoVendorDir = craneLib.vendorCargoDeps {
             src = source;
