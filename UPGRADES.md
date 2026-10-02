@@ -1,5 +1,55 @@
 # Upgrades
 
+## 8.1.0 to 9.0.0
+
+Horizon 0.14 removes the wired selector from `RouterInterfaces`. Every
+runtime, ordinary/meta client and offline tool uses signal-lojix 7 and
+meta-signal-lojix 8; update their immutable pins and locks together. Stores
+move from schema 5 to 6. Opening or resetting a schema-5 store refuses it.
+Existing jobs and meta-owned configuration need explicit conversion.
+
+The separate `lojix-migrate-v5-v6` package carries both decoder versions;
+it is absent from the daemon/client package and runtime workspace. Its API is:
+
+```
+lojix-migrate-v5-v6 OLD_STARTUP_ARCHIVE NEW_STARTUP_ARCHIVE DESTINATION_DIRECTORY
+```
+
+Deployment remains held until independent populated-store, refusal,
+interruption and matched-old-tuple rollback qualification passes. A built
+converter, a fresh store or the header-refusal test does not satisfy that gate.
+Field owns cutover; this release performs no automatic migration.
+
+1. Retain the matched old binary, startup archive, store, sidecars and recovery
+   metadata. Establish a drained old store and exclusive mutation ownership.
+   Live jobs/tests/containers, pending intents/outboxes, quarantine, compaction
+   or unknown sidecars hold migration. Preserve private permissions.
+2. Prepare private canonical old/new startup archives. The new archive must
+   name `DESTINATION_DIRECTORY/store.db` and that state directory. Preserve
+   meta-owned desired configuration, allowing only the removed WAN field and
+   declared socket/state-path relocation. Capability changes are a later
+   explicit configuration operation. Keep the source tuple untouched.
+3. Run the qualified converter into a new destination. Compare all eleven
+   families, keys, IDs, event order, counters, catalog/header and engine
+   archives with the independent oracle; reopen store data without starting
+   workers, binding sockets or applying configuration. A known family can
+   lack a physical table while empty; permitted new empty family tables are
+   recorded explicitly. Reset, retention and compaction are not migration.
+4. Accept publication only with exit 0 and the matching durable committed
+   receipt. `migration.json` is a verified-but-uncommitted record; the final
+   `migration.committed.json` links its exact digest after publication syncs.
+   A partial target or any nonzero exit remains held, including interruption
+   after rename. There is no implicit retry, overwrite, cleanup or cutover.
+5. After audit and recovery proof, start the coherent new runtime/client/
+   archive/store tuple. Validate the intended materialized inputs separately.
+   On startup or comparison failure, hold cutover and restore the qualified
+   matched old tuple. Prove rollback on a separate clone, never by reopening
+   the immutable source. Retain both tuples until acceptance.
+
+The converter's rollback directory retains source bytes; it does not by
+itself qualify old binaries, sidecar recovery or production rollback. Host
+activation, legacy USB cleanup and Ouranos recovery remain separate gates.
+
 # 8.0.0 to 8.1.0
 
 A deploy behaviour change with no wire change and no store change: the
