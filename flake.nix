@@ -120,6 +120,20 @@
             cargoExtraArgs = "-p lojix-offline-tools --bin lojix-bootstrap";
           }
         );
+        # Both schema decoders belong only to this offline converter closure;
+        # it is intentionally absent from completePackage and the workspace.
+        migrationArguments = commonArguments // {
+          pname = "lojix-migrate-v5-v6";
+          version = "0.1.0";
+          cargoExtraArgs = "--manifest-path migration-v5-v6/Cargo.toml";
+          cargoVendorDir = craneLib.vendorCargoDeps {
+            src = source;
+            cargoLock = ./migration-v5-v6/Cargo.lock;
+          };
+        };
+        migrationPackage = craneLib.buildPackage (migrationArguments // {
+          cargoArtifacts = craneLib.buildDepsOnly migrationArguments;
+        });
         bootstrapPackage = pkgs.symlinkJoin {
           name = "lojix-bootstrap";
           paths = [ bootstrapBinary ];
@@ -169,6 +183,7 @@
           lojix = ordinaryClientPackage;
           lojix-meta = metaClientPackage;
           offline-tools = offlineToolsPackage;
+          lojix-migrate-v5-v6 = migrationPackage;
 
           # A maintained flake-owned bootstrap program.  The wrapper keeps the
           # exact Nix/systemd executables in the app closure; it never depends
