@@ -1,4 +1,5 @@
 use super::*;
+use old::DurableStore as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 struct Fixture(PathBuf);
