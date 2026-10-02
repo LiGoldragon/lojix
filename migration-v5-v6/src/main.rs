@@ -96,6 +96,14 @@ fn identity(file: &File) -> Result<(u64, u64, u64, i64, i64)> {
     let m = file.metadata()?;
     Ok((m.dev(), m.ino(), m.len(), m.mtime(), m.mtime_nsec()))
 }
+fn same_directory(file: &File, path: &Path) -> Result<()> {
+    let held = file.metadata()?;
+    let named = opened(path, true)?.metadata()?;
+    require(
+        (held.dev(), held.ino()) == (named.dev(), named.ino()),
+        "publication directory was replaced",
+    )
+}
 fn proc_path(file: &File) -> PathBuf {
     PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
 }
@@ -765,6 +773,8 @@ fn migrate(args: Vec<PathBuf>) -> Result<Value> {
     sync(&stage_fd)?;
     sync(&parent_file)?;
     fault("before-publish")?;
+    same_directory(&parent_file, parent)?;
+    same_directory(&stage_fd, &stage)?;
     rustix::fs::renameat_with(
         &parent_file,
         stage_name.as_str(),
@@ -773,6 +783,8 @@ fn migrate(args: Vec<PathBuf>) -> Result<Value> {
         rustix::fs::RenameFlags::NOREPLACE,
     )?;
     sync(&parent_file)?;
+    same_directory(&parent_file, parent)?;
+    same_directory(&stage_fd, destination)?;
     fault("after-publish")?;
     fault("before-commit-receipt")?;
     manifest["verified_receipt_sha256"] = json!(digest(&serde_json::to_vec(&manifest)?));
@@ -786,6 +798,8 @@ fn migrate(args: Vec<PathBuf>) -> Result<Value> {
     fault("commit-receipt-written")?;
     sync(&stage_fd)?;
     sync(&parent_file)?;
+    same_directory(&parent_file, parent)?;
+    same_directory(&stage_fd, destination)?;
     fault("before-success")?;
     Ok(manifest)
 }
