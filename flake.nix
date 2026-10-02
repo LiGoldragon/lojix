@@ -205,6 +205,11 @@
         };
 
         checks = {
+          migration-catalog = craneLib.cargoTest (migrationArguments // {
+            cargoArtifacts = craneLib.buildDepsOnly migrationArguments;
+            cargoExtraArgs = "--bin lojix-migrate-v5-v6 catalog_tests";
+          });
+
           build = self.packages.${system}.default;
 
           nexus-binary = self.packages.${system}.lojix-nexus;

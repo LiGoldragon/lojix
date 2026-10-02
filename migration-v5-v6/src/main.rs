@@ -857,3 +857,6 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod catalog_tests;
