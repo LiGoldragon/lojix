@@ -125,7 +125,16 @@ fn write_private(directory: &File, name: &str, data: &[u8], mode: u32) -> Result
 }
 fn raw_rows(db: &redb::ReadOnlyDatabase, name: &str) -> Result<Vec<(String, Vec<u8>)>> {
     let tx = db.begin_read()?;
-    let table = tx.open_table(TableDefinition::<String, &[u8]>::new(name))?;
+    let table = match tx.open_table(TableDefinition::<String, &[u8]>::new(name)) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_))
+            if FAMILIES.iter().any(|(family, _, _)| *family == name)
+                || name == "quarantined-row" =>
+        {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error.into()),
+    };
     table
         .iter()?
         .map(|row| {
@@ -728,7 +737,20 @@ fn migrate(args: Vec<PathBuf>) -> Result<Value> {
         .list_tables()?
         .map(|t| Ok(t.name().to_string()))
         .collect::<Result<Vec<_>>>()?;
-    require(after_roster == roster, "reopen changed table roster")?;
+    let before = roster.iter().cloned().collect::<BTreeSet<_>>();
+    let after = after_roster.iter().cloned().collect::<BTreeSet<_>>();
+    require(before.is_subset(&after), "reopen removed physical tables")?;
+    let added_empty_tables = after.difference(&before).cloned().collect::<Vec<_>>();
+    for name in &added_empty_tables {
+        require(
+            name == "quarantined-row" || mapped.get(name).is_some_and(Vec::is_empty),
+            "reopen added a nonempty or unknown table",
+        )?;
+        require(
+            raw_rows(&db, name)?.is_empty(),
+            "new family table is not empty",
+        )?;
+    }
     drop(tx);
     drop(db);
     let target_file = opened_internal(&stage_fd, "store.db")?;
@@ -762,7 +784,7 @@ fn migrate(args: Vec<PathBuf>) -> Result<Value> {
         "sidecar roster changed during migration",
     )?;
     let mut target_read = opened_internal(&stage_fd, "store.db")?;
-    let mut manifest = json!({"schema":"LojixV5V6Migration/1","committed":false,"source_schema":5,"destination_schema":6,"source_sha256":digest(&source_bytes),"destination_sha256":digest(&bytes(&mut target_read)?),"source_archive_sha256":digest(&old_bytes),"destination_archive_sha256":digest(&new_bytes),"families":family_receipts,"catalog":catalog_receipts,"engine_counters":counters,"engine_counter_digest":framed_numeric("__sema_engine_counters",&counters),"engine_meta_source_digest":framed_numeric("__sema_meta",&meta),"engine_meta_destination_digest":framed_numeric("__sema_meta",&expected_meta),"engine_meta_source":meta,"engine_meta_destination":expected_meta,"engine_tables":roster,"engine_records":engine_before,"digest_algorithm":"SHA-256","digest_framing":"ASCII LojixV5V6Migration/1/table followed by NUL; u64be table-name byte length + UTF-8 table name; ordered rows of u64be key length + raw key bytes + u64be value length + raw value bytes","sidecars":sidecars,"source_preserved":true,"store_only_reopen":true,"key_encoding":"UTF-8 bytes as lowercase hex; ascending raw-byte key order","old_runtime_pin":"3fc95f0cf4eaf14ff62898c4783ebbc670fdf96b","new_runtime_version":"9.0.0","new_runtime_source_baseline":"94d8b69a546560e9d3c8300c6114e8dac7df67ea","converter_source_revision":option_env!("LOJIX_MIGRATION_SOURCE_REVISION").unwrap_or("unqualified-local-build"),"paths":{"source":source,"destination":destination,"old_archive":old_archive,"new_archive":new_archive}});
+    let mut manifest = json!({"schema":"LojixV5V6Migration/1","committed":false,"source_schema":5,"destination_schema":6,"source_sha256":digest(&source_bytes),"destination_sha256":digest(&bytes(&mut target_read)?),"source_archive_sha256":digest(&old_bytes),"destination_archive_sha256":digest(&new_bytes),"families":family_receipts,"catalog":catalog_receipts,"engine_counters":counters,"engine_counter_digest":framed_numeric("__sema_engine_counters",&counters),"engine_meta_source_digest":framed_numeric("__sema_meta",&meta),"engine_meta_destination_digest":framed_numeric("__sema_meta",&expected_meta),"engine_meta_source":meta,"engine_meta_destination":expected_meta,"engine_tables":roster,"physical_tables_source":roster,"physical_tables_destination":after_roster,"added_empty_family_tables":added_empty_tables,"engine_records":engine_before,"digest_algorithm":"SHA-256","digest_framing":"ASCII LojixV5V6Migration/1/table followed by NUL; u64be table-name byte length + UTF-8 table name; ordered rows of u64be key length + raw key bytes + u64be value length + raw value bytes","sidecars":sidecars,"source_preserved":true,"store_only_reopen":true,"key_encoding":"UTF-8 bytes as lowercase hex; ascending raw-byte key order","old_runtime_pin":"3fc95f0cf4eaf14ff62898c4783ebbc670fdf96b","new_runtime_version":"9.0.0","new_runtime_source_baseline":"94d8b69a546560e9d3c8300c6114e8dac7df67ea","converter_source_revision":option_env!("LOJIX_MIGRATION_SOURCE_REVISION").unwrap_or("unqualified-local-build"),"paths":{"source":source,"destination":destination,"old_archive":old_archive,"new_archive":new_archive}});
     write_private(
         &stage_fd,
         "migration.json",
