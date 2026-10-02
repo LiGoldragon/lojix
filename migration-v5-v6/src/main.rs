@@ -2,9 +2,8 @@
 mod mapping;
 
 use mapping::Result;
+use new::DurableStore as _;
 use new::quarantine::OpenedStore as _;
-use new::{DurableStore as _, LegacyConfigurationArchivable as _};
-use old::LegacyConfigurationArchivable as _;
 use old::Payload as _;
 use redb::{ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
 use rkyv::rancor::Error;
@@ -463,8 +462,8 @@ fn migrate(args: Vec<PathBuf>) -> Result<Value> {
     let mut new_file = opened(new_archive, false)?;
     let new_id = identity(&new_file)?;
     let new_bytes = bytes(&mut new_file)?;
-    let legacy = old::LegacyStartupConfiguration::from_rkyv_file(&proc_path(&old_file))?;
-    let startup = new::LegacyStartupConfiguration::from_rkyv_file(&proc_path(&new_file))?;
+    let legacy = rkyv::from_bytes::<old::LegacyStartupConfiguration, Error>(&old_bytes)?;
+    let startup = rkyv::from_bytes::<new::LegacyStartupConfiguration, Error>(&new_bytes)?;
     let source = PathBuf::from(&legacy.store_path);
     let mut source_file = opened(&source, false)?;
     let source_id = identity(&source_file)?;
