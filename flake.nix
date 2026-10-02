@@ -127,6 +127,11 @@
           LOJIX_MIGRATION_SOURCE_REVISION = self.rev or "unqualified-source";
           version = "0.1.0";
           cargoExtraArgs = "--manifest-path migration-v5-v6/Cargo.toml";
+          # Crane's dependency-only dummy source retains the root workspace
+          # lock. This independent workspace also needs its own exact lock.
+          postConfigure = ''
+            cp ${./migration-v5-v6/Cargo.lock} migration-v5-v6/Cargo.lock
+          '';
           cargoVendorDir = craneLib.vendorCargoDeps {
             src = source;
             cargoLock = ./migration-v5-v6/Cargo.lock;
