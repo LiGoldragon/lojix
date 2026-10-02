@@ -423,7 +423,7 @@ fn changed_rows(
                     rkyv::to_bytes::<Error>(&n)?.to_vec()
                 }
                 "nexus-configuration" => {
-                    require(key == "singleton", "unknown configuration key")?;
+                    require(key == "desired", "unknown configuration key")?;
                     let v = rkyv::from_bytes::<OldConfigurationRow, Error>(&data)?;
                     let mut expected = mapping::configuration(v.state.desired_configuration)?;
                     expected.ordinary_socket_path = desired.ordinary_socket_path.clone();
