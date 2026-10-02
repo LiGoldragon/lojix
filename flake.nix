@@ -124,6 +124,7 @@
         # it is intentionally absent from completePackage and the workspace.
         migrationArguments = commonArguments // {
           pname = "lojix-migrate-v5-v6";
+          LOJIX_MIGRATION_SOURCE_REVISION = self.rev or "unqualified-source";
           version = "0.1.0";
           cargoExtraArgs = "--manifest-path migration-v5-v6/Cargo.toml";
           cargoVendorDir = craneLib.vendorCargoDeps {
