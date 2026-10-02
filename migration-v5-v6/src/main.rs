@@ -165,6 +165,19 @@ fn hex(bytes: &[u8]) -> String {
 }
 // Table digests use SHA-256 over a domain prefix and ordered length-framed
 // raw key/value pairs. Lengths are unsigned 64-bit big-endian bytes.
+fn table_digest(name: &str, rows: &[(String, Vec<u8>)]) -> String {
+    let mut h = Sha256::new();
+    h.update(b"LojixV5V6Migration/1/table\0");
+    h.update((name.len() as u64).to_be_bytes());
+    h.update(name.as_bytes());
+    for (k, v) in rows {
+        h.update((k.len() as u64).to_be_bytes());
+        h.update(k.as_bytes());
+        h.update((v.len() as u64).to_be_bytes());
+        h.update(v);
+    }
+    format!("{:x}", h.finalize())
+}
 fn framed_numeric(name: &str, values: &BTreeMap<String, u64>) -> Value {
     let mut h = Sha256::new();
     h.update(b"LojixV5V6Migration/1/table\0");
@@ -323,6 +336,7 @@ fn changed_rows(
     }
     for (name, _, _) in FAMILIES {
         let rows = raw_rows(db, name)?;
+        let source_table_sha256 = table_digest(name, &rows);
         if *name == "nexus-configuration" {
             require(
                 rows.len() == 1,
@@ -416,7 +430,7 @@ fn changed_rows(
             receipts.push(json!({"key_hex":key.as_bytes().iter().map(|b|format!("{b:02x}")).collect::<String>(),"source_sha256":digest(&data),"destination_sha256":digest(&value),"transformation":transformation}));
             target.push((key, value));
         }
-        evidence.push(json!({"family":name,"records":receipts}));
+        evidence.push(json!({"family":name,"source_table_sha256":source_table_sha256,"destination_table_sha256":table_digest(name,&target),"records":receipts}));
         mapped.insert(name.to_string(), target);
     }
     require(
