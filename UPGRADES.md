@@ -1,5 +1,37 @@
 # Upgrades
 
+# 8.1.0 to 9.0.0
+
+A dependency step onto ethos-zero 16.0.0 and the 0.32.2 substrate, with no
+store change and no change to the archived layout of either contract: the
+store schema stays v5, no migration runs, and `DeployResumeStage` is
+unchanged.
+
+Pins, in the root and in every member that names them:
+
+- `signal` 3.0.2 (`8f9a0deb…`) to 8.0.0 (`f35460de930943ea1a8a972453ccf3a092a655b5`);
+- `signal-lojix` 6.0.0 (`cd164896…`) to 7.0.0 (`0a83f2d6d89b473ce63ff10bf05982df314894ad`);
+- `meta-signal-lojix` 7.0.0 (`c0f883c5…`) to 8.0.0 (`25f7f220e47f703f4c262b1df84d06ad2bd61197`);
+- `horizon-lib` 0.13.0 (`a3ddaf86…`) to 0.14.0 (`2e09ebbdc725f64fd9ee102b5758bab85be217e1`),
+  also as the `horizon` flake input that composes the fixture;
+- `datom-codec` 0.31.0 (`09e2a9d5…`) to 0.32.2 (`4dff16b4f7412febc3b71aac8b49680cd20988cb`);
+- `protos` 0.31.0 (`1febca78…`) to 0.32.2 (`15b41da8f2579e73ead59bc0c2b97529b8ac32d3`);
+- `ethos-zero` 10.0.0 (`4bf73cae…`) to 16.0.0 (`c2653dd82adbdb1f1f2f654405c6620e0d06fd58`).
+
+`src/ingress.rs` is regenerated from `ethos/ingress.ethos`. Its types now
+derive rkyv always and their datom kinds under a new `datom` feature, which
+`tools` (the default) enables; the Nexus builds with neither, as before.
+`sema-engine`, `triad-runtime` and `nexus` are unchanged.
+
+protos 0.32 prints vertically through `Textualizable::textualize`; `lojix`
+and `lojix-meta` now print their replies through `Compactable::compact`, so a
+reply stays on one line, as it was.
+
+signal 8.0.0 bounds archive validation at a depth of 64; the frame bytes are
+unchanged. Deploy the Nexus and both clients from one revision, together:
+build `lojix` 9.0.0, stop `lojix-nexus`, switch the package, start it. The
+store resumes as it is.
+
 # 8.0.0 to 8.1.0
 
 A deploy behaviour change with no wire change and no store change: the

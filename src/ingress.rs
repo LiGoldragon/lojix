@@ -1,26 +1,31 @@
 #![allow(dead_code, non_camel_case_types, non_snake_case)]
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum InspectionRequest {
     InspectStore(InspectStore),
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct InspectStore {
     pub string: String,
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum ResetStoreRequest {
     ResetStore,
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum BootstrapRequest {
     BootstrapRun(BootstrapRun),
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct BootstrapRun {
     pub bootstrap_request_id: BootstrapRequestId,
     pub bootstrap_mode: BootstrapMode,
@@ -28,13 +33,15 @@ pub struct BootstrapRun {
 #[rustfmt::skip]
 pub type BootstrapRequestId = String;
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum BootstrapMode {
     BuildOnly(BootstrapBuildOnly),
     BootOnce(BootstrapBootOnce),
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct BootstrapBuildOnly {
     pub bootstrap_input: BootstrapInput,
     pub bootstrap_builder: BootstrapBuilder,
@@ -43,7 +50,8 @@ pub struct BootstrapBuildOnly {
     pub bootstrap_terminal_evidence_path: BootstrapTerminalEvidencePath,
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct BootstrapBootOnce {
     pub bootstrap_input: BootstrapInput,
     pub bootstrap_builder: BootstrapBuilder,
@@ -54,20 +62,23 @@ pub struct BootstrapBootOnce {
     pub bootstrap_terminal_evidence_path: BootstrapTerminalEvidencePath,
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum BootstrapInput {
     Direct(BootstrapDirectInput),
     Horizon(BootstrapHorizonInput),
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct BootstrapDirectInput {
     pub bootstrap_flake_reference: BootstrapFlakeReference,
     pub bootstrap_nix_system: BootstrapNixSystem,
     pub bootstrap_output_selector: BootstrapOutputSelector,
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct BootstrapHorizonInput {
     pub bootstrap_proposal_source: BootstrapProposalSource,
     pub bootstrap_cluster_name: BootstrapClusterName,
@@ -79,44 +90,51 @@ pub struct BootstrapHorizonInput {
     pub bootstrap_output_selector: BootstrapOutputSelector,
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum BootstrapMaterializationShape {
     CompleteHost,
     BaseHost,
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum BootstrapSecretsInput {
     NoSecrets,
     SecretsDirectory(BootstrapSecretsDirectory),
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum BootstrapBuilder {
     NoBuilder,
     NixBuilder(BootstrapBuilderSpec),
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum BootstrapTestPlan {
     NoTest,
     RunHermeticTest(BootstrapHermeticTest),
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct BootstrapHermeticTest {
     pub bootstrap_flake_reference: BootstrapFlakeReference,
     pub bootstrap_nix_system: BootstrapNixSystem,
     pub bootstrap_output_selector: BootstrapOutputSelector,
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum BootstrapActivationBackend {
     RemoteNixosSystemdBootV1(BootstrapRemoteNixosSystemdBootV1),
     LocalBootstrapV1(BootstrapLocalBootstrapV1),
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct BootstrapRemoteNixosSystemdBootV1 {
     pub bootstrap_nix_store_uri: BootstrapNixStoreUri,
     pub bootstrap_ssh_destination: BootstrapSshDestination,
@@ -125,19 +143,22 @@ pub struct BootstrapRemoteNixosSystemdBootV1 {
     pub bootstrap_boot_entries_directory: BootstrapBootEntriesDirectory,
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct BootstrapSshPolicy {
     pub bootstrap_ssh_identity_file: BootstrapSshIdentityFile,
     pub bootstrap_ssh_known_hosts_file: BootstrapSshKnownHostsFile,
     pub bootstrap_strict_host_key_mode: BootstrapStrictHostKeyMode,
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum BootstrapStrictHostKeyMode {
     RequireKnownHost,
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct BootstrapLocalBootstrapV1 {
     pub bootstrap_system_profile_path: BootstrapSystemProfilePath,
     pub bootstrap_boot_entries_directory: BootstrapBootEntriesDirectory,
@@ -177,12 +198,14 @@ pub type BootstrapSystemProfilePath = String;
 #[rustfmt::skip]
 pub type BootstrapBootEntriesDirectory = String;
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum ConfigurationWriterInput {
     ConfigurationWriteRequest(ConfigurationWriteRequest),
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct ConfigurationWriteRequest {
     pub first_writer_path: WriterPath,
     pub first_writer_mode: WriterMode,
@@ -195,13 +218,15 @@ pub struct ConfigurationWriteRequest {
     pub fifth_writer_path: WriterPath,
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum WriterTestDefaultsChoice {
     NoTestDefaults,
     TestDefaults(WriterTestDefaults),
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct WriterTestDefaults {
     pub first_writer_cluster: WriterCluster,
     pub second_writer_cluster: WriterCluster,
@@ -212,7 +237,8 @@ pub struct WriterTestDefaults {
     pub writer_path: WriterPath,
 }
 #[rustfmt::skip]
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum WriterTestMode {
     Hermetic,
     Live,

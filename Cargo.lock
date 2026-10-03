@@ -311,51 +311,12 @@ dependencies = [
 
 [[package]]
 name = "datom-codec"
-version = "0.26.3"
-source = "git+https://github.com/LiGoldragon/datom-codec?rev=627db67f2655efd9f786864009955005fd8ab2ad#627db67f2655efd9f786864009955005fd8ab2ad"
-dependencies = [
- "datom-codec-derive 0.26.0",
- "protos 0.30.1",
-]
-
-[[package]]
-name = "datom-codec"
-version = "0.31.0"
-source = "git+https://github.com/LiGoldragon/datom-codec?rev=09e2a9d52bf7f2f11e51d15cb6c3177f72c6c927#09e2a9d52bf7f2f11e51d15cb6c3177f72c6c927"
-dependencies = [
- "datom-codec-derive 0.31.0",
- "protos 0.31.0",
- "rkyv",
-]
-
-[[package]]
-name = "datom-codec"
 version = "0.32.2"
 source = "git+https://github.com/LiGoldragon/datom-codec?rev=4dff16b4f7412febc3b71aac8b49680cd20988cb#4dff16b4f7412febc3b71aac8b49680cd20988cb"
 dependencies = [
- "datom-codec-derive 0.32.0",
- "protos 0.32.2",
+ "datom-codec-derive",
+ "protos",
  "rkyv",
-]
-
-[[package]]
-name = "datom-codec-derive"
-version = "0.26.0"
-source = "git+https://github.com/LiGoldragon/datom-codec?rev=627db67f2655efd9f786864009955005fd8ab2ad#627db67f2655efd9f786864009955005fd8ab2ad"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "datom-codec-derive"
-version = "0.31.0"
-source = "git+https://github.com/LiGoldragon/datom-codec?rev=09e2a9d52bf7f2f11e51d15cb6c3177f72c6c927#09e2a9d52bf7f2f11e51d15cb6c3177f72c6c927"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -435,41 +396,13 @@ dependencies = [
 
 [[package]]
 name = "ethos-zero"
-version = "8.0.1"
-source = "git+https://github.com/LiGoldragon/ethos-zero?rev=de3d9928b156f2e1a92d060b7817af201abfdbef#de3d9928b156f2e1a92d060b7817af201abfdbef"
-dependencies = [
- "datom-codec 0.26.3",
- "prettyplease",
- "proc-macro2",
- "protos 0.30.1",
- "quote",
- "rkyv",
- "syn 3.0.6",
-]
-
-[[package]]
-name = "ethos-zero"
-version = "10.0.0"
-source = "git+https://github.com/LiGoldragon/ethos-zero?rev=4bf73cae8d4f5a2072c76a11cd2f00aa3fe9f8e3#4bf73cae8d4f5a2072c76a11cd2f00aa3fe9f8e3"
-dependencies = [
- "datom-codec 0.31.0",
- "prettyplease",
- "proc-macro2",
- "protos 0.31.0",
- "quote",
- "rkyv",
- "syn 3.0.6",
-]
-
-[[package]]
-name = "ethos-zero"
 version = "16.0.0"
 source = "git+https://github.com/LiGoldragon/ethos-zero?rev=c2653dd82adbdb1f1f2f654405c6620e0d06fd58#c2653dd82adbdb1f1f2f654405c6620e0d06fd58"
 dependencies = [
- "datom-codec 0.32.2",
+ "datom-codec",
  "prettyplease",
  "proc-macro2",
- "protos 0.32.2",
+ "protos",
  "quote",
  "rkyv",
  "syn 3.0.6",
@@ -666,12 +599,12 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "horizon-lib"
-version = "0.13.0"
-source = "git+https://github.com/LiGoldragon/horizon-rs?rev=a3ddaf8685b920093a2328b85ba350a04e11477a#a3ddaf8685b920093a2328b85ba350a04e11477a"
+version = "0.14.0"
+source = "git+https://github.com/LiGoldragon/horizon-rs?rev=2e09ebbdc725f64fd9ee102b5758bab85be217e1#2e09ebbdc725f64fd9ee102b5758bab85be217e1"
 dependencies = [
- "datom-codec 0.31.0",
- "ethos-zero 10.0.0",
- "protos 0.31.0",
+ "datom-codec",
+ "ethos-zero",
+ "protos",
  "rkyv",
  "serde",
  "thiserror",
@@ -745,16 +678,16 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lojix"
-version = "8.1.0"
+version = "9.0.0"
 dependencies = [
- "datom-codec 0.32.2",
- "ethos-zero 16.0.0",
+ "datom-codec",
+ "ethos-zero",
  "futures-util",
  "horizon-lib",
  "kameo",
  "meta-signal-lojix",
  "nexus",
- "protos 0.32.2",
+ "protos",
  "redb",
  "rkyv",
  "rustix",
@@ -772,18 +705,18 @@ dependencies = [
 
 [[package]]
 name = "lojix-client"
-version = "8.1.0"
+version = "9.0.0"
 dependencies = [
- "datom-codec 0.32.2",
+ "datom-codec",
  "lojix",
- "protos 0.32.2",
+ "protos",
  "signal",
  "signal-lojix",
 ]
 
 [[package]]
 name = "lojix-nexus"
-version = "8.1.0"
+version = "9.0.0"
 dependencies = [
  "lojix",
  "meta-signal-lojix",
@@ -797,12 +730,12 @@ dependencies = [
 
 [[package]]
 name = "lojix-offline-tools"
-version = "8.1.0"
+version = "9.0.0"
 dependencies = [
- "datom-codec 0.32.2",
+ "datom-codec",
  "horizon-lib",
  "lojix",
- "protos 0.32.2",
+ "protos",
  "signal-lojix",
  "tempfile",
  "thiserror",
@@ -825,13 +758,13 @@ dependencies = [
 
 [[package]]
 name = "meta-lojix-client"
-version = "8.1.0"
+version = "9.0.0"
 dependencies = [
- "datom-codec 0.32.2",
+ "datom-codec",
  "horizon-lib",
  "lojix",
  "meta-signal-lojix",
- "protos 0.32.2",
+ "protos",
  "signal",
  "signal-lojix",
  "tempfile",
@@ -839,13 +772,13 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-lojix"
-version = "7.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix?rev=c0f883c5cc428ce94ffa109fa20a5a28f7902481#c0f883c5cc428ce94ffa109fa20a5a28f7902481"
+version = "8.0.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix?rev=25f7f220e47f703f4c262b1df84d06ad2bd61197#25f7f220e47f703f4c262b1df84d06ad2bd61197"
 dependencies = [
- "datom-codec 0.31.0",
- "ethos-zero 10.0.0",
+ "datom-codec",
+ "ethos-zero",
  "horizon-lib",
- "protos 0.31.0",
+ "protos",
  "rkyv",
  "signal",
  "signal-lojix",
@@ -999,16 +932,6 @@ checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
-
-[[package]]
-name = "protos"
-version = "0.30.1"
-source = "git+https://github.com/LiGoldragon/protos?rev=171b21f65337983ab624b7b906397a4f1f92c5a3#171b21f65337983ab624b7b906397a4f1f92c5a3"
-
-[[package]]
-name = "protos"
-version = "0.31.0"
-source = "git+https://github.com/LiGoldragon/protos?rev=1febca7836bf8d5f5973a302fdd50aa9c84c159b#1febca7836bf8d5f5973a302fdd50aa9c84c159b"
 
 [[package]]
 name = "protos"
@@ -1266,10 +1189,10 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signal"
-version = "3.0.2"
-source = "git+https://github.com/LiGoldragon/signal?rev=8f9a0deb701cebbea518679548df4a795affc918#8f9a0deb701cebbea518679548df4a795affc918"
+version = "8.0.0"
+source = "git+https://github.com/LiGoldragon/signal?rev=f35460de930943ea1a8a972453ccf3a092a655b5#f35460de930943ea1a8a972453ccf3a092a655b5"
 dependencies = [
- "ethos-zero 8.0.1",
+ "ethos-zero",
  "rkyv",
  "thiserror",
  "tokio",
@@ -1308,13 +1231,13 @@ dependencies = [
 
 [[package]]
 name = "signal-lojix"
-version = "6.0.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix?rev=cd164896311af9849e2ddf1cdbdd35b5feedcdd1#cd164896311af9849e2ddf1cdbdd35b5feedcdd1"
+version = "7.0.0"
+source = "git+https://github.com/LiGoldragon/signal-lojix?rev=0a83f2d6d89b473ce63ff10bf05982df314894ad#0a83f2d6d89b473ce63ff10bf05982df314894ad"
 dependencies = [
- "datom-codec 0.31.0",
- "ethos-zero 10.0.0",
+ "datom-codec",
+ "ethos-zero",
  "horizon-lib",
- "protos 0.31.0",
+ "protos",
  "rkyv",
  "signal",
 ]
