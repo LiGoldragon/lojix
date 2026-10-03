@@ -1,6 +1,6 @@
 [package]
 name         = "lojix"
-version      = "9.0.0"
+version      = "9.0.1"
 edition      = "2024"
 rust-version = "1.89"
 license      = "MIT OR Apache-2.0"
@@ -40,7 +40,7 @@ signal = { git = "https://github.com/LiGoldragon/signal", rev = "f35460de930943e
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 redb              = "4"
 rustix            = { version = "1", default-features = false, features = ["fs", "process"] }
-sema-engine       = { git = "https://github.com/LiGoldragon/sema-engine.git", rev = "27e814a721439af67721c530d48b4d2101141f74" }
+sema-engine       = { git = "https://github.com/LiGoldragon/sema-engine.git", rev = "9884905ff9c660ad97a35c524e42532d5c7bac90" }
 serde_json        = "1"
 sha2              = "0.10"
 thiserror         = "2"
