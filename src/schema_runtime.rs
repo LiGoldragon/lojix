@@ -7676,6 +7676,7 @@ impl NixInvoking for NixCommand {
             vec![
                 "flake".to_string(),
                 "metadata".to_string(),
+                "--no-write-lock-file".to_string(),
                 "--json".to_string(),
                 flake.to_string(),
             ],
@@ -8921,6 +8922,24 @@ mod tests {
                 "User environment {mode:?} should be supported"
             );
         }
+    }
+
+    #[test]
+    fn flake_metadata_never_writes_the_fetched_source_lock() {
+        let invocation = NixCommand::flake_metadata(
+            "github:LiGoldragon/CriomOS/0123456789abcdef0123456789abcdef01234567",
+        );
+        assert_eq!(invocation.program(), "nix");
+        assert_eq!(
+            invocation.arguments,
+            vec![
+                "flake",
+                "metadata",
+                "--no-write-lock-file",
+                "--json",
+                "github:LiGoldragon/CriomOS/0123456789abcdef0123456789abcdef01234567",
+            ],
+        );
     }
 
     // ---- closure build argv — `.drv^*` output selector, never the bare .drv ----
