@@ -4,8 +4,8 @@
 //! actor. They prove the production order without opening a network connection.
 //!
 //! When the deployed node is the daemon host: local immutable evaluation and
-//! build, target copy, root-mediated Home Manager profile set, then
-//! target-user activation (unchanged since lojix 8.0.0).
+//! build, target copy, target-user activation, then the root-mediated Home
+//! Manager profile set once the activation has succeeded.
 //!
 //! When the deployed node is any other node: local evaluation, the derivation
 //! closure copied to the transport store, the build in that store, a GC root
@@ -190,7 +190,7 @@ fn command_lines(programs: &Path) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact_identity() {
+async fn home_transport_is_local_build_then_copy_activate_and_profile_with_exact_identity() {
     let directory = tempfile::tempdir().expect("tempdir");
     let programs = directory.path().join("programs");
     fake_programs(&programs, false, false);
@@ -233,7 +233,7 @@ async fn home_transport_is_local_build_then_copy_profile_and_activate_with_exact
         .iter()
         .position(|line| line.starts_with("ssh ") && line.contains("/activate"))
         .expect("root-mediated activation");
-    assert!(eval < build && build < copy && copy < profile && profile < activate);
+    assert!(eval < build && build < copy && copy < activate && activate < profile);
     assert!(
         !commands[eval].contains("--store"),
         "eval must stay local: {}",
@@ -595,8 +595,8 @@ async fn remote_node_builds_in_its_own_store_roots_the_output_and_skips_the_tran
             && derivation_copy < build
             && build < root
             && root < presence
-            && presence < profile
-            && profile < activate,
+            && presence < activate
+            && activate < profile,
         "{commands:?}"
     );
 

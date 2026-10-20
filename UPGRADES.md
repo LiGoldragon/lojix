@@ -1,5 +1,15 @@
 # Upgrades
 
+# 9.0.1 to 9.0.2
+
+`UserEnvironment` `ActivateNow` runs the Home Manager activation first, as
+`<generation>/activate --driver-version 1`, and sets
+`~/.local/state/nix/profiles/home-manager` to the generation only after the
+activation succeeds. At driver version 1 the activation script leaves the
+profile to its caller. A refused activation leaves the profile on the
+generation it named before the deploy. `SetProfile` is unchanged. No store
+or contract change.
+
 # 8.1.0 to 9.0.0
 
 A dependency step onto ethos-zero 16.0.0 and the 0.32.2 substrate, with no

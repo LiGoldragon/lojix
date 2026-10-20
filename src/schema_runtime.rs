@@ -7374,7 +7374,15 @@ struct UserEnvironmentActivation {
     mode: meta::UserEnvironmentAction,
 }
 
+/// Home Manager's activation driver protocol: at version 1 the activation
+/// script leaves the Home Manager profile alone, so the profile names a
+/// generation only after that generation's activation has succeeded.
+const HOME_MANAGER_DRIVER_VERSION_FLAG: &str = "--driver-version";
+const HOME_MANAGER_DRIVER_VERSION: &str = "1";
+
 /// Activating one user environment, locally or through a remote shell.
+/// `ActivateNow` runs the activation first and sets the profile only once it
+/// has succeeded, so a refused activation leaves the profile where it was.
 trait UserEnvironmentActivating {
     fn local_profile_invocation(&self, home: &Path) -> NixCommand;
 
@@ -7443,7 +7451,13 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
     }
 
     fn local_activate_invocation(&self) -> NixCommand {
-        NixCommand::new(format!("{}/activate", self.store_path), Vec::new())
+        NixCommand::new(
+            format!("{}/activate", self.store_path),
+            vec![
+                HOME_MANAGER_DRIVER_VERSION_FLAG.to_string(),
+                HOME_MANAGER_DRIVER_VERSION.to_string(),
+            ],
+        )
     }
 
     fn remote_profile_invocation(&self) -> std::result::Result<NixCommand, String> {
@@ -7454,9 +7468,10 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
     }
 
     fn remote_activate_invocation(&self) -> std::result::Result<NixCommand, String> {
-        self.remote_invocation(ShellCommand::from_raw(
+        self.remote_invocation(ShellCommand::from_raw(format!(
+            "{} {HOME_MANAGER_DRIVER_VERSION_FLAG} {HOME_MANAGER_DRIVER_VERSION}",
             ShellArgument::new(format!("{}/activate", self.store_path)).to_command_text(),
-        ))
+        )))
     }
 
     fn remote_invocation(&self, command: ShellCommand) -> std::result::Result<NixCommand, String> {
@@ -7550,8 +7565,8 @@ impl Effect for UserEnvironmentActivation {
             meta::UserEnvironmentAction::Realize => Ok(()),
             meta::UserEnvironmentAction::SetProfile => self.run_profile(execution).await,
             meta::UserEnvironmentAction::ActivateNow => {
-                self.run_profile(execution).await?;
-                self.run_activate(execution).await
+                self.run_activate(execution).await?;
+                self.run_profile(execution).await
             }
         }
     }

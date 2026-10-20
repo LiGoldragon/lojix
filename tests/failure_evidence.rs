@@ -311,24 +311,25 @@ async fn a_by_deployment_query_answers_with_that_deployment() {
     assert!(evidence.failure_detail.payload().contains(ACTIVATION_CAUSE));
 }
 
-/// The ledger says the deployment failed at Activate. It does not say the
-/// target was left untouched: the profile-set step ran and succeeded before
-/// activation failed. These are two different facts and the test keeps them
-/// apart, because a retry that assumes the target is unchanged is unsafe.
+/// A refused activation leaves the target's Home Manager profile where it was:
+/// the activation runs first, under the driver protocol that keeps it off the
+/// profile, and the profile is set only after it succeeds.
 #[tokio::test]
-async fn the_profile_advanced_although_the_deployment_failed() {
+async fn a_refused_activation_leaves_the_profile_where_it_was() {
     let directory = tempfile::tempdir().expect("tempdir");
     let (engine, identifier, commands) = failed_user_environment_activation(directory.path()).await;
 
     assert!(
         commands
             .iter()
-            .any(|line| line.contains("nix-env") || line.contains("--set")),
-        "the fixture must reach the profile-set step, got {commands:?}"
+            .any(|line| line.contains("/activate") && line.contains("--driver-version 1")),
+        "the fixture must reach the activation step under driver version 1, got {commands:?}"
     );
     assert!(
-        commands.iter().any(|line| line.contains("activate")),
-        "the fixture must reach the activation step, got {commands:?}"
+        !commands
+            .iter()
+            .any(|line| line.contains("nix-env") || line.contains("--set")),
+        "a refused activation must not set the profile, got {commands:?}"
     );
 
     let record = engine
@@ -340,8 +341,7 @@ async fn the_profile_advanced_although_the_deployment_failed() {
         .expect("the driven deployment has a durable record");
     assert_eq!(
         record.deployment_lifecycle,
-        ordinary::DeploymentLifecycle::Failed,
-        "Lojix ledger state is Failed while the target's profile has moved"
+        ordinary::DeploymentLifecycle::Failed
     );
     assert!(
         engine
@@ -349,8 +349,46 @@ async fn the_profile_advanced_although_the_deployment_failed() {
             .matching_live_generations(|live| live.deployment_identifier == identifier)
             .expect("read the live set")
             .is_empty(),
-        "a failed activation must not enter the live set, however far the \
-         target itself advanced"
+        "a failed activation must not enter the live set"
+    );
+}
+
+/// A successful activation is followed by the profile set to the generation
+/// it activated, and in that order.
+#[tokio::test]
+async fn the_profile_follows_a_successful_activation() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let programs = directory.path().join("programs");
+    succeeding_programs(&programs);
+    let source = directory.path().join("horizon-definition.datom");
+    common::write_hosted_pair(&source);
+    let mut engine = runtime(directory.path(), &programs);
+    match engine.submit_deploy(user_environment_request(&source)) {
+        lojix::schema_runtime::DeploySubmissionOutcome::Accepted(_) => {}
+        other => panic!("fixture request was not accepted: {other:?}"),
+    }
+    engine.drive_submitted_deploy().await;
+    let commands: Vec<String> = fs::read_to_string(programs.join("commands"))
+        .expect("read fake command log")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+
+    let activation = commands
+        .iter()
+        .position(|line| line.contains("/activate") && line.contains("--driver-version 1"))
+        .unwrap_or_else(|| panic!("the activation ran, got {commands:?}"));
+    let profile = commands
+        .iter()
+        .position(|line| line.contains("profiles/home-manager") && line.contains("--set"))
+        .unwrap_or_else(|| panic!("the profile was set, got {commands:?}"));
+    assert!(
+        activation < profile,
+        "the profile is set only after the activation, got {commands:?}"
+    );
+    assert!(
+        commands[profile].contains(OUTPUT),
+        "the profile names the activated generation, got {commands:?}"
     );
 }
 
