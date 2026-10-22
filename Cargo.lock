@@ -685,13 +685,13 @@ dependencies = [
  "futures-util",
  "horizon-lib",
  "kameo",
+ "memory-engine",
  "meta-signal-lojix",
  "nexus",
  "protos",
  "redb",
  "rkyv",
  "rustix",
- "sema-engine",
  "serde_json",
  "sha2",
  "signal",
@@ -699,7 +699,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "triad-runtime",
+ "triad-runtime 0.10.1",
  "zbus",
 ]
 
@@ -725,7 +725,7 @@ dependencies = [
  "signal",
  "signal-lojix",
  "tempfile",
- "triad-runtime",
+ "triad-runtime 0.8.1",
 ]
 
 [[package]]
@@ -754,6 +754,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "memory"
+version = "0.1.1"
+source = "git+https://github.com/LiGoldragon/memory.git?rev=69d91c486b335575ee5e4b0eb79da27094e700b6#69d91c486b335575ee5e4b0eb79da27094e700b6"
+dependencies = [
+ "redb",
+ "rkyv",
+ "thiserror",
+]
+
+[[package]]
+name = "memory-engine"
+version = "0.18.0"
+source = "git+https://github.com/LiGoldragon/memory-engine.git?rev=abf9d85166e22440440baba03358913458905b8d#abf9d85166e22440440baba03358913458905b8d"
+dependencies = [
+ "blake3",
+ "memory",
+ "rkyv",
+ "signal-sema",
+ "thiserror",
 ]
 
 [[package]]
@@ -1081,28 +1103,6 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
-
-[[package]]
-name = "sema"
-version = "0.1.1"
-source = "git+https://github.com/LiGoldragon/sema.git?rev=51d7927c872f0df12791bad8d39a4db6433b01a1#51d7927c872f0df12791bad8d39a4db6433b01a1"
-dependencies = [
- "redb",
- "rkyv",
- "thiserror",
-]
-
-[[package]]
-name = "sema-engine"
-version = "0.18.0"
-source = "git+https://github.com/LiGoldragon/sema-engine.git?rev=9884905ff9c660ad97a35c524e42532d5c7bac90#9884905ff9c660ad97a35c524e42532d5c7bac90"
-dependencies = [
- "blake3",
- "rkyv",
- "sema",
- "signal-sema",
- "thiserror",
-]
 
 [[package]]
 name = "serde"
@@ -1437,6 +1437,18 @@ dependencies = [
  "rkyv",
  "rustix",
  "signal-frame",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "triad-runtime"
+version = "0.10.1"
+source = "git+https://github.com/LiGoldragon/triad-runtime.git?rev=4cc0a100841d2400f354c008c9faa73b2cedf50e#4cc0a100841d2400f354c008c9faa73b2cedf50e"
+dependencies = [
+ "kameo",
+ "rkyv",
+ "rustix",
  "thiserror",
  "tokio",
 ]

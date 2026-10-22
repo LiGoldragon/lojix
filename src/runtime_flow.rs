@@ -8,8 +8,8 @@ use crate::Payload;
 pub use crate::runtime_model::{
     ActivationEffect, ClosurePath, ClusterName, DeploymentIdentifier, FlakeReference,
     GenerationArtifact, GenerationIdentifier, GenerationSlot, HostComposition, HostDeployAction,
-    MetaEgress, MetaIngress, NodeName, OrdinaryEgress, OrdinaryIngress, ProposalSource,
-    SecretsInput, SemaReadInput, SemaReadOutput, SemaWriteInput, SemaWriteOutput,
+    MemoryReadInput, MemoryReadOutput, MemoryWriteInput, MemoryWriteOutput, MetaEgress,
+    MetaIngress, NodeName, OrdinaryEgress, OrdinaryIngress, ProposalSource, SecretsInput,
     SourceRevisionPolicy, SourceRevisionRecord, TestMode, UserEnvironmentAction, UserName,
 };
 
@@ -357,14 +357,14 @@ pub enum EffectResult {
 #[derive(Clone, Debug, PartialEq)]
 pub enum NexusWork {
     SignalArrived(SignalInput),
-    SemaReadCompleted(SemaReadOutput),
-    SemaWriteCompleted(SemaWriteOutput),
+    MemoryReadCompleted(MemoryReadOutput),
+    MemoryWriteCompleted(MemoryWriteOutput),
     EffectCompleted(EffectResult),
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum NexusAction {
-    CommandSemaRead(SemaReadInput),
-    CommandSemaWrite(SemaWriteInput),
+    CommandMemoryRead(MemoryReadInput),
+    CommandMemoryWrite(MemoryWriteInput),
     CommandEffect(EffectCommand),
     ReplyToSignal(SignalOutput),
     Continue(NexusWork),
@@ -479,20 +479,25 @@ impl triad_runtime::NexusWork for NexusWork {}
 impl triad_runtime::NexusEffectCommand for EffectCommand {}
 impl triad_runtime::NexusEffectResult for EffectResult {}
 
-pub type NexusRunnerNextStep =
-    triad_runtime::NextStep<SignalOutput, SemaWriteInput, SemaReadInput, EffectCommand, NexusWork>;
+pub type NexusRunnerNextStep = triad_runtime::NextStep<
+    SignalOutput,
+    MemoryWriteInput,
+    MemoryReadInput,
+    EffectCommand,
+    NexusWork,
+>;
 
 impl triad_runtime::NexusAction for NexusAction {
     type Reply = SignalOutput;
-    type SemaWrite = SemaWriteInput;
-    type SemaRead = SemaReadInput;
+    type MemoryWrite = MemoryWriteInput;
+    type MemoryRead = MemoryReadInput;
     type Effect = EffectCommand;
     type Work = NexusWork;
 
     fn into_next_step(self) -> NexusRunnerNextStep {
         match self {
-            Self::CommandSemaWrite(input) => triad_runtime::NextStep::SemaWrite(input),
-            Self::CommandSemaRead(input) => triad_runtime::NextStep::SemaRead(input),
+            Self::CommandMemoryWrite(input) => triad_runtime::NextStep::MemoryWrite(input),
+            Self::CommandMemoryRead(input) => triad_runtime::NextStep::MemoryRead(input),
             Self::ReplyToSignal(output) => triad_runtime::NextStep::Reply(output),
             Self::CommandEffect(effect) => triad_runtime::NextStep::RunEffect(effect),
             Self::Continue(work) => triad_runtime::NextStep::Continue(work),
@@ -505,17 +510,17 @@ pub trait NexusEngine: Send {
         triad_runtime::ContinuationLimit::default()
     }
 
-    fn apply_sema_write(
+    fn apply_memory_write(
         &mut self,
         origin_route: OriginRoute,
-        input: SemaWriteInput,
-    ) -> impl std::future::Future<Output = SemaWriteOutput> + Send + '_;
+        input: MemoryWriteInput,
+    ) -> impl std::future::Future<Output = MemoryWriteOutput> + Send + '_;
 
-    fn observe_sema_read(
+    fn observe_memory_read(
         &mut self,
         origin_route: OriginRoute,
-        input: SemaReadInput,
-    ) -> impl std::future::Future<Output = SemaReadOutput> + Send + '_;
+        input: MemoryReadInput,
+    ) -> impl std::future::Future<Output = MemoryReadOutput> + Send + '_;
 
     fn run_effect(
         &mut self,
@@ -557,8 +562,8 @@ struct NexusRunnerAdapter<'engine, Engine> {
 
 impl<Engine: NexusEngine> triad_runtime::RunnerEngines for NexusRunnerAdapter<'_, Engine> {
     type Reply = SignalOutput;
-    type SemaWrite = SemaWriteInput;
-    type SemaRead = SemaReadInput;
+    type MemoryWrite = MemoryWriteInput;
+    type MemoryRead = MemoryReadInput;
     type Effect = EffectCommand;
     type Work = NexusWork;
 
@@ -573,20 +578,20 @@ impl<Engine: NexusEngine> triad_runtime::RunnerEngines for NexusRunnerAdapter<'_
         triad_runtime::NexusAction::into_next_step(action)
     }
 
-    async fn apply_sema_write(&mut self, write: Self::SemaWrite) -> Self::Work {
+    async fn apply_memory_write(&mut self, write: Self::MemoryWrite) -> Self::Work {
         let output = self
             .engine
-            .apply_sema_write(self.origin_route.clone(), write)
+            .apply_memory_write(self.origin_route.clone(), write)
             .await;
-        NexusWork::SemaWriteCompleted(output)
+        NexusWork::MemoryWriteCompleted(output)
     }
 
-    async fn observe_sema_read(&mut self, read: Self::SemaRead) -> Self::Work {
+    async fn observe_memory_read(&mut self, read: Self::MemoryRead) -> Self::Work {
         let output = self
             .engine
-            .observe_sema_read(self.origin_route.clone(), read)
+            .observe_memory_read(self.origin_route.clone(), read)
             .await;
-        NexusWork::SemaReadCompleted(output)
+        NexusWork::MemoryReadCompleted(output)
     }
 
     async fn run_effect(&mut self, effect: Self::Effect) -> Self::Work {

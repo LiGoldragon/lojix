@@ -52,7 +52,7 @@
             || (craneLib.filterCargoSources path type)
             || (type == "regular" && baseNameOf path == "horizon-definition.datom")
             || (type == "regular" && pkgs.lib.hasSuffix ".ethos" path)
-            || (type == "regular" && pkgs.lib.hasSuffix ".sema" path)
+            || (type == "regular" && pkgs.lib.hasSuffix ".memory" path)
             || (
               type == "regular"
               && builtins.elem (baseNameOf path) [
@@ -194,7 +194,7 @@
           );
 
           # Process-level zero-argument startup witness with isolated XDG
-          # roots, a fresh Sema, both authority tiers, and restart persistence.
+          # roots, a fresh Memory, both authority tiers, and restart persistence.
           fresh-daemon-startup = craneLib.cargoTest (
             commonArguments
             // {

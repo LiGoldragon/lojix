@@ -591,13 +591,13 @@ pub struct AppliedRetire {
     pub state_marker: StateMarker,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum SemaReadInput {
+pub enum MemoryReadInput {
     QueryGenerations(Selection),
     ReadEventLog(EventLogRange),
     QueryTestRuns(TestRunLookup),
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum SemaReadOutput {
+pub enum MemoryReadOutput {
     GenerationsQueried(GenerationListing),
     EventLogRead(EventLogPage),
     TestRunsQueried(TestRunListing),
@@ -610,7 +610,7 @@ pub struct EventLogPage {
     pub state_marker: StateMarker,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub enum SemaWriteInput {
+pub enum MemoryWriteInput {
     OrdinaryConfigure(crate::NexusConfiguration),
     MetaConfigure(crate::NexusConfiguration),
     ReverseConfiguration,
@@ -655,7 +655,7 @@ pub enum ContainerState {
     Failed,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub enum SemaWriteOutput {
+pub enum MemoryWriteOutput {
     OrdinaryConfigured(ConfigurationReceipt),
     MetaConfigured(ConfigurationReceipt),
     ConfigurationReversed(ConfigurationReceipt),
@@ -988,16 +988,16 @@ pub struct StoredTestRun {
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum Input {
-    Read(SemaReadInput),
-    Write(SemaWriteInput),
+    Read(MemoryReadInput),
+    Write(MemoryWriteInput),
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum Output {
-    ReadCompleted(SemaReadOutput),
-    WriteCompleted(SemaWriteOutput),
+    ReadCompleted(MemoryReadOutput),
+    WriteCompleted(MemoryWriteOutput),
 }
 
-impl triad_runtime::SemaWriteInput for SemaWriteInput {}
-impl triad_runtime::SemaWriteOutput for SemaWriteOutput {}
-impl triad_runtime::SemaReadInput for SemaReadInput {}
-impl triad_runtime::SemaReadOutput for SemaReadOutput {}
+impl triad_runtime::MemoryWriteInput for MemoryWriteInput {}
+impl triad_runtime::MemoryWriteOutput for MemoryWriteOutput {}
+impl triad_runtime::MemoryReadInput for MemoryReadInput {}
+impl triad_runtime::MemoryReadOutput for MemoryReadOutput {}

@@ -35,7 +35,7 @@ const JOURNAL_SCHEMA_VERSION: u32 = 5;
 const JOURNAL_PREFIX: &str = ".lojix-bootstrap-v5-";
 const TEMPORARY_EVIDENCE_PREFIX: &str = ".lojix-bootstrap-evidence-";
 const JOURNAL_STATE_FILE: &str = "bootstrap-v5.rkyv";
-const JOURNAL_STORE_FILE: &str = "lojix-v5.sema";
+const JOURNAL_STORE_FILE: &str = "lojix-v5.memory";
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_EVIDENCE_MODE: u32 = 0o600;
 

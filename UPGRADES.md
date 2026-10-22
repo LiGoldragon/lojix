@@ -31,7 +31,7 @@ Pins, in the root and in every member that names them:
 `src/ingress.rs` is regenerated from `ethos/ingress.ethos`. Its types now
 derive rkyv always and their datom kinds under a new `datom` feature, which
 `tools` (the default) enables; the Nexus builds with neither, as before.
-`sema-engine`, `triad-runtime` and `nexus` are unchanged.
+`memory-engine`, `triad-runtime` and `nexus` are unchanged.
 
 protos 0.32 prints vertically through `Textualizable::textualize`; `lojix`
 and `lojix-meta` now print their replies through `Compactable::compact`, so a
@@ -320,14 +320,14 @@ now share `lojix::OfflineCommand` (`from_environment`, `from_arguments`, `run`).
   identically named inherent methods. The bodies moved into the trait impl.
 - `Nexus::root()`, `StoreInspection::catalog()`, `StoreInspection::tables()`
   and `TableInspection::role()` had no callers.
-- `NexusWork::sema_write_completed`, `sema_read_completed`, `effect_completed`
+- `NexusWork::memory_write_completed`, `memory_read_completed`, `effect_completed`
   and `NexusAction::reply_to_signal` wrapped one enum variant each; the variant
   is the constructor.
 
 ## Conversions are conversions
 
 `JournalStage::from_effect`/`effect`, `EffectResult::flake_resolved` and its
-three siblings, `SchemaRuntime::marker`/`sema_marker`,
+three siblings, `SchemaRuntime::marker`/`memory_marker`,
 `SchemaRuntime::configuration_receipt`/`configuration_rejection` and
 `SchemaRuntime::reply_meta` are `From` impls now.
 
@@ -340,7 +340,7 @@ arguments and moved there: `RejectionVocabulary` on `RejectionReason`,
 `TestRunSelecting` on `TestRunLookup`, `GenerationSelecting` on `Selection`,
 and `DeployAdmission` on `DeployRequest` — a deploy request now judges itself.
 The rest are `RuntimeCore`, `SignalDeciding`, `DeployDriving`, `TestDriving`,
-`SemaApplying`, `SemaObserving` and `EffectRunning`.
+`MemoryApplying`, `MemoryObserving` and `EffectRunning`.
 
 Seven effect types — `NixCommand`, `ClosureCopy`, `Activation`,
 `HostActivation`, `UserEnvironmentActivation`, `HermeticCheck` and
@@ -395,7 +395,7 @@ left to say, or it was reachable, in which case it now answers the peer.
   name no deployment — the continuation budget exhausted, a completion
   arriving with no correlated cursor, a durable write failing before the
   record exists. Each previously aborted the daemon or fabricated a record.
-- Every durable-write failure inside a sema-apply handler now returns
+- Every durable-write failure inside a memory-apply handler now returns
   `WriteRejected(DurableWriteFailed)` instead of aborting; the cause goes to
   the daemon journal.
 - `DeploySubmissionOutcome` and `DeployAdmission` each gain a third variant,
@@ -604,7 +604,7 @@ Package and wire behavior are unchanged from 1.0.0.
 ## 1.0.0 — zero-argument Nexus and separate clients
 
 Lojix now ships `lojix-nexus`, `lojix`, and `lojix-meta` from separate Nexus,
-ordinary-client, and meta-client packages. The Nexus discovers its stable Sema,
+ordinary-client, and meta-client packages. The Nexus discovers its stable Memory,
 persists desired configuration plus the meta-Configure marker, and has no Datom
 dependency in its package dependency graph; Datom-enabled maintenance programs
 live in the separate `lojix-offline-tools` package. Its old startup archive is accepted

@@ -42,7 +42,7 @@ fn deployment_event(position: u64) -> EventLogEntry {
 #[test]
 fn event_retention_preserves_the_newest_query_window_and_monotonic_positions() {
     let directory = tempfile::tempdir().expect("temporary store");
-    let store = Store::open(directory.path().join("lojix.sema")).expect("store opens");
+    let store = Store::open(directory.path().join("lojix.memory")).expect("store opens");
     for position in 0..3 {
         store
             .append_event_log_entry(event(position))
@@ -71,7 +71,7 @@ fn event_retention_preserves_the_newest_query_window_and_monotonic_positions() {
 #[test]
 fn deployment_events_cannot_bypass_the_transition_intent_protocol() {
     let directory = tempfile::tempdir().expect("temporary store");
-    let store = Store::open(directory.path().join("lojix.sema")).expect("store opens");
+    let store = Store::open(directory.path().join("lojix.memory")).expect("store opens");
 
     assert!(store.append_event_log_entry(deployment_event(0)).is_err());
     assert!(

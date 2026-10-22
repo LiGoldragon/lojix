@@ -159,7 +159,7 @@ fn remote_runtime(directory: &Path, programs: &Path) -> SchemaRuntime {
 }
 
 fn runtime_on(directory: &Path, programs: &Path, daemon_host: &str) -> SchemaRuntime {
-    let store = Arc::new(Store::open(directory.join("lojix.sema")).expect("open test store"));
+    let store = Arc::new(Store::open(directory.join("lojix.memory")).expect("open test store"));
     let configuration = Arc::new(
         RuntimeConfiguration::test_with_effect_program_directory(
             directory.join("generated-inputs"),

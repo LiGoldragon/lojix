@@ -39,8 +39,8 @@ client. Both clients speak portable typed Signals over Unix sockets.
 
 > **Scope (today vs eventually).** This stack sits on today's
 > substrate — Rust on Linux, `signal-core` over a Unix socket,
-> `sema-engine` for durable state, direct nix invocations. It is a
-> realization step toward the Sema-on-Sema future per
+> `memory-engine` for durable state, direct nix invocations. It is a
+> realization step toward the Memory-on-Memory future per
 > the workspace architecture's "Workspace vision and intent" section.
 
 ## 0.6 · Direction
@@ -49,7 +49,7 @@ client. Both clients speak portable typed Signals over Unix sockets.
 
 The production cutover bar is specific: complete-host and user-environment deploys (not eval/build only), deploys that survive SSH disconnect (job actor decoupled from the request stream so a dropped client does not abort the deploy), every operation described in schema types with no untyped escape hatch, durable-first state built and self-resuming before the first cutover, and end-to-end validation against a full routed microVM with its own Criome domain and reachable IP (Spirit `se72`).
 
-This stack sits on today's substrate as a realization step toward the Sema-on-Sema future — "Today, not eventually." See §7 for the detailed direction bullets governing testing/deployment discipline, typed Nix interface, ergonomic test authoring, credential custody, and GitHub-auth.
+This stack sits on today's substrate as a realization step toward the Memory-on-Memory future — "Today, not eventually." See §7 for the detailed direction bullets governing testing/deployment discipline, typed Nix interface, ergonomic test authoring, credential custody, and GitHub-auth.
 
 ## 0 · Crate shape
 
@@ -94,7 +94,7 @@ streams subscription events.
   `owner-signal-lojix` (Spirit `vudl`). `meta-signal-lojix` is the maintained
   standalone dependency; Lojix does not carry a local compatibility contract.
 - **Live generation set** — `BTreeMap<(ClusterName, NodeName, Kind),
-  Generation>` persisted via `sema-engine`. Source of truth for
+  Generation>` persisted via `memory-engine`. Source of truth for
   "what's running on every node right now."
 - **GC roots tree** —
   `/nix/var/nix/gcroots/criomos/<cluster>/<node>/<kind>/<generation>` →
@@ -119,7 +119,7 @@ streams subscription events.
   bounded query window is not merely an in-memory or materialized-row
   projection.
   Subscribers consume via `signal-lojix` `DeploymentObservation` and
-  `CacheRetentionObservation`, bridged through `sema-engine`'s
+  `CacheRetentionObservation`, bridged through `memory-engine`'s
   `SubscriptionSink` trait.
 - **Container lifecycle observation** — systemd dbus subscriptions
   for `containers.<name>.service` transitions; mirrors into the
@@ -163,12 +163,12 @@ streams subscription events.
   and the channel-macro engine. This crate uses signal-core types
   for every inter-component byte and does not invent parallel
   framing.
-- **Storage kernel** — `sema-engine` owns table registration, Signal
+- **Storage kernel** — `memory-engine` owns table registration, Signal
   verb execution (`assert`, `mutate`, `retract`, `commit`, `match`,
   `validate`, `subscribe`), the commit log, snapshot identity, and
-  the subscription-delivery primitive. `sema` (the storage kernel
+  the subscription-delivery primitive. `memory` (the storage kernel
   beneath it) owns redb/rkyv mechanics. This crate consumes both
-  through `sema-engine`'s public surface.
+  through `memory-engine`'s public surface.
 - **Cluster proposal source** — a request-supplied, validated `.datomic` path
   (read only for an explicitly selected Horizon materialization).
 - **Per-host key material** — `clavifaber` (this stack is
@@ -200,7 +200,7 @@ the workspace actor-systems doctrine. No zero-state holders.
 
 ## 4 · Storage and wire
 
-- **Storage:** handwritten runtime nouns in SEMA tables over a durable `sema-engine`
+- **Storage:** handwritten runtime nouns in MEMORY tables over a durable `memory-engine`
   store — one exact configured absolute file shared by daemon startup and the
   reset service. The ten
   record families (live set, gc-roots, event log, container lifecycle,
@@ -252,7 +252,7 @@ the workspace actor-systems doctrine. No zero-state holders.
 
 ## 5 · Constraints
 
-- The zero-argument Nexus discovers its stable Sema, loads persisted desired
+- The zero-argument Nexus discovers its stable Memory, loads persisted desired
   configuration, and binds ordinary and owner/meta Unix sockets. The owner/meta socket refuses any mode with
   "other" access and admits only same-uid/gid owner peers.
 - `lojix-write-configuration` is an offline migration input tool: it accepts
@@ -285,10 +285,10 @@ the workspace actor-systems doctrine. No zero-state holders.
 - The daemon serves connections concurrently, bounded by a permit
   cap, and never blocks on in-progress nix builds. Deploy state is
   per-request: each connection owns its own pipeline cursor. The
-  durable `sema-engine` Store is the only shared point and is locked
-  only briefly per sema op; long nix effects hold no global lock
+  durable `memory-engine` Store is the only shared point and is locked
+  only briefly per memory op; long nix effects hold no global lock
   (Spirit `2alg`).
-- The daemon's shared store uses `sema-engine` multi-table atomic commits for
+- The daemon's shared store uses `memory-engine` multi-table atomic commits for
   activation (live generation, GC root, and allocation) and for every deploy
   transition (correlation state/job plus intent, then acknowledgement and any
   terminal job retraction). A crash therefore cannot expose one half of those
@@ -298,7 +298,7 @@ the workspace actor-systems doctrine. No zero-state holders.
   event's `StreamEventIdentifier` from the lane's monotonic
   `LaneSequence`.
 - The daemon's subscription bridge is downstream of the commit:
-  `sema-engine` delta delivery cannot roll back the write
+  `memory-engine` delta delivery cannot roll back the write
   transaction.
 - Daemon-internal actor messages stay inside the crate; only
   `signal-lojix` records cross the socket.
@@ -366,10 +366,10 @@ the workspace actor-systems doctrine. No zero-state holders.
   channel.
 - `signal-core` at `github:LiGoldragon/signal-core` is the wire
   kernel.
-- `sema-engine` at `github:LiGoldragon/sema-engine` is the typed
+- `memory-engine` at `github:LiGoldragon/memory-engine` is the typed
   database engine.
-- `sema` at `github:LiGoldragon/sema` is the storage kernel beneath
-  `sema-engine`; this crate depends on it only transitively.
+- `memory` at `github:LiGoldragon/memory` is the storage kernel beneath
+  `memory-engine`; this crate depends on it only transitively.
 - `horizon-rs` at `github:LiGoldragon/horizon-rs` is the projection
   of cluster proposals; this stack reads horizon per request, never
   edits it.

@@ -40,12 +40,12 @@ signal = { git = "https://github.com/LiGoldragon/signal", rev = "f35460de930943e
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 redb              = "4"
 rustix            = { version = "1", default-features = false, features = ["fs", "process"] }
-sema-engine       = { git = "https://github.com/LiGoldragon/sema-engine.git", rev = "9884905ff9c660ad97a35c524e42532d5c7bac90" }
+memory-engine       = { git = "https://github.com/LiGoldragon/memory-engine.git", rev = "abf9d85166e22440440baba03358913458905b8d" }
 serde_json        = "1"
 sha2              = "0.10"
 thiserror         = "2"
 tokio             = { version = "1", features = ["io-util", "process", "rt-multi-thread", "signal", "sync", "time"] }
-triad-runtime     = { git = "https://github.com/LiGoldragon/triad-runtime.git", rev = "02cdd49df63a1769b3cf1b2761261a87eeaa75a4" }
+triad-runtime     = { git = "https://github.com/LiGoldragon/triad-runtime.git", rev = "4cc0a100841d2400f354c008c9faa73b2cedf50e" }
 futures-util      = "0.3"
 zbus              = "4.4"
 

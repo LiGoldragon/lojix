@@ -60,7 +60,7 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
 #[test]
 fn current_store_reopens_through_startup_gate() {
     let directory = TempDir::new().expect("tempdir");
-    let path = directory.path().join("lojix.sema");
+    let path = directory.path().join("lojix.memory");
     {
         let store = Store::open(&path).expect("open current store");
         let (generation, root) = activation(1);
@@ -118,7 +118,7 @@ fn quarantined(table: &str, key: &str, archive: &[u8]) -> impl Fn(&QuarantinedRo
 #[test]
 fn undecodable_deploy_job_and_configuration_rows_are_quarantined_and_the_store_serves() {
     let directory = TempDir::new().expect("tempdir");
-    let path = directory.path().join("lojix.sema");
+    let path = directory.path().join("lojix.memory");
     store_with_undecodable_rows(&path);
 
     let before = StoreInspector { path: path.clone() }.inspect();
@@ -207,7 +207,7 @@ fn an_undecodable_row_is_reported_on_the_opening_line() {
 #[test]
 fn a_row_quarantined_again_under_the_same_key_is_kept_beside_the_first() {
     let directory = TempDir::new().expect("tempdir");
-    let path = directory.path().join("lojix.sema");
+    let path = directory.path().join("lojix.memory");
     store_with_undecodable_rows(&path);
     drop(Store::open(&path).expect("first quarantine"));
 
@@ -242,7 +242,7 @@ fn a_row_quarantined_again_under_the_same_key_is_kept_beside_the_first() {
 #[test]
 fn a_malformed_live_set_row_is_quarantined_not_refused() {
     let directory = TempDir::new().expect("tempdir");
-    let path = directory.path().join("lojix.sema");
+    let path = directory.path().join("lojix.memory");
     {
         let _store = Store::open(&path).expect("create current store envelope");
     }

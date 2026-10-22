@@ -56,7 +56,7 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
 #[test]
 fn missing_store_path_is_reported_without_creating_file() {
     let directory = TempDir::new().expect("tempdir");
-    let path = directory.path().join("missing.sema");
+    let path = directory.path().join("missing.memory");
 
     let inspection = StoreInspector { path: path.clone() }.inspect();
 
@@ -70,7 +70,7 @@ fn missing_store_path_is_reported_without_creating_file() {
 #[test]
 fn registered_tables_with_no_rows_report_empty() {
     let directory = TempDir::new().expect("tempdir");
-    let path = directory.path().join("lojix.sema");
+    let path = directory.path().join("lojix.memory");
     {
         let _store = Store::open(&path).expect("open empty store");
     }
@@ -98,7 +98,7 @@ fn registered_tables_with_no_rows_report_empty() {
 #[test]
 fn populated_generation_rows_report_row_counts() {
     let directory = TempDir::new().expect("tempdir");
-    let path = directory.path().join("lojix.sema");
+    let path = directory.path().join("lojix.memory");
     {
         let store = Store::open(&path).expect("open store");
         let (generation, root) = activation(1);
@@ -128,7 +128,7 @@ fn populated_generation_rows_report_row_counts() {
 #[test]
 fn unreadable_generation_and_event_rows_report_decode_failures() {
     let directory = TempDir::new().expect("tempdir");
-    let path = directory.path().join("lojix.sema");
+    let path = directory.path().join("lojix.memory");
     {
         let _store = Store::open(&path).expect("open store");
     }
@@ -179,17 +179,17 @@ fn command_requires_one_inline_inspect_store_object() {
     assert!(StoreInspectionCommand::from_arguments(Vec::new()).is_err());
     assert!(StoreInspectionCommand::from_arguments([OsString::from("--state")]).is_err());
     assert!(StoreInspectionCommand::from_arguments([OsString::from("--pretty")]).is_err());
-    assert!(StoreInspectionCommand::from_arguments([OsString::from("lojix.sema")]).is_err());
+    assert!(StoreInspectionCommand::from_arguments([OsString::from("lojix.memory")]).is_err());
     assert!(
         StoreInspectionCommand::from_arguments([
-            OsString::from("InspectStore.{ /tmp/lojix.sema }"),
+            OsString::from("InspectStore.{ /tmp/lojix.memory }"),
             OsString::from("extra"),
         ])
         .is_err()
     );
     assert!(
         StoreInspectionCommand::from_arguments([OsString::from(
-            "InspectStore.{ /tmp/lojix.sema }",
+            "InspectStore.{ /tmp/lojix.memory }",
         )])
         .is_ok()
     );

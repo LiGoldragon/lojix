@@ -1,4 +1,4 @@
-//! Lojix Nexus entry. It takes no arguments, discovers its stable Sema from
+//! Lojix Nexus entry. It takes no arguments, discovers its stable Memory from
 //! the standard state base, loads desired configuration, and serves both
 //! authority-tiered sockets.
 

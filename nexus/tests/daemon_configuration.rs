@@ -36,7 +36,7 @@ fn legacy_configuration_archive_remains_available_to_the_offline_migrator() {
         owner_socket_path: directory.path().join("owner.sock").display().to_string(),
         owner_socket_mode: 0o600,
         state_directory_path: directory.path().join("state").display().to_string(),
-        store_path: directory.path().join("lojix.sema").display().to_string(),
+        store_path: directory.path().join("lojix.memory").display().to_string(),
         daemon_host: "fixture-daemon".to_string(),
         test_defaults: None,
     };
@@ -58,7 +58,7 @@ fn daemon_rejects_startup_arguments_before_discovering_state() {
         .expect("run daemon with forbidden argument");
     assert!(!output.status.success());
     assert!(output_text(&output).contains("starts with no arguments"));
-    assert!(!directory.path().join("state/lojix/lojix.sema").exists());
+    assert!(!directory.path().join("state/lojix/lojix.memory").exists());
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn zero_argument_daemon_persists_lifecycle_and_uses_desired_sockets_on_restart()
     let initial_state = state_root.join("lojix");
     let ordinary_socket = initial_runtime.join("ordinary.sock");
     let meta_socket = initial_runtime.join("meta.sock");
-    let store = initial_state.join("lojix.sema");
+    let store = initial_state.join("lojix.memory");
 
     let mut daemon = start_daemon(&runtime_root, &state_root);
     assert_eq!(
@@ -140,7 +140,7 @@ fn zero_argument_daemon_persists_lifecycle_and_uses_desired_sockets_on_restart()
     assert!(!reversed.meta_configure_occurred);
 
     stop_daemon(daemon, "configured daemon");
-    assert!(store.exists(), "stable XDG-discovered Sema must persist");
+    assert!(store.exists(), "stable XDG-discovered Memory must persist");
 
     let mut restarted = start_daemon(&runtime_root, &state_root);
     assert_eq!(
@@ -174,7 +174,7 @@ fn nexus_over_undecodable_rows_quarantines_them_and_answers_a_query() {
     let directory = tempfile::tempdir().expect("temporary isolation roots");
     let runtime_root = directory.path().join("runtime");
     let state_root = directory.path().join("state");
-    let store = state_root.join("lojix").join("lojix.sema");
+    let store = state_root.join("lojix").join("lojix.memory");
     fs::create_dir_all(store.parent().expect("store directory")).expect("state directory");
     fs::create_dir_all(&runtime_root).expect("isolated runtime root");
     drop(<lojix::Store as lojix::DurableStore>::open(&store).expect("create current store"));

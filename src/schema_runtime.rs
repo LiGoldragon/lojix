@@ -2,8 +2,8 @@
 //! implements the handwritten `nexus::NexusEngine` decision boundary.
 //!
 //! `decide` is the routing brain (port plan §4.2): ordinary reads route to
-//! `SemaRead`, ordinary subscription verbs reply with the token handshake, and
-//! meta mutations route to `SemaWrite`. A meta `Deploy` opens the effect
+//! `MemoryRead`, ordinary subscription verbs reply with the token handshake, and
+//! meta mutations route to `MemoryWrite`. A meta `Deploy` opens the effect
 //! pipeline (port plan §4.3): the write completion drives a chain of
 //! `RunEffect` continuations — resolve flake auth, eval, build, copy, activate
 //! — recording a phase transition between stages and finally replying
@@ -36,7 +36,7 @@ use zbus::zvariant::OwnedObjectPath;
 use zbus::{Connection, Proxy};
 
 use crate::runtime_flow::{self as nexus, NexusEngine};
-use crate::runtime_model as sema;
+use crate::runtime_model as memory;
 
 /// A local activation-login noun. Horizon projects users as public strings;
 /// Lojix validates the command-bearing login independently before it reaches
@@ -191,7 +191,7 @@ mod meta {
 }
 use crate::{Error, LegacyStartupConfiguration, NexusConfiguration, Result, Store};
 
-/// The lojix engine noun. Carries the durable `Store` (the four sema tables)
+/// The lojix engine noun. Carries the durable `Store` (the four memory tables)
 /// and, while a deploy is in flight, the pipeline cursor that threads the
 /// effect chain across continuation hops. The handwritten
 /// `NexusEngine::execute` drives the `Runner` over it.
@@ -301,8 +301,8 @@ pub struct TestDefaults {
     /// whose built microVM runner the live path brings up.
     test_flake: ordinary::FlakeReference,
     /// Exact hermetic system and output selector for a configured shorthand.
-    test_nix_system: sema::NixSystem,
-    test_output_selector: sema::DeploymentOutputSelector,
+    test_nix_system: memory::NixSystem,
+    test_output_selector: memory::DeploymentOutputSelector,
     /// The already-actualized Horizon definition used to validate `(OnHost h)`
     /// and resolve `All`. The configuration writer owns authored-file input.
     horizon_definition: Option<HorizonDefinition>,
@@ -355,7 +355,7 @@ pub(crate) trait TestLowering {
     where
         Self: Sized;
 
-    fn default_profile(&self) -> sema::TestExecutionProfile;
+    fn default_profile(&self) -> memory::TestExecutionProfile;
 
     /// The configured proposal projection, if a proposal source is set. The
     /// host-set validation and the `All` sweep both read it; absent (empty)
@@ -426,16 +426,16 @@ impl TestLowering for TestDefaults {
             default_vm_host: ordinary::NodeName::from("fixture-vm-host"),
             default_mode: ordinary::TestMode::Hermetic,
             test_flake: ordinary::FlakeReference::from("github:fixture-owner/fixture-test-flake"),
-            test_nix_system: sema::NixSystem::from("x86_64-linux"),
-            test_output_selector: sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new(
-                "checks.fixture-a".to_string(),
-            )),
+            test_nix_system: memory::NixSystem::from("x86_64-linux"),
+            test_output_selector: memory::DeploymentOutputSelector::new(
+                memory::FlakeAttribute::new("checks.fixture-a".to_string()),
+            ),
             horizon_definition: None,
         }
     }
 
-    fn default_profile(&self) -> sema::TestExecutionProfile {
-        sema::TestExecutionProfile {
+    fn default_profile(&self) -> memory::TestExecutionProfile {
+        memory::TestExecutionProfile {
             test_mode: self.default_mode,
             nix_system: self.test_nix_system.clone(),
             deployment_output_selector: self.test_output_selector.clone(),
@@ -460,17 +460,17 @@ impl From<&crate::TestDefaults> for TestDefaults {
                 crate::TestMode::Live => ordinary::TestMode::Live,
             },
             test_flake: ordinary::FlakeReference::new(defaults.test_flake.clone()),
-            test_nix_system: sema::NixSystem::new(defaults.test_nix_system.clone()),
-            test_output_selector: sema::DeploymentOutputSelector::new(sema::FlakeAttribute::new(
-                defaults.test_output_selector.clone(),
-            )),
+            test_nix_system: memory::NixSystem::new(defaults.test_nix_system.clone()),
+            test_output_selector: memory::DeploymentOutputSelector::new(
+                memory::FlakeAttribute::new(defaults.test_output_selector.clone()),
+            ),
             horizon_definition: defaults.horizon_definition.clone(),
         }
     }
 }
 
 /// Which single-write meta mutation is in flight, so a `WriteRejected` from the
-/// SEMA engine routes back to the matching typed rejection reply
+/// MEMORY engine routes back to the matching typed rejection reply
 /// (`PinRejected` / `UnpinRejected` / `RetireRejected` / `DeployRejected`).
 /// Deploy is multi-step and additionally tracked by `active_deploy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -493,7 +493,7 @@ pub(crate) struct ResolvedTestRun {
     cluster: ordinary::ClusterName,
     node: ordinary::NodeName,
     host: ordinary::NodeName,
-    profile: sema::TestExecutionProfile,
+    profile: memory::TestExecutionProfile,
     /// The flake paired with the exact output selector the hermetic dispatch
     /// builds (and whose built microVM runner the live path brings up).
     flake: ordinary::FlakeReference,
@@ -654,7 +654,7 @@ trait TestCursor {
     /// change — the driver the report-47 §2 `ContainerLifecycleRecord` table
     /// was scaffolded for. The container is named `vm-<node>`, the on-demand
     /// microVM this test brings up.
-    fn container_transition(&self, state: sema::ContainerState) -> sema::ContainerTransition;
+    fn container_transition(&self, state: memory::ContainerState) -> memory::ContainerTransition;
 }
 
 impl TestCursor for TestPipeline {
@@ -688,11 +688,11 @@ impl TestCursor for TestPipeline {
         }
     }
 
-    fn container_transition(&self, state: sema::ContainerState) -> sema::ContainerTransition {
-        sema::ContainerTransition {
+    fn container_transition(&self, state: memory::ContainerState) -> memory::ContainerTransition {
+        memory::ContainerTransition {
             cluster_name: self.run.cluster.clone(),
             node_name: self.run.node.clone(),
-            container_name: sema::ContainerName::new(format!("vm-{}", self.run.node.payload())),
+            container_name: memory::ContainerName::new(format!("vm-{}", self.run.node.payload())),
             container_state: state,
         }
     }
@@ -1163,24 +1163,24 @@ pub struct DeployPipeline {
     generation_artifact: ordinary::GenerationArtifact,
     activation_effect: ordinary::ActivationEffect,
     activation_slot: Option<ordinary::GenerationSlot>,
-    secrets_input: sema::SecretsInput,
+    secrets_input: memory::SecretsInput,
     requested_flake: ordinary::FlakeReference,
     flake: ordinary::FlakeReference,
     /// Exact, request-owned deployment routing. These values are persisted on
     /// the job cursor and copied to every effect; cluster/node identity never
     /// supplies an implicit route or output name.
-    deployment_transport: sema::DeploymentTransport,
-    deployment_input_mode: sema::DeploymentInputMode,
+    deployment_transport: memory::DeploymentTransport,
+    deployment_input_mode: memory::DeploymentInputMode,
     horizon_definition_option: Option<HorizonDefinition>,
-    deployment_output_selector: sema::DeploymentOutputSelector,
-    activation_backend: sema::ActivationBackend,
+    deployment_output_selector: memory::DeploymentOutputSelector,
+    activation_backend: memory::ActivationBackend,
     /// The deploy action (host action, or user-environment action + user). Owns the
     /// produces-closure / activates / target-attribute decisions so the
     /// pipeline asks the action rather than storing derived booleans.
     action: DeployAction,
     source_revision_policy: meta::SourceRevisionPolicy,
     source_revision: Option<ordinary::SourceRevisionRecord>,
-    builder: Option<sema::NixBuilderSpec>,
+    builder: Option<memory::NixBuilderSpec>,
     substituters: Vec<nexus::ExtraSubstituter>,
     input_overrides: Vec<nexus::FlakeInputOverride>,
     closure_path: Option<ordinary::ClosurePath>,
@@ -1188,13 +1188,13 @@ pub struct DeployPipeline {
     stage: DeployStage,
     /// The exact next continuation action, durably mirrored on `DeployJob`.
     /// It advances only after the preceding materialization/result is stored.
-    resume_stage: sema::DeployResumeStage,
+    resume_stage: memory::DeployResumeStage,
     /// Exact receipt of the immediately preceding phase transition. It is
     /// persisted only after Store returns the commit receipt; a restart uses
     /// this real receipt to enter the runner continuation, never a zero or
     /// predicted marker.
-    phase_receipt: Option<sema::PhaseReceipt>,
-    submission: sema::DeploySubmission,
+    phase_receipt: Option<memory::PhaseReceipt>,
+    submission: memory::DeploySubmission,
 }
 
 /// The deploy pipeline cursor. Each value names the stage that has just
@@ -1310,7 +1310,7 @@ trait FlakeAdmission<'a> {
 
     fn safe_ref(value: &str) -> bool;
 
-    fn immutable_revision(&self) -> Option<sema::ImmutableRevision>;
+    fn immutable_revision(&self) -> Option<memory::ImmutableRevision>;
 }
 
 impl<'a> FlakeAdmission<'a> for FlakeReferencePolicy<'a> {
@@ -1418,7 +1418,7 @@ impl<'a> FlakeAdmission<'a> for FlakeReferencePolicy<'a> {
             && value.split('/').all(Self::safe_locator_component)
     }
 
-    fn immutable_revision(&self) -> Option<sema::ImmutableRevision> {
+    fn immutable_revision(&self) -> Option<memory::ImmutableRevision> {
         self.is_immutable().then(|| {
             self.reference
                 .split_once('?')
@@ -1546,14 +1546,14 @@ impl FlakeMetadataReading for NixFlakeMetadata {
 /// far, and the effect command each next step needs.
 trait DeployCursor {
     fn deployment_request_identity(
-        submission: &sema::DeploySubmission,
-    ) -> sema::DeploymentRequestIdentity;
+        submission: &memory::DeploySubmission,
+    ) -> memory::DeploymentRequestIdentity;
 
     fn from_submission(
         deployment_identifier: ordinary::DeploymentIdentifier,
         generation_identifier: ordinary::GenerationIdentifier,
         accepted_marker: ordinary::StateMarker,
-        submission: sema::DeploySubmission,
+        submission: memory::DeploySubmission,
     ) -> Self
     where
         Self: Sized;
@@ -1621,7 +1621,7 @@ trait DeployCursor {
     /// here is an internal invariant failure surfaced through
     /// `activation_commit` returning `None` rather than committing incomplete
     /// state into the live set.
-    fn activation_commit(&self) -> Option<sema::ActivationCommit>;
+    fn activation_commit(&self) -> Option<memory::ActivationCommit>;
 
     fn phase_event(
         &self,
@@ -1629,7 +1629,7 @@ trait DeployCursor {
         event_log_position: ordinary::EventLogPosition,
     ) -> ordinary::DeploymentPhaseEvent;
 
-    fn deployment_environment(&self) -> sema::DeploymentEnvironment;
+    fn deployment_environment(&self) -> memory::DeploymentEnvironment;
 
     /// The BootOnce transient-unit name a resumed `Activating` job polls via
     /// `journalctl -u <unit>` instead of re-activating. Deterministic in the
@@ -1644,20 +1644,20 @@ trait DeployCursor {
     /// closure path (once built), exact private routing snapshot, and BootOnce
     /// unit name let a restarted daemon read the row without recomputing a
     /// route or selector.
-    fn deploy_job(&self, phase: sema::DeployJobPhase) -> sema::DeployJob;
+    fn deploy_job(&self, phase: memory::DeployJobPhase) -> memory::DeployJob;
 }
 
 impl DeployCursor for DeployPipeline {
     fn deployment_request_identity(
-        submission: &sema::DeploySubmission,
-    ) -> sema::DeploymentRequestIdentity {
+        submission: &memory::DeploySubmission,
+    ) -> memory::DeploymentRequestIdentity {
         match submission {
-            sema::DeploySubmission::Host(deployment) => sema::DeploymentRequestIdentity {
-                deployment_environment: sema::DeploymentEnvironment::HostEnvironment,
+            memory::DeploySubmission::Host(deployment) => memory::DeploymentRequestIdentity {
+                deployment_environment: memory::DeploymentEnvironment::HostEnvironment,
                 cluster_name: deployment.cluster_name.clone(),
                 node_name: deployment.node_name.clone(),
                 generation_artifact: Self::host_generation_artifact(deployment.host_composition),
-                requested_deployment_action: sema::RequestedDeploymentAction::Host(
+                requested_deployment_action: memory::RequestedDeploymentAction::Host(
                     deployment.host_deploy_action,
                 ),
                 activation_effect: Self::host_activation_effect(deployment.host_deploy_action),
@@ -1667,15 +1667,15 @@ impl DeployCursor for DeployPipeline {
                 )
                 .immutable_revision(),
             },
-            sema::DeploySubmission::UserEnvironment(deployment) => {
-                sema::DeploymentRequestIdentity {
-                    deployment_environment: sema::DeploymentEnvironment::UserEnvironment(
+            memory::DeploySubmission::UserEnvironment(deployment) => {
+                memory::DeploymentRequestIdentity {
+                    deployment_environment: memory::DeploymentEnvironment::UserEnvironment(
                         deployment.user_name.clone(),
                     ),
                     cluster_name: deployment.cluster_name.clone(),
                     node_name: deployment.node_name.clone(),
-                    generation_artifact: sema::GenerationArtifact::UserEnvironment,
-                    requested_deployment_action: sema::RequestedDeploymentAction::UserEnvironment(
+                    generation_artifact: memory::GenerationArtifact::UserEnvironment,
+                    requested_deployment_action: memory::RequestedDeploymentAction::UserEnvironment(
                         deployment.user_environment_action,
                     ),
                     activation_effect: Self::user_environment_activation_effect(
@@ -1695,11 +1695,11 @@ impl DeployCursor for DeployPipeline {
         deployment_identifier: ordinary::DeploymentIdentifier,
         generation_identifier: ordinary::GenerationIdentifier,
         accepted_marker: ordinary::StateMarker,
-        submission: sema::DeploySubmission,
+        submission: memory::DeploySubmission,
     ) -> Self {
         let durable_submission = submission.clone();
         match submission {
-            sema::DeploySubmission::Host(deployment) => Self {
+            memory::DeploySubmission::Host(deployment) => Self {
                 deployment_identifier,
                 generation_identifier,
                 cluster_name: deployment.cluster_name,
@@ -1724,11 +1724,11 @@ impl DeployCursor for DeployPipeline {
                 closure_path: None,
                 accepted_marker,
                 stage: DeployStage::Submitted,
-                resume_stage: sema::DeployResumeStage::ResolveFlakeAuth,
+                resume_stage: memory::DeployResumeStage::ResolveFlakeAuth,
                 phase_receipt: None,
                 submission: durable_submission,
             },
-            sema::DeploySubmission::UserEnvironment(deployment) => Self {
+            memory::DeploySubmission::UserEnvironment(deployment) => Self {
                 deployment_identifier,
                 generation_identifier,
                 cluster_name: deployment.cluster_name,
@@ -1758,7 +1758,7 @@ impl DeployCursor for DeployPipeline {
                 closure_path: None,
                 accepted_marker,
                 stage: DeployStage::Submitted,
-                resume_stage: sema::DeployResumeStage::ResolveFlakeAuth,
+                resume_stage: memory::DeployResumeStage::ResolveFlakeAuth,
                 phase_receipt: None,
                 submission: durable_submission,
             },
@@ -1851,7 +1851,7 @@ impl DeployCursor for DeployPipeline {
     fn needs_horizon_materialization(&self) -> bool {
         matches!(
             self.deployment_input_mode,
-            sema::DeploymentInputMode::Horizon
+            memory::DeploymentInputMode::Horizon
         )
     }
 
@@ -1961,10 +1961,10 @@ impl DeployCursor for DeployPipeline {
             closure_path,
             activation_effect: self.activation_effect,
             activation_backend: match self.activation_backend {
-                sema::ActivationBackend::NixosSystemdBootV1 => {
+                memory::ActivationBackend::NixosSystemdBootV1 => {
                     nexus::ActivationBackend::NixosSystemdBootV1
                 }
-                sema::ActivationBackend::HomeManagerNixProfileV1 => {
+                memory::ActivationBackend::HomeManagerNixProfileV1 => {
                     nexus::ActivationBackend::HomeManagerNixProfileV1
                 }
             },
@@ -1983,8 +1983,8 @@ impl DeployCursor for DeployPipeline {
             })
     }
 
-    fn activation_commit(&self) -> Option<sema::ActivationCommit> {
-        Some(sema::ActivationCommit {
+    fn activation_commit(&self) -> Option<memory::ActivationCommit> {
+        Some(memory::ActivationCommit {
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
@@ -2016,11 +2016,11 @@ impl DeployCursor for DeployPipeline {
         }
     }
 
-    fn deployment_environment(&self) -> sema::DeploymentEnvironment {
+    fn deployment_environment(&self) -> memory::DeploymentEnvironment {
         match &self.action {
-            DeployAction::Host(_) => sema::DeploymentEnvironment::HostEnvironment,
+            DeployAction::Host(_) => memory::DeploymentEnvironment::HostEnvironment,
             DeployAction::UserEnvironment { user, .. } => {
-                sema::DeploymentEnvironment::UserEnvironment(user.clone())
+                memory::DeploymentEnvironment::UserEnvironment(user.clone())
             }
         }
     }
@@ -2034,8 +2034,8 @@ impl DeployCursor for DeployPipeline {
         }
     }
 
-    fn deploy_job(&self, phase: sema::DeployJobPhase) -> sema::DeployJob {
-        sema::DeployJob {
+    fn deploy_job(&self, phase: memory::DeployJobPhase) -> memory::DeployJob {
+        memory::DeployJob {
             deployment_identifier: self.deployment_identifier.clone(),
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
@@ -2062,9 +2062,9 @@ impl DeployCursor for DeployPipeline {
             persisted_flake_input_override_vector: self
                 .input_overrides
                 .iter()
-                .map(|override_value| sema::PersistedFlakeInputOverride {
+                .map(|override_value| memory::PersistedFlakeInputOverride {
                     string: override_value.string.clone(),
-                    persisted_flake_input_reference: sema::PersistedFlakeInputReference {
+                    persisted_flake_input_reference: memory::PersistedFlakeInputReference {
                         url: override_value.flake_input_reference.url.clone(),
                         nix_archive_hash: override_value
                             .flake_input_reference
@@ -2153,24 +2153,24 @@ pub(crate) trait DeployJobResuming {
     fn self_switch_activation_record(
         &self,
         daemon_host_system_closure: Option<&str>,
-    ) -> Option<(sema::LiveGeneration, sema::GcRoot)>;
+    ) -> Option<(memory::LiveGeneration, memory::GcRoot)>;
 
     fn is_persisted_host_activate_now(&self) -> bool;
 }
 
-impl DeployJobResuming for sema::DeployJob {
+impl DeployJobResuming for memory::DeployJob {
     fn detached_test_activation_unit(
         &self,
         daemon_host: &ordinary::NodeName,
     ) -> Option<DetachedActivationUnit> {
-        if self.deploy_job_phase != sema::DeployJobPhase::Activating
+        if self.deploy_job_phase != memory::DeployJobPhase::Activating
             || self.node_name != *daemon_host
-            || self.activation_backend != sema::ActivationBackend::NixosSystemdBootV1
+            || self.activation_backend != memory::ActivationBackend::NixosSystemdBootV1
             || !matches!(
                 self.optional_deploy_submission.as_ref(),
-                Some(sema::DeploySubmission::Host(host))
+                Some(memory::DeploySubmission::Host(host))
                     if host.host_deploy_action == ordinary::HostDeployAction::TestActivation
-                        && host.activation_backend == sema::ActivationBackend::NixosSystemdBootV1
+                        && host.activation_backend == memory::ActivationBackend::NixosSystemdBootV1
             )
         {
             return None;
@@ -2182,14 +2182,14 @@ impl DeployJobResuming for sema::DeployJob {
 
     fn resumption(&self) -> DeployJobResumption {
         match self.deploy_job_phase {
-            sema::DeployJobPhase::Activating => DeployJobResumption::PollActivationUnit {
+            memory::DeployJobPhase::Activating => DeployJobResumption::PollActivationUnit {
                 unit: self.boot_once_unit.clone(),
             },
-            sema::DeployJobPhase::Submitted
-            | sema::DeployJobPhase::Building
-            | sema::DeployJobPhase::Built
-            | sema::DeployJobPhase::Copying => DeployJobResumption::RestartPipeline,
-            sema::DeployJobPhase::Activated | sema::DeployJobPhase::Failed => {
+            memory::DeployJobPhase::Submitted
+            | memory::DeployJobPhase::Building
+            | memory::DeployJobPhase::Built
+            | memory::DeployJobPhase::Copying => DeployJobResumption::RestartPipeline,
+            memory::DeployJobPhase::Activated | memory::DeployJobPhase::Failed => {
                 DeployJobResumption::AlreadyTerminal
             }
         }
@@ -2198,7 +2198,7 @@ impl DeployJobResuming for sema::DeployJob {
     fn self_switch_activation_record(
         &self,
         daemon_host_system_closure: Option<&str>,
-    ) -> Option<(sema::LiveGeneration, sema::GcRoot)> {
+    ) -> Option<(memory::LiveGeneration, memory::GcRoot)> {
         if !self.is_persisted_host_activate_now() {
             return None;
         }
@@ -2215,12 +2215,12 @@ impl DeployJobResuming for sema::DeployJob {
                 .unwrap_or_else(|| self.flake_reference.clone()),
             string: self.resolved_revision.clone().unwrap_or_default(),
         };
-        let generation = sema::LiveGeneration {
+        let generation = memory::LiveGeneration {
             deployment_identifier: self.deployment_identifier.clone(),
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
-            deployment_environment: sema::DeploymentEnvironment::HostEnvironment,
+            deployment_environment: memory::DeploymentEnvironment::HostEnvironment,
             // The detached self-switch is only reached by a host `ActivateNow`,
             // and a daemon host is a complete host, so the recorded artifact is
             // CompleteHost and the effect a live activation.
@@ -2230,7 +2230,7 @@ impl DeployJobResuming for sema::DeployJob {
             closure_path: closure_path.clone(),
             source_revision_record,
         };
-        let root = sema::GcRoot {
+        let root = memory::GcRoot {
             generation_identifier: self.generation_identifier.clone(),
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
@@ -2242,17 +2242,17 @@ impl DeployJobResuming for sema::DeployJob {
     }
 
     fn is_persisted_host_activate_now(&self) -> bool {
-        self.activation_backend == sema::ActivationBackend::NixosSystemdBootV1
+        self.activation_backend == memory::ActivationBackend::NixosSystemdBootV1
             && matches!(
                 self.optional_deploy_submission.as_ref(),
-                Some(sema::DeploySubmission::Host(host))
+                Some(memory::DeploySubmission::Host(host))
                     if host.host_deploy_action == ordinary::HostDeployAction::ActivateNow
-                        && host.activation_backend == sema::ActivationBackend::NixosSystemdBootV1
+                        && host.activation_backend == memory::ActivationBackend::NixosSystemdBootV1
             )
     }
 }
 
-impl From<ordinary::TestRunRecord> for sema::StoredTestRun {
+impl From<ordinary::TestRunRecord> for memory::StoredTestRun {
     /// Project the wire test-run record onto the lojix-local durable row. The
     /// two carry identical fields (the LiveGeneration/Generation split): the
     /// daemon writes the durable row, the query reads it back as the wire shape.
@@ -2270,10 +2270,10 @@ impl From<ordinary::TestRunRecord> for sema::StoredTestRun {
     }
 }
 
-impl From<sema::StoredTestRun> for ordinary::TestRunRecord {
+impl From<memory::StoredTestRun> for ordinary::TestRunRecord {
     /// Project the durable row back onto the wire record for the
     /// `(ByTestRun …)` query reply.
-    fn from(run: sema::StoredTestRun) -> Self {
+    fn from(run: memory::StoredTestRun) -> Self {
         Self {
             test_run_identifier: run.test_run_identifier,
             cluster_name: run.cluster_name,
@@ -2295,7 +2295,7 @@ trait ResumePoint {
     fn deploy_stage(&self) -> DeployStage;
 }
 
-impl ResumePoint for sema::DeployResumeStage {
+impl ResumePoint for memory::DeployResumeStage {
     fn recorded_phase(&self) -> Option<ordinary::DeploymentPhase> {
         match self {
             Self::NixEval => Some(ordinary::DeploymentPhase::Building),
@@ -2316,7 +2316,7 @@ impl ResumePoint for sema::DeployResumeStage {
     }
 }
 
-impl From<ordinary::DeploymentPhase> for sema::DeployJobPhase {
+impl From<ordinary::DeploymentPhase> for memory::DeployJobPhase {
     /// Mirror the wire phase onto the durable job-row phase cursor. The two
     /// enums carry the same variants; the job row tracks the same lifecycle the
     /// event log records, so a resumed daemon reads one phase value.
@@ -2358,15 +2358,15 @@ trait RejectionVocabulary {
     fn deploy_reason(self) -> meta::DeployRejectionReason;
 }
 
-impl RejectionVocabulary for sema::RejectionReason {
-    /// Map a SEMA write-rejection reason to a typed test rejection. A reason
+impl RejectionVocabulary for memory::RejectionReason {
+    /// Map a MEMORY write-rejection reason to a typed test rejection. A reason
     /// with no test-domain meaning is an internal invariant failure (the Deploy
     /// precedent), never a misleading domain reason.
     fn test_reason(self) -> meta::TestRejectionReason {
         let reason = self;
         match reason {
-            sema::RejectionReason::ClusterUnknown => meta::TestRejectionReason::ClusterUnknown,
-            sema::RejectionReason::NodeUnknown => meta::TestRejectionReason::NodeUnknown,
+            memory::RejectionReason::ClusterUnknown => meta::TestRejectionReason::ClusterUnknown,
+            memory::RejectionReason::NodeUnknown => meta::TestRejectionReason::NodeUnknown,
             _ => meta::TestRejectionReason::InternalError,
         }
     }
@@ -2374,9 +2374,11 @@ impl RejectionVocabulary for sema::RejectionReason {
     fn pin_reason(self) -> meta::PinRejectionReason {
         let reason = self;
         match reason {
-            sema::RejectionReason::GenerationUnknown => meta::PinRejectionReason::GenerationUnknown,
-            sema::RejectionReason::NodeUnknown => meta::PinRejectionReason::NodeUnknown,
-            sema::RejectionReason::PinLabelInUse => meta::PinRejectionReason::PinLabelInUse,
+            memory::RejectionReason::GenerationUnknown => {
+                meta::PinRejectionReason::GenerationUnknown
+            }
+            memory::RejectionReason::NodeUnknown => meta::PinRejectionReason::NodeUnknown,
+            memory::RejectionReason::PinLabelInUse => meta::PinRejectionReason::PinLabelInUse,
             _ => meta::PinRejectionReason::InternalError,
         }
     }
@@ -2384,9 +2386,9 @@ impl RejectionVocabulary for sema::RejectionReason {
     fn unpin_reason(self) -> meta::UnpinRejectionReason {
         let reason = self;
         match reason {
-            sema::RejectionReason::PinLabelUnknown => meta::UnpinRejectionReason::PinLabelUnknown,
-            sema::RejectionReason::NodeUnknown => meta::UnpinRejectionReason::NodeUnknown,
-            sema::RejectionReason::GenerationUnknown => {
+            memory::RejectionReason::PinLabelUnknown => meta::UnpinRejectionReason::PinLabelUnknown,
+            memory::RejectionReason::NodeUnknown => meta::UnpinRejectionReason::NodeUnknown,
+            memory::RejectionReason::GenerationUnknown => {
                 meta::UnpinRejectionReason::GenerationNotPinned
             }
             // A reason with no unpin-domain meaning — a failed durable write,
@@ -2400,14 +2402,14 @@ impl RejectionVocabulary for sema::RejectionReason {
     fn retire_reason(self) -> meta::RetireRejectionReason {
         let reason = self;
         match reason {
-            sema::RejectionReason::GenerationUnknown => {
+            memory::RejectionReason::GenerationUnknown => {
                 meta::RetireRejectionReason::GenerationUnknown
             }
-            sema::RejectionReason::NodeUnknown => meta::RetireRejectionReason::NodeUnknown,
-            sema::RejectionReason::GenerationActive => {
+            memory::RejectionReason::NodeUnknown => meta::RetireRejectionReason::NodeUnknown,
+            memory::RejectionReason::GenerationActive => {
                 meta::RetireRejectionReason::GenerationActive
             }
-            sema::RejectionReason::GenerationPinned => {
+            memory::RejectionReason::GenerationPinned => {
                 meta::RetireRejectionReason::GenerationPinned
             }
             _ => meta::RetireRejectionReason::InternalError,
@@ -2417,12 +2419,12 @@ impl RejectionVocabulary for sema::RejectionReason {
     fn deploy_reason(self) -> meta::DeployRejectionReason {
         let reason = self;
         match reason {
-            sema::RejectionReason::ClusterUnknown => meta::DeployRejectionReason::ClusterUnknown,
-            sema::RejectionReason::NodeUnknown => meta::DeployRejectionReason::NodeUnknown,
-            sema::RejectionReason::ProposalSourceUnreachable => {
+            memory::RejectionReason::ClusterUnknown => meta::DeployRejectionReason::ClusterUnknown,
+            memory::RejectionReason::NodeUnknown => meta::DeployRejectionReason::NodeUnknown,
+            memory::RejectionReason::ProposalSourceUnreachable => {
                 meta::DeployRejectionReason::ProposalSourceUnreachable
             }
-            // A sema reason with no deploy-domain mapping is an internal
+            // A memory reason with no deploy-domain mapping is an internal
             // invariant failure (e.g. a poisoned lock), not "already deploying"
             // (audit C4).
             _ => meta::DeployRejectionReason::InternalError,
@@ -2432,44 +2434,48 @@ impl RejectionVocabulary for sema::RejectionReason {
 
 /// What a refused deploy is recorded as once the refusal becomes durable.
 trait TerminalReason {
-    fn terminal_reason(self) -> sema::DeploymentTerminalReason;
+    fn terminal_reason(self) -> memory::DeploymentTerminalReason;
 }
 
 impl TerminalReason for meta::DeployRejectionReason {
-    fn terminal_reason(self) -> sema::DeploymentTerminalReason {
+    fn terminal_reason(self) -> memory::DeploymentTerminalReason {
         let reason = self;
         match reason {
             meta::DeployRejectionReason::ClusterUnknown => {
-                sema::DeploymentTerminalReason::ClusterUnknown
+                memory::DeploymentTerminalReason::ClusterUnknown
             }
-            meta::DeployRejectionReason::NodeUnknown => sema::DeploymentTerminalReason::NodeUnknown,
+            meta::DeployRejectionReason::NodeUnknown => {
+                memory::DeploymentTerminalReason::NodeUnknown
+            }
             meta::DeployRejectionReason::ProposalSourceUnreachable => {
-                sema::DeploymentTerminalReason::ProposalSourceUnreachable
+                memory::DeploymentTerminalReason::ProposalSourceUnreachable
             }
             meta::DeployRejectionReason::FlakeReferenceMalformed => {
-                sema::DeploymentTerminalReason::FlakeReferenceMalformed
+                memory::DeploymentTerminalReason::FlakeReferenceMalformed
             }
             meta::DeployRejectionReason::EvaluationFailed => {
-                sema::DeploymentTerminalReason::EvaluationFailed
+                memory::DeploymentTerminalReason::EvaluationFailed
             }
-            meta::DeployRejectionReason::BuildFailed => sema::DeploymentTerminalReason::BuildFailed,
+            meta::DeployRejectionReason::BuildFailed => {
+                memory::DeploymentTerminalReason::BuildFailed
+            }
             meta::DeployRejectionReason::InvalidDeploymentRouting => {
-                sema::DeploymentTerminalReason::InvalidDeploymentRouting
+                memory::DeploymentTerminalReason::InvalidDeploymentRouting
             }
             meta::DeployRejectionReason::ClosureCopyFailed => {
-                sema::DeploymentTerminalReason::ClosureCopyFailed
+                memory::DeploymentTerminalReason::ClosureCopyFailed
             }
             meta::DeployRejectionReason::DeploymentInFlight => {
-                sema::DeploymentTerminalReason::DeploymentInFlight
+                memory::DeploymentTerminalReason::DeploymentInFlight
             }
             meta::DeployRejectionReason::UnsupportedDeployAction => {
-                sema::DeploymentTerminalReason::UnsupportedDeployAction
+                memory::DeploymentTerminalReason::UnsupportedDeployAction
             }
             meta::DeployRejectionReason::InternalError => {
-                sema::DeploymentTerminalReason::InternalError
+                memory::DeploymentTerminalReason::InternalError
             }
             meta::DeployRejectionReason::ActivationFailed => {
-                sema::DeploymentTerminalReason::ActivationFailed
+                memory::DeploymentTerminalReason::ActivationFailed
             }
         }
     }
@@ -2478,27 +2484,27 @@ impl TerminalReason for meta::DeployRejectionReason {
 /// How an effect stage that failed is recorded, in the deployment's vocabulary
 /// and in the test pipeline's.
 trait FailureStaging {
-    fn deployment_failure_stage(self) -> sema::DeploymentFailureStage;
+    fn deployment_failure_stage(self) -> memory::DeploymentFailureStage;
 
     fn test_failure_stage(self) -> ordinary::FailureStage;
 }
 
 impl FailureStaging for nexus::EffectStage {
-    fn deployment_failure_stage(self) -> sema::DeploymentFailureStage {
+    fn deployment_failure_stage(self) -> memory::DeploymentFailureStage {
         let stage = self;
         match stage {
-            nexus::EffectStage::FlakeAuth => sema::DeploymentFailureStage::FlakeAuth,
+            nexus::EffectStage::FlakeAuth => memory::DeploymentFailureStage::FlakeAuth,
             nexus::EffectStage::MaterializeHorizon => {
-                sema::DeploymentFailureStage::MaterializeHorizon
+                memory::DeploymentFailureStage::MaterializeHorizon
             }
-            nexus::EffectStage::Eval => sema::DeploymentFailureStage::Eval,
-            nexus::EffectStage::Build => sema::DeploymentFailureStage::Build,
-            nexus::EffectStage::CopyClosure => sema::DeploymentFailureStage::CopyClosure,
-            nexus::EffectStage::Activate => sema::DeploymentFailureStage::Activate,
+            nexus::EffectStage::Eval => memory::DeploymentFailureStage::Eval,
+            nexus::EffectStage::Build => memory::DeploymentFailureStage::Build,
+            nexus::EffectStage::CopyClosure => memory::DeploymentFailureStage::CopyClosure,
+            nexus::EffectStage::Activate => memory::DeploymentFailureStage::Activate,
             nexus::EffectStage::Gc
             | nexus::EffectStage::HermeticCheck
             | nexus::EffectStage::BringUpTestVm
-            | nexus::EffectStage::TearDownTestVm => sema::DeploymentFailureStage::Daemon,
+            | nexus::EffectStage::TearDownTestVm => memory::DeploymentFailureStage::Daemon,
         }
     }
 
@@ -2520,22 +2526,22 @@ impl FailureStaging for nexus::EffectStage {
 
 /// The durable lifecycle a public deployment phase is recorded as.
 trait PhaseLifecycle {
-    fn deployment_lifecycle(self) -> sema::DeploymentLifecycle;
+    fn deployment_lifecycle(self) -> memory::DeploymentLifecycle;
 }
 
 impl PhaseLifecycle for ordinary::DeploymentPhase {
-    fn deployment_lifecycle(self) -> sema::DeploymentLifecycle {
+    fn deployment_lifecycle(self) -> memory::DeploymentLifecycle {
         let phase = self;
         match phase {
-            ordinary::DeploymentPhase::Submitted => sema::DeploymentLifecycle::Submitted,
-            ordinary::DeploymentPhase::Building => sema::DeploymentLifecycle::Building,
-            ordinary::DeploymentPhase::Built => sema::DeploymentLifecycle::Built,
-            ordinary::DeploymentPhase::Copying => sema::DeploymentLifecycle::Copying,
-            ordinary::DeploymentPhase::Activating => sema::DeploymentLifecycle::Activating,
-            ordinary::DeploymentPhase::Activated => sema::DeploymentLifecycle::Activated,
-            ordinary::DeploymentPhase::Completed => sema::DeploymentLifecycle::Completed,
-            ordinary::DeploymentPhase::Rejected => sema::DeploymentLifecycle::Rejected,
-            ordinary::DeploymentPhase::Failed => sema::DeploymentLifecycle::Failed,
+            ordinary::DeploymentPhase::Submitted => memory::DeploymentLifecycle::Submitted,
+            ordinary::DeploymentPhase::Building => memory::DeploymentLifecycle::Building,
+            ordinary::DeploymentPhase::Built => memory::DeploymentLifecycle::Built,
+            ordinary::DeploymentPhase::Copying => memory::DeploymentLifecycle::Copying,
+            ordinary::DeploymentPhase::Activating => memory::DeploymentLifecycle::Activating,
+            ordinary::DeploymentPhase::Activated => memory::DeploymentLifecycle::Activated,
+            ordinary::DeploymentPhase::Completed => memory::DeploymentLifecycle::Completed,
+            ordinary::DeploymentPhase::Rejected => memory::DeploymentLifecycle::Rejected,
+            ordinary::DeploymentPhase::Failed => memory::DeploymentLifecycle::Failed,
         }
     }
 }
@@ -2560,11 +2566,11 @@ impl ActivationSlot for ordinary::ActivationEffect {
 
 /// What a stored test run has to match for a lookup to answer with it.
 trait TestRunSelecting {
-    fn matches(&self, run: &sema::StoredTestRun) -> bool;
+    fn matches(&self, run: &memory::StoredTestRun) -> bool;
 }
 
 impl TestRunSelecting for ordinary::TestRunLookup {
-    fn matches(&self, run: &sema::StoredTestRun) -> bool {
+    fn matches(&self, run: &memory::StoredTestRun) -> bool {
         let lookup = self;
         lookup.cluster_name == run.cluster_name
             && lookup.node_name == run.node
@@ -2578,13 +2584,13 @@ impl TestRunSelecting for ordinary::TestRunLookup {
 /// What a query selection admits: which live generations answer it, and which
 /// durable deployment records do.
 trait GenerationSelecting {
-    fn matches_generation(&self, live: &sema::LiveGeneration) -> bool;
+    fn matches_generation(&self, live: &memory::LiveGeneration) -> bool;
 
-    fn matches_deployment_record(&self, record: &sema::DeploymentRecord) -> bool;
+    fn matches_deployment_record(&self, record: &memory::DeploymentRecord) -> bool;
 }
 
 impl GenerationSelecting for ordinary::Selection {
-    fn matches_generation(&self, live: &sema::LiveGeneration) -> bool {
+    fn matches_generation(&self, live: &memory::LiveGeneration) -> bool {
         let selection = self;
         match selection {
             ordinary::Selection::ByNode(selector) => {
@@ -2611,7 +2617,7 @@ impl GenerationSelecting for ordinary::Selection {
         }
     }
 
-    fn matches_deployment_record(&self, record: &sema::DeploymentRecord) -> bool {
+    fn matches_deployment_record(&self, record: &memory::DeploymentRecord) -> bool {
         let selection = self;
         match selection {
             ordinary::Selection::ByNode(selector) => {
@@ -2745,8 +2751,8 @@ impl DeployAdmission for meta::DeployRequest {
         };
         let valid_backend = matches!(
             (action, backend),
-            (true, sema::ActivationBackend::NixosSystemdBootV1)
-                | (false, sema::ActivationBackend::HomeManagerNixProfileV1)
+            (true, memory::ActivationBackend::NixosSystemdBootV1)
+                | (false, memory::ActivationBackend::HomeManagerNixProfileV1)
         );
         let valid_selector = !selector.payload().payload().is_empty()
             && selector
@@ -2815,8 +2821,8 @@ impl DeployAdmission for meta::DeployRequest {
             ),
         };
         match (mode, definition) {
-            (sema::DeploymentInputMode::Direct, None) => None,
-            (sema::DeploymentInputMode::Horizon, Some(definition))
+            (memory::DeploymentInputMode::Direct, None) => None,
+            (memory::DeploymentInputMode::Horizon, Some(definition))
                 if definition.project(node.payload()).is_ok() =>
             {
                 None
@@ -2829,12 +2835,12 @@ impl DeployAdmission for meta::DeployRequest {
 /// A read that could not be answered, reported with the store state it was
 /// asked against.
 trait ReadMiss {
-    fn read_missed(commit_sequence: u64, reason: sema::RejectionReason) -> Self;
+    fn read_missed(commit_sequence: u64, reason: memory::RejectionReason) -> Self;
 }
 
-impl ReadMiss for sema::SemaReadOutput {
-    fn read_missed(commit_sequence: u64, reason: sema::RejectionReason) -> Self {
-        Self::ReadMissed(sema::RejectionReport {
+impl ReadMiss for memory::MemoryReadOutput {
+    fn read_missed(commit_sequence: u64, reason: memory::RejectionReason) -> Self {
+        Self::ReadMissed(memory::RejectionReport {
             rejection_reason: reason,
             state_marker: ordinary::StateMarker::from(commit_sequence),
         })
@@ -2847,7 +2853,7 @@ impl From<meta::Output> for nexus::NexusAction {
     }
 }
 
-impl From<crate::NexusConfigurationState> for sema::ConfigurationReceipt {
+impl From<crate::NexusConfigurationState> for memory::ConfigurationReceipt {
     fn from(state: crate::NexusConfigurationState) -> Self {
         Self {
             configuration: state.desired_configuration,
@@ -2856,14 +2862,14 @@ impl From<crate::NexusConfigurationState> for sema::ConfigurationReceipt {
     }
 }
 
-impl From<crate::Error> for sema::ConfigurationRejection {
+impl From<crate::Error> for memory::ConfigurationRejection {
     fn from(error: crate::Error) -> Self {
         Self {
             reason: match error {
                 crate::Error::OrdinaryConfigureClosed => {
-                    sema::ConfigurationRejectionReason::OrdinaryConfigureClosed
+                    memory::ConfigurationRejectionReason::OrdinaryConfigureClosed
                 }
-                _ => sema::ConfigurationRejectionReason::InvalidConfiguration,
+                _ => memory::ConfigurationRejectionReason::InvalidConfiguration,
             },
         }
     }
@@ -2885,7 +2891,7 @@ pub trait RuntimeCore {
     where
         Self: Sized;
 
-    /// A unique tempdir-backed `*.sema` path for a test-only `Store`. Each call
+    /// A unique tempdir-backed `*.memory` path for a test-only `Store`. Each call
     /// names a fresh file under the temp directory (process id, a nanosecond
     /// timestamp, and a per-process counter) so parallel tests never collide and
     /// each starts from a virgin store.
@@ -2914,7 +2920,7 @@ pub trait RuntimeCore {
     fn current_commit_sequence(&self) -> u64;
 
     /// Drive a test-pipeline `NexusAction` to its terminal `Tested`/
-    /// `TestRejected` reply, threading any further effect / sema-write
+    /// `TestRejected` reply, threading any further effect / memory-write
     /// continuations through the handwritten runner. The hermetic path is a
     /// single effect then a terminal write, so this usually runs one or two
     /// hops; the live path threads bring-up → deploy → assert → teardown.
@@ -2924,7 +2930,7 @@ pub trait RuntimeCore {
 impl RuntimeCore for SchemaRuntime {
     fn new() -> Self {
         Self::with_store(Arc::new(
-            Store::open(Self::test_store_path()).expect("open sema store"),
+            Store::open(Self::test_store_path()).expect("open memory store"),
         ))
     }
 
@@ -2937,7 +2943,7 @@ impl RuntimeCore for SchemaRuntime {
             .unwrap_or(0);
         let unique = COUNTER.fetch_add(1, Ordering::SeqCst);
         std::env::temp_dir().join("lojix-test-store").join(format!(
-            "{}-{nanoseconds}-{unique}.sema",
+            "{}-{nanoseconds}-{unique}.memory",
             std::process::id()
         ))
     }
@@ -2975,8 +2981,8 @@ impl RuntimeCore for SchemaRuntime {
                 nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => {
                     return output;
                 }
-                nexus::NexusAction::CommandSemaWrite(input) => {
-                    let output = self.apply_sema(input);
+                nexus::NexusAction::CommandMemoryWrite(input) => {
+                    let output = self.apply_memory(input);
                     action = self.decide_write_completion(output);
                 }
                 nexus::NexusAction::CommandEffect(command) => {
@@ -3037,9 +3043,9 @@ pub(crate) trait SignalDeciding {
 
     fn test_rejection(&self, reason: meta::TestRejectionReason) -> meta::RejectedTest;
 
-    fn decide_read_completion(&mut self, output: sema::SemaReadOutput) -> nexus::NexusAction;
+    fn decide_read_completion(&mut self, output: memory::MemoryReadOutput) -> nexus::NexusAction;
 
-    fn decide_write_completion(&mut self, output: sema::SemaWriteOutput) -> nexus::NexusAction;
+    fn decide_write_completion(&mut self, output: memory::MemoryWriteOutput) -> nexus::NexusAction;
 
     /// Route a test effect's result to the next test step (Unit 2b). The
     /// hermetic check is a single effect: a built check records `Passed` with
@@ -3055,14 +3061,14 @@ pub(crate) trait SignalDeciding {
 
     fn decide_effect_completion(&mut self, result: nexus::EffectResult) -> nexus::NexusAction;
 
-    fn reject_active_or_meta(&mut self, report: sema::RejectionReport) -> nexus::NexusAction;
+    fn reject_active_or_meta(&mut self, report: memory::RejectionReport) -> nexus::NexusAction;
 
     /// Reject a request only after allocating and terminalizing its durable
     /// correlation record. This is the rejection analogue of admission: no
     /// caller can receive a deploy rejection with a synthetic identifier.
     fn reject_submission(
         &self,
-        submission: sema::DeploySubmission,
+        submission: memory::DeploySubmission,
         reason: meta::DeployRejectionReason,
     ) -> DeploySubmissionOutcome;
 
@@ -3086,13 +3092,13 @@ pub(crate) trait SignalDeciding {
     /// itself is not evidence a retry can act on.
     fn refuse_deploy(
         &self,
-        deploy_refusal_reason: sema::DeployRefusalReason,
+        deploy_refusal_reason: memory::DeployRefusalReason,
         cause: &dyn std::fmt::Display,
     ) -> meta::Output;
 
     fn refusal(
         &self,
-        deploy_refusal_reason: sema::DeployRefusalReason,
+        deploy_refusal_reason: memory::DeployRefusalReason,
         cause: &dyn std::fmt::Display,
     ) -> meta::RefusedDeploy;
 }
@@ -3107,22 +3113,26 @@ impl SignalDeciding for SchemaRuntime {
 
     fn decide_ordinary_input(&mut self, input: ordinary::Input) -> nexus::NexusAction {
         match input {
-            ordinary::Input::Configure(configuration) => nexus::NexusAction::CommandSemaWrite(
-                sema::SemaWriteInput::OrdinaryConfigure(configuration),
+            ordinary::Input::Configure(configuration) => nexus::NexusAction::CommandMemoryWrite(
+                memory::MemoryWriteInput::OrdinaryConfigure(configuration),
             ),
             ordinary::Input::Query(selection) => {
                 // A (ByTestRun …) selection reads the durable test-run table;
                 // every other selection reads the generation set. Routing here
                 // keeps one Query verb covering both read planes (report 54).
                 match selection {
-                    ordinary::Selection::ByTestRun(lookup) => nexus::NexusAction::CommandSemaRead(
-                        sema::SemaReadInput::QueryTestRuns(lookup),
-                    ),
-                    ordinary::Selection::ByEventLog(range) => nexus::NexusAction::CommandSemaRead(
-                        sema::SemaReadInput::ReadEventLog(range),
-                    ),
-                    selection => nexus::NexusAction::CommandSemaRead(
-                        sema::SemaReadInput::QueryGenerations(selection),
+                    ordinary::Selection::ByTestRun(lookup) => {
+                        nexus::NexusAction::CommandMemoryRead(
+                            memory::MemoryReadInput::QueryTestRuns(lookup),
+                        )
+                    }
+                    ordinary::Selection::ByEventLog(range) => {
+                        nexus::NexusAction::CommandMemoryRead(
+                            memory::MemoryReadInput::ReadEventLog(range),
+                        )
+                    }
+                    selection => nexus::NexusAction::CommandMemoryRead(
+                        memory::MemoryReadInput::QueryGenerations(selection),
                     ),
                 }
             }
@@ -3155,12 +3165,12 @@ impl SignalDeciding for SchemaRuntime {
 
     fn decide_meta_input(&mut self, input: meta::Input) -> nexus::NexusAction {
         match input {
-            meta::Input::Configure(configuration) => nexus::NexusAction::CommandSemaWrite(
-                sema::SemaWriteInput::MetaConfigure(configuration),
+            meta::Input::Configure(configuration) => nexus::NexusAction::CommandMemoryWrite(
+                memory::MemoryWriteInput::MetaConfigure(configuration),
             ),
-            meta::Input::ReverseConfiguration => {
-                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::ReverseConfiguration)
-            }
+            meta::Input::ReverseConfiguration => nexus::NexusAction::CommandMemoryWrite(
+                memory::MemoryWriteInput::ReverseConfiguration,
+            ),
             meta::Input::Deploy(request) => {
                 // A preflight refusal happens before admission, so there is no
                 // in-flight cursor to terminalize. `reject_submission`
@@ -3183,21 +3193,25 @@ impl SignalDeciding for SchemaRuntime {
                     );
                 }
                 self.active_operation = Some(MetaOperation::Deploy);
-                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordDeploySubmitted(
-                    request,
-                ))
+                nexus::NexusAction::CommandMemoryWrite(
+                    memory::MemoryWriteInput::RecordDeploySubmitted(request),
+                )
             }
             meta::Input::Pin(request) => {
                 self.active_operation = Some(MetaOperation::Pin);
-                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::PinGeneration(request))
+                nexus::NexusAction::CommandMemoryWrite(memory::MemoryWriteInput::PinGeneration(
+                    request,
+                ))
             }
             meta::Input::Unpin(request) => {
                 self.active_operation = Some(MetaOperation::Unpin);
-                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::UnpinGeneration(request))
+                nexus::NexusAction::CommandMemoryWrite(memory::MemoryWriteInput::UnpinGeneration(
+                    request,
+                ))
             }
             meta::Input::Retire(request) => {
                 self.active_operation = Some(MetaOperation::Retire);
-                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RetireGeneration(
+                nexus::NexusAction::CommandMemoryWrite(memory::MemoryWriteInput::RetireGeneration(
                     request,
                 ))
             }
@@ -3214,7 +3228,7 @@ impl SignalDeciding for SchemaRuntime {
                     self.store.next_test_run_identifier().unwrap_or(1),
                 );
                 self.active_test = Some(TestPipeline::accepted(run.clone(), identifier.clone()));
-                nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordTestRun(
+                nexus::NexusAction::CommandMemoryWrite(memory::MemoryWriteInput::RecordTestRun(
                     run.pending_record(identifier),
                 ))
             }
@@ -3269,16 +3283,18 @@ impl SignalDeciding for SchemaRuntime {
         }
     }
 
-    fn decide_read_completion(&mut self, output: sema::SemaReadOutput) -> nexus::NexusAction {
+    fn decide_read_completion(&mut self, output: memory::MemoryReadOutput) -> nexus::NexusAction {
         let reply = match output {
-            sema::SemaReadOutput::GenerationsQueried(listing) => ordinary::Output::Queried(listing),
-            sema::SemaReadOutput::TestRunsQueried(listing) => {
+            memory::MemoryReadOutput::GenerationsQueried(listing) => {
+                ordinary::Output::Queried(listing)
+            }
+            memory::MemoryReadOutput::TestRunsQueried(listing) => {
                 ordinary::Output::TestRunsQueried(listing)
             }
-            sema::SemaReadOutput::EventLogRead(page) => {
+            memory::MemoryReadOutput::EventLogRead(page) => {
                 ordinary::Output::DeploymentEventsQueried(page)
             }
-            sema::SemaReadOutput::ReadMissed(report) => {
+            memory::MemoryReadOutput::ReadMissed(report) => {
                 ordinary::Output::QueryRejected(ordinary::RejectedQuery {
                     query_rejection_reason: ordinary::QueryRejectionReason::GenerationUnknown,
                     state_marker: report.state_marker,
@@ -3288,52 +3304,52 @@ impl SignalDeciding for SchemaRuntime {
         nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
     }
 
-    fn decide_write_completion(&mut self, output: sema::SemaWriteOutput) -> nexus::NexusAction {
+    fn decide_write_completion(&mut self, output: memory::MemoryWriteOutput) -> nexus::NexusAction {
         match output {
-            sema::SemaWriteOutput::OrdinaryConfigured(receipt) => {
+            memory::MemoryWriteOutput::OrdinaryConfigured(receipt) => {
                 nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(
                     ordinary::Output::Configured(receipt),
                 ))
             }
-            sema::SemaWriteOutput::MetaConfigured(receipt) => {
+            memory::MemoryWriteOutput::MetaConfigured(receipt) => {
                 nexus::NexusAction::from(meta::Output::Configured(receipt))
             }
-            sema::SemaWriteOutput::ConfigurationReversed(receipt) => {
+            memory::MemoryWriteOutput::ConfigurationReversed(receipt) => {
                 nexus::NexusAction::from(meta::Output::ConfigurationReversed(receipt))
             }
-            sema::SemaWriteOutput::OrdinaryConfigurationRejected(rejection) => {
+            memory::MemoryWriteOutput::OrdinaryConfigurationRejected(rejection) => {
                 nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(
                     ordinary::Output::ConfigurationRejected(rejection),
                 ))
             }
-            sema::SemaWriteOutput::MetaConfigurationRejected(rejection) => {
+            memory::MemoryWriteOutput::MetaConfigurationRejected(rejection) => {
                 nexus::NexusAction::from(meta::Output::ConfigurationRejected(rejection))
             }
-            sema::SemaWriteOutput::DeploySubmitted(accepted) => {
+            memory::MemoryWriteOutput::DeploySubmitted(accepted) => {
                 self.begin_deploy_pipeline(accepted)
             }
-            sema::SemaWriteOutput::PhaseRecorded(_) => self.advance_after_phase(),
-            sema::SemaWriteOutput::GenerationActivated(_) => match self.active_deploy.clone() {
+            memory::MemoryWriteOutput::PhaseRecorded(_) => self.advance_after_phase(),
+            memory::MemoryWriteOutput::GenerationActivated(_) => match self.active_deploy.clone() {
                 Some(pipeline) => self.finish_deploy_pipeline(&pipeline),
                 None => nexus::NexusAction::from(self.refuse_deploy(
-                    sema::DeployRefusalReason::NoCorrelatedDeployment,
+                    memory::DeployRefusalReason::NoCorrelatedDeployment,
                     &"an activation committed with no correlated cursor",
                 )),
             },
-            sema::SemaWriteOutput::GenerationPinned(applied) => {
+            memory::MemoryWriteOutput::GenerationPinned(applied) => {
                 self.active_operation = None;
                 nexus::NexusAction::from(meta::Output::Pinned(applied))
             }
-            sema::SemaWriteOutput::GenerationUnpinned(applied) => {
+            memory::MemoryWriteOutput::GenerationUnpinned(applied) => {
                 self.active_operation = None;
                 nexus::NexusAction::from(meta::Output::Unpinned(applied))
             }
-            sema::SemaWriteOutput::GenerationRetired(applied) => {
+            memory::MemoryWriteOutput::GenerationRetired(applied) => {
                 self.active_operation = None;
                 nexus::NexusAction::from(meta::Output::Retired(applied))
             }
-            sema::SemaWriteOutput::ContainerRecorded(_) => self.advance_after_phase(),
-            sema::SemaWriteOutput::TestRunRecorded(accepted) => {
+            memory::MemoryWriteOutput::ContainerRecorded(_) => self.advance_after_phase(),
+            memory::MemoryWriteOutput::TestRunRecorded(accepted) => {
                 // The accepted SUBMIT reply. `active_operation` is cleared (the
                 // synchronous submit is done) but `active_test` stays set: the
                 // decoupled executor (`drive_submitted_test`) re-enters to run
@@ -3341,7 +3357,7 @@ impl SignalDeciding for SchemaRuntime {
                 self.active_operation = None;
                 nexus::NexusAction::from(meta::Output::Tested(accepted))
             }
-            sema::SemaWriteOutput::WriteRejected(report) => self.reject_active_or_meta(report),
+            memory::MemoryWriteOutput::WriteRejected(report) => self.reject_active_or_meta(report),
         }
     }
 
@@ -3363,7 +3379,7 @@ impl SignalDeciding for SchemaRuntime {
                 )
             }
             nexus::EffectResult::TestVmStarted(_) => {
-                self.record_container(&pipeline, sema::ContainerState::Started);
+                self.record_container(&pipeline, memory::ContainerState::Started);
                 self.set_test_stage(TestStage::BroughtUp);
                 // The deploy-into-VM + assert chain runs here in a live run
                 // (gated). BUILT path advances straight to teardown so the
@@ -3374,7 +3390,7 @@ impl SignalDeciding for SchemaRuntime {
                 ))
             }
             nexus::EffectResult::TestVmStopped(_) => {
-                self.record_container(&pipeline, sema::ContainerState::Stopped);
+                self.record_container(&pipeline, memory::ContainerState::Stopped);
                 // Honest LIVE terminal (report 54 Unit 2b fix 1): the bring-up →
                 // teardown bracket ran, but the deploy-into-VM + assert chain
                 // between them is not yet implemented, so nothing was asserted.
@@ -3418,15 +3434,15 @@ impl SignalDeciding for SchemaRuntime {
                 other => format!("{other:?}"),
             };
             return nexus::NexusAction::from(
-                self.refuse_deploy(sema::DeployRefusalReason::NoCorrelatedDeployment, &cause),
+                self.refuse_deploy(memory::DeployRefusalReason::NoCorrelatedDeployment, &cause),
             );
         };
         match result {
             nexus::EffectResult::FlakeResolved(resolved) => {
                 let next_stage = if pipeline.needs_horizon_materialization() {
-                    sema::DeployResumeStage::MaterializeHorizon
+                    memory::DeployResumeStage::MaterializeHorizon
                 } else {
-                    sema::DeployResumeStage::RecordBuilding
+                    memory::DeployResumeStage::RecordBuilding
                 };
                 if !self.set_resolved_flake(resolved, next_stage) {
                     return self.fail_pipeline(
@@ -3469,8 +3485,8 @@ impl SignalDeciding for SchemaRuntime {
                 }
                 if pipeline.action.produces_closure() {
                     self.persist_job_cursor(
-                        sema::DeployJobPhase::Building,
-                        sema::DeployResumeStage::NixBuild,
+                        memory::DeployJobPhase::Building,
+                        memory::DeployResumeStage::NixBuild,
                     );
                     nexus::NexusAction::CommandEffect(nexus::EffectCommand::NixBuild(
                         pipeline.nix_build_command(
@@ -3482,8 +3498,8 @@ impl SignalDeciding for SchemaRuntime {
                     // Host `Evaluate`: the derivation path is the result — finish
                     // the pipeline without building.
                     self.persist_job_cursor(
-                        sema::DeployJobPhase::Built,
-                        sema::DeployResumeStage::FinishDeployment,
+                        memory::DeployJobPhase::Built,
+                        memory::DeployResumeStage::FinishDeployment,
                     );
                     self.finish_deploy_pipeline(&pipeline)
                 }
@@ -3503,8 +3519,8 @@ impl SignalDeciding for SchemaRuntime {
                 }
                 if pipeline.action.activates() {
                     self.persist_job_cursor(
-                        sema::DeployJobPhase::Built,
-                        sema::DeployResumeStage::CopyClosure,
+                        memory::DeployJobPhase::Built,
+                        memory::DeployResumeStage::CopyClosure,
                     );
                     nexus::NexusAction::CommandEffect(nexus::EffectCommand::CopyClosure(
                         pipeline.copy_closure_command(
@@ -3517,8 +3533,8 @@ impl SignalDeciding for SchemaRuntime {
                     // finish without copy/activate (which remain addressing-
                     // incomplete; that is the M2/M3 deploy work).
                     self.persist_job_cursor(
-                        sema::DeployJobPhase::Built,
-                        sema::DeployResumeStage::FinishDeployment,
+                        memory::DeployJobPhase::Built,
+                        memory::DeployResumeStage::FinishDeployment,
                     );
                     self.finish_deploy_pipeline(&pipeline)
                 }
@@ -3572,7 +3588,7 @@ impl SignalDeciding for SchemaRuntime {
         }
     }
 
-    fn reject_active_or_meta(&mut self, report: sema::RejectionReport) -> nexus::NexusAction {
+    fn reject_active_or_meta(&mut self, report: memory::RejectionReport) -> nexus::NexusAction {
         // A write rejection aborts any in-flight deploy and replies a typed
         // meta rejection for the operation in flight, carrying the rejection
         // reason and current marker. The deploy cursor is read BEFORE it is
@@ -3591,7 +3607,7 @@ impl SignalDeciding for SchemaRuntime {
                     (report.rejection_reason).deploy_reason(),
                 ),
                 None => self.refuse_deploy(
-                    sema::DeployRefusalReason::NoCorrelatedDeployment,
+                    memory::DeployRefusalReason::NoCorrelatedDeployment,
                     &format!("write rejected: {:?}", report.rejection_reason),
                 ),
             },
@@ -3617,20 +3633,20 @@ impl SignalDeciding for SchemaRuntime {
 
     fn reject_submission(
         &self,
-        submission: sema::DeploySubmission,
+        submission: memory::DeploySubmission,
         reason: meta::DeployRejectionReason,
     ) -> DeploySubmissionOutcome {
         let identity = DeployPipeline::deployment_request_identity(&submission);
         match self.store.reject_deployment_request(
             identity,
-            sema::DeploymentTerminal::Rejected(reason.terminal_reason()),
+            memory::DeploymentTerminal::Rejected(reason.terminal_reason()),
         ) {
             Ok(record) => DeploySubmissionOutcome::Rejected(meta::RejectedDeploy::new(record)),
             // Allocating the rejection is itself a durable write. When it
             // fails there is no record to reject with, and the peer is told
             // that rather than losing the daemon.
             Err(error) => DeploySubmissionOutcome::Refused(
-                self.refusal(sema::DeployRefusalReason::DurableWriteFailed, &error),
+                self.refusal(memory::DeployRefusalReason::DurableWriteFailed, &error),
             ),
         }
     }
@@ -3642,16 +3658,18 @@ impl SignalDeciding for SchemaRuntime {
     ) -> meta::Output {
         match self.store.terminalize_deployment(
             *deployment_identifier.payload(),
-            sema::DeploymentTerminal::Rejected(reason.terminal_reason()),
+            memory::DeploymentTerminal::Rejected(reason.terminal_reason()),
         ) {
             Ok(record) => meta::Output::DeployRejected(meta::RejectedDeploy::new(record)),
-            Err(error) => self.refuse_deploy(sema::DeployRefusalReason::DurableWriteFailed, &error),
+            Err(error) => {
+                self.refuse_deploy(memory::DeployRefusalReason::DurableWriteFailed, &error)
+            }
         }
     }
 
     fn refuse_deploy(
         &self,
-        deploy_refusal_reason: sema::DeployRefusalReason,
+        deploy_refusal_reason: memory::DeployRefusalReason,
         cause: &dyn std::fmt::Display,
     ) -> meta::Output {
         meta::Output::DeployRefused(self.refusal(deploy_refusal_reason, cause))
@@ -3659,7 +3677,7 @@ impl SignalDeciding for SchemaRuntime {
 
     fn refusal(
         &self,
-        deploy_refusal_reason: sema::DeployRefusalReason,
+        deploy_refusal_reason: memory::DeployRefusalReason,
         cause: &dyn std::fmt::Display,
     ) -> meta::RefusedDeploy {
         eprintln!("lojix deploy refused reason={deploy_refusal_reason:?} cause={cause}");
@@ -3690,7 +3708,7 @@ pub trait DeployDriving {
     /// is created, so a full queue still cannot return an anonymous rejection.
     fn reject_deployment_in_flight(
         &self,
-        request: sema::DeploySubmission,
+        request: memory::DeploySubmission,
     ) -> DeploySubmissionOutcome;
 
     /// Run ONLY the synchronous submit step of a `Deploy` (up9q surface a): the
@@ -3706,7 +3724,7 @@ pub trait DeployDriving {
     /// Reconstruct an accepted deploy from its daemon-local persisted
     /// submission and correlation receipt. This never allocates a second
     /// identity or emits another Submitted event.
-    fn resume_deploy_job(&mut self, job: sema::DeployJob) -> Result<bool>;
+    fn resume_deploy_job(&mut self, job: memory::DeployJob) -> Result<bool>;
 
     /// Drive an already-submitted deploy's effect pipeline to its terminal
     /// reply (up9q surface a, the daemon-owned executor body). Requires the
@@ -3742,7 +3760,7 @@ pub trait DeployDriving {
     fn set_resolved_flake(
         &mut self,
         resolved: nexus::ResolvedFlake,
-        resume_stage: sema::DeployResumeStage,
+        resume_stage: memory::DeployResumeStage,
     ) -> bool;
 
     fn record_phase(&mut self, phase: ordinary::DeploymentPhase) -> nexus::NexusAction;
@@ -3752,12 +3770,12 @@ pub trait DeployDriving {
     /// running deploy — the event log remains the authoritative phase record
     /// and the job row is the resume convenience. No-op when no deploy is
     /// active (e.g. a standalone effect).
-    fn persist_job_phase(&mut self, phase: sema::DeployJobPhase);
+    fn persist_job_phase(&mut self, phase: memory::DeployJobPhase);
 
     fn persist_job_cursor(
         &mut self,
-        phase: sema::DeployJobPhase,
-        resume_stage: sema::DeployResumeStage,
+        phase: memory::DeployJobPhase,
+        resume_stage: memory::DeployResumeStage,
     );
 
     /// The caller passes the cursor it already holds, so an effect failure
@@ -3780,7 +3798,7 @@ impl DeployDriving for SchemaRuntime {
 
     fn reject_deployment_in_flight(
         &self,
-        request: sema::DeploySubmission,
+        request: memory::DeploySubmission,
     ) -> DeploySubmissionOutcome {
         self.reject_submission(request, meta::DeployRejectionReason::DeploymentInFlight)
     }
@@ -3792,10 +3810,10 @@ impl DeployDriving for SchemaRuntime {
         self.active_operation = Some(MetaOperation::Deploy);
         let rejected_request = request.clone();
         match self.record_deploy_submitted(request) {
-            sema::SemaWriteOutput::DeploySubmitted(accepted) => {
+            memory::MemoryWriteOutput::DeploySubmitted(accepted) => {
                 DeploySubmissionOutcome::Accepted(accepted)
             }
-            sema::SemaWriteOutput::WriteRejected(report) => {
+            memory::MemoryWriteOutput::WriteRejected(report) => {
                 self.active_operation = None;
                 self.active_deploy = None;
                 self.reject_submission(rejected_request, (report.rejection_reason).deploy_reason())
@@ -3811,7 +3829,7 @@ impl DeployDriving for SchemaRuntime {
         }
     }
 
-    fn resume_deploy_job(&mut self, job: sema::DeployJob) -> Result<bool> {
+    fn resume_deploy_job(&mut self, job: memory::DeployJob) -> Result<bool> {
         let persisted_phase = job.deploy_job_phase;
         let Some(submission) = job.optional_deploy_submission.clone() else {
             return Ok(false);
@@ -3842,9 +3860,9 @@ impl DeployDriving for SchemaRuntime {
         };
         if matches!(
             record.deployment_lifecycle,
-            sema::DeploymentLifecycle::Completed
-                | sema::DeploymentLifecycle::Rejected
-                | sema::DeploymentLifecycle::Failed
+            memory::DeploymentLifecycle::Completed
+                | memory::DeploymentLifecycle::Rejected
+                | memory::DeploymentLifecycle::Failed
         ) {
             return Ok(false);
         }
@@ -3905,7 +3923,7 @@ impl DeployDriving for SchemaRuntime {
                         && intent.deployment_phase == expected_phase
                         && matches!(
                             intent.transition_intent_state,
-                            sema::TransitionIntentState::Acknowledged
+                            memory::TransitionIntentState::Acknowledged
                         )
                 })
                 .collect();
@@ -3930,12 +3948,12 @@ impl DeployDriving for SchemaRuntime {
                 .event_log_in_range(0, u64::MAX)?
                 .into_iter()
                 .filter_map(|entry| match entry.logged_event {
-                    sema::LoggedEvent::Deployment(event)
+                    memory::LoggedEvent::Deployment(event)
                         if event.deployment_identifier == pipeline.deployment_identifier
                             && event.event_log_position == intent.event_log_position
                             && event.state_marker == marker =>
                     {
-                        Some(sema::PhaseReceipt {
+                        Some(memory::PhaseReceipt {
                             event_log_position: event.event_log_position,
                             state_marker: event.state_marker,
                         })
@@ -3974,7 +3992,7 @@ impl DeployDriving for SchemaRuntime {
     async fn drive_submitted_deploy(&mut self) -> meta::Output {
         let Some(pipeline) = self.active_deploy.clone() else {
             return self.refuse_deploy(
-                sema::DeployRefusalReason::NoCorrelatedDeployment,
+                memory::DeployRefusalReason::NoCorrelatedDeployment,
                 &"a submitted deploy was driven with no correlated cursor",
             );
         };
@@ -3984,7 +4002,7 @@ impl DeployDriving for SchemaRuntime {
             state_marker: pipeline.accepted_marker.clone(),
         };
         let work = match pipeline.resume_stage {
-            sema::DeployResumeStage::FinishDeployment => {
+            memory::DeployResumeStage::FinishDeployment => {
                 return match self.finish_deploy_pipeline(&pipeline) {
                     nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => {
                         output
@@ -3993,27 +4011,29 @@ impl DeployDriving for SchemaRuntime {
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError),
                 };
             }
-            sema::DeployResumeStage::ResolveFlakeAuth => nexus::NexusWork::SemaWriteCompleted(
-                sema::SemaWriteOutput::DeploySubmitted(accepted),
+            memory::DeployResumeStage::ResolveFlakeAuth => nexus::NexusWork::MemoryWriteCompleted(
+                memory::MemoryWriteOutput::DeploySubmitted(accepted),
             ),
-            sema::DeployResumeStage::MaterializeHorizon => {
+            memory::DeployResumeStage::MaterializeHorizon => {
                 let Some(revision) = pipeline.source_revision.clone() else {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
                 nexus::NexusWork::EffectCompleted(nexus::EffectResult::from(revision))
             }
-            sema::DeployResumeStage::RecordBuilding => nexus::NexusWork::EffectCompleted(
+            memory::DeployResumeStage::RecordBuilding => nexus::NexusWork::EffectCompleted(
                 nexus::EffectResult::from(pipeline.input_overrides.clone()),
             ),
-            sema::DeployResumeStage::NixEval => {
+            memory::DeployResumeStage::NixEval => {
                 let Some(receipt) = pipeline.phase_receipt.clone() else {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
-                nexus::NexusWork::SemaWriteCompleted(sema::SemaWriteOutput::PhaseRecorded(receipt))
+                nexus::NexusWork::MemoryWriteCompleted(memory::MemoryWriteOutput::PhaseRecorded(
+                    receipt,
+                ))
             }
-            sema::DeployResumeStage::NixBuild => {
+            memory::DeployResumeStage::NixBuild => {
                 let Some(closure_path) = pipeline.closure_path.clone() else {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
@@ -4025,7 +4045,7 @@ impl DeployDriving for SchemaRuntime {
                     },
                 ))
             }
-            sema::DeployResumeStage::CopyClosure => {
+            memory::DeployResumeStage::CopyClosure => {
                 let Some(closure_path) = pipeline.closure_path.clone() else {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
@@ -4035,13 +4055,15 @@ impl DeployDriving for SchemaRuntime {
                     closure_path,
                 }))
             }
-            sema::DeployResumeStage::ActivateGeneration
-            | sema::DeployResumeStage::RecordGenerationActivated => {
+            memory::DeployResumeStage::ActivateGeneration
+            | memory::DeployResumeStage::RecordGenerationActivated => {
                 let Some(receipt) = pipeline.phase_receipt.clone() else {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
-                nexus::NexusWork::SemaWriteCompleted(sema::SemaWriteOutput::PhaseRecorded(receipt))
+                nexus::NexusWork::MemoryWriteCompleted(memory::MemoryWriteOutput::PhaseRecorded(
+                    receipt,
+                ))
             }
         }
         .with_origin_route(nexus::OriginRoute::new(0));
@@ -4071,7 +4093,7 @@ impl DeployDriving for SchemaRuntime {
         // the final activation-record write.
         let Some(pipeline) = self.active_deploy.clone() else {
             return nexus::NexusAction::from(self.refuse_deploy(
-                sema::DeployRefusalReason::NoCorrelatedDeployment,
+                memory::DeployRefusalReason::NoCorrelatedDeployment,
                 &"a phase transition committed with no correlated cursor",
             ));
         };
@@ -4126,7 +4148,7 @@ impl DeployDriving for SchemaRuntime {
                 // phase on restart and reconciles via the BootOnce unit rather
                 // than blindly re-activating. There is no Activating event-log
                 // phase today; the job row is the resume cursor for this window.
-                self.persist_job_phase(sema::DeployJobPhase::Activating);
+                self.persist_job_phase(memory::DeployJobPhase::Activating);
                 nexus::NexusAction::CommandEffect(nexus::EffectCommand::ActivateGeneration(
                     pipeline.activate_generation_command(closure_path),
                 ))
@@ -4149,8 +4171,8 @@ impl DeployDriving for SchemaRuntime {
                     }
                 };
                 self.set_stage(DeployStage::ActivatedRecorded);
-                nexus::NexusAction::CommandSemaWrite(
-                    sema::SemaWriteInput::RecordGenerationActivated(commit),
+                nexus::NexusAction::CommandMemoryWrite(
+                    memory::MemoryWriteInput::RecordGenerationActivated(commit),
                 )
             }
             DeployStage::ActivatedRecorded => self.finish_deploy_pipeline(&pipeline),
@@ -4166,7 +4188,7 @@ impl DeployDriving for SchemaRuntime {
     fn finish_deploy_pipeline(&mut self, pipeline: &DeployPipeline) -> nexus::NexusAction {
         let record = match self.store.terminalize_deployment(
             *pipeline.deployment_identifier.payload(),
-            sema::DeploymentTerminal::Succeeded,
+            memory::DeploymentTerminal::Succeeded,
         ) {
             Ok(record) => record,
             Err(error) => {
@@ -4210,15 +4232,15 @@ impl DeployDriving for SchemaRuntime {
             pipeline.input_overrides = overrides;
         }
         self.persist_job_cursor(
-            sema::DeployJobPhase::Submitted,
-            sema::DeployResumeStage::RecordBuilding,
+            memory::DeployJobPhase::Submitted,
+            memory::DeployResumeStage::RecordBuilding,
         );
     }
 
     fn set_resolved_flake(
         &mut self,
         resolved: nexus::ResolvedFlake,
-        resume_stage: sema::DeployResumeStage,
+        resume_stage: memory::DeployResumeStage,
     ) -> bool {
         let source_revision = resolved.into_payload();
         let Some(immutable_revision) = source_revision.string.immutable_revision() else {
@@ -4236,7 +4258,7 @@ impl DeployDriving for SchemaRuntime {
             pipeline.resume_stage = resume_stage;
             snapshot = Some((
                 *pipeline.deployment_identifier.payload(),
-                pipeline.deploy_job(sema::DeployJobPhase::Submitted),
+                pipeline.deploy_job(memory::DeployJobPhase::Submitted),
             ));
         }
         if let Some((deployment_identifier, deploy_job)) = snapshot {
@@ -4257,16 +4279,16 @@ impl DeployDriving for SchemaRuntime {
 
     fn record_phase(&mut self, phase: ordinary::DeploymentPhase) -> nexus::NexusAction {
         let resume_stage = match phase {
-            ordinary::DeploymentPhase::Building => sema::DeployResumeStage::NixEval,
-            ordinary::DeploymentPhase::Copying => sema::DeployResumeStage::ActivateGeneration,
+            ordinary::DeploymentPhase::Building => memory::DeployResumeStage::NixEval,
+            ordinary::DeploymentPhase::Copying => memory::DeployResumeStage::ActivateGeneration,
             ordinary::DeploymentPhase::Activated => {
-                sema::DeployResumeStage::RecordGenerationActivated
+                memory::DeployResumeStage::RecordGenerationActivated
             }
-            _ => sema::DeployResumeStage::FinishDeployment,
+            _ => memory::DeployResumeStage::FinishDeployment,
         };
         let Some(pipeline) = self.active_deploy.as_mut() else {
             return nexus::NexusAction::from(self.refuse_deploy(
-                sema::DeployRefusalReason::NoCorrelatedDeployment,
+                memory::DeployRefusalReason::NoCorrelatedDeployment,
                 &"a phase was recorded with no correlated cursor",
             ));
         };
@@ -4288,22 +4310,24 @@ impl DeployDriving for SchemaRuntime {
             }
         };
         let event = pipeline.phase_event(phase, ordinary::EventLogPosition::new(position));
-        nexus::NexusAction::CommandSemaWrite(sema::SemaWriteInput::RecordPhaseTransition(event))
+        nexus::NexusAction::CommandMemoryWrite(memory::MemoryWriteInput::RecordPhaseTransition(
+            event,
+        ))
     }
 
-    fn persist_job_phase(&mut self, phase: sema::DeployJobPhase) {
+    fn persist_job_phase(&mut self, phase: memory::DeployJobPhase) {
         let resume_stage = self
             .active_deploy
             .as_ref()
             .map(|pipeline| pipeline.resume_stage)
-            .unwrap_or(sema::DeployResumeStage::FinishDeployment);
+            .unwrap_or(memory::DeployResumeStage::FinishDeployment);
         self.persist_job_cursor(phase, resume_stage);
     }
 
     fn persist_job_cursor(
         &mut self,
-        phase: sema::DeployJobPhase,
-        resume_stage: sema::DeployResumeStage,
+        phase: memory::DeployJobPhase,
+        resume_stage: memory::DeployResumeStage,
     ) {
         let job = if let Some(pipeline) = self.active_deploy.as_mut() {
             pipeline.resume_stage = resume_stage;
@@ -4356,7 +4380,7 @@ impl DeployDriving for SchemaRuntime {
         // The evidence the stage reported travels into the durable record and,
         // through the terminal transition's journal event, into the event log.
         // This is the only place a deploy effect failure becomes permanent.
-        let terminal = sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
+        let terminal = memory::DeploymentTerminal::Failed(memory::DeploymentFailure {
             deployment_failure_stage: (failure.effect_stage).deployment_failure_stage(),
             deployment_terminal_reason: reason.terminal_reason(),
             optional_failure_evidence: Some(failure.failure_evidence),
@@ -4372,7 +4396,7 @@ impl DeployDriving for SchemaRuntime {
             // is the only truthful reply left: claiming a terminal record that
             // was never written would be worse than the panic it replaces.
             Err(error) => nexus::NexusAction::from(
-                self.refuse_deploy(sema::DeployRefusalReason::DurableWriteFailed, &error),
+                self.refuse_deploy(memory::DeployRefusalReason::DurableWriteFailed, &error),
             ),
         }
     }
@@ -4426,7 +4450,7 @@ pub trait TestDriving {
     /// §2 `ContainerLifecycleRecord` table finally gets its driver. Best-effort,
     /// like the deploy job-row persistence — a record error never fakes the
     /// outcome.
-    fn record_container(&mut self, pipeline: &TestPipeline, state: sema::ContainerState);
+    fn record_container(&mut self, pipeline: &TestPipeline, state: memory::ContainerState);
 
     fn set_test_stage(&mut self, stage: TestStage);
 
@@ -4505,7 +4529,7 @@ impl TestDriving for SchemaRuntime {
         self.active_operation = None;
         self.active_test = None;
         match output {
-            sema::SemaWriteOutput::TestRunRecorded(accepted) => {
+            memory::MemoryWriteOutput::TestRunRecorded(accepted) => {
                 nexus::NexusAction::from(meta::Output::Tested(accepted))
             }
             _ => nexus::NexusAction::from(meta::Output::TestRejected(
@@ -4514,7 +4538,7 @@ impl TestDriving for SchemaRuntime {
         }
     }
 
-    fn record_container(&mut self, pipeline: &TestPipeline, state: sema::ContainerState) {
+    fn record_container(&mut self, pipeline: &TestPipeline, state: memory::ContainerState) {
         let _ = self.record_container_transition(pipeline.container_transition(state));
     }
 
@@ -4550,53 +4574,53 @@ impl TestDriving for SchemaRuntime {
 /// Applying one decided write to the durable store. Every arm answers with a
 /// typed outcome — a receipt or a rejection — and nothing here decides what to
 /// do next.
-pub(crate) trait SemaApplying {
-    fn apply_sema(&mut self, input: sema::SemaWriteInput) -> sema::SemaWriteOutput;
+pub(crate) trait MemoryApplying {
+    fn apply_memory(&mut self, input: memory::MemoryWriteInput) -> memory::MemoryWriteOutput;
 
     fn apply_ordinary_configuration(
         &self,
         configuration: crate::NexusConfiguration,
-    ) -> sema::SemaWriteOutput;
+    ) -> memory::MemoryWriteOutput;
 
     fn apply_meta_configuration(
         &self,
         configuration: crate::NexusConfiguration,
-    ) -> sema::SemaWriteOutput;
+    ) -> memory::MemoryWriteOutput;
 
-    fn reverse_meta_configuration(&self) -> sema::SemaWriteOutput;
+    fn reverse_meta_configuration(&self) -> memory::MemoryWriteOutput;
 
     /// Persist one accepted test-run row (phase Submitted / outcome Pending)
     /// and reply the `AcceptedTest` handle. Mirrors `record_deploy_submitted`:
     /// the row is durable from acceptance, so a `(Query (ByTestRun …))` reads
     /// it immediately and a restarted daemon reconciles the in-flight test
     /// (Unit 2b). Unit 2a writes exactly this Pending row — no faked pass.
-    fn record_test_run(&mut self, record: ordinary::TestRunRecord) -> sema::SemaWriteOutput;
+    fn record_test_run(&mut self, record: ordinary::TestRunRecord) -> memory::MemoryWriteOutput;
 
     fn record_deploy_submitted(
         &mut self,
-        submission: sema::DeploySubmission,
-    ) -> sema::SemaWriteOutput;
+        submission: memory::DeploySubmission,
+    ) -> memory::MemoryWriteOutput;
 
     fn record_phase_transition(
         &mut self,
         event: ordinary::DeploymentPhaseEvent,
-    ) -> sema::SemaWriteOutput;
+    ) -> memory::MemoryWriteOutput;
 
     fn record_generation_activated(
         &mut self,
-        commit: sema::ActivationCommit,
-    ) -> sema::SemaWriteOutput;
+        commit: memory::ActivationCommit,
+    ) -> memory::MemoryWriteOutput;
 
-    fn pin_generation(&mut self, request: meta::PinRequest) -> sema::SemaWriteOutput;
+    fn pin_generation(&mut self, request: meta::PinRequest) -> memory::MemoryWriteOutput;
 
-    fn unpin_generation(&mut self, request: meta::UnpinRequest) -> sema::SemaWriteOutput;
+    fn unpin_generation(&mut self, request: meta::UnpinRequest) -> memory::MemoryWriteOutput;
 
-    fn retire_generation(&mut self, request: meta::RetireRequest) -> sema::SemaWriteOutput;
+    fn retire_generation(&mut self, request: meta::RetireRequest) -> memory::MemoryWriteOutput;
 
     fn record_container_transition(
         &mut self,
-        transition: sema::ContainerTransition,
-    ) -> sema::SemaWriteOutput;
+        transition: memory::ContainerTransition,
+    ) -> memory::MemoryWriteOutput;
 
     /// Build a write-rejection at a known commit sequence. The caller passes
     /// the sequence it already read under the store lock — this method never
@@ -4607,51 +4631,53 @@ pub(crate) trait SemaApplying {
     /// vocabulary of whatever operation was in flight. Reading the commit
     /// sequence is best-effort: the store that just refused a write may
     /// equally refuse to report its sequence.
-    fn reject_durable_write(&self, cause: &dyn std::fmt::Display) -> sema::SemaWriteOutput;
+    fn reject_durable_write(&self, cause: &dyn std::fmt::Display) -> memory::MemoryWriteOutput;
 
-    fn write_rejected(commit_sequence: u64, reason: sema::RejectionReason)
-    -> sema::SemaWriteOutput;
+    fn write_rejected(
+        commit_sequence: u64,
+        reason: memory::RejectionReason,
+    ) -> memory::MemoryWriteOutput;
 }
 
-impl SemaApplying for SchemaRuntime {
-    fn apply_sema(&mut self, input: sema::SemaWriteInput) -> sema::SemaWriteOutput {
+impl MemoryApplying for SchemaRuntime {
+    fn apply_memory(&mut self, input: memory::MemoryWriteInput) -> memory::MemoryWriteOutput {
         match input {
-            sema::SemaWriteInput::OrdinaryConfigure(configuration) => {
+            memory::MemoryWriteInput::OrdinaryConfigure(configuration) => {
                 self.apply_ordinary_configuration(configuration)
             }
-            sema::SemaWriteInput::MetaConfigure(configuration) => {
+            memory::MemoryWriteInput::MetaConfigure(configuration) => {
                 self.apply_meta_configuration(configuration)
             }
-            sema::SemaWriteInput::ReverseConfiguration => self.reverse_meta_configuration(),
-            sema::SemaWriteInput::RecordDeploySubmitted(submission) => {
+            memory::MemoryWriteInput::ReverseConfiguration => self.reverse_meta_configuration(),
+            memory::MemoryWriteInput::RecordDeploySubmitted(submission) => {
                 self.record_deploy_submitted(submission)
             }
-            sema::SemaWriteInput::RecordPhaseTransition(event) => {
+            memory::MemoryWriteInput::RecordPhaseTransition(event) => {
                 self.record_phase_transition(event)
             }
-            sema::SemaWriteInput::RecordGenerationActivated(commit) => {
+            memory::MemoryWriteInput::RecordGenerationActivated(commit) => {
                 self.record_generation_activated(commit)
             }
-            sema::SemaWriteInput::PinGeneration(request) => self.pin_generation(request),
-            sema::SemaWriteInput::UnpinGeneration(request) => self.unpin_generation(request),
-            sema::SemaWriteInput::RetireGeneration(request) => self.retire_generation(request),
-            sema::SemaWriteInput::RecordContainerTransition(transition) => {
+            memory::MemoryWriteInput::PinGeneration(request) => self.pin_generation(request),
+            memory::MemoryWriteInput::UnpinGeneration(request) => self.unpin_generation(request),
+            memory::MemoryWriteInput::RetireGeneration(request) => self.retire_generation(request),
+            memory::MemoryWriteInput::RecordContainerTransition(transition) => {
                 self.record_container_transition(transition)
             }
-            sema::SemaWriteInput::RecordTestRun(record) => self.record_test_run(record),
+            memory::MemoryWriteInput::RecordTestRun(record) => self.record_test_run(record),
         }
     }
 
     fn apply_ordinary_configuration(
         &self,
         configuration: crate::NexusConfiguration,
-    ) -> sema::SemaWriteOutput {
+    ) -> memory::MemoryWriteOutput {
         match self.store.ordinary_configure(configuration) {
-            Ok(state) => {
-                sema::SemaWriteOutput::OrdinaryConfigured(sema::ConfigurationReceipt::from(state))
-            }
-            Err(error) => sema::SemaWriteOutput::OrdinaryConfigurationRejected(
-                sema::ConfigurationRejection::from(error),
+            Ok(state) => memory::MemoryWriteOutput::OrdinaryConfigured(
+                memory::ConfigurationReceipt::from(state),
+            ),
+            Err(error) => memory::MemoryWriteOutput::OrdinaryConfigurationRejected(
+                memory::ConfigurationRejection::from(error),
             ),
         }
     }
@@ -4659,36 +4685,36 @@ impl SemaApplying for SchemaRuntime {
     fn apply_meta_configuration(
         &self,
         configuration: crate::NexusConfiguration,
-    ) -> sema::SemaWriteOutput {
+    ) -> memory::MemoryWriteOutput {
         match self.store.meta_configure(configuration) {
             Ok(state) => {
-                sema::SemaWriteOutput::MetaConfigured(sema::ConfigurationReceipt::from(state))
+                memory::MemoryWriteOutput::MetaConfigured(memory::ConfigurationReceipt::from(state))
             }
-            Err(error) => sema::SemaWriteOutput::MetaConfigurationRejected(
-                sema::ConfigurationRejection::from(error),
+            Err(error) => memory::MemoryWriteOutput::MetaConfigurationRejected(
+                memory::ConfigurationRejection::from(error),
             ),
         }
     }
 
-    fn reverse_meta_configuration(&self) -> sema::SemaWriteOutput {
+    fn reverse_meta_configuration(&self) -> memory::MemoryWriteOutput {
         match self.store.reverse_meta_configuration() {
-            Ok(state) => sema::SemaWriteOutput::ConfigurationReversed(
-                sema::ConfigurationReceipt::from(state),
+            Ok(state) => memory::MemoryWriteOutput::ConfigurationReversed(
+                memory::ConfigurationReceipt::from(state),
             ),
-            Err(error) => sema::SemaWriteOutput::MetaConfigurationRejected(
-                sema::ConfigurationRejection::from(error),
+            Err(error) => memory::MemoryWriteOutput::MetaConfigurationRejected(
+                memory::ConfigurationRejection::from(error),
             ),
         }
     }
 
-    fn record_test_run(&mut self, record: ordinary::TestRunRecord) -> sema::SemaWriteOutput {
+    fn record_test_run(&mut self, record: ordinary::TestRunRecord) -> memory::MemoryWriteOutput {
         let identifier = record.test_run_identifier.clone();
         match self
             .store
-            .upsert_test_run(sema::StoredTestRun::from(record))
+            .upsert_test_run(memory::StoredTestRun::from(record))
             .and_then(|()| self.store.commit_sequence())
         {
-            Ok(commit_sequence) => sema::SemaWriteOutput::TestRunRecorded(meta::AcceptedTest {
+            Ok(commit_sequence) => memory::MemoryWriteOutput::TestRunRecorded(meta::AcceptedTest {
                 test_run_identifier: identifier,
                 state_marker: ordinary::StateMarker::from(commit_sequence),
             }),
@@ -4698,8 +4724,8 @@ impl SemaApplying for SchemaRuntime {
 
     fn record_deploy_submitted(
         &mut self,
-        submission: sema::DeploySubmission,
-    ) -> sema::SemaWriteOutput {
+        submission: memory::DeploySubmission,
+    ) -> memory::MemoryWriteOutput {
         // Identifier reservation, correlation-record creation, and the
         // restart cursor share one durable commit.  The public admission
         // marker is bound only afterwards from that commit's durable log.
@@ -4710,7 +4736,7 @@ impl SemaApplying for SchemaRuntime {
             ordinary::StateMarker::from(0),
             submission.clone(),
         )
-        .deploy_job(sema::DeployJobPhase::Submitted);
+        .deploy_job(memory::DeployJobPhase::Submitted);
         let record = match self
             .store
             .allocate_deployment_record(identity, restart_cursor)
@@ -4740,7 +4766,7 @@ impl SemaApplying for SchemaRuntime {
         // journalled, and locally acknowledged.  Do not synthesize a second
         // Submitted event here.
         self.active_deploy = Some(pipeline);
-        sema::SemaWriteOutput::DeploySubmitted(meta::DeployHandle {
+        memory::MemoryWriteOutput::DeploySubmitted(meta::DeployHandle {
             deployment_identifier,
             state_marker: accepted_marker,
         })
@@ -4749,7 +4775,7 @@ impl SemaApplying for SchemaRuntime {
     fn record_phase_transition(
         &mut self,
         mut event: ordinary::DeploymentPhaseEvent,
-    ) -> sema::SemaWriteOutput {
+    ) -> memory::MemoryWriteOutput {
         let recorded_phase = event.deployment_phase;
         let event_log_position = event.event_log_position.clone();
         let Some(pipeline) = self.active_deploy.as_ref() else {
@@ -4757,7 +4783,7 @@ impl SemaApplying for SchemaRuntime {
                 &"a deployment phase transition arrived with no correlated cursor",
             );
         };
-        let job = pipeline.deploy_job(sema::DeployJobPhase::from(recorded_phase));
+        let job = pipeline.deploy_job(memory::DeployJobPhase::from(recorded_phase));
         let recorded = self.store.advance_deployment_phase(
             *event.deployment_identifier.payload(),
             recorded_phase.deployment_lifecycle(),
@@ -4767,13 +4793,13 @@ impl SemaApplying for SchemaRuntime {
         match recorded {
             Ok(marker) => {
                 event.state_marker = marker.clone();
-                let receipt = sema::PhaseReceipt {
+                let receipt = memory::PhaseReceipt {
                     event_log_position,
                     state_marker: marker,
                 };
                 let job = if let Some(pipeline) = self.active_deploy.as_mut() {
                     pipeline.phase_receipt = Some(receipt.clone());
-                    Some(pipeline.deploy_job(sema::DeployJobPhase::from(recorded_phase)))
+                    Some(pipeline.deploy_job(memory::DeployJobPhase::from(recorded_phase)))
                 } else {
                     None
                 };
@@ -4782,7 +4808,7 @@ impl SemaApplying for SchemaRuntime {
                         .upsert_deploy_job(job)
                         .expect("persist exact phase receipt before resuming its continuation");
                 }
-                sema::SemaWriteOutput::PhaseRecorded(receipt)
+                memory::MemoryWriteOutput::PhaseRecorded(receipt)
             }
             Err(error) => self.reject_durable_write(&error),
         }
@@ -4790,8 +4816,8 @@ impl SemaApplying for SchemaRuntime {
 
     fn record_generation_activated(
         &mut self,
-        commit: sema::ActivationCommit,
-    ) -> sema::SemaWriteOutput {
+        commit: memory::ActivationCommit,
+    ) -> memory::MemoryWriteOutput {
         let Some(pipeline) = self.active_deploy.clone() else {
             return self.reject_durable_write(
                 &"a generation activation arrived with no correlated cursor",
@@ -4800,7 +4826,7 @@ impl SemaApplying for SchemaRuntime {
         let deployment_identifier = pipeline.deployment_identifier.clone();
         let generation_artifact = pipeline.generation_artifact;
         let activation_effect = pipeline.activation_effect;
-        let generation = sema::LiveGeneration {
+        let generation = memory::LiveGeneration {
             deployment_identifier,
             generation_identifier: commit.generation_identifier.clone(),
             cluster_name: commit.cluster_name.clone(),
@@ -4812,7 +4838,7 @@ impl SemaApplying for SchemaRuntime {
             closure_path: commit.closure_path.clone(),
             source_revision_record: commit.source_revision_record.clone(),
         };
-        let root = sema::GcRoot {
+        let root = memory::GcRoot {
             generation_identifier: commit.generation_identifier.clone(),
             cluster_name: commit.cluster_name.clone(),
             node_name: commit.node_name.clone(),
@@ -4831,10 +4857,10 @@ impl SemaApplying for SchemaRuntime {
         match recorded {
             Ok(commit_sequence) => {
                 self.persist_job_cursor(
-                    sema::DeployJobPhase::Activated,
-                    sema::DeployResumeStage::FinishDeployment,
+                    memory::DeployJobPhase::Activated,
+                    memory::DeployResumeStage::FinishDeployment,
                 );
-                sema::SemaWriteOutput::GenerationActivated(sema::AppliedActivation {
+                memory::MemoryWriteOutput::GenerationActivated(memory::AppliedActivation {
                     generation_identifier: commit.generation_identifier,
                     generation_slot: commit.generation_slot,
                     state_marker: ordinary::StateMarker::from(commit_sequence),
@@ -4844,7 +4870,7 @@ impl SemaApplying for SchemaRuntime {
         }
     }
 
-    fn pin_generation(&mut self, request: meta::PinRequest) -> sema::SemaWriteOutput {
+    fn pin_generation(&mut self, request: meta::PinRequest) -> memory::MemoryWriteOutput {
         let roots = match self.store.records::<crate::runtime_model::GcRoot>() {
             Ok(roots) => roots,
             Err(error) => panic!("read durable gc roots for pin request: {error}"),
@@ -4854,7 +4880,7 @@ impl SemaApplying for SchemaRuntime {
             .iter()
             .any(|root| root.optional_pin_label.as_ref() == Some(&request.pin_label));
         if already_used {
-            return Self::write_rejected(current_sequence, sema::RejectionReason::PinLabelInUse);
+            return Self::write_rejected(current_sequence, memory::RejectionReason::PinLabelInUse);
         }
         let Some(mut root) = roots.into_iter().find(|root| {
             root.generation_identifier == request.generation_identifier
@@ -4863,7 +4889,7 @@ impl SemaApplying for SchemaRuntime {
         }) else {
             return Self::write_rejected(
                 current_sequence,
-                sema::RejectionReason::GenerationUnknown,
+                memory::RejectionReason::GenerationUnknown,
             );
         };
         let from_slot = root.generation_slot;
@@ -4874,7 +4900,7 @@ impl SemaApplying for SchemaRuntime {
             .mutate_gc_root(root)
             .and_then(|()| self.store.commit_sequence());
         match committed {
-            Ok(commit_sequence) => sema::SemaWriteOutput::GenerationPinned(meta::AppliedPin {
+            Ok(commit_sequence) => memory::MemoryWriteOutput::GenerationPinned(meta::AppliedPin {
                 generation_identifier: request.generation_identifier,
                 pin_label: request.pin_label,
                 from_slot,
@@ -4885,7 +4911,7 @@ impl SemaApplying for SchemaRuntime {
         }
     }
 
-    fn unpin_generation(&mut self, request: meta::UnpinRequest) -> sema::SemaWriteOutput {
+    fn unpin_generation(&mut self, request: meta::UnpinRequest) -> memory::MemoryWriteOutput {
         let roots = match self.store.records::<crate::runtime_model::GcRoot>() {
             Ok(roots) => roots,
             Err(error) => panic!("read durable gc roots for unpin request: {error}"),
@@ -4896,7 +4922,10 @@ impl SemaApplying for SchemaRuntime {
                 && root.cluster_name == request.cluster_name
                 && root.node_name == request.node_name
         }) else {
-            return Self::write_rejected(current_sequence, sema::RejectionReason::PinLabelUnknown);
+            return Self::write_rejected(
+                current_sequence,
+                memory::RejectionReason::PinLabelUnknown,
+            );
         };
         let generation_identifier = root.generation_identifier.clone();
         let from_slot = root.generation_slot;
@@ -4907,18 +4936,20 @@ impl SemaApplying for SchemaRuntime {
             .mutate_gc_root(root)
             .and_then(|()| self.store.commit_sequence());
         match committed {
-            Ok(commit_sequence) => sema::SemaWriteOutput::GenerationUnpinned(meta::AppliedUnpin {
-                generation_identifier,
-                pin_label: request.pin_label,
-                from_slot,
-                to_slot: ordinary::GenerationSlot::Recent,
-                state_marker: ordinary::StateMarker::from(commit_sequence),
-            }),
+            Ok(commit_sequence) => {
+                memory::MemoryWriteOutput::GenerationUnpinned(meta::AppliedUnpin {
+                    generation_identifier,
+                    pin_label: request.pin_label,
+                    from_slot,
+                    to_slot: ordinary::GenerationSlot::Recent,
+                    state_marker: ordinary::StateMarker::from(commit_sequence),
+                })
+            }
             Err(error) => panic!("persist generation unpin transition: {error}"),
         }
     }
 
-    fn retire_generation(&mut self, request: meta::RetireRequest) -> sema::SemaWriteOutput {
+    fn retire_generation(&mut self, request: meta::RetireRequest) -> memory::MemoryWriteOutput {
         let roots = match self.store.records::<crate::runtime_model::GcRoot>() {
             Ok(roots) => roots,
             Err(error) => panic!("read durable gc roots for retire request: {error}"),
@@ -4931,44 +4962,49 @@ impl SemaApplying for SchemaRuntime {
         }) else {
             return Self::write_rejected(
                 current_sequence,
-                sema::RejectionReason::GenerationUnknown,
+                memory::RejectionReason::GenerationUnknown,
             );
         };
         if matches!(root.generation_slot, ordinary::GenerationSlot::Pinned) {
-            return Self::write_rejected(current_sequence, sema::RejectionReason::GenerationPinned);
+            return Self::write_rejected(
+                current_sequence,
+                memory::RejectionReason::GenerationPinned,
+            );
         }
         let committed = self
             .store
             .retract_gc_root(*request.generation_identifier.payload())
             .and_then(|()| self.store.commit_sequence());
         match committed {
-            Ok(commit_sequence) => sema::SemaWriteOutput::GenerationRetired(meta::AppliedRetire {
-                generation_identifier: request.generation_identifier,
-                generation_slot: root.generation_slot,
-                state_marker: ordinary::StateMarker::from(commit_sequence),
-            }),
+            Ok(commit_sequence) => {
+                memory::MemoryWriteOutput::GenerationRetired(meta::AppliedRetire {
+                    generation_identifier: request.generation_identifier,
+                    generation_slot: root.generation_slot,
+                    state_marker: ordinary::StateMarker::from(commit_sequence),
+                })
+            }
             Err(error) => panic!("persist generation retirement: {error}"),
         }
     }
 
     fn record_container_transition(
         &mut self,
-        transition: sema::ContainerTransition,
-    ) -> sema::SemaWriteOutput {
+        transition: memory::ContainerTransition,
+    ) -> memory::MemoryWriteOutput {
         let recorded = self
             .store
             .allocate_event_log_position()
             .and_then(|position| {
-                let record = sema::ContainerLifecycleRecord {
+                let record = memory::ContainerLifecycleRecord {
                     cluster_name: transition.cluster_name,
                     node_name: transition.node_name,
                     container_name: transition.container_name,
                     container_state: transition.container_state,
                     event_log_position: ordinary::EventLogPosition::new(position),
                 };
-                let entry = sema::EventLogEntry {
+                let entry = memory::EventLogEntry {
                     event_log_position: ordinary::EventLogPosition::new(position),
-                    logged_event: sema::LoggedEvent::Container(record.clone()),
+                    logged_event: memory::LoggedEvent::Container(record.clone()),
                 };
                 self.store
                     .record_container_transition(record, entry)
@@ -4977,7 +5013,7 @@ impl SemaApplying for SchemaRuntime {
             });
         match recorded {
             Ok((event_log_position, commit_sequence)) => {
-                sema::SemaWriteOutput::ContainerRecorded(sema::ContainerReceipt {
+                memory::MemoryWriteOutput::ContainerRecorded(memory::ContainerReceipt {
                     event_log_position: ordinary::EventLogPosition::new(event_log_position),
                     state_marker: ordinary::StateMarker::from(commit_sequence),
                 })
@@ -4986,19 +5022,19 @@ impl SemaApplying for SchemaRuntime {
         }
     }
 
-    fn reject_durable_write(&self, cause: &dyn std::fmt::Display) -> sema::SemaWriteOutput {
+    fn reject_durable_write(&self, cause: &dyn std::fmt::Display) -> memory::MemoryWriteOutput {
         eprintln!("lojix durable write rejected: {cause}");
         Self::write_rejected(
             self.store.commit_sequence().unwrap_or(0),
-            sema::RejectionReason::DurableWriteFailed,
+            memory::RejectionReason::DurableWriteFailed,
         )
     }
 
     fn write_rejected(
         commit_sequence: u64,
-        reason: sema::RejectionReason,
-    ) -> sema::SemaWriteOutput {
-        sema::SemaWriteOutput::WriteRejected(sema::RejectionReport {
+        reason: memory::RejectionReason,
+    ) -> memory::MemoryWriteOutput {
+        memory::MemoryWriteOutput::WriteRejected(memory::RejectionReport {
             rejection_reason: reason,
             state_marker: ordinary::StateMarker::from(commit_sequence),
         })
@@ -5007,42 +5043,44 @@ impl SemaApplying for SchemaRuntime {
 
 /// Answering one decided read from the durable store, projected into the
 /// public vocabulary the asker speaks.
-pub(crate) trait SemaObserving {
-    fn observe_sema(&self, input: sema::SemaReadInput) -> sema::SemaReadOutput;
+pub(crate) trait MemoryObserving {
+    fn observe_memory(&self, input: memory::MemoryReadInput) -> memory::MemoryReadOutput;
 
     /// Answer a `(ByTestRun …)` query from the durable test-run table (report
     /// 54 §5.3). Filters by cluster + node, and by run identifier when the
     /// lookup names one (`None` returns every run for that node). The matching
     /// rows are returned newest-first by run identifier so the routine
     /// `(Check …)` reader sees its latest run first.
-    fn query_test_runs(&self, lookup: ordinary::TestRunLookup) -> sema::SemaReadOutput;
+    fn query_test_runs(&self, lookup: ordinary::TestRunLookup) -> memory::MemoryReadOutput;
 
-    fn query_generations(&self, selection: ordinary::Selection) -> sema::SemaReadOutput;
+    fn query_generations(&self, selection: ordinary::Selection) -> memory::MemoryReadOutput;
 
     fn project_generation(
-        live: &sema::LiveGeneration,
-        deployment_records: &[sema::DeploymentRecord],
+        live: &memory::LiveGeneration,
+        deployment_records: &[memory::DeploymentRecord],
     ) -> ordinary::Generation;
 
-    fn read_event_log(&self, range: ordinary::EventLogRange) -> sema::SemaReadOutput;
+    fn read_event_log(&self, range: ordinary::EventLogRange) -> memory::MemoryReadOutput;
 }
 
-impl SemaObserving for SchemaRuntime {
-    fn observe_sema(&self, input: sema::SemaReadInput) -> sema::SemaReadOutput {
+impl MemoryObserving for SchemaRuntime {
+    fn observe_memory(&self, input: memory::MemoryReadInput) -> memory::MemoryReadOutput {
         match input {
-            sema::SemaReadInput::QueryGenerations(selection) => self.query_generations(selection),
-            sema::SemaReadInput::ReadEventLog(range) => self.read_event_log(range),
-            sema::SemaReadInput::QueryTestRuns(lookup) => self.query_test_runs(lookup),
+            memory::MemoryReadInput::QueryGenerations(selection) => {
+                self.query_generations(selection)
+            }
+            memory::MemoryReadInput::ReadEventLog(range) => self.read_event_log(range),
+            memory::MemoryReadInput::QueryTestRuns(lookup) => self.query_test_runs(lookup),
         }
     }
 
-    fn query_test_runs(&self, lookup: ordinary::TestRunLookup) -> sema::SemaReadOutput {
+    fn query_test_runs(&self, lookup: ordinary::TestRunLookup) -> memory::MemoryReadOutput {
         let runs = match self.store.records::<crate::runtime_model::StoredTestRun>() {
             Ok(runs) => runs,
             Err(error) => panic!("read durable test runs: {error}"),
         };
         let commit_sequence = self.current_commit_sequence();
-        let mut matching: Vec<sema::StoredTestRun> =
+        let mut matching: Vec<memory::StoredTestRun> =
             runs.into_iter().filter(|run| lookup.matches(run)).collect();
         matching.sort_by(|left, right| {
             right
@@ -5050,18 +5088,18 @@ impl SemaObserving for SchemaRuntime {
                 .payload()
                 .cmp(left.test_run_identifier.payload())
         });
-        sema::SemaReadOutput::TestRunsQueried(ordinary::TestRunListing {
+        memory::MemoryReadOutput::TestRunsQueried(ordinary::TestRunListing {
             test_run_record_vector: matching
                 .into_iter()
                 .map(ordinary::TestRunRecord::from)
                 .collect(),
-            database_marker: sema::DatabaseMarker::new(ordinary::StateMarker::from(
+            database_marker: memory::DatabaseMarker::new(ordinary::StateMarker::from(
                 commit_sequence,
             )),
         })
     }
 
-    fn query_generations(&self, selection: ordinary::Selection) -> sema::SemaReadOutput {
+    fn query_generations(&self, selection: ordinary::Selection) -> memory::MemoryReadOutput {
         let matching = self
             .store
             .matching_live_generations(|live| selection.matches_generation(live));
@@ -5070,7 +5108,7 @@ impl SemaObserving for SchemaRuntime {
             Err(error) => panic!("read durable generations: {error}"),
         };
         let commit_sequence = self.current_commit_sequence();
-        let deployment_records: Vec<sema::DeploymentRecord> =
+        let deployment_records: Vec<memory::DeploymentRecord> =
             match self
                 .store
                 .records::<crate::runtime_model::DeploymentRecord>()
@@ -5085,7 +5123,7 @@ impl SemaObserving for SchemaRuntime {
             .iter()
             .map(|generation| Self::project_generation(generation, &deployment_records))
             .collect();
-        sema::SemaReadOutput::GenerationsQueried(ordinary::GenerationListing {
+        memory::MemoryReadOutput::GenerationsQueried(ordinary::GenerationListing {
             generation_vector: generations,
             deployment_record_vector: deployment_records,
             state_marker: ordinary::StateMarker::from(commit_sequence),
@@ -5093,8 +5131,8 @@ impl SemaObserving for SchemaRuntime {
     }
 
     fn project_generation(
-        live: &sema::LiveGeneration,
-        deployment_records: &[sema::DeploymentRecord],
+        live: &memory::LiveGeneration,
+        deployment_records: &[memory::DeploymentRecord],
     ) -> ordinary::Generation {
         ordinary::Generation {
             generation_identifier: live.generation_identifier.clone(),
@@ -5117,16 +5155,16 @@ impl SemaObserving for SchemaRuntime {
         }
     }
 
-    fn read_event_log(&self, range: ordinary::EventLogRange) -> sema::SemaReadOutput {
+    fn read_event_log(&self, range: ordinary::EventLogRange) -> memory::MemoryReadOutput {
         let entries = match self
             .store
             .event_log_in_range(*range.from.payload(), *range.until.payload())
         {
             Ok(entries) => entries,
             Err(_) => {
-                return sema::SemaReadOutput::read_missed(
+                return memory::MemoryReadOutput::read_missed(
                     self.current_commit_sequence(),
-                    sema::RejectionReason::EventLogPositionOutOfRange,
+                    memory::RejectionReason::EventLogPositionOutOfRange,
                 );
             }
         };
@@ -5135,12 +5173,12 @@ impl SemaObserving for SchemaRuntime {
         let mut retention_events = Vec::new();
         for entry in &entries {
             match &entry.logged_event {
-                sema::LoggedEvent::Deployment(event) => deployment_events.push(event.clone()),
-                sema::LoggedEvent::CacheRetention(event) => retention_events.push(event.clone()),
-                sema::LoggedEvent::Container(_) => {}
+                memory::LoggedEvent::Deployment(event) => deployment_events.push(event.clone()),
+                memory::LoggedEvent::CacheRetention(event) => retention_events.push(event.clone()),
+                memory::LoggedEvent::Container(_) => {}
             }
         }
-        sema::SemaReadOutput::EventLogRead(sema::EventLogPage {
+        memory::MemoryReadOutput::EventLogRead(memory::EventLogPage {
             deployment_phase_event_vector: deployment_events,
             cache_retention_transition_event_vector: retention_events,
             state_marker: ordinary::StateMarker::from(commit_sequence),
@@ -5864,7 +5902,7 @@ struct ClusterSecretsDirectory {
 
 /// The caller-supplied secrets directory a materialization copies from.
 trait SecretsSource {
-    fn from_input(input: &sema::SecretsInput) -> Result<Self>
+    fn from_input(input: &memory::SecretsInput) -> Result<Self>
     where
         Self: Sized;
 
@@ -5875,10 +5913,10 @@ trait SecretsSource {
 }
 
 impl SecretsSource for ClusterSecretsDirectory {
-    fn from_input(input: &sema::SecretsInput) -> Result<Self> {
+    fn from_input(input: &memory::SecretsInput) -> Result<Self> {
         match input {
-            sema::SecretsInput::NoSecrets => Ok(Self { path: None }),
-            sema::SecretsInput::SecretsDirectory(directory) => {
+            memory::SecretsInput::NoSecrets => Ok(Self { path: None }),
+            memory::SecretsInput::SecretsDirectory(directory) => {
                 let raw = directory.payload();
                 // Caller-provided secret authority is admitted on the same
                 // no-symlink contract as every other lojix path: the daemon
@@ -7058,7 +7096,7 @@ pub(crate) trait DetachedActivation {
 
     fn terminal_outcome(
         outcome: Option<DetachedActivationOutcome>,
-    ) -> Option<sema::DeploymentTerminal>;
+    ) -> Option<memory::DeploymentTerminal>;
 
     #[cfg(test)]
     fn needs_completion_observer(outcome: Option<DetachedActivationOutcome>) -> bool;
@@ -7113,16 +7151,18 @@ impl DetachedActivation for DetachedActivationUnit {
 
     fn terminal_outcome(
         outcome: Option<DetachedActivationOutcome>,
-    ) -> Option<sema::DeploymentTerminal> {
+    ) -> Option<memory::DeploymentTerminal> {
         match outcome {
-            Some(DetachedActivationOutcome::Succeeded) => Some(sema::DeploymentTerminal::Succeeded),
-            Some(DetachedActivationOutcome::Failed(observed)) => {
-                Some(sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
-                    deployment_failure_stage: sema::DeploymentFailureStage::Activate,
-                    deployment_terminal_reason: sema::DeploymentTerminalReason::ActivationFailed,
-                    optional_failure_evidence: Some(observed.witness()),
-                }))
+            Some(DetachedActivationOutcome::Succeeded) => {
+                Some(memory::DeploymentTerminal::Succeeded)
             }
+            Some(DetachedActivationOutcome::Failed(observed)) => Some(
+                memory::DeploymentTerminal::Failed(memory::DeploymentFailure {
+                    deployment_failure_stage: memory::DeploymentFailureStage::Activate,
+                    deployment_terminal_reason: memory::DeploymentTerminalReason::ActivationFailed,
+                    optional_failure_evidence: Some(observed.witness()),
+                }),
+            ),
             Some(DetachedActivationOutcome::Missing)
             | Some(DetachedActivationOutcome::Running)
             | None => None,
@@ -7961,20 +8001,20 @@ impl Effect for NixCommand {
 }
 
 impl nexus::NexusEngine for SchemaRuntime {
-    async fn apply_sema_write(
+    async fn apply_memory_write(
         &mut self,
         _origin_route: nexus::OriginRoute,
-        input: sema::SemaWriteInput,
-    ) -> sema::SemaWriteOutput {
-        self.apply_sema(input)
+        input: memory::MemoryWriteInput,
+    ) -> memory::MemoryWriteOutput {
+        self.apply_memory(input)
     }
 
-    async fn observe_sema_read(
+    async fn observe_memory_read(
         &mut self,
         _origin_route: nexus::OriginRoute,
-        input: sema::SemaReadInput,
-    ) -> sema::SemaReadOutput {
-        self.observe_sema(input)
+        input: memory::MemoryReadInput,
+    ) -> memory::MemoryReadOutput {
+        self.observe_memory(input)
     }
 
     async fn run_effect(&mut self, input: nexus::EffectCommand) -> nexus::EffectResult {
@@ -8007,7 +8047,7 @@ impl nexus::NexusEngine for SchemaRuntime {
         _exhausted: triad_runtime::ContinuationExhausted,
     ) -> nexus::SignalOutput {
         nexus::SignalOutput::MetaOutput(self.refuse_deploy(
-            sema::DeployRefusalReason::ContinuationBudgetExhausted,
+            memory::DeployRefusalReason::ContinuationBudgetExhausted,
             &"the Nexus runner exhausted its continuation budget",
         ))
     }
@@ -8019,8 +8059,8 @@ impl nexus::NexusEngine for SchemaRuntime {
         let origin_route = input.origin_route();
         let action = match input.into_root() {
             nexus::NexusWork::SignalArrived(input) => self.decide_signal_arrival(input),
-            nexus::NexusWork::SemaReadCompleted(output) => self.decide_read_completion(output),
-            nexus::NexusWork::SemaWriteCompleted(output) => self.decide_write_completion(output),
+            nexus::NexusWork::MemoryReadCompleted(output) => self.decide_read_completion(output),
+            nexus::NexusWork::MemoryWriteCompleted(output) => self.decide_write_completion(output),
             nexus::NexusWork::EffectCompleted(result) => self.decide_effect_completion(result),
         };
         action.with_origin_route(origin_route)
@@ -8039,19 +8079,19 @@ mod tests {
 
     const STORE: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-toplevel";
 
-    fn host_submission(action: ordinary::HostDeployAction) -> sema::DeploySubmission {
-        sema::DeploySubmission::Host(meta::HostDeployment {
+    fn host_submission(action: ordinary::HostDeployAction) -> memory::DeploySubmission {
+        memory::DeploySubmission::Host(meta::HostDeployment {
             cluster_name: ordinary::ClusterName::from("alpha"),
             node_name: ordinary::NodeName::from("node-1"),
             host_composition: ordinary::HostComposition::BaseHost,
             proposal_source: ordinary::ProposalSource::from("/dev/null"),
-            secrets_input: sema::SecretsInput::NoSecrets,
+            secrets_input: memory::SecretsInput::NoSecrets,
             flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
             deployment_transport: fixture_transport(),
-            deployment_input_mode: sema::DeploymentInputMode::Direct,
+            deployment_input_mode: memory::DeploymentInputMode::Direct,
             horizon_definition_option: None,
             deployment_output_selector: fixture_output_selector(),
-            activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
+            activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
             host_deploy_action: action,
             source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
             optional_nix_builder_spec: None,
@@ -8068,19 +8108,19 @@ mod tests {
         )
     }
 
-    fn user_submission() -> sema::DeploySubmission {
-        sema::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
+    fn user_submission() -> memory::DeploySubmission {
+        memory::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
             cluster_name: ordinary::ClusterName::from("fixture-cluster"),
             node_name: ordinary::NodeName::from("fixture-daemon"),
             user_name: ordinary::UserName::from("fixture-user"),
             proposal_source: ordinary::ProposalSource::from("/dev/null"),
-            secrets_input: sema::SecretsInput::NoSecrets,
+            secrets_input: memory::SecretsInput::NoSecrets,
             flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
             deployment_transport: fixture_transport(),
-            deployment_input_mode: sema::DeploymentInputMode::Direct,
+            deployment_input_mode: memory::DeploymentInputMode::Direct,
             horizon_definition_option: None,
             deployment_output_selector: fixture_output_selector(),
-            activation_backend: sema::ActivationBackend::HomeManagerNixProfileV1,
+            activation_backend: memory::ActivationBackend::HomeManagerNixProfileV1,
             user_environment_action: meta::UserEnvironmentAction::ActivateNow,
             source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
             optional_nix_builder_spec: None,
@@ -8116,15 +8156,15 @@ mod tests {
         ordinary::NodeName::from("daemon-host")
     }
 
-    fn fixture_transport() -> sema::DeploymentTransport {
-        sema::DeploymentTransport {
-            nix_store_uri: sema::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
-            ssh_destination: sema::SshDestination::from("fixture-login@fixture-activate.invalid"),
+    fn fixture_transport() -> memory::DeploymentTransport {
+        memory::DeploymentTransport {
+            nix_store_uri: memory::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
+            ssh_destination: memory::SshDestination::from("fixture-login@fixture-activate.invalid"),
         }
     }
 
-    fn fixture_output_selector() -> sema::DeploymentOutputSelector {
-        sema::DeploymentOutputSelector::new(sema::FlakeAttribute::from("checks.fixture-a"))
+    fn fixture_output_selector() -> memory::DeploymentOutputSelector {
+        memory::DeploymentOutputSelector::new(memory::FlakeAttribute::from("checks.fixture-a"))
     }
 
     fn fixture_test_profile() -> nexus::TestExecutionProfile {
@@ -8172,7 +8212,7 @@ mod tests {
         assert!(matches!(
             engine
                 .record_deploy_submitted(host_submission(ordinary::HostDeployAction::ActivateNow)),
-            sema::SemaWriteOutput::DeploySubmitted(_)
+            memory::MemoryWriteOutput::DeploySubmitted(_)
         ));
         engine.set_stage(DeployStage::BuildingRecorded);
 
@@ -8251,13 +8291,13 @@ mod tests {
             node_name: node(),
             host_composition: ordinary::HostComposition::BaseHost,
             proposal_source: ordinary::ProposalSource::from("/dev/null"),
-            secrets_input: sema::SecretsInput::NoSecrets,
+            secrets_input: memory::SecretsInput::NoSecrets,
             flake_reference: ordinary::FlakeReference::from(flake),
             deployment_transport: fixture_transport(),
-            deployment_input_mode: sema::DeploymentInputMode::Direct,
+            deployment_input_mode: memory::DeploymentInputMode::Direct,
             horizon_definition_option: None,
             deployment_output_selector: fixture_output_selector(),
-            activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
+            activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
             host_deploy_action: ordinary::HostDeployAction::Evaluate,
             source_revision_policy: policy,
             optional_nix_builder_spec: None,
@@ -8323,16 +8363,16 @@ mod tests {
         let meta::DeployRequest::Host(deployment) = &mut request else {
             unreachable!("fixture is a host deploy")
         };
-        deployment.deployment_transport.ssh_destination = sema::SshDestination::from("root");
+        deployment.deployment_transport.ssh_destination = memory::SshDestination::from("root");
         assert_eq!(
             request.deployment_routing_rejection(),
             Some(meta::DeployRejectionReason::InvalidDeploymentRouting)
         );
         let mut runtime = SchemaRuntime::new();
         let outcome = runtime.submit_deploy(match request {
-            meta::DeployRequest::Host(deployment) => sema::DeploySubmission::Host(deployment),
+            meta::DeployRequest::Host(deployment) => memory::DeploySubmission::Host(deployment),
             meta::DeployRequest::UserEnvironment(deployment) => {
-                sema::DeploySubmission::UserEnvironment(deployment)
+                memory::DeploySubmission::UserEnvironment(deployment)
             }
         });
         let DeploySubmissionOutcome::Rejected(rejected) = outcome else {
@@ -8340,8 +8380,8 @@ mod tests {
         };
         assert!(matches!(
             rejected.into_payload().optional_deployment_terminal,
-            Some(sema::DeploymentTerminal::Rejected(
-                sema::DeploymentTerminalReason::InvalidDeploymentRouting
+            Some(memory::DeploymentTerminal::Rejected(
+                memory::DeploymentTerminalReason::InvalidDeploymentRouting
             ))
         ));
         assert!(runtime.store().deploy_jobs().expect("job rows").is_empty());
@@ -8438,13 +8478,13 @@ mod tests {
         let meta::DeployRequest::Host(deployment) = &mut request else {
             unreachable!()
         };
-        deployment.deployment_input_mode = sema::DeploymentInputMode::Horizon;
+        deployment.deployment_input_mode = memory::DeploymentInputMode::Horizon;
         match engine.submit_deploy(request) {
             DeploySubmissionOutcome::Rejected(record) => {
                 assert!(matches!(
                     record.into_payload().optional_deployment_terminal,
-                    Some(sema::DeploymentTerminal::Rejected(
-                        sema::DeploymentTerminalReason::ProposalSourceUnreachable
+                    Some(memory::DeploymentTerminal::Rejected(
+                        memory::DeploymentTerminalReason::ProposalSourceUnreachable
                     ))
                 ));
             }
@@ -8460,7 +8500,7 @@ mod tests {
         engine.active_deploy = Some(host_pipeline(ordinary::HostDeployAction::Evaluate));
         assert!(engine.set_resolved_flake(
             resolved_flake(ordinary::SourceRevisionPolicy::ResolveAndRecord),
-            sema::DeployResumeStage::RecordBuilding,
+            memory::DeployResumeStage::RecordBuilding,
         ));
         let pipeline = engine.active_deploy.as_ref().expect("pipeline");
         assert_eq!(
@@ -8491,7 +8531,7 @@ mod tests {
         let mut engine = SchemaRuntime::new();
         assert!(matches!(
             engine.record_deploy_submitted(host_submission(ordinary::HostDeployAction::Evaluate)),
-            sema::SemaWriteOutput::DeploySubmitted(_)
+            memory::MemoryWriteOutput::DeploySubmitted(_)
         ));
         let mut source = source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord);
         source.string = "sha256-unproven-nar-hash".to_string();
@@ -8503,10 +8543,12 @@ mod tests {
             )) => {
                 assert!(matches!(
                     record.optional_deployment_terminal,
-                    Some(sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
-                        deployment_failure_stage: sema::DeploymentFailureStage::FlakeAuth,
-                        ..
-                    }))
+                    Some(memory::DeploymentTerminal::Failed(
+                        memory::DeploymentFailure {
+                            deployment_failure_stage: memory::DeploymentFailureStage::FlakeAuth,
+                            ..
+                        }
+                    ))
                 ));
             }
             other => panic!("unproven metadata must terminalize, got {other:?}"),
@@ -8523,7 +8565,7 @@ mod tests {
         let mut evaluated = SchemaRuntime::new();
         assert!(matches!(
             evaluated.record_deploy_submitted(host_submission(ordinary::HostDeployAction::Realize)),
-            sema::SemaWriteOutput::DeploySubmitted(_)
+            memory::MemoryWriteOutput::DeploySubmitted(_)
         ));
         match evaluated.decide_effect_completion(nexus::EffectResult::ClosureEvaluated(
             nexus::EvaluatedClosure {
@@ -8535,10 +8577,12 @@ mod tests {
                 meta::Output::DeployTerminal(record),
             )) => assert!(matches!(
                 record.optional_deployment_terminal,
-                Some(sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
-                    deployment_failure_stage: sema::DeploymentFailureStage::Eval,
-                    ..
-                }))
+                Some(memory::DeploymentTerminal::Failed(
+                    memory::DeploymentFailure {
+                        deployment_failure_stage: memory::DeploymentFailureStage::Eval,
+                        ..
+                    }
+                ))
             )),
             other => panic!("unsafe evaluated closure must terminalize, got {other:?}"),
         }
@@ -8547,7 +8591,7 @@ mod tests {
         let mut built = SchemaRuntime::new();
         assert!(matches!(
             built.record_deploy_submitted(host_submission(ordinary::HostDeployAction::ActivateNow)),
-            sema::SemaWriteOutput::DeploySubmitted(_)
+            memory::MemoryWriteOutput::DeploySubmitted(_)
         ));
         match built.decide_effect_completion(nexus::EffectResult::ClosureBuilt(
             nexus::BuiltClosure {
@@ -8559,10 +8603,12 @@ mod tests {
                 meta::Output::DeployTerminal(record),
             )) => assert!(matches!(
                 record.optional_deployment_terminal,
-                Some(sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
-                    deployment_failure_stage: sema::DeploymentFailureStage::Build,
-                    ..
-                }))
+                Some(memory::DeploymentTerminal::Failed(
+                    memory::DeploymentFailure {
+                        deployment_failure_stage: memory::DeploymentFailureStage::Build,
+                        ..
+                    }
+                ))
             )),
             other => panic!("unsafe built closure must terminalize, got {other:?}"),
         }
@@ -8606,7 +8652,8 @@ mod tests {
             directory.path().join("inputs"),
             directory.path().to_path_buf(),
         ));
-        let store = Arc::new(Store::open(directory.path().join("lojix.sema")).expect("open store"));
+        let store =
+            Arc::new(Store::open(directory.path().join("lojix.memory")).expect("open store"));
         let engine = SchemaRuntime::with_store_and_configuration(store, configuration.clone());
         let mut pipeline = host_pipeline(ordinary::HostDeployAction::Evaluate);
         pipeline.source_revision = Some(source_revision(
@@ -8660,18 +8707,18 @@ mod tests {
     fn crash_after_atomic_resolved_source_commit_reopens_at_materialization_without_resolving_again()
      {
         let directory = tempfile::tempdir().expect("temporary store directory");
-        let path = directory.path().join("lojix.sema");
+        let path = directory.path().join("lojix.memory");
         let store = Arc::new(Store::open(&path).expect("open store"));
         let mut before_crash = SchemaRuntime::with_store(store.clone());
         let accepted = match before_crash
             .record_deploy_submitted(host_submission(ordinary::HostDeployAction::Evaluate))
         {
-            sema::SemaWriteOutput::DeploySubmitted(accepted) => accepted,
+            memory::MemoryWriteOutput::DeploySubmitted(accepted) => accepted,
             other => panic!("expected accepted deploy, got {other:?}"),
         };
         before_crash.set_resolved_flake(
             resolved_flake(ordinary::SourceRevisionPolicy::ResolveAndRecord),
-            sema::DeployResumeStage::MaterializeHorizon,
+            memory::DeployResumeStage::MaterializeHorizon,
         );
         before_crash.set_input_overrides(vec![nexus::FlakeInputOverride {
             string: "criomos".to_string(),
@@ -8688,7 +8735,7 @@ mod tests {
             .expect("one job");
         assert_eq!(
             persisted.deploy_resume_stage,
-            sema::DeployResumeStage::RecordBuilding
+            memory::DeployResumeStage::RecordBuilding
         );
         assert_eq!(
             persisted.optional_flake_reference,
@@ -8712,7 +8759,7 @@ mod tests {
         assert_eq!(pipeline.accepted_marker, accepted.state_marker);
         assert_eq!(
             pipeline.resume_stage,
-            sema::DeployResumeStage::RecordBuilding
+            memory::DeployResumeStage::RecordBuilding
         );
         assert_eq!(
             pipeline.flake,
@@ -8739,17 +8786,17 @@ mod tests {
     #[test]
     fn restart_restores_or_recovers_the_exact_phase_receipt_for_each_resume_continuation() {
         let directory = tempfile::tempdir().expect("temporary store directory");
-        let path = directory.path().join("lojix.sema");
+        let path = directory.path().join("lojix.memory");
         let store = Arc::new(Store::open(&path).expect("open store"));
         let mut engine = SchemaRuntime::with_store(store.clone());
         assert!(matches!(
             engine
                 .record_deploy_submitted(host_submission(ordinary::HostDeployAction::ActivateNow)),
-            sema::SemaWriteOutput::DeploySubmitted(_)
+            memory::MemoryWriteOutput::DeploySubmitted(_)
         ));
         engine.set_resolved_flake(
             resolved_flake(ordinary::SourceRevisionPolicy::ResolveAndRecord),
-            sema::DeployResumeStage::RecordBuilding,
+            memory::DeployResumeStage::RecordBuilding,
         );
         assert!(engine.set_closure_path(ordinary::ClosurePath::from(STORE)));
         engine.set_activation_slot(ordinary::GenerationSlot::Current);
@@ -8757,15 +8804,15 @@ mod tests {
         for (phase, resume_stage) in [
             (
                 ordinary::DeploymentPhase::Building,
-                sema::DeployResumeStage::NixEval,
+                memory::DeployResumeStage::NixEval,
             ),
             (
                 ordinary::DeploymentPhase::Copying,
-                sema::DeployResumeStage::ActivateGeneration,
+                memory::DeployResumeStage::ActivateGeneration,
             ),
             (
                 ordinary::DeploymentPhase::Activated,
-                sema::DeployResumeStage::RecordGenerationActivated,
+                memory::DeployResumeStage::RecordGenerationActivated,
             ),
         ] {
             let position = store
@@ -8777,7 +8824,7 @@ mod tests {
                 pipeline.phase_event(phase, ordinary::EventLogPosition::new(position))
             };
             let receipt = match engine.record_phase_transition(event) {
-                sema::SemaWriteOutput::PhaseRecorded(receipt) => receipt,
+                memory::MemoryWriteOutput::PhaseRecorded(receipt) => receipt,
                 other => panic!("expected phase receipt, got {other:?}"),
             };
             let mut job = store
@@ -8824,7 +8871,7 @@ mod tests {
         assert!(matches!(
             engine
                 .record_deploy_submitted(host_submission(ordinary::HostDeployAction::ActivateNow)),
-            sema::SemaWriteOutput::DeploySubmitted(_)
+            memory::MemoryWriteOutput::DeploySubmitted(_)
         ));
         let mut pipeline = engine.active_deploy.clone().expect("accepted pipeline");
         let source_revision = source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord);
@@ -8840,13 +8887,13 @@ mod tests {
         assert_eq!(event.deployment_identifier, pipeline.deployment_identifier);
         assert!(matches!(
             engine.record_phase_transition(event),
-            sema::SemaWriteOutput::PhaseRecorded(_)
+            memory::MemoryWriteOutput::PhaseRecorded(_)
         ));
         match engine.read_event_log(ordinary::EventLogRange {
             from: ordinary::EventLogPosition::new(1),
             until: ordinary::EventLogPosition::new(2),
         }) {
-            sema::SemaReadOutput::EventLogRead(page) => assert_eq!(
+            memory::MemoryReadOutput::EventLogRead(page) => assert_eq!(
                 page.deployment_phase_event_vector
                     .first()
                     .expect("deployment event")
@@ -8859,14 +8906,14 @@ mod tests {
         let commit = pipeline.activation_commit().expect("activation commit");
         assert!(matches!(
             engine.record_generation_activated(commit),
-            sema::SemaWriteOutput::GenerationActivated(_)
+            memory::MemoryWriteOutput::GenerationActivated(_)
         ));
         match engine.query_generations(ordinary::Selection::ByNode(ordinary::NodeSelector {
             cluster_name: cluster(),
             node_name: node(),
             optional_generation_artifact: None,
         })) {
-            sema::SemaReadOutput::GenerationsQueried(listing) => assert_eq!(
+            memory::MemoryReadOutput::GenerationsQueried(listing) => assert_eq!(
                 listing
                     .generation_vector
                     .first()
@@ -8893,13 +8940,13 @@ mod tests {
                 node_name: node(),
                 host_composition: ordinary::HostComposition::BaseHost,
                 proposal_source: ordinary::ProposalSource::from("/dev/null"),
-                secrets_input: sema::SecretsInput::NoSecrets,
+                secrets_input: memory::SecretsInput::NoSecrets,
                 flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
                 deployment_transport: fixture_transport(),
-                deployment_input_mode: sema::DeploymentInputMode::Direct,
+                deployment_input_mode: memory::DeploymentInputMode::Direct,
                 horizon_definition_option: None,
                 deployment_output_selector: fixture_output_selector(),
-                activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
+                activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
                 host_deploy_action: action,
                 source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
                 optional_nix_builder_spec: None,
@@ -8920,13 +8967,13 @@ mod tests {
                 node_name: node(),
                 user_name: ordinary::UserName::from("li"),
                 proposal_source: ordinary::ProposalSource::from("/dev/null"),
-                secrets_input: sema::SecretsInput::NoSecrets,
+                secrets_input: memory::SecretsInput::NoSecrets,
                 flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
                 deployment_transport: fixture_transport(),
-                deployment_input_mode: sema::DeploymentInputMode::Direct,
+                deployment_input_mode: memory::DeploymentInputMode::Direct,
                 horizon_definition_option: None,
                 deployment_output_selector: fixture_output_selector(),
-                activation_backend: sema::ActivationBackend::HomeManagerNixProfileV1,
+                activation_backend: memory::ActivationBackend::HomeManagerNixProfileV1,
                 user_environment_action: mode,
                 source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
                 optional_nix_builder_spec: None,
@@ -9352,13 +9399,13 @@ mod tests {
         );
     }
 
-    fn interrupted_self_switch_job(closure: Option<&str>) -> sema::DeployJob {
-        sema::DeployJob {
+    fn interrupted_self_switch_job(closure: Option<&str>) -> memory::DeployJob {
+        memory::DeployJob {
             deployment_identifier: ordinary::DeploymentIdentifier::new(72),
             generation_identifier: ordinary::GenerationIdentifier::new(72),
             cluster_name: ordinary::ClusterName::from("fixture-cluster"),
             node_name: ordinary::NodeName::from("fixture-daemon"),
-            deploy_job_phase: sema::DeployJobPhase::Activating,
+            deploy_job_phase: memory::DeployJobPhase::Activating,
             optional_closure_path: closure.map(ordinary::ClosurePath::from),
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
             flake_reference: ordinary::FlakeReference::new(
@@ -9371,14 +9418,14 @@ mod tests {
             )),
             resolved_revision: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
             deployment_transport: fixture_transport(),
-            deployment_input_mode: sema::DeploymentInputMode::Direct,
+            deployment_input_mode: memory::DeploymentInputMode::Direct,
             deployment_output_selector: fixture_output_selector(),
-            activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
+            activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
             optional_nix_builder_spec: None,
             boot_once_unit: None,
             optional_generation_slot: None,
             persisted_flake_input_override_vector: Vec::new(),
-            deploy_resume_stage: sema::DeployResumeStage::ResolveFlakeAuth,
+            deploy_resume_stage: memory::DeployResumeStage::ResolveFlakeAuth,
             optional_phase_receipt: None,
             optional_deploy_submission: Some(host_submission(
                 ordinary::HostDeployAction::ActivateNow,
@@ -9489,7 +9536,7 @@ mod tests {
     #[test]
     fn matching_profile_without_the_systemd_boot_backend_is_not_recovered() {
         let mut job = interrupted_self_switch_job(Some("/nix/store/aaaaaaaa-system"));
-        job.activation_backend = sema::ActivationBackend::HomeManagerNixProfileV1;
+        job.activation_backend = memory::ActivationBackend::HomeManagerNixProfileV1;
         assert!(
             job.self_switch_activation_record(Some("/nix/store/aaaaaaaa-system"))
                 .is_none()
@@ -9637,7 +9684,7 @@ mod tests {
         // An operator-named builder still dispatches the daemon host's own
         // build to that machine through the local Nix client.
         let mut pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
-        pipeline.builder = Some(sema::NixBuilderSpec::new(FIXTURE_BUILDER.to_string()));
+        pipeline.builder = Some(memory::NixBuilderSpec::new(FIXTURE_BUILDER.to_string()));
         assert!(matches!(
             pipeline.build_target(&node()),
             nexus::BuildTarget::Remote(_)
@@ -9650,7 +9697,7 @@ mod tests {
         // the builder must not win (lojix 0.3.5) and is carried only so the
         // effect can log that it was ignored.
         let mut pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
-        pipeline.builder = Some(sema::NixBuilderSpec::new(FIXTURE_BUILDER.to_string()));
+        pipeline.builder = Some(memory::NixBuilderSpec::new(FIXTURE_BUILDER.to_string()));
         let nexus::BuildTarget::TargetStore(build) = pipeline.build_target(&daemon_host()) else {
             panic!("a remote node realizes in its own store even with a builder");
         };
@@ -9876,7 +9923,8 @@ mod tests {
             directory.path().join("inputs"),
             directory.path().to_path_buf(),
         ));
-        let store = Arc::new(Store::open(directory.path().join("lojix.sema")).expect("open store"));
+        let store =
+            Arc::new(Store::open(directory.path().join("lojix.memory")).expect("open store"));
         let engine = SchemaRuntime::with_store_and_configuration(store, configuration);
         let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
         let command =
@@ -10206,7 +10254,7 @@ mod tests {
 
     #[test]
     fn no_secrets_is_explicit_and_yields_no_files() {
-        let directory = ClusterSecretsDirectory::from_input(&sema::SecretsInput::NoSecrets)
+        let directory = ClusterSecretsDirectory::from_input(&memory::SecretsInput::NoSecrets)
             .expect("NoSecrets is accepted");
         assert!(directory.path.is_none());
         assert!(directory.secret_files().expect("no files").is_empty());
@@ -10214,7 +10262,7 @@ mod tests {
 
     #[test]
     fn secrets_input_rejects_nonexistent_directory() {
-        let input = sema::SecretsInput::SecretsDirectory(sema::SecretsDirectory::new(
+        let input = memory::SecretsInput::SecretsDirectory(memory::SecretsDirectory::new(
             "/nonexistent/path/that/has/no/secrets".to_string(),
         ));
         assert!(matches!(
@@ -10235,7 +10283,7 @@ mod tests {
         let linked_parent = temporary.path().join("linked");
         symlink(&actual_parent, &linked_parent).expect("create linked parent");
 
-        let input = sema::SecretsInput::SecretsDirectory(sema::SecretsDirectory::new(
+        let input = memory::SecretsInput::SecretsDirectory(memory::SecretsDirectory::new(
             linked_parent.join("secrets").to_string_lossy().to_string(),
         ));
         assert!(matches!(
@@ -10257,7 +10305,7 @@ mod tests {
         symlink(&ciphertext, secrets_directory.join("linked.sops"))
             .expect("create linked sops file");
 
-        let input = sema::SecretsInput::SecretsDirectory(sema::SecretsDirectory::new(
+        let input = memory::SecretsInput::SecretsDirectory(memory::SecretsDirectory::new(
             secrets_directory.to_string_lossy().to_string(),
         ));
         let cluster = ClusterSecretsDirectory::from_input(&input).expect("directory is valid");
@@ -10286,7 +10334,7 @@ mod tests {
         let generated =
             std::env::temp_dir().join(format!("lojix-secrets-gen-{}", std::process::id()));
         let _ = fs::remove_dir_all(&generated);
-        let input = sema::SecretsInput::SecretsDirectory(sema::SecretsDirectory::new(
+        let input = memory::SecretsInput::SecretsDirectory(memory::SecretsDirectory::new(
             secrets_directory.to_string_lossy().to_string(),
         ));
         let cluster = ClusterSecretsDirectory::from_input(&input).expect("valid secrets directory");
@@ -10338,7 +10386,7 @@ mod tests {
         let generated =
             std::env::temp_dir().join(format!("lojix-secrets-stale-gen-{}", std::process::id()));
         let _ = fs::remove_dir_all(&generated);
-        let input = sema::SecretsInput::SecretsDirectory(sema::SecretsDirectory::new(
+        let input = memory::SecretsInput::SecretsDirectory(memory::SecretsDirectory::new(
             secrets_directory.to_string_lossy().to_string(),
         ));
         let cluster = ClusterSecretsDirectory::from_input(&input).expect("valid secrets directory");
@@ -10416,7 +10464,7 @@ mod tests {
         let generated =
             std::env::temp_dir().join(format!("lojix-secrets-empty-{}", std::process::id()));
         let _ = fs::remove_dir_all(&generated);
-        let cluster = ClusterSecretsDirectory::from_input(&sema::SecretsInput::NoSecrets)
+        let cluster = ClusterSecretsDirectory::from_input(&memory::SecretsInput::NoSecrets)
             .expect("NoSecrets is accepted");
         GeneratedInputDirectory::new(generated.clone())
             .write_secrets(&cluster)

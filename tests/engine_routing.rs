@@ -7,31 +7,31 @@ use lojix::Payload as _;
 use lojix::schema_runtime::{DeployDriving as _, RuntimeCore as _};
 use std::path::Path;
 
-use lojix::runtime_model as sema;
+use lojix::runtime_model as memory;
 use lojix::schema_runtime::{DeploySubmissionOutcome, SchemaRuntime};
 
 mod common;
 
-fn host_submission(proposal_source: &Path) -> sema::DeploySubmission {
-    sema::DeploySubmission::Host(sema::HostDeployment {
-        cluster_name: sema::ClusterName::from("alpha"),
-        node_name: sema::NodeName::from("node-1"),
-        host_composition: sema::HostComposition::BaseHost,
-        proposal_source: sema::ProposalSource::new(proposal_source.display().to_string()),
-        secrets_input: sema::SecretsInput::NoSecrets,
-        flake_reference: sema::FlakeReference::from("github:example/fixture"),
-        deployment_transport: sema::DeploymentTransport {
-            nix_store_uri: sema::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
-            ssh_destination: sema::SshDestination::from("fixture-login@fixture-activate.invalid"),
+fn host_submission(proposal_source: &Path) -> memory::DeploySubmission {
+    memory::DeploySubmission::Host(memory::HostDeployment {
+        cluster_name: memory::ClusterName::from("alpha"),
+        node_name: memory::NodeName::from("node-1"),
+        host_composition: memory::HostComposition::BaseHost,
+        proposal_source: memory::ProposalSource::new(proposal_source.display().to_string()),
+        secrets_input: memory::SecretsInput::NoSecrets,
+        flake_reference: memory::FlakeReference::from("github:example/fixture"),
+        deployment_transport: memory::DeploymentTransport {
+            nix_store_uri: memory::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
+            ssh_destination: memory::SshDestination::from("fixture-login@fixture-activate.invalid"),
         },
-        deployment_input_mode: sema::DeploymentInputMode::Horizon,
+        deployment_input_mode: memory::DeploymentInputMode::Horizon,
         horizon_definition_option: Some(common::read_horizon(proposal_source)),
-        deployment_output_selector: sema::DeploymentOutputSelector::new(
-            sema::FlakeAttribute::from("checks.fixture-a"),
+        deployment_output_selector: memory::DeploymentOutputSelector::new(
+            memory::FlakeAttribute::from("checks.fixture-a"),
         ),
-        activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
-        host_deploy_action: sema::HostDeployAction::Realize,
-        source_revision_policy: sema::SourceRevisionPolicy::ResolveAndRecord,
+        activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
+        host_deploy_action: memory::HostDeployAction::Realize,
+        source_revision_policy: memory::SourceRevisionPolicy::ResolveAndRecord,
         optional_nix_builder_spec: None,
         extra_substituter_vector: Vec::new(),
     })
@@ -60,7 +60,7 @@ fn accepted_submission_creates_a_correlated_durable_record() {
     assert!(record.optional_admission_marker.is_some());
     assert_eq!(
         record.deployment_lifecycle,
-        sema::DeploymentLifecycle::Submitted
+        memory::DeploymentLifecycle::Submitted
     );
     assert!(record.optional_deployment_terminal.is_none());
 }
@@ -81,12 +81,12 @@ fn capacity_rejection_is_a_correlated_terminal_record() {
     assert!(record.optional_admission_marker.is_none());
     assert_eq!(
         record.deployment_lifecycle,
-        sema::DeploymentLifecycle::Rejected
+        memory::DeploymentLifecycle::Rejected
     );
     assert!(matches!(
         record.optional_deployment_terminal,
-        Some(sema::DeploymentTerminal::Rejected(
-            sema::DeploymentTerminalReason::DeploymentInFlight
+        Some(memory::DeploymentTerminal::Rejected(
+            memory::DeploymentTerminalReason::DeploymentInFlight
         ))
     ));
     assert!(record.optional_terminal_marker.is_some());

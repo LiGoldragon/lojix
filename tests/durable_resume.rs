@@ -1,8 +1,8 @@
 //! Self-resume + restart-safe identifiers: the proof that lojix daemon state
-//! survives a process restart now that the `Store` is sema-engine-backed
+//! survives a process restart now that the `Store` is memory-engine-backed
 //! (Spirit oh9l durable-first, ur16 self-resume).
 //!
-//! The test opens a `Store` at a temp `*.sema` path, records an activation (a
+//! The test opens a `Store` at a temp `*.memory` path, records an activation (a
 //! live generation plus its gc-root), reads the commit sequence and the next
 //! generation identifier, DROPS the store (simulating the daemon stopping),
 //! REOPENS at the same path, and asserts the live generation, the commit
@@ -66,7 +66,7 @@ fn activation_in_environment(
 #[test]
 fn store_self_resumes_after_reopen() {
     let directory = TempDir::new().expect("tempdir");
-    let path = directory.path().join("lojix.sema");
+    let path = directory.path().join("lojix.memory");
 
     // First boot: a virgin store starts empty with genesis counters.
     let (committed_sequence, expected_next_generation) = {
@@ -134,7 +134,7 @@ fn store_self_resumes_after_reopen() {
 #[test]
 fn current_generation_is_unique_per_host_or_user_environment_across_reopen() {
     let directory = TempDir::new().expect("tempdir");
-    let path = directory.path().join("lojix.sema");
+    let path = directory.path().join("lojix.memory");
     {
         let store = Store::open(&path).expect("open store");
         let (first_host, first_host_root) =

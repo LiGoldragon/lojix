@@ -7,13 +7,13 @@
 //! pipeline runs as a chain of effect continuations. The CLI is only a
 //! text-to-Signal adapter for this daemon.
 //!
-//! Durable `sema-engine`-backed state backs the handwritten runtime model,
+//! Durable `memory-engine`-backed state backs the handwritten runtime model,
 //! while the daemon socket shell is actor-native. Daemon state — the live
 //! generation set, GC-roots, the append-only event log, and the container
-//! mirror — persists to a `*.sema` file and self-resumes on restart: opening
+//! mirror — persists to a `*.memory` file and self-resumes on restart: opening
 //! the engine reads the persisted catalog, commit counter, and records straight
 //! back, so the daemon recovers without replay code (Spirit oh9l durable-first,
-//! fosp sema-engine-exclusive, ur16 self-resume).
+//! fosp memory-engine-exclusive, ur16 self-resume).
 
 use crate::inspected_text::{NixStorePath, StoreItemShape};
 use crate::quarantine::{OpeningReport as _, RowQuarantine as _};
@@ -22,6 +22,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
+use memory_engine::{
+    Assertion, Engine as MemoryDatabase, EngineOpen, EngineRecord, EngineStoredRecord,
+    FamilyDirectory, FamilyName, Mutation, QueryPlan, RecordKey, Retraction, RowMaterializer,
+    SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
+    VersionedHistoryAcknowledgement, VersionedHistoryRetention, VersionedStoreName,
+    VersioningPolicy,
+};
 use rkyv::api::high::HighDeserializer;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::rancor::{self, Strategy};
@@ -29,13 +36,6 @@ use rkyv::validation::Validator;
 use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema_engine::{
-    Assertion, Engine as SemaDatabase, EngineOpen, EngineRecord, EngineStoredRecord,
-    FamilyDirectory, FamilyName, Mutation, QueryPlan, RecordKey, Retraction, RowMaterializer,
-    SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
-    VersionedHistoryAcknowledgement, VersionedHistoryRetention, VersionedStoreName,
-    VersioningPolicy,
-};
 
 use crate::runtime_model::{
     AdmissionMarker, CommitSequence, ContainerLifecycleRecord, DeployJob, DeploymentLifecycle,
@@ -154,7 +154,7 @@ impl HorizonArchitecture for str {
 const LOJIX_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(5);
 
 /// A record kind the lojix store holds. Every family is one durable table
-/// carrying one row per element — the sema-engine model — and everything the
+/// carrying one row per element — the memory-engine model — and everything the
 /// store, the startup gate and the read-only inspector need to know about a
 /// family is stated once here rather than as a constant, a reader, a validator
 /// and an inspection target spelled separately per kind.
@@ -196,7 +196,7 @@ where
         )
     }
 
-    fn register(database: &mut SemaDatabase, path: &Path) -> Result<TableReference<Self>> {
+    fn register(database: &mut MemoryDatabase, path: &Path) -> Result<TableReference<Self>> {
         database
             .register_table(Self::descriptor())
             .map_err(|source| Error::StoreStartupCompatibility {
@@ -412,8 +412,8 @@ pub enum Error {
     #[error("signal request was rejected before execution")]
     SignalRequestRejected,
 
-    #[error("sema database engine error: {0}")]
-    Database(#[from] sema_engine::Error),
+    #[error("memory database engine error: {0}")]
+    Database(#[from] memory_engine::Error),
 
     #[error("store maintenance rejected: {0}")]
     StoreMaintenance(String),
@@ -425,7 +425,7 @@ pub enum Error {
         path: PathBuf,
         stage: String,
         #[source]
-        source: Box<sema_engine::Error>,
+        source: Box<memory_engine::Error>,
     },
 
     #[error("horizon projection error: {0}")]
@@ -489,7 +489,7 @@ pub struct LegacyStartupConfiguration {
     pub state_directory_path: String,
     /// Exact configured durable Lojix store path. This is intentionally
     /// independent from the state directory so the daemon and reset primitive
-    /// share one explicit target rather than deriving a `lojix.sema` basename.
+    /// share one explicit target rather than deriving a `lojix.memory` basename.
     pub store_path: String,
     /// The node name of the host this daemon runs on. It is
     /// retained as deployment identity, while every immutable generation is
@@ -588,7 +588,7 @@ impl LojixNexusConfigurable for NexusConfiguration {
     }
 
     fn store_path() -> PathBuf {
-        Self::state_directory().join("lojix.sema")
+        Self::state_directory().join("lojix.memory")
     }
 
     fn validate(&self) -> Result<()> {
@@ -675,9 +675,9 @@ impl From<&LegacyStartupConfiguration> for NexusConfiguration {
     }
 }
 
-/// Capability to add the Nexus configuration record to a copied legacy Sema.
+/// Capability to add the Nexus configuration record to a copied legacy Memory.
 ///
-/// The source is only read as bytes. All sema-engine discovery and mutation
+/// The source is only read as bytes. All memory-engine discovery and mutation
 /// occurs on `target`, so an incompatible source cannot be changed by probing.
 pub trait LegacyConfigurationMigratable {
     fn migrate_configuration_copy(
@@ -758,11 +758,11 @@ impl Payload for EventLogRetention {
     }
 }
 
-/// The durable lojix daemon state plane: a `sema-engine` keyed table store
-/// written to a `*.sema` file, mirroring the spirit `Store` shape. SEMA means
+/// The durable lojix daemon state plane: a `memory-engine` keyed table store
+/// written to a `*.memory` file, mirroring the spirit `Store` shape. MEMORY means
 /// database work. `Store` maps the six schema-emitted record families onto
-/// sema-engine operations — one row per element, not one blob per table — and
-/// sema-engine owns the database handle, the durable commit sequence, and typed
+/// memory-engine operations — one row per element, not one blob per table — and
+/// memory-engine owns the database handle, the durable commit sequence, and typed
 /// rkyv table access. A process-local write gate serializes Lojix mutations
 /// before they reach redb. This is stricter than redb's transaction lock: the
 /// admission and terminal markers embedded in durable deployment records name
@@ -776,7 +776,7 @@ impl Payload for EventLogRetention {
 /// `next_deployment_identifier`, `next_event_log_position`) live in a durable
 /// high-water row rather than in RAM or a scan of retained history.
 pub struct Store {
-    database: SemaDatabase,
+    database: MemoryDatabase,
     directory: LojixDirectory,
     path: PathBuf,
     write_gate: Mutex<()>,
@@ -807,11 +807,11 @@ pub struct LojixDirectory {
 /// The one place that says which families a lojix store holds. Registration is
 /// idempotent, so building the directory doubles as the resume.
 trait LojixTables: Sized {
-    fn register(database: &mut SemaDatabase, path: &Path) -> Result<Self>;
+    fn register(database: &mut MemoryDatabase, path: &Path) -> Result<Self>;
 }
 
 impl LojixTables for LojixDirectory {
-    fn register(database: &mut SemaDatabase, path: &Path) -> Result<Self> {
+    fn register(database: &mut MemoryDatabase, path: &Path) -> Result<Self> {
         Ok(Self {
             live_set: LiveGeneration::register(database, path)?,
             gc_roots: GcRoot::register(database, path)?,
@@ -835,7 +835,7 @@ struct NexusConfigurationRecord {
 }
 
 impl FamilyDirectory for LojixDirectory {
-    fn materialize(&self, row: RowMaterializer<'_>) -> sema_engine::Result<()> {
+    fn materialize(&self, row: RowMaterializer<'_>) -> memory_engine::Result<()> {
         match row.family().table_name() {
             LiveGeneration::TABLE => row.apply(self.live_set),
             GcRoot::TABLE => row.apply(self.gc_roots),
@@ -849,7 +849,7 @@ impl FamilyDirectory for LojixDirectory {
             PendingTransitionIntent::TABLE => row.apply(self.pending_transition_intents),
             NexusConfigurationRecord::TABLE => row.apply(self.nexus_configuration),
             quarantine::QuarantinedRow::TABLE => row.apply(self.quarantined_rows),
-            table => Err(sema_engine::Error::TableNotRegistered {
+            table => Err(memory_engine::Error::TableNotRegistered {
                 table: table.to_owned(),
             }),
         }
@@ -961,9 +961,9 @@ impl ClosureRecord for GcRoot {
 /// counter has run, and every row of one record family read back. The record
 /// kind is the parameter here — a family is not a method.
 pub trait DurableStore {
-    /// Open or create the durable SEMA database at `path`. A fresh file is
+    /// Open or create the durable MEMORY database at `path`. A fresh file is
     /// created with empty engine counters; an existing file resumes its
-    /// persisted commit sequence and records straight back through sema-engine.
+    /// persisted commit sequence and records straight back through memory-engine.
     /// Building the family directory registers every table, and registration is
     /// idempotent, so opening doubles as the resume — there is no separate load
     /// path (ur16).
@@ -973,7 +973,7 @@ pub trait DurableStore {
 
     fn path(&self) -> &Path;
 
-    /// The persisted commit sequence — sema-engine's durable write counter,
+    /// The persisted commit sequence — memory-engine's durable write counter,
     /// read back after a write for the reply marker. Survives restart because
     /// the engine owns it (it just deletes from RAM here). `state_digest`
     /// remains the commit-sequence stand-in (decision 6).
@@ -1114,7 +1114,7 @@ pub trait TransitionJournal {
     /// Find the exact durable transaction that created `intent`.  The
     /// write-ahead row is not allowed to borrow the current database head: a
     /// later unrelated commit would otherwise forge the public marker.  The
-    /// versioned SEMA log names both keyed rows written together, so matching
+    /// versioned MEMORY log names both keyed rows written together, so matching
     /// the intent key and its deployment-record key proves the atomic source.
     fn initial_intent_marker(&self, intent: &PendingTransitionIntent) -> Result<TransitionMarker>;
 
@@ -1219,7 +1219,7 @@ pub trait EventHistory {
 pub trait DeploymentLedger {
     /// Atomically create the admission correlation record *and* the durable
     /// write-ahead intent.  The public receipt is intentionally absent here:
-    /// it is bound only after this transaction is visible in sema-engine's
+    /// it is bound only after this transaction is visible in memory-engine's
     /// versioned commit log.
     fn begin_admission_transition(
         &self,
@@ -1520,7 +1520,7 @@ impl NexusPersistable for Store {
         if path.exists() {
             let probe_identifier = STARTUP_PROBE_IDENTIFIER.fetch_add(1, Ordering::Relaxed);
             let probe = path.with_extension(format!(
-                "lojix-open-probe-{}-{probe_identifier}.sema",
+                "lojix-open-probe-{}-{probe_identifier}.memory",
                 std::process::id(),
             ));
             let mut source = std::fs::File::open(&path)?;
@@ -1530,13 +1530,13 @@ impl NexusPersistable for Store {
                 .open(&probe)
                 .map_err(|error| {
                     Error::StoreMaintenance(format!(
-                        "reserve disposable Lojix Sema startup probe {}: {error}",
+                        "reserve disposable Lojix Memory startup probe {}: {error}",
                         probe.display()
                     ))
                 })?;
             std::io::copy(&mut source, &mut target).map_err(|error| {
                 Error::StoreMaintenance(format!(
-                    "copy Lojix Sema to disposable startup probe {}: {error}",
+                    "copy Lojix Memory to disposable startup probe {}: {error}",
                     probe.display()
                 ))
             })?;
@@ -1552,7 +1552,7 @@ impl NexusPersistable for Store {
             drop(probe_store);
             std::fs::remove_file(&probe).map_err(|error| {
                 Error::StoreMaintenance(format!(
-                    "remove disposable Lojix Sema startup probe {}: {error}",
+                    "remove disposable Lojix Memory startup probe {}: {error}",
                     probe.display()
                 ))
             })?;
@@ -1570,7 +1570,7 @@ impl NexusPersistable for Store {
         seed_existing_state: bool,
     ) -> Result<Self> {
         let path = path.into();
-        let mut database = SemaDatabase::open(
+        let mut database = MemoryDatabase::open(
             EngineOpen::new(path.clone(), LOJIX_SCHEMA_VERSION).with_versioning(
                 VersioningPolicy::new(VersionedStoreName::new("lojix"))
                     .with_retention(VersionedHistoryRetention::new(4_096)),
@@ -1578,7 +1578,7 @@ impl NexusPersistable for Store {
         )
         .map_err(|source| Error::StoreStartupCompatibility {
             path: path.clone(),
-            stage: "opening sema-engine".to_string(),
+            stage: "opening memory-engine".to_string(),
             source: Box::new(source),
         })?;
         let directory = LojixDirectory::register(&mut database, &path)?;
@@ -1634,7 +1634,7 @@ impl NexusPersistable for Store {
                     || !self.records::<PendingTransitionIntent>()?.is_empty();
                 if legacy_state_exists && !seed_existing_state && !configuration_quarantined {
                     return Err(Error::StoreMaintenance(
-                        "existing Lojix Sema has no Nexus configuration; migrate its legacy startup archive into a validated copy before opening it"
+                        "existing Lojix Memory has no Nexus configuration; migrate its legacy startup archive into a validated copy before opening it"
                             .to_string(),
                     ));
                 }
@@ -3081,7 +3081,7 @@ impl LegacyConfigurationMigratable for Store {
     ) -> Result<Self> {
         if Path::new(&legacy_configuration.store_path) != source {
             return Err(Error::StoreMaintenance(
-                "legacy startup configuration does not identify the source Sema".to_string(),
+                "legacy startup configuration does not identify the source Memory".to_string(),
             ));
         }
         if target.exists() {
@@ -3229,7 +3229,7 @@ mod transition_intent_tests {
     #[test]
     fn fresh_job_and_gc_root_writes_reject_noncanonical_closure_paths() {
         let directory = tempfile::TempDir::new().expect("temporary store directory");
-        let store = Store::open(directory.path().join("lojix.sema")).expect("open store");
+        let store = Store::open(directory.path().join("lojix.memory")).expect("open store");
         let unsafe_path = ordinary::ClosurePath::new(
             "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-private-secret".to_string(),
         );
@@ -3255,7 +3255,7 @@ mod transition_intent_tests {
     #[test]
     fn reopen_rejects_an_unsafe_resumable_job_closure() {
         let directory = tempfile::TempDir::new().expect("temporary store directory");
-        let path = directory.path().join("lojix.sema");
+        let path = directory.path().join("lojix.memory");
         let store = Store::open(&path).expect("open store");
         let record = store
             .allocate_deployment_record(admission_identity(), admission_job())
@@ -3302,7 +3302,7 @@ mod transition_intent_tests {
     fn admission_intent_recovery_is_exactly_once_at_every_crash_window() {
         for crash_after in ["intent", "bind", "dispatch", "journal"] {
             let directory = tempfile::TempDir::new().expect("temporary store directory");
-            let path = directory.path().join("lojix.sema");
+            let path = directory.path().join("lojix.memory");
             let deployment_identifier = {
                 let store = Store::open(&path).expect("open store");
                 let record = store
@@ -3393,7 +3393,7 @@ mod transition_intent_tests {
     #[test]
     fn reopening_after_acknowledged_transition_compaction_does_not_redeliver() {
         let directory = tempfile::TempDir::new().expect("temporary store directory");
-        let path = directory.path().join("lojix.sema");
+        let path = directory.path().join("lojix.memory");
         let store = Store::open(&path).expect("open store");
         let record = store
             .allocate_deployment_record(admission_identity(), admission_job())
@@ -3457,7 +3457,7 @@ mod transition_intent_tests {
     fn intermediate_phase_intent_recovery_acknowledges_before_continuation() {
         for crash_after in ["intent", "bind", "dispatch", "journal"] {
             let directory = tempfile::TempDir::new().expect("temporary store directory");
-            let path = directory.path().join("lojix.sema");
+            let path = directory.path().join("lojix.memory");
             let deployment_identifier = {
                 let store = Store::open(&path).expect("open store");
                 let record = store
@@ -3592,7 +3592,7 @@ mod transition_intent_tests {
     fn terminal_intent_recovery_keeps_the_job_until_local_acknowledgement() {
         for crash_after in ["intent", "bind", "dispatch", "journal"] {
             let directory = tempfile::TempDir::new().expect("temporary store directory");
-            let path = directory.path().join("lojix.sema");
+            let path = directory.path().join("lojix.memory");
             let deployment_identifier = {
                 let store = Store::open(&path).expect("open store");
                 let record = store
@@ -3708,7 +3708,7 @@ mod transition_intent_tests {
     fn preflight_rejection_intent_recovers_an_acknowledged_terminal_event() {
         for crash_after in ["intent", "bind", "dispatch", "journal"] {
             let directory = tempfile::TempDir::new().expect("temporary store directory");
-            let path = directory.path().join("lojix.sema");
+            let path = directory.path().join("lojix.memory");
             let deployment_identifier = {
                 let store = Store::open(&path).expect("open store");
                 let record = store

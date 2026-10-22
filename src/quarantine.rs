@@ -12,8 +12,8 @@
 //! Nothing carries an earlier layout forward: a quarantined row is kept only
 //! as evidence, and the Nexus serves what remains.
 
+use memory_engine::{EngineRecord, QueryPlan, RecordKey, TableName, TableReference};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema_engine::{EngineRecord, QueryPlan, RecordKey, TableName, TableReference};
 
 use crate::runtime_model::{
     ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, DeploymentRecord, EventLogEntry,
@@ -228,7 +228,7 @@ impl RowQuarantine for Store {
                 }
                 Ok(rows)
             })
-            .map_err(sema_engine::Error::from)?)
+            .map_err(memory_engine::Error::from)?)
     }
 
     fn quarantined_rows(&self) -> Result<Vec<QuarantinedRow>> {

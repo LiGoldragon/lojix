@@ -4,7 +4,7 @@
 
 use crate::Payload;
 use crate::inspected_text::{NixStorePath, StoreItemShape};
-use crate::runtime_model as sema;
+use crate::runtime_model as memory;
 use meta_signal_lojix as owner;
 use signal_lojix as ordinary;
 
@@ -95,12 +95,12 @@ where
 
 macro_rules! text_value {
     ($runtime:ident) => {
-        impl Lowerable<sema::$runtime> for String {
-            fn lower(self) -> Result<sema::$runtime, WireShapeError> {
-                Ok(sema::$runtime::new(self))
+        impl Lowerable<memory::$runtime> for String {
+            fn lower(self) -> Result<memory::$runtime, WireShapeError> {
+                Ok(memory::$runtime::new(self))
             }
         }
-        impl Raisable<String> for sema::$runtime {
+        impl Raisable<String> for memory::$runtime {
             fn raise(self) -> Result<String, WireShapeError> {
                 Ok(self.into_payload())
             }
@@ -109,14 +109,14 @@ macro_rules! text_value {
 }
 macro_rules! integer_value {
     ($runtime:ident) => {
-        impl Lowerable<sema::$runtime> for i64 {
-            fn lower(self) -> Result<sema::$runtime, WireShapeError> {
-                Ok(sema::$runtime::new(
+        impl Lowerable<memory::$runtime> for i64 {
+            fn lower(self) -> Result<memory::$runtime, WireShapeError> {
+                Ok(memory::$runtime::new(
                     u64::try_from(self).map_err(|_| WireShapeError)?,
                 ))
             }
         }
-        impl Raisable<i64> for sema::$runtime {
+        impl Raisable<i64> for memory::$runtime {
             fn raise(self) -> Result<i64, WireShapeError> {
                 i64::try_from(self.into_payload()).map_err(|_| WireShapeError)
             }
@@ -124,48 +124,48 @@ macro_rules! integer_value {
     };
 }
 macro_rules! shared_unit_enum { ($name:ident { $($variant:ident),+ $(,)? }) => {
-    impl Lowerable<sema::$name> for ordinary::$name {
-        fn lower(self) -> Result<sema::$name, WireShapeError> { Ok(match self { $(ordinary::$name::$variant => sema::$name::$variant),+ }) }
+    impl Lowerable<memory::$name> for ordinary::$name {
+        fn lower(self) -> Result<memory::$name, WireShapeError> { Ok(match self { $(ordinary::$name::$variant => memory::$name::$variant),+ }) }
     }
-    impl Raisable<ordinary::$name> for sema::$name {
-        fn raise(self) -> Result<ordinary::$name, WireShapeError> { Ok(match self { $(sema::$name::$variant => ordinary::$name::$variant),+ }) }
+    impl Raisable<ordinary::$name> for memory::$name {
+        fn raise(self) -> Result<ordinary::$name, WireShapeError> { Ok(match self { $(memory::$name::$variant => ordinary::$name::$variant),+ }) }
     }
 }; }
 macro_rules! owner_unit_enum { ($name:ident { $($variant:ident),+ $(,)? }) => {
-    impl Lowerable<sema::$name> for owner::$name {
-        fn lower(self) -> Result<sema::$name, WireShapeError> { Ok(match self { $(owner::$name::$variant => sema::$name::$variant),+ }) }
+    impl Lowerable<memory::$name> for owner::$name {
+        fn lower(self) -> Result<memory::$name, WireShapeError> { Ok(match self { $(owner::$name::$variant => memory::$name::$variant),+ }) }
     }
-    impl Raisable<owner::$name> for sema::$name {
-        fn raise(self) -> Result<owner::$name, WireShapeError> { Ok(match self { $(sema::$name::$variant => owner::$name::$variant),+ }) }
+    impl Raisable<owner::$name> for memory::$name {
+        fn raise(self) -> Result<owner::$name, WireShapeError> { Ok(match self { $(memory::$name::$variant => owner::$name::$variant),+ }) }
     }
 }; }
 macro_rules! shared_struct { ($public:ident => $runtime:ident { $($pf:ident => $rf:ident),+ $(,)? }) => {
-    impl Lowerable<sema::$runtime> for ordinary::$public {
-        fn lower(self) -> Result<sema::$runtime, WireShapeError> { Ok(sema::$runtime { $($rf: self.$pf.lower()?),+ }) }
+    impl Lowerable<memory::$runtime> for ordinary::$public {
+        fn lower(self) -> Result<memory::$runtime, WireShapeError> { Ok(memory::$runtime { $($rf: self.$pf.lower()?),+ }) }
     }
-    impl Raisable<ordinary::$public> for sema::$runtime {
+    impl Raisable<ordinary::$public> for memory::$runtime {
         fn raise(self) -> Result<ordinary::$public, WireShapeError> { Ok(ordinary::$public { $($pf: self.$rf.raise()?),+ }) }
     }
 }; }
 macro_rules! owner_struct { ($public:ident => $runtime:ident { $($pf:ident => $rf:ident),+ $(,)? }) => {
-    impl Lowerable<sema::$runtime> for owner::$public {
-        fn lower(self) -> Result<sema::$runtime, WireShapeError> { Ok(sema::$runtime { $($rf: self.$pf.lower()?),+ }) }
+    impl Lowerable<memory::$runtime> for owner::$public {
+        fn lower(self) -> Result<memory::$runtime, WireShapeError> { Ok(memory::$runtime { $($rf: self.$pf.lower()?),+ }) }
     }
-    impl Raisable<owner::$public> for sema::$runtime {
+    impl Raisable<owner::$public> for memory::$runtime {
         fn raise(self) -> Result<owner::$public, WireShapeError> { Ok(owner::$public { $($pf: self.$rf.raise()?),+ }) }
     }
 }; }
 macro_rules! owner_struct_with_none {
     ($public:ident => $runtime:ident { $($pf:ident => $rf:ident),+ $(,)? }, $runtime_only:ident) => {
-        impl Lowerable<sema::$runtime> for owner::$public {
-            fn lower(self) -> Result<sema::$runtime, WireShapeError> {
-                Ok(sema::$runtime {
+        impl Lowerable<memory::$runtime> for owner::$public {
+            fn lower(self) -> Result<memory::$runtime, WireShapeError> {
+                Ok(memory::$runtime {
                     $($rf: self.$pf.lower()?),+,
                     $runtime_only: None,
                 })
             }
         }
-        impl Raisable<owner::$public> for sema::$runtime {
+        impl Raisable<owner::$public> for memory::$runtime {
             fn raise(self) -> Result<owner::$public, WireShapeError> {
                 Ok(owner::$public { $($pf: self.$rf.raise()?),+ })
             }
@@ -173,12 +173,12 @@ macro_rules! owner_struct_with_none {
     };
 }
 macro_rules! shared_raise_struct { ($public:ident => $runtime:ident { $($pf:ident => $rf:ident),+ $(,)? }) => {
-    impl Raisable<ordinary::$public> for sema::$runtime {
+    impl Raisable<ordinary::$public> for memory::$runtime {
         fn raise(self) -> Result<ordinary::$public, WireShapeError> { Ok(ordinary::$public { $($pf: self.$rf.raise()?),+ }) }
     }
 }; }
 macro_rules! owner_raise_struct { ($public:ident => $runtime:ident { $($pf:ident => $rf:ident),+ $(,)? }) => {
-    impl Raisable<owner::$public> for sema::$runtime {
+    impl Raisable<owner::$public> for memory::$runtime {
         fn raise(self) -> Result<owner::$public, WireShapeError> { Ok(owner::$public { $($pf: self.$rf.raise()?),+ }) }
     }
 }; }
@@ -379,31 +379,31 @@ owner_unit_enum!(TestRejectionReason {
 });
 
 macro_rules! shared_unary_enum { ($name:ident { $($variant:ident($public:ty => $runtime:ty)),+ $(,)? }) => {
-    impl Lowerable<sema::$name> for ordinary::$name {
-        fn lower(self) -> Result<sema::$name, WireShapeError> { Ok(match self { $(ordinary::$name::$variant(value) => sema::$name::$variant(<$public as Lowerable<$runtime>>::lower(value)?)),+ }) }
+    impl Lowerable<memory::$name> for ordinary::$name {
+        fn lower(self) -> Result<memory::$name, WireShapeError> { Ok(match self { $(ordinary::$name::$variant(value) => memory::$name::$variant(<$public as Lowerable<$runtime>>::lower(value)?)),+ }) }
     }
-    impl Raisable<ordinary::$name> for sema::$name {
-        fn raise(self) -> Result<ordinary::$name, WireShapeError> { Ok(match self { $(sema::$name::$variant(value) => ordinary::$name::$variant(<$runtime as Raisable<$public>>::raise(value)?)),+ }) }
+    impl Raisable<ordinary::$name> for memory::$name {
+        fn raise(self) -> Result<ordinary::$name, WireShapeError> { Ok(match self { $(memory::$name::$variant(value) => ordinary::$name::$variant(<$runtime as Raisable<$public>>::raise(value)?)),+ }) }
     }
 }; }
 macro_rules! owner_unary_enum { ($name:ident { $($variant:ident($public:ty => $runtime:ty)),+ $(,)? }) => {
-    impl Lowerable<sema::$name> for owner::$name {
-        fn lower(self) -> Result<sema::$name, WireShapeError> { Ok(match self { $(owner::$name::$variant(value) => sema::$name::$variant(<$public as Lowerable<$runtime>>::lower(value)?)),+ }) }
+    impl Lowerable<memory::$name> for owner::$name {
+        fn lower(self) -> Result<memory::$name, WireShapeError> { Ok(match self { $(owner::$name::$variant(value) => memory::$name::$variant(<$public as Lowerable<$runtime>>::lower(value)?)),+ }) }
     }
-    impl Raisable<owner::$name> for sema::$name {
-        fn raise(self) -> Result<owner::$name, WireShapeError> { Ok(match self { $(sema::$name::$variant(value) => owner::$name::$variant(<$runtime as Raisable<$public>>::raise(value)?)),+ }) }
+    impl Raisable<owner::$name> for memory::$name {
+        fn raise(self) -> Result<owner::$name, WireShapeError> { Ok(match self { $(memory::$name::$variant(value) => owner::$name::$variant(<$runtime as Raisable<$public>>::raise(value)?)),+ }) }
     }
 }; }
 
-impl Lowerable<sema::SecretsInput> for ordinary::SecretsInput {
-    fn lower(self) -> Result<sema::SecretsInput, WireShapeError> {
+impl Lowerable<memory::SecretsInput> for ordinary::SecretsInput {
+    fn lower(self) -> Result<memory::SecretsInput, WireShapeError> {
         Ok(match self {
-            Self::NoSecrets => sema::SecretsInput::NoSecrets,
-            Self::SecretsDirectory(value) => sema::SecretsInput::SecretsDirectory(value.lower()?),
+            Self::NoSecrets => memory::SecretsInput::NoSecrets,
+            Self::SecretsDirectory(value) => memory::SecretsInput::SecretsDirectory(value.lower()?),
         })
     }
 }
-impl Raisable<ordinary::SecretsInput> for sema::SecretsInput {
+impl Raisable<ordinary::SecretsInput> for memory::SecretsInput {
     fn raise(self) -> Result<ordinary::SecretsInput, WireShapeError> {
         Ok(match self {
             Self::NoSecrets => ordinary::SecretsInput::NoSecrets,
@@ -414,19 +414,19 @@ impl Raisable<ordinary::SecretsInput> for sema::SecretsInput {
     }
 }
 shared_unary_enum!(RequestedDeploymentAction {
-    Host(ordinary::HostDeployAction => sema::HostDeployAction),
-    UserEnvironment(ordinary::UserEnvironmentAction => sema::UserEnvironmentAction)
+    Host(ordinary::HostDeployAction => memory::HostDeployAction),
+    UserEnvironment(ordinary::UserEnvironmentAction => memory::UserEnvironmentAction)
 });
-impl Lowerable<sema::TestOutcome> for ordinary::TestOutcome {
-    fn lower(self) -> Result<sema::TestOutcome, WireShapeError> {
+impl Lowerable<memory::TestOutcome> for ordinary::TestOutcome {
+    fn lower(self) -> Result<memory::TestOutcome, WireShapeError> {
         Ok(match self {
-            Self::Pending => sema::TestOutcome::Pending,
-            Self::Passed => sema::TestOutcome::Passed,
-            Self::Failed(value) => sema::TestOutcome::Failed(value.lower()?),
+            Self::Pending => memory::TestOutcome::Pending,
+            Self::Passed => memory::TestOutcome::Passed,
+            Self::Failed(value) => memory::TestOutcome::Failed(value.lower()?),
         })
     }
 }
-impl Raisable<ordinary::TestOutcome> for sema::TestOutcome {
+impl Raisable<ordinary::TestOutcome> for memory::TestOutcome {
     fn raise(self) -> Result<ordinary::TestOutcome, WireShapeError> {
         Ok(match self {
             Self::Pending => ordinary::TestOutcome::Pending,
@@ -435,17 +435,17 @@ impl Raisable<ordinary::TestOutcome> for sema::TestOutcome {
         })
     }
 }
-impl Lowerable<sema::DeploymentEnvironment> for ordinary::DeploymentEnvironment {
-    fn lower(self) -> Result<sema::DeploymentEnvironment, WireShapeError> {
+impl Lowerable<memory::DeploymentEnvironment> for ordinary::DeploymentEnvironment {
+    fn lower(self) -> Result<memory::DeploymentEnvironment, WireShapeError> {
         Ok(match self {
-            Self::HostEnvironment => sema::DeploymentEnvironment::HostEnvironment,
+            Self::HostEnvironment => memory::DeploymentEnvironment::HostEnvironment,
             Self::UserEnvironment(value) => {
-                sema::DeploymentEnvironment::UserEnvironment(value.lower()?)
+                memory::DeploymentEnvironment::UserEnvironment(value.lower()?)
             }
         })
     }
 }
-impl Raisable<ordinary::DeploymentEnvironment> for sema::DeploymentEnvironment {
+impl Raisable<ordinary::DeploymentEnvironment> for memory::DeploymentEnvironment {
     fn raise(self) -> Result<ordinary::DeploymentEnvironment, WireShapeError> {
         Ok(match self {
             Self::HostEnvironment => ordinary::DeploymentEnvironment::HostEnvironment,
@@ -455,15 +455,15 @@ impl Raisable<ordinary::DeploymentEnvironment> for sema::DeploymentEnvironment {
         })
     }
 }
-impl Lowerable<sema::HostSelection> for ordinary::HostSelection {
-    fn lower(self) -> Result<sema::HostSelection, WireShapeError> {
+impl Lowerable<memory::HostSelection> for ordinary::HostSelection {
+    fn lower(self) -> Result<memory::HostSelection, WireShapeError> {
         Ok(match self {
-            Self::DefaultHost => sema::HostSelection::DefaultHost,
-            Self::OnHost(value) => sema::HostSelection::OnHost(value.lower()?),
+            Self::DefaultHost => memory::HostSelection::DefaultHost,
+            Self::OnHost(value) => memory::HostSelection::OnHost(value.lower()?),
         })
     }
 }
-impl Raisable<ordinary::HostSelection> for sema::HostSelection {
+impl Raisable<ordinary::HostSelection> for memory::HostSelection {
     fn raise(self) -> Result<ordinary::HostSelection, WireShapeError> {
         Ok(match self {
             Self::DefaultHost => ordinary::HostSelection::DefaultHost,
@@ -471,16 +471,16 @@ impl Raisable<ordinary::HostSelection> for sema::HostSelection {
         })
     }
 }
-impl Lowerable<sema::DeploymentTerminal> for ordinary::DeploymentTerminal {
-    fn lower(self) -> Result<sema::DeploymentTerminal, WireShapeError> {
+impl Lowerable<memory::DeploymentTerminal> for ordinary::DeploymentTerminal {
+    fn lower(self) -> Result<memory::DeploymentTerminal, WireShapeError> {
         Ok(match self {
-            Self::Succeeded => sema::DeploymentTerminal::Succeeded,
-            Self::Failed(value) => sema::DeploymentTerminal::Failed(value.lower()?),
-            Self::Rejected(value) => sema::DeploymentTerminal::Rejected(value.lower()?),
+            Self::Succeeded => memory::DeploymentTerminal::Succeeded,
+            Self::Failed(value) => memory::DeploymentTerminal::Failed(value.lower()?),
+            Self::Rejected(value) => memory::DeploymentTerminal::Rejected(value.lower()?),
         })
     }
 }
-impl Raisable<ordinary::DeploymentTerminal> for sema::DeploymentTerminal {
+impl Raisable<ordinary::DeploymentTerminal> for memory::DeploymentTerminal {
     fn raise(self) -> Result<ordinary::DeploymentTerminal, WireShapeError> {
         Ok(match self {
             Self::Succeeded => ordinary::DeploymentTerminal::Succeeded,
@@ -490,28 +490,28 @@ impl Raisable<ordinary::DeploymentTerminal> for sema::DeploymentTerminal {
     }
 }
 shared_unary_enum!(Selection {
-    ByNode(ordinary::NodeSelector => sema::NodeSelector),
-    ByTestRun(ordinary::TestRunLookup => sema::TestRunLookup),
-    ByDeployment(ordinary::DeploymentLookup => sema::DeploymentLookup),
-    ByGeneration(ordinary::GenerationLookup => sema::GenerationLookup),
-    ByEventLog(ordinary::EventLogRange => sema::EventLogRange)
+    ByNode(ordinary::NodeSelector => memory::NodeSelector),
+    ByTestRun(ordinary::TestRunLookup => memory::TestRunLookup),
+    ByDeployment(ordinary::DeploymentLookup => memory::DeploymentLookup),
+    ByGeneration(ordinary::GenerationLookup => memory::GenerationLookup),
+    ByEventLog(ordinary::EventLogRange => memory::EventLogRange)
 });
 owner_unary_enum!(TestRequest {
-    Run(owner::TestRun => sema::TestRun), Check(owner::QuickCheck => sema::QuickCheck)
+    Run(owner::TestRun => memory::TestRun), Check(owner::QuickCheck => memory::QuickCheck)
 });
 owner_unary_enum!(DeploySubmission {
-    UserEnvironment(owner::UserEnvironmentDeployment => sema::UserEnvironmentDeployment),
-    Host(owner::HostDeployment => sema::HostDeployment)
+    UserEnvironment(owner::UserEnvironmentDeployment => memory::UserEnvironmentDeployment),
+    Host(owner::HostDeployment => memory::HostDeployment)
 });
-impl Lowerable<sema::NodeSelection> for owner::NodeSelection {
-    fn lower(self) -> Result<sema::NodeSelection, WireShapeError> {
+impl Lowerable<memory::NodeSelection> for owner::NodeSelection {
+    fn lower(self) -> Result<memory::NodeSelection, WireShapeError> {
         Ok(match self {
-            Self::All => sema::NodeSelection::All,
-            Self::Nodes(value) => sema::NodeSelection::Nodes(value.lower()?),
+            Self::All => memory::NodeSelection::All,
+            Self::Nodes(value) => memory::NodeSelection::Nodes(value.lower()?),
         })
     }
 }
-impl Raisable<owner::NodeSelection> for sema::NodeSelection {
+impl Raisable<owner::NodeSelection> for memory::NodeSelection {
     fn raise(self) -> Result<owner::NodeSelection, WireShapeError> {
         Ok(match self {
             Self::All => owner::NodeSelection::All,
@@ -532,82 +532,82 @@ shared_struct!(DeploymentFailure => DeploymentFailure { deployment_failure_stage
 shared_struct!(FailureEvidence => FailureEvidence { failed_command_option => optional_failed_command, failure_detail => failure_detail, detail_truncated => detail_truncated });
 shared_struct!(FailedCommand => FailedCommand { command_program => command_program, command_argument_vector => command_argument_vector, exit_code_option => optional_exit_code });
 
-impl Lowerable<sema::GenerationLookup> for ordinary::GenerationLookup {
-    fn lower(self) -> Result<sema::GenerationLookup, WireShapeError> {
-        Ok(sema::GenerationLookup::new(
+impl Lowerable<memory::GenerationLookup> for ordinary::GenerationLookup {
+    fn lower(self) -> Result<memory::GenerationLookup, WireShapeError> {
+        Ok(memory::GenerationLookup::new(
             self.generation_identifier.lower()?,
         ))
     }
 }
-impl Raisable<ordinary::GenerationLookup> for sema::GenerationLookup {
+impl Raisable<ordinary::GenerationLookup> for memory::GenerationLookup {
     fn raise(self) -> Result<ordinary::GenerationLookup, WireShapeError> {
         Ok(ordinary::GenerationLookup {
             generation_identifier: self.into_payload().raise()?,
         })
     }
 }
-impl Lowerable<sema::DeploymentLookup> for ordinary::DeploymentLookup {
-    fn lower(self) -> Result<sema::DeploymentLookup, WireShapeError> {
-        Ok(sema::DeploymentLookup::new(
+impl Lowerable<memory::DeploymentLookup> for ordinary::DeploymentLookup {
+    fn lower(self) -> Result<memory::DeploymentLookup, WireShapeError> {
+        Ok(memory::DeploymentLookup::new(
             self.deployment_identifier.lower()?,
         ))
     }
 }
-impl Raisable<ordinary::DeploymentLookup> for sema::DeploymentLookup {
+impl Raisable<ordinary::DeploymentLookup> for memory::DeploymentLookup {
     fn raise(self) -> Result<ordinary::DeploymentLookup, WireShapeError> {
         Ok(ordinary::DeploymentLookup {
             deployment_identifier: self.into_payload().raise()?,
         })
     }
 }
-impl Lowerable<sema::SubscriptionClose> for ordinary::SubscriptionClose {
-    fn lower(self) -> Result<sema::SubscriptionClose, WireShapeError> {
-        Ok(sema::SubscriptionClose::new(
+impl Lowerable<memory::SubscriptionClose> for ordinary::SubscriptionClose {
+    fn lower(self) -> Result<memory::SubscriptionClose, WireShapeError> {
+        Ok(memory::SubscriptionClose::new(
             self.subscription_token.lower()?,
         ))
     }
 }
-impl Raisable<ordinary::SubscriptionClose> for sema::SubscriptionClose {
+impl Raisable<ordinary::SubscriptionClose> for memory::SubscriptionClose {
     fn raise(self) -> Result<ordinary::SubscriptionClose, WireShapeError> {
         Ok(ordinary::SubscriptionClose {
             subscription_token: self.into_payload().raise()?,
         })
     }
 }
-impl Lowerable<sema::DeploymentOutputSelector> for ordinary::DeploymentOutputSelector {
-    fn lower(self) -> Result<sema::DeploymentOutputSelector, WireShapeError> {
-        Ok(sema::DeploymentOutputSelector::new(
+impl Lowerable<memory::DeploymentOutputSelector> for ordinary::DeploymentOutputSelector {
+    fn lower(self) -> Result<memory::DeploymentOutputSelector, WireShapeError> {
+        Ok(memory::DeploymentOutputSelector::new(
             self.flake_attribute.lower()?,
         ))
     }
 }
-impl Raisable<ordinary::DeploymentOutputSelector> for sema::DeploymentOutputSelector {
+impl Raisable<ordinary::DeploymentOutputSelector> for memory::DeploymentOutputSelector {
     fn raise(self) -> Result<ordinary::DeploymentOutputSelector, WireShapeError> {
         Ok(ordinary::DeploymentOutputSelector {
             flake_attribute: self.into_payload().raise()?,
         })
     }
 }
-impl Lowerable<sema::QuickCheck> for owner::QuickCheck {
-    fn lower(self) -> Result<sema::QuickCheck, WireShapeError> {
-        Ok(sema::QuickCheck::new(self.lower()?))
+impl Lowerable<memory::QuickCheck> for owner::QuickCheck {
+    fn lower(self) -> Result<memory::QuickCheck, WireShapeError> {
+        Ok(memory::QuickCheck::new(self.lower()?))
     }
 }
-impl Raisable<owner::QuickCheck> for sema::QuickCheck {
+impl Raisable<owner::QuickCheck> for memory::QuickCheck {
     fn raise(self) -> Result<owner::QuickCheck, WireShapeError> {
         self.into_payload().raise()
     }
 }
-impl Lowerable<sema::GenerationArtifact> for ordinary::RequestedGenerationArtifact {
-    fn lower(self) -> Result<sema::GenerationArtifact, WireShapeError> {
+impl Lowerable<memory::GenerationArtifact> for ordinary::RequestedGenerationArtifact {
+    fn lower(self) -> Result<memory::GenerationArtifact, WireShapeError> {
         Ok(match self {
-            Self::UserEnvironment => sema::GenerationArtifact::UserEnvironment,
-            Self::CompleteHost => sema::GenerationArtifact::CompleteHost,
-            Self::BaseHost => sema::GenerationArtifact::BaseHost,
+            Self::UserEnvironment => memory::GenerationArtifact::UserEnvironment,
+            Self::CompleteHost => memory::GenerationArtifact::CompleteHost,
+            Self::BaseHost => memory::GenerationArtifact::BaseHost,
         })
     }
 }
-impl Raisable<ordinary::RequestedGenerationArtifact> for sema::GenerationArtifact {
+impl Raisable<ordinary::RequestedGenerationArtifact> for memory::GenerationArtifact {
     fn raise(self) -> Result<ordinary::RequestedGenerationArtifact, WireShapeError> {
         Ok(match self {
             Self::UserEnvironment => ordinary::RequestedGenerationArtifact::UserEnvironment,
@@ -639,14 +639,14 @@ owner_struct_with_none!(UserEnvironmentDeployment => UserEnvironmentDeployment {
     nix_builder_spec_option => optional_nix_builder_spec, extra_substituter_vector => extra_substituter_vector
 }, horizon_definition_option);
 
-impl Lowerable<sema::DeploySubmission> for owner::ActualizedDeploySubmission {
-    fn lower(self) -> Result<sema::DeploySubmission, WireShapeError> {
+impl Lowerable<memory::DeploySubmission> for owner::ActualizedDeploySubmission {
+    fn lower(self) -> Result<memory::DeploySubmission, WireShapeError> {
         let mut submission = self.deploy_submission.lower()?;
         match &mut submission {
-            sema::DeploySubmission::Host(value) => {
+            memory::DeploySubmission::Host(value) => {
                 value.horizon_definition_option = self.horizon_definition_option;
             }
-            sema::DeploySubmission::UserEnvironment(value) => {
+            memory::DeploySubmission::UserEnvironment(value) => {
                 value.horizon_definition_option = self.horizon_definition_option;
             }
         }
@@ -656,7 +656,7 @@ impl Lowerable<sema::DeploySubmission> for owner::ActualizedDeploySubmission {
 
 macro_rules! marker_wrapper {
     ($runtime:ident) => {
-        impl Raisable<ordinary::DatabaseMarker> for sema::$runtime {
+        impl Raisable<ordinary::DatabaseMarker> for memory::$runtime {
             fn raise(self) -> Result<ordinary::DatabaseMarker, WireShapeError> {
                 self.into_payload().raise()
             }
@@ -710,21 +710,21 @@ owner_raise_struct!(RejectedRetire => RejectedRetire { retire_rejection_reason =
 owner_raise_struct!(RejectedTest => RejectedTest { test_rejection_reason => test_rejection_reason, database_marker => state_marker });
 owner_raise_struct!(RefusedDeploy => RefusedDeploy { deploy_refusal_reason => deploy_refusal_reason, database_marker => state_marker });
 
-impl Raisable<ordinary::RejectedWatch> for sema::RejectedWatch {
+impl Raisable<ordinary::RejectedWatch> for memory::RejectedWatch {
     fn raise(self) -> Result<ordinary::RejectedWatch, WireShapeError> {
         Ok(ordinary::RejectedWatch {
             watch_rejection_reason: self.into_payload().raise()?,
         })
     }
 }
-impl Raisable<ordinary::SubscriptionClosed> for sema::SubscriptionClosed {
+impl Raisable<ordinary::SubscriptionClosed> for memory::SubscriptionClosed {
     fn raise(self) -> Result<ordinary::SubscriptionClosed, WireShapeError> {
         Ok(ordinary::SubscriptionClosed {
             subscription_token: self.into_payload().raise()?,
         })
     }
 }
-impl Raisable<owner::RejectedDeploy> for sema::RejectedDeploy {
+impl Raisable<owner::RejectedDeploy> for memory::RejectedDeploy {
     fn raise(self) -> Result<owner::RejectedDeploy, WireShapeError> {
         Ok(owner::RejectedDeploy {
             deployment_record: self.into_payload().raise()?,
@@ -732,7 +732,7 @@ impl Raisable<owner::RejectedDeploy> for sema::RejectedDeploy {
     }
 }
 
-impl Raisable<ordinary::Generation> for sema::Generation {
+impl Raisable<ordinary::Generation> for memory::Generation {
     fn raise(self) -> Result<ordinary::Generation, WireShapeError> {
         let closure_path_option = NixStorePath::from(self.closure_path.payload().as_str())
             .is_canonical_item_root()
@@ -751,7 +751,7 @@ impl Raisable<ordinary::Generation> for sema::Generation {
         })
     }
 }
-impl Raisable<ordinary::TestRunRecord> for sema::TestRunRecord {
+impl Raisable<ordinary::TestRunRecord> for memory::TestRunRecord {
     fn raise(self) -> Result<ordinary::TestRunRecord, WireShapeError> {
         let closure_path_option = self
             .optional_closure_path
@@ -770,107 +770,111 @@ impl Raisable<ordinary::TestRunRecord> for sema::TestRunRecord {
     }
 }
 
-impl Lowerable<sema::OrdinaryIngress> for ordinary::Query {
-    fn lower(self) -> Result<sema::OrdinaryIngress, WireShapeError> {
+impl Lowerable<memory::OrdinaryIngress> for ordinary::Query {
+    fn lower(self) -> Result<memory::OrdinaryIngress, WireShapeError> {
         Ok(match self {
-            ordinary::Query::Configure(value) => sema::OrdinaryIngress::Configure(value.lower()?),
+            ordinary::Query::Configure(value) => memory::OrdinaryIngress::Configure(value.lower()?),
             ordinary::Query::WatchDeployments(value) => {
-                sema::OrdinaryIngress::WatchDeployments(value.lower()?)
+                memory::OrdinaryIngress::WatchDeployments(value.lower()?)
             }
-            ordinary::Query::Query(value) => sema::OrdinaryIngress::Query(value.lower()?),
+            ordinary::Query::Query(value) => memory::OrdinaryIngress::Query(value.lower()?),
             ordinary::Query::WatchCacheRetention(value) => {
-                sema::OrdinaryIngress::WatchCacheRetention(value.lower()?)
+                memory::OrdinaryIngress::WatchCacheRetention(value.lower()?)
             }
-            ordinary::Query::Unwatch(value) => sema::OrdinaryIngress::Unwatch(value.lower()?),
+            ordinary::Query::Unwatch(value) => memory::OrdinaryIngress::Unwatch(value.lower()?),
         })
     }
 }
-impl Lowerable<sema::MetaIngress> for owner::Query {
-    fn lower(self) -> Result<sema::MetaIngress, WireShapeError> {
+impl Lowerable<memory::MetaIngress> for owner::Query {
+    fn lower(self) -> Result<memory::MetaIngress, WireShapeError> {
         Ok(match self {
-            owner::Query::Configure(value) => sema::MetaIngress::Configure(value.lower()?),
-            owner::Query::ReverseConfiguration => sema::MetaIngress::ReverseConfiguration,
-            owner::Query::Retire(value) => sema::MetaIngress::Retire(value.lower()?),
-            owner::Query::Pin(value) => sema::MetaIngress::Pin(value.lower()?),
-            owner::Query::Deploy(value) => sema::MetaIngress::Deploy(value.lower()?),
-            owner::Query::Test(value) => sema::MetaIngress::Test(value.lower()?),
-            owner::Query::Unpin(value) => sema::MetaIngress::Unpin(value.lower()?),
+            owner::Query::Configure(value) => memory::MetaIngress::Configure(value.lower()?),
+            owner::Query::ReverseConfiguration => memory::MetaIngress::ReverseConfiguration,
+            owner::Query::Retire(value) => memory::MetaIngress::Retire(value.lower()?),
+            owner::Query::Pin(value) => memory::MetaIngress::Pin(value.lower()?),
+            owner::Query::Deploy(value) => memory::MetaIngress::Deploy(value.lower()?),
+            owner::Query::Test(value) => memory::MetaIngress::Test(value.lower()?),
+            owner::Query::Unpin(value) => memory::MetaIngress::Unpin(value.lower()?),
         })
     }
 }
 
-impl Raisable<ordinary::Response> for sema::OrdinaryEgress {
+impl Raisable<ordinary::Response> for memory::OrdinaryEgress {
     fn raise(self) -> Result<ordinary::Response, WireShapeError> {
         Ok(match self {
-            sema::OrdinaryEgress::Configured(value) => {
+            memory::OrdinaryEgress::Configured(value) => {
                 ordinary::Response::Configured(ordinary::ConfigurationReceipt {
                     lojix_nexus_configuration: value.configuration,
                     meta_configure_occurred: value.meta_configure_occurred,
                 })
             }
-            sema::OrdinaryEgress::ConfigurationRejected(value) => {
+            memory::OrdinaryEgress::ConfigurationRejected(value) => {
                 ordinary::Response::ConfigurationRejected(value.raise()?)
             }
-            sema::OrdinaryEgress::TestRunsQueried(value) => {
+            memory::OrdinaryEgress::TestRunsQueried(value) => {
                 ordinary::Response::TestRunsQueried(value.raise()?)
             }
-            sema::OrdinaryEgress::UnwatchRejected(value) => {
+            memory::OrdinaryEgress::UnwatchRejected(value) => {
                 ordinary::Response::UnwatchRejected(value.raise()?)
             }
-            sema::OrdinaryEgress::QueryRejected(value) => {
+            memory::OrdinaryEgress::QueryRejected(value) => {
                 ordinary::Response::QueryRejected(value.raise()?)
             }
-            sema::OrdinaryEgress::Watching(value) => ordinary::Response::Watching(value.raise()?),
-            sema::OrdinaryEgress::Queried(value) => ordinary::Response::Queried(value.raise()?),
-            sema::OrdinaryEgress::DeploymentEventsQueried(value) => {
+            memory::OrdinaryEgress::Watching(value) => ordinary::Response::Watching(value.raise()?),
+            memory::OrdinaryEgress::Queried(value) => ordinary::Response::Queried(value.raise()?),
+            memory::OrdinaryEgress::DeploymentEventsQueried(value) => {
                 ordinary::Response::DeploymentEventsQueried(value.raise()?)
             }
-            sema::OrdinaryEgress::Unwatched(value) => ordinary::Response::Unwatched(value.raise()?),
-            sema::OrdinaryEgress::WatchRejected(value) => {
+            memory::OrdinaryEgress::Unwatched(value) => {
+                ordinary::Response::Unwatched(value.raise()?)
+            }
+            memory::OrdinaryEgress::WatchRejected(value) => {
                 ordinary::Response::WatchRejected(value.raise()?)
             }
         })
     }
 }
-impl Raisable<owner::Response> for sema::MetaEgress {
+impl Raisable<owner::Response> for memory::MetaEgress {
     fn raise(self) -> Result<owner::Response, WireShapeError> {
         Ok(match self {
-            sema::MetaEgress::Configured(value) => owner::Response::Configured(value.raise()?),
-            sema::MetaEgress::ConfigurationRejected(value) => {
+            memory::MetaEgress::Configured(value) => owner::Response::Configured(value.raise()?),
+            memory::MetaEgress::ConfigurationRejected(value) => {
                 owner::Response::ConfigurationRejected(value.raise()?)
             }
-            sema::MetaEgress::ConfigurationReversed(value) => {
+            memory::MetaEgress::ConfigurationReversed(value) => {
                 owner::Response::ConfigurationReversed(value.raise()?)
             }
-            sema::MetaEgress::PinRejected(value) => owner::Response::PinRejected(value.raise()?),
-            sema::MetaEgress::DeployRefused(value) => {
+            memory::MetaEgress::PinRejected(value) => owner::Response::PinRejected(value.raise()?),
+            memory::MetaEgress::DeployRefused(value) => {
                 owner::Response::DeployRefused(value.raise()?)
             }
-            sema::MetaEgress::DeployRejected(value) => {
+            memory::MetaEgress::DeployRejected(value) => {
                 owner::Response::DeployRejected(value.raise()?)
             }
-            sema::MetaEgress::DeployAccepted(value) => {
+            memory::MetaEgress::DeployAccepted(value) => {
                 owner::Response::DeployAccepted(value.raise()?)
             }
-            sema::MetaEgress::TestRejected(value) => owner::Response::TestRejected(value.raise()?),
-            sema::MetaEgress::Unpinned(value) => owner::Response::Unpinned(value.raise()?),
-            sema::MetaEgress::Tested(value) => owner::Response::Tested(value.raise()?),
-            sema::MetaEgress::UnpinRejected(value) => {
+            memory::MetaEgress::TestRejected(value) => {
+                owner::Response::TestRejected(value.raise()?)
+            }
+            memory::MetaEgress::Unpinned(value) => owner::Response::Unpinned(value.raise()?),
+            memory::MetaEgress::Tested(value) => owner::Response::Tested(value.raise()?),
+            memory::MetaEgress::UnpinRejected(value) => {
                 owner::Response::UnpinRejected(value.raise()?)
             }
-            sema::MetaEgress::DeployTerminal(value) => {
+            memory::MetaEgress::DeployTerminal(value) => {
                 owner::Response::DeployTerminal(value.raise()?)
             }
-            sema::MetaEgress::Pinned(value) => owner::Response::Pinned(value.raise()?),
-            sema::MetaEgress::RetireRejected(value) => {
+            memory::MetaEgress::Pinned(value) => owner::Response::Pinned(value.raise()?),
+            memory::MetaEgress::RetireRejected(value) => {
                 owner::Response::RetireRejected(value.raise()?)
             }
-            sema::MetaEgress::Retired(value) => owner::Response::Retired(value.raise()?),
+            memory::MetaEgress::Retired(value) => owner::Response::Retired(value.raise()?),
         })
     }
 }
 
-impl Raisable<ordinary::ConfigurationReceipt> for sema::ConfigurationReceipt {
+impl Raisable<ordinary::ConfigurationReceipt> for memory::ConfigurationReceipt {
     fn raise(self) -> Result<ordinary::ConfigurationReceipt, WireShapeError> {
         Ok(ordinary::ConfigurationReceipt {
             lojix_nexus_configuration: self.configuration,
@@ -879,14 +883,14 @@ impl Raisable<ordinary::ConfigurationReceipt> for sema::ConfigurationReceipt {
     }
 }
 
-impl Raisable<ordinary::ConfigurationRejection> for sema::ConfigurationRejection {
+impl Raisable<ordinary::ConfigurationRejection> for memory::ConfigurationRejection {
     fn raise(self) -> Result<ordinary::ConfigurationRejection, WireShapeError> {
         Ok(ordinary::ConfigurationRejection {
             configuration_rejection_reason: match self.reason {
-                sema::ConfigurationRejectionReason::OrdinaryConfigureClosed => {
+                memory::ConfigurationRejectionReason::OrdinaryConfigureClosed => {
                     ordinary::ConfigurationRejectionReason::OrdinaryConfigureClosed
                 }
-                sema::ConfigurationRejectionReason::InvalidConfiguration => {
+                memory::ConfigurationRejectionReason::InvalidConfiguration => {
                     ordinary::ConfigurationRejectionReason::InvalidConfiguration
                 }
             },
@@ -898,29 +902,29 @@ impl Raisable<ordinary::ConfigurationRejection> for sema::ConfigurationRejection
 mod tests {
     use super::*;
 
-    fn marker() -> sema::StateMarker {
-        sema::StateMarker {
-            commit_sequence: sema::CommitSequence::new(7),
-            state_digest: sema::StateDigest::new(7),
+    fn marker() -> memory::StateMarker {
+        memory::StateMarker {
+            commit_sequence: memory::CommitSequence::new(7),
+            state_digest: memory::StateDigest::new(7),
         }
     }
-    fn generation(path: &str) -> sema::Generation {
-        sema::Generation {
-            generation_identifier: sema::GenerationIdentifier::new(1),
-            deployment_identifier: sema::DeploymentIdentifier::new(1),
-            cluster_name: sema::ClusterName::from("alpha"),
-            node_name: sema::NodeName::from("node-1"),
-            generation_artifact: sema::GenerationArtifact::BaseHost,
-            activation_effect: sema::ActivationEffect::LiveActivation,
-            generation_slot: sema::GenerationSlot::Current,
-            closure_path: sema::ClosurePath::from(path),
+    fn generation(path: &str) -> memory::Generation {
+        memory::Generation {
+            generation_identifier: memory::GenerationIdentifier::new(1),
+            deployment_identifier: memory::DeploymentIdentifier::new(1),
+            cluster_name: memory::ClusterName::from("alpha"),
+            node_name: memory::NodeName::from("node-1"),
+            generation_artifact: memory::GenerationArtifact::BaseHost,
+            activation_effect: memory::ActivationEffect::LiveActivation,
+            generation_slot: memory::GenerationSlot::Current,
+            closure_path: memory::ClosurePath::from(path),
             optional_immutable_revision: None,
         }
     }
     #[test]
     fn ordinary_projection_keeps_only_canonical_store_item_roots() {
         let valid = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-system-toplevel";
-        let visible = sema::OrdinaryEgress::Queried(sema::GenerationListing {
+        let visible = memory::OrdinaryEgress::Queried(memory::GenerationListing {
             generation_vector: vec![generation(valid)],
             deployment_record_vector: Vec::new(),
             state_marker: marker(),
@@ -933,7 +937,7 @@ mod tests {
             "/nix/store/short-system",
             "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-secret",
         ] {
-            let visible = sema::OrdinaryEgress::Queried(sema::GenerationListing {
+            let visible = memory::OrdinaryEgress::Queried(memory::GenerationListing {
                 generation_vector: vec![generation(private)],
                 deployment_record_vector: Vec::new(),
                 state_marker: marker(),

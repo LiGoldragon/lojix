@@ -8,7 +8,7 @@ use lojix::reconstruction::StoreResetCommand;
 use lojix::{LegacyConfigurationArchivable as _, LegacyStartupConfiguration, Store};
 use redb::{Database, TableDefinition};
 
-const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");
+const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__memory_meta");
 
 fn startup_archive(
     directory: &std::path::Path,
@@ -46,14 +46,14 @@ fn reset_requires_one_inline_pathless_request() {
     );
     assert!(
         StoreResetCommand::from_arguments_with_configuration(
-            [OsString::from("lojix.sema")],
+            [OsString::from("lojix.memory")],
             archive.clone()
         )
         .is_err()
     );
     assert!(
         StoreResetCommand::from_arguments_with_configuration(
-            [OsString::from("/tmp/spirit.sema")],
+            [OsString::from("/tmp/spirit.memory")],
             archive.clone()
         )
         .is_err()
@@ -80,7 +80,7 @@ fn v5_refuses_the_v4_deploy_submission_layout_until_explicit_reset() {
     let path = directory.path().join("configured-lojix-store.db");
     std::fs::write(
         &path,
-        include_bytes!("fixtures/lojix-v5-pre-nexus-cf231859.sema"),
+        include_bytes!("fixtures/lojix-v5-pre-nexus-cf231859.memory"),
     )
     .expect("materialize the exact pre-Nexus v5 layout");
     let database = Database::open(&path).expect("open disposable legacy-shaped store");

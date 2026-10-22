@@ -36,7 +36,7 @@ fn configuration(directory: &std::path::Path, name: &str) -> NexusConfiguration 
 #[test]
 fn configuration_lifecycle_persists_the_meta_marker_and_desired_state() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let path = directory.path().join("lojix.sema");
+    let path = directory.path().join("lojix.memory");
     let default = configuration(directory.path(), "default");
     let ordinary = configuration(directory.path(), "ordinary");
     let meta = configuration(directory.path(), "meta");
@@ -90,11 +90,11 @@ fn configuration_lifecycle_persists_the_meta_marker_and_desired_state() {
 #[test]
 fn exact_pre_nexus_store_is_never_opened_in_place_and_migrates_on_a_copy() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let source = directory.path().join("legacy.sema");
-    let target = directory.path().join("migrated.sema");
+    let source = directory.path().join("legacy.memory");
+    let target = directory.path().join("migrated.memory");
     fs::write(
         &source,
-        include_bytes!("../../tests/fixtures/lojix-v5-pre-nexus-cf231859.sema"),
+        include_bytes!("../../tests/fixtures/lojix-v5-pre-nexus-cf231859.memory"),
     )
     .expect("materialize exact historical fixture");
     let before = fs::read(&source).expect("read source before probe");
@@ -166,12 +166,12 @@ fn exact_pre_nexus_store_is_never_opened_in_place_and_migrates_on_a_copy() {
 #[test]
 fn offline_migration_executable_uses_the_legacy_archive_as_its_source_authority() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let source = directory.path().join("legacy.sema");
-    let target = directory.path().join("migrated.sema");
+    let source = directory.path().join("legacy.memory");
+    let target = directory.path().join("migrated.memory");
     let archive = directory.path().join("legacy.rkyv");
     fs::write(
         &source,
-        include_bytes!("../../tests/fixtures/lojix-v5-pre-nexus-cf231859.sema"),
+        include_bytes!("../../tests/fixtures/lojix-v5-pre-nexus-cf231859.memory"),
     )
     .expect("materialize historical store");
     let legacy = LegacyStartupConfiguration {

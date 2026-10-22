@@ -96,7 +96,7 @@ fn user_environment_request(source: &Path) -> meta::DeploySubmission {
 /// A daemon running on the deployed node, so the closure is built in its own
 /// store and the copy stage really transfers it (the stage under test).
 fn runtime(directory: &Path, programs: &Path) -> SchemaRuntime {
-    let store = Arc::new(Store::open(directory.join("lojix.sema")).expect("open test store"));
+    let store = Arc::new(Store::open(directory.join("lojix.memory")).expect("open test store"));
     let configuration = Arc::new(
         RuntimeConfiguration::test_with_effect_program_directory(
             directory.join("generated-inputs"),
@@ -293,7 +293,7 @@ async fn driving_a_deploy_with_no_cursor_is_refused() {
 #[test]
 fn a_terminal_record_takes_its_lifecycle_from_its_terminal() {
     let directory = tempfile::tempdir().expect("tempdir");
-    let store = Store::open(directory.path().join("lojix.sema")).expect("open test store");
+    let store = Store::open(directory.path().join("lojix.memory")).expect("open test store");
 
     for (terminal, expected_lifecycle) in [
         (

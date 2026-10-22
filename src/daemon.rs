@@ -73,7 +73,7 @@ impl MetaResponseFraming for meta_signal_lojix::Response {
 
 use crate::adapters::{Lowerable as _, Raisable as _};
 use crate::runtime_flow::{self as nexus, NexusEngine};
-use crate::runtime_model as sema;
+use crate::runtime_model as memory;
 use crate::schema_runtime::{
     DeploySubmissionOutcome, RuntimeConfiguration, SchemaRuntime, TestSubmissionOutcome,
 };
@@ -107,7 +107,7 @@ pub struct Daemon {
     state_database_path: std::path::PathBuf,
 }
 
-/// Capability to discover the stable Lojix Sema and desired configuration.
+/// Capability to discover the stable Lojix Memory and desired configuration.
 pub trait EnvironmentConstructible {
     fn from_environment() -> Result<Self>
     where
@@ -272,7 +272,7 @@ const MAXIMUM_CONCURRENT_REQUESTS: usize = 64;
 const MAXIMUM_CONCURRENT_DEPLOYS: usize = 8;
 
 /// The `AsyncMultiConnectionRuntime` realization. Owns the SHARED durable
-/// `Store` (the concurrency point — locked only briefly per sema operation), the frame
+/// `Store` (the concurrency point — locked only briefly per memory operation), the frame
 /// codec, and no local listener/thread machinery. The actor runtime admits
 /// requests through per-listener gates and spawns each connection task, so BOTH
 /// sockets remain responsive while deploys run (intent 2alg, resolving audit
@@ -453,8 +453,8 @@ trait RequestServable {
     async fn serve(self, listener: ListenerRole, connection: AcceptedConnection) -> Result<()>;
     async fn serve_ordinary(&self, connection: &mut AcceptedConnection) -> Result<()>;
     async fn serve_owner(&self, connection: &mut AcceptedConnection) -> Result<()>;
-    async fn submit_deploy(&self, request: sema::DeploySubmission) -> Result<sema::MetaEgress>;
-    async fn submit_test(&self, request: sema::TestRequest) -> Result<sema::MetaEgress>;
+    async fn submit_deploy(&self, request: memory::DeploySubmission) -> Result<memory::MetaEgress>;
+    async fn submit_test(&self, request: memory::TestRequest) -> Result<memory::MetaEgress>;
     async fn read_body(&self, connection: &mut AcceptedConnection) -> Result<FrameBody>;
     async fn execute_request(
         &self,
@@ -467,8 +467,8 @@ trait RequestServable {
         listener: ListenerRole,
         signal_input: nexus::SignalInput,
     ) -> Result<nexus::SignalOutput>;
-    fn ordinary_reply(output: nexus::SignalOutput) -> Result<sema::OrdinaryEgress>;
-    fn meta_reply(output: nexus::SignalOutput) -> Result<sema::MetaEgress>;
+    fn ordinary_reply(output: nexus::SignalOutput) -> Result<memory::OrdinaryEgress>;
+    fn meta_reply(output: nexus::SignalOutput) -> Result<memory::MetaEgress>;
 }
 
 impl RequestServable for RequestWorker {
@@ -515,12 +515,12 @@ impl RequestServable for RequestWorker {
         // handle. Pin/Unpin/Retire are fast single writes and stay synchronous
         // on this task (up9q surface a — only Deploy decouples).
         let reply = match input {
-            sema::MetaIngress::Deploy(request) => self.submit_deploy(request).await?,
+            memory::MetaIngress::Deploy(request) => self.submit_deploy(request).await?,
             // A `Test` decouples from this connection task exactly like a
             // `Deploy` (Unit 2b): the test-job actor owns the dispatch pipeline
             // (the real `nix build` of the hermetic check, or the gated live
             // cycle), this task only submits and replies the accepted handle.
-            sema::MetaIngress::Test(request) => self.submit_test(request).await?,
+            memory::MetaIngress::Test(request) => self.submit_test(request).await?,
             other => {
                 let output = self
                     .execute_request(ListenerRole::Owner, nexus::SignalInput::MetaInput(other))
@@ -545,15 +545,15 @@ impl RequestServable for RequestWorker {
     /// runs. When the cap is full it replies `DeploymentInFlight`. This task's
     /// only remaining work is writing this reply frame; dropping it (a client
     /// disconnect) cannot cancel the spawned pipeline.
-    async fn submit_deploy(&self, request: sema::DeploySubmission) -> Result<sema::MetaEgress> {
+    async fn submit_deploy(&self, request: memory::DeploySubmission) -> Result<memory::MetaEgress> {
         match self.deploy_jobs.ask(AdmitDeploy { request }).await {
             Ok(DeployAdmission::Accepted(accepted)) => {
-                Ok(sema::MetaEgress::DeployAccepted(accepted))
+                Ok(memory::MetaEgress::DeployAccepted(accepted))
             }
             Ok(DeployAdmission::Rejected(rejected)) => {
-                Ok(sema::MetaEgress::DeployRejected(rejected))
+                Ok(memory::MetaEgress::DeployRejected(rejected))
             }
-            Ok(DeployAdmission::Refused(refused)) => Ok(sema::MetaEgress::DeployRefused(refused)),
+            Ok(DeployAdmission::Refused(refused)) => Ok(memory::MetaEgress::DeployRefused(refused)),
             // The deploy-job actor is daemon-lifetime; a send error means the
             // runtime is tearing down. Reply a typed internal rejection rather
             // than dropping the connection without a frame.
@@ -569,10 +569,10 @@ impl RequestServable for RequestWorker {
     /// — all before the build runs. Dropping this task (a client disconnect)
     /// cannot cancel the spawned pipeline; the result lands durably and is read
     /// over the ordinary `(ByTestRun …)` query.
-    async fn submit_test(&self, request: sema::TestRequest) -> Result<sema::MetaEgress> {
+    async fn submit_test(&self, request: memory::TestRequest) -> Result<memory::MetaEgress> {
         match self.test_jobs.ask(AdmitTest { request }).await {
-            Ok(TestAdmission::Accepted(accepted)) => Ok(sema::MetaEgress::Tested(accepted)),
-            Ok(TestAdmission::Rejected(rejected)) => Ok(sema::MetaEgress::TestRejected(rejected)),
+            Ok(TestAdmission::Accepted(accepted)) => Ok(memory::MetaEgress::Tested(accepted)),
+            Ok(TestAdmission::Rejected(rejected)) => Ok(memory::MetaEgress::TestRejected(rejected)),
             Err(_) => Err(Error::UnexpectedFrame),
         }
     }
@@ -627,14 +627,14 @@ impl RequestServable for RequestWorker {
         }
     }
 
-    fn ordinary_reply(output: nexus::SignalOutput) -> Result<sema::OrdinaryEgress> {
+    fn ordinary_reply(output: nexus::SignalOutput) -> Result<memory::OrdinaryEgress> {
         match output {
             nexus::SignalOutput::OrdinaryOutput(output) => Ok(output),
             nexus::SignalOutput::MetaOutput(_) => Err(Error::UnexpectedFrame),
         }
     }
 
-    fn meta_reply(output: nexus::SignalOutput) -> Result<sema::MetaEgress> {
+    fn meta_reply(output: nexus::SignalOutput) -> Result<memory::MetaEgress> {
         match output {
             nexus::SignalOutput::MetaOutput(output) => Ok(output),
             nexus::SignalOutput::OrdinaryOutput(_) => Err(Error::UnexpectedFrame),
@@ -752,7 +752,7 @@ impl DeployProcessable for DeployJobs {
                             .store
                             .terminalize_deployment(
                                 deployment_identifier,
-                                sema::DeploymentTerminal::Succeeded,
+                                memory::DeploymentTerminal::Succeeded,
                             )
                             .is_ok()
                         {
@@ -777,11 +777,11 @@ impl DeployProcessable for DeployJobs {
                             .store
                             .terminalize_deployment(
                                 deployment_identifier,
-                                sema::DeploymentTerminal::Failed(sema::DeploymentFailure {
+                                memory::DeploymentTerminal::Failed(memory::DeploymentFailure {
                                     deployment_failure_stage:
-                                        sema::DeploymentFailureStage::Activate,
+                                        memory::DeploymentFailureStage::Activate,
                                     deployment_terminal_reason:
-                                        sema::DeploymentTerminalReason::ActivationFailed,
+                                        memory::DeploymentTerminalReason::ActivationFailed,
                                     optional_failure_evidence,
                                 }),
                             )
@@ -913,7 +913,7 @@ impl DeployProcessable for DeployJobs {
         }
         let _ = self
             .store
-            .terminalize_deployment(deployment_identifier, sema::DeploymentTerminal::Succeeded);
+            .terminalize_deployment(deployment_identifier, memory::DeploymentTerminal::Succeeded);
     }
 }
 
@@ -933,17 +933,17 @@ impl Actor for DeployJobs {
 /// submit, and on accept launch the pipeline. The reply is the immediate
 /// admission verdict.
 pub struct AdmitDeploy {
-    pub request: sema::DeploySubmission,
+    pub request: memory::DeploySubmission,
 }
 
 /// The immediate admission verdict for an `AdmitDeploy` — the wire reply the
 /// daemon sends the owner connection before any pipeline effect runs.
 #[derive(Debug, Clone, PartialEq, Eq, kameo::Reply)]
 pub enum DeployAdmission {
-    Accepted(sema::DeployHandle),
-    Rejected(sema::RejectedDeploy),
+    Accepted(memory::DeployHandle),
+    Rejected(memory::RejectedDeploy),
     /// Refused with no deployment to name — see `DeploySubmissionOutcome`.
-    Refused(sema::RefusedDeploy),
+    Refused(memory::RefusedDeploy),
 }
 
 impl From<DeploySubmissionOutcome> for DeployAdmission {
@@ -1026,28 +1026,28 @@ mod tests {
     const CLOSURE: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-self-switch";
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 
-    fn self_switch_submission() -> sema::DeploySubmission {
-        sema::DeploySubmission::Host(sema::HostDeployment {
+    fn self_switch_submission() -> memory::DeploySubmission {
+        memory::DeploySubmission::Host(memory::HostDeployment {
             cluster_name: ordinary::ClusterName::from("fixture-cluster"),
             node_name: ordinary::NodeName::from("fixture-daemon"),
             host_composition: ordinary::HostComposition::CompleteHost,
             proposal_source: ordinary::ProposalSource::from("/dev/null"),
-            secrets_input: sema::SecretsInput::NoSecrets,
+            secrets_input: memory::SecretsInput::NoSecrets,
             flake_reference: ordinary::FlakeReference::new(format!(
                 "github:LiGoldragon/CriomOS?rev={REVISION}"
             )),
-            deployment_transport: sema::DeploymentTransport {
-                nix_store_uri: sema::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
-                ssh_destination: sema::SshDestination::from("root@fixture-daemon.invalid"),
+            deployment_transport: memory::DeploymentTransport {
+                nix_store_uri: memory::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
+                ssh_destination: memory::SshDestination::from("root@fixture-daemon.invalid"),
             },
-            deployment_input_mode: sema::DeploymentInputMode::Direct,
+            deployment_input_mode: memory::DeploymentInputMode::Direct,
             horizon_definition_option: None,
-            deployment_output_selector: sema::DeploymentOutputSelector::new(
-                sema::FlakeAttribute::new(
+            deployment_output_selector: memory::DeploymentOutputSelector::new(
+                memory::FlakeAttribute::new(
                     "nixosConfigurations.fixture-daemon.config.system.build.toplevel".to_string(),
                 ),
             ),
-            activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
+            activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
             host_deploy_action: ordinary::HostDeployAction::ActivateNow,
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
             optional_nix_builder_spec: None,
@@ -1055,13 +1055,13 @@ mod tests {
         })
     }
 
-    fn self_switch_job() -> sema::DeployJob {
-        sema::DeployJob {
+    fn self_switch_job() -> memory::DeployJob {
+        memory::DeployJob {
             deployment_identifier: ordinary::DeploymentIdentifier::new(0),
             generation_identifier: ordinary::GenerationIdentifier::new(0),
             cluster_name: ordinary::ClusterName::from("fixture-cluster"),
             node_name: ordinary::NodeName::from("fixture-daemon"),
-            deploy_job_phase: sema::DeployJobPhase::Submitted,
+            deploy_job_phase: memory::DeployJobPhase::Submitted,
             optional_closure_path: Some(ordinary::ClosurePath::from(CLOSURE)),
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
             flake_reference: ordinary::FlakeReference::new(format!(
@@ -1071,22 +1071,22 @@ mod tests {
                 "github:LiGoldragon/CriomOS?rev={REVISION}"
             ))),
             resolved_revision: Some(REVISION.to_string()),
-            deployment_transport: sema::DeploymentTransport {
-                nix_store_uri: sema::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
-                ssh_destination: sema::SshDestination::from("root@fixture-daemon.invalid"),
+            deployment_transport: memory::DeploymentTransport {
+                nix_store_uri: memory::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
+                ssh_destination: memory::SshDestination::from("root@fixture-daemon.invalid"),
             },
-            deployment_input_mode: sema::DeploymentInputMode::Direct,
-            deployment_output_selector: sema::DeploymentOutputSelector::new(
-                sema::FlakeAttribute::new(
+            deployment_input_mode: memory::DeploymentInputMode::Direct,
+            deployment_output_selector: memory::DeploymentOutputSelector::new(
+                memory::FlakeAttribute::new(
                     "nixosConfigurations.fixture-daemon.config.system.build.toplevel".to_string(),
                 ),
             ),
-            activation_backend: sema::ActivationBackend::NixosSystemdBootV1,
+            activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
             optional_nix_builder_spec: None,
             boot_once_unit: None,
             optional_generation_slot: Some(ordinary::GenerationSlot::Current),
             persisted_flake_input_override_vector: Vec::new(),
-            deploy_resume_stage: sema::DeployResumeStage::ResolveFlakeAuth,
+            deploy_resume_stage: memory::DeployResumeStage::ResolveFlakeAuth,
             optional_phase_receipt: None,
             optional_deploy_submission: Some(self_switch_submission()),
         }
@@ -1110,7 +1110,8 @@ mod tests {
     #[test]
     fn successor_reconciles_self_switch_as_current_and_public_terminal_success() {
         let directory = tempfile::tempdir().expect("temporary store directory");
-        let store = Arc::new(Store::open(directory.path().join("lojix.sema")).expect("open store"));
+        let store =
+            Arc::new(Store::open(directory.path().join("lojix.memory")).expect("open store"));
         let mut job = self_switch_job();
         let record = store
             .allocate_deployment_record(self_switch_identity(), job.clone())
@@ -1122,8 +1123,8 @@ mod tests {
         let copying_position = store
             .allocate_event_log_position()
             .expect("reserve copying event position");
-        job.deploy_job_phase = sema::DeployJobPhase::Copying;
-        job.deploy_resume_stage = sema::DeployResumeStage::ActivateGeneration;
+        job.deploy_job_phase = memory::DeployJobPhase::Copying;
+        job.deploy_resume_stage = memory::DeployResumeStage::ActivateGeneration;
         store
             .advance_deployment_phase(
                 deployment_identifier,
@@ -1145,8 +1146,8 @@ mod tests {
                 },
             )
             .expect("persist copying boundary");
-        job.deploy_job_phase = sema::DeployJobPhase::Activating;
-        job.deploy_resume_stage = sema::DeployResumeStage::RecordGenerationActivated;
+        job.deploy_job_phase = memory::DeployJobPhase::Activating;
+        job.deploy_resume_stage = memory::DeployResumeStage::RecordGenerationActivated;
         store
             .upsert_deploy_job(job.clone())
             .expect("persist activating cursor");
@@ -1228,7 +1229,7 @@ trait TestProcessable {
         cap: usize,
     ) -> ActorRef<TestJobs>;
     fn at_capacity(&self) -> bool;
-    fn substrate_unavailable_rejection(&self) -> sema::RejectedTest;
+    fn substrate_unavailable_rejection(&self) -> memory::RejectedTest;
     fn launch_pipeline(&self, engine: SchemaRuntime, jobs: ActorRef<TestJobs>);
 }
 
@@ -1252,16 +1253,16 @@ impl TestProcessable for TestJobs {
         self.active_count >= self.cap
     }
 
-    fn substrate_unavailable_rejection(&self) -> sema::RejectedTest {
+    fn substrate_unavailable_rejection(&self) -> memory::RejectedTest {
         let commit_sequence = self
             .store
             .commit_sequence()
             .expect("read durable state marker for test rejection");
-        sema::RejectedTest {
-            test_rejection_reason: sema::TestRejectionReason::SubstrateUnavailable,
-            state_marker: sema::StateMarker {
-                commit_sequence: sema::CommitSequence::new(commit_sequence),
-                state_digest: sema::StateDigest::new(commit_sequence),
+        memory::RejectedTest {
+            test_rejection_reason: memory::TestRejectionReason::SubstrateUnavailable,
+            state_marker: memory::StateMarker {
+                commit_sequence: memory::CommitSequence::new(commit_sequence),
+                state_digest: memory::StateDigest::new(commit_sequence),
             },
         }
     }
@@ -1298,15 +1299,15 @@ impl Actor for TestJobs {
 /// and on accept launch the dispatch pipeline. The reply is the immediate
 /// admission verdict the daemon sends the owner connection.
 pub struct AdmitTest {
-    pub request: sema::TestRequest,
+    pub request: memory::TestRequest,
 }
 
 /// The immediate admission verdict for an `AdmitTest` — the wire reply the
 /// daemon sends before any dispatch effect runs.
 #[derive(Debug, Clone, PartialEq, Eq, kameo::Reply)]
 pub enum TestAdmission {
-    Accepted(sema::AcceptedTest),
-    Rejected(sema::RejectedTest),
+    Accepted(memory::AcceptedTest),
+    Rejected(memory::RejectedTest),
 }
 
 impl Message<AdmitTest> for TestJobs {

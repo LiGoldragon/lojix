@@ -1,7 +1,7 @@
 //! A v5 store whose one in-flight deploy-job row carries a `HorizonDefinition`
 //! archived in the Horizon 0.12 layout.
 //!
-//! `fixtures/lojix-v5-horizon-0.12-deploy-job.sema` was written once by this
+//! `fixtures/lojix-v5-horizon-0.12-deploy-job.memory` was written once by this
 //! crate at horizon-rs `ee8d6f8` (the Horizon 0.12 layout Lojix 7.0.0 carries):
 //! a Horizon-mode `Deploy.Host` of `node-1` in cluster `alpha` was admitted
 //! through `SchemaRuntime::submit_deploy` and the store was closed with the
@@ -19,12 +19,12 @@ use lojix::quarantine::{OpenedStore as _, RowQuarantine as _};
 use lojix::{DeploymentLedger as _, Store};
 use tempfile::TempDir;
 
-const FIXTURE: &[u8] = include_bytes!("fixtures/lojix-v5-horizon-0.12-deploy-job.sema");
+const FIXTURE: &[u8] = include_bytes!("fixtures/lojix-v5-horizon-0.12-deploy-job.memory");
 
 #[test]
 fn a_horizon_0_12_deploy_job_row_is_quarantined_under_the_horizon_0_13_layout() {
     let directory = TempDir::new().expect("tempdir");
-    let path = directory.path().join("lojix.sema");
+    let path = directory.path().join("lojix.memory");
     std::fs::write(&path, FIXTURE).expect("copy fixture store");
 
     let before = StoreInspector { path: path.clone() }.inspect();

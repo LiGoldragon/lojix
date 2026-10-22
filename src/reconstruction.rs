@@ -15,9 +15,9 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use datom_codec::{Actualizing, Potential};
+use memory_engine::TableRegistration;
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use rkyv::rancor;
-use sema_engine::TableRegistration;
 
 use crate::runtime_model::{
     ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, DeploymentRecord, EventLogEntry,
@@ -28,8 +28,8 @@ use crate::{
     LegacyStartupConfiguration, LojixRecord as _, OfflineCommand, Result, Store, ingress,
 };
 
-const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");
-const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");
+const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__memory_engine_catalog");
+const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__memory_meta");
 const SCHEMA_VERSION_KEY: &str = "schema_version";
 const CURRENT_SCHEMA: u64 = 5;
 const RECOGNISED_SCHEMAS: &[u64] = &[2, 3, 4, CURRENT_SCHEMA];
@@ -311,7 +311,7 @@ impl ResetSubject for Path {
 trait LojixStoreDatabase {
     fn schema_version(&self) -> Result<u64>;
 
-    /// Verify the persisted sema-engine catalog belongs wholly to one of the
+    /// Verify the persisted memory-engine catalog belongs wholly to one of the
     /// Lojix store layouts. Schema v2 has the six core families; v3/v4/v5 add
     /// the deployment correlation families (and v3's retired quarantine
     /// family). A valid reset source must contain every core family and no
@@ -371,7 +371,7 @@ impl LojixStoreDatabase for redb::ReadOnlyDatabase {
 
 type StoreFamilyIdentity = (String, String, [u8; 32]);
 
-/// How a sema-engine table registration names itself in a Lojix catalog.
+/// How a memory-engine table registration names itself in a Lojix catalog.
 trait CatalogRegistration {
     fn lojix_identity(&self) -> StoreFamilyIdentity;
 }
@@ -487,13 +487,15 @@ mod tests {
     #[test]
     fn reset_cli_requires_exactly_one_inline_pathless_object() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let archive = startup_archive(directory.path(), &directory.path().join("store.sema"));
+        let archive = startup_archive(directory.path(), &directory.path().join("store.memory"));
         for arguments in [
             Vec::new(),
             vec![OsString::from("--help")],
             vec![OsString::from("--pretty")],
-            vec![OsString::from("/tmp/lojix-store.sema")],
-            vec![OsString::from("StoreResetRequest.{/tmp/lojix-store.sema}")],
+            vec![OsString::from("/tmp/lojix-store.memory")],
+            vec![OsString::from(
+                "StoreResetRequest.{/tmp/lojix-store.memory}",
+            )],
             vec![OsString::from("ResetStore"), OsString::from("extra")],
         ] {
             assert!(
@@ -545,7 +547,7 @@ mod tests {
         for sidecar in path.sidecars() {
             fs::write(sidecar, "stale Lojix sidecar").expect("write sidecar");
         }
-        let spirit = directory.path().join("spirit.sema");
+        let spirit = directory.path().join("spirit.memory");
         fs::write(&spirit, "must survive").expect("write Spirit witness");
         let archive = startup_archive(directory.path(), &path);
         let outcome = reset_command(&archive).run().expect("reset pre-v5 source");
@@ -570,9 +572,9 @@ mod tests {
         let lojix = directory.path().join("configured-lojix-store.db");
         drop(Store::open(&lojix).expect("create recognised Lojix source"));
 
-        // This has a plausible sema schema marker but no Lojix family catalog:
+        // This has a plausible memory schema marker but no Lojix family catalog:
         // a reset request that names it must fail closed and leave every byte.
-        let spirit = directory.path().join("spirit.sema");
+        let spirit = directory.path().join("spirit.memory");
         let database = redb::Database::create(&spirit).expect("create Spirit witness");
         let write = database.begin_write().expect("write Spirit witness");
         {

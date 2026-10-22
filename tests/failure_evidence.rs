@@ -23,7 +23,7 @@ use lojix::Store;
 use lojix::runtime_flow::{NexusEngine, OriginRoute};
 use lojix::runtime_model as meta;
 use lojix::runtime_model as ordinary;
-use lojix::runtime_model as sema;
+use lojix::runtime_model as memory;
 use lojix::schema_runtime::{RuntimeConfiguration, SchemaRuntime};
 
 mod common;
@@ -111,7 +111,7 @@ fn user_environment_request(source: &Path) -> meta::DeploySubmission {
 }
 
 fn runtime(directory: &Path, programs: &Path) -> SchemaRuntime {
-    let store = Arc::new(Store::open(directory.join("lojix.sema")).expect("open test store"));
+    let store = Arc::new(Store::open(directory.join("lojix.memory")).expect("open test store"));
     let configuration = Arc::new(RuntimeConfiguration::test_with_effect_program_directory(
         directory.join("generated-inputs"),
         programs.to_path_buf(),
@@ -244,16 +244,16 @@ async fn the_event_log_carries_the_same_evidence_as_the_record() {
         failed_user_environment_activation(directory.path()).await;
 
     let page = match engine
-        .observe_sema_read(
+        .observe_memory_read(
             OriginRoute::new(0),
-            sema::SemaReadInput::ReadEventLog(ordinary::EventLogRange {
+            memory::MemoryReadInput::ReadEventLog(ordinary::EventLogRange {
                 from: ordinary::EventLogPosition::new(0),
                 until: ordinary::EventLogPosition::new(u64::MAX),
             }),
         )
         .await
     {
-        sema::SemaReadOutput::EventLogRead(page) => page,
+        memory::MemoryReadOutput::EventLogRead(page) => page,
         other => panic!("expected an event-log page, got {other:?}"),
     };
 
@@ -287,15 +287,15 @@ async fn a_by_deployment_query_answers_with_that_deployment() {
         failed_user_environment_activation(directory.path()).await;
 
     let listing = match engine
-        .observe_sema_read(
+        .observe_memory_read(
             OriginRoute::new(0),
-            sema::SemaReadInput::QueryGenerations(ordinary::Selection::ByDeployment(
+            memory::MemoryReadInput::QueryGenerations(ordinary::Selection::ByDeployment(
                 ordinary::DeploymentLookup::new(identifier.clone()),
             )),
         )
         .await
     {
-        sema::SemaReadOutput::GenerationsQueried(listing) => listing,
+        memory::MemoryReadOutput::GenerationsQueried(listing) => listing,
         other => panic!("expected a generation listing, got {other:?}"),
     };
 
@@ -414,15 +414,15 @@ async fn a_by_deployment_query_answers_with_the_generation_it_produced() {
     engine.drive_submitted_deploy().await;
 
     let listing = match engine
-        .observe_sema_read(
+        .observe_memory_read(
             OriginRoute::new(0),
-            sema::SemaReadInput::QueryGenerations(ordinary::Selection::ByDeployment(
+            memory::MemoryReadInput::QueryGenerations(ordinary::Selection::ByDeployment(
                 ordinary::DeploymentLookup::new(identifier.clone()),
             )),
         )
         .await
     {
-        sema::SemaReadOutput::GenerationsQueried(listing) => listing,
+        memory::MemoryReadOutput::GenerationsQueried(listing) => listing,
         other => panic!("expected a generation listing, got {other:?}"),
     };
 

@@ -14,7 +14,7 @@ authority surfaces.
   admission handle, not proof that build/copy/activation finished. Use
   ordinary event-log or generation queries for status.
 
-Storage lives in `sema-engine`; transport length-prefixes portable rkyv
+Storage lives in `memory-engine`; transport length-prefixes portable rkyv
 `Signal<Query>` and `Signal<Response>` bytes directly. The
 ordinary contract repo is `signal-lojix`; the owner/meta contract repo is
 `meta-signal-lojix`.
@@ -71,18 +71,18 @@ selects, follows, or modifies a Spirit database.
 
 ## Nexus configuration
 
-`lojix-nexus` takes zero arguments. It discovers `lojix/lojix.sema` below
-`XDG_STATE_HOME` when set, otherwise `/var/lib/lojix/lojix.sema`, and seeds a
-fresh Sema with its executable default. Ordinary `Configure` remains available
+`lojix-nexus` takes zero arguments. It discovers `lojix/lojix.memory` below
+`XDG_STATE_HOME` when set, otherwise `/var/lib/lojix/lojix.memory`, and seeds a
+fresh Memory with its executable default. Ordinary `Configure` remains available
 until a successful meta `Configure`; only `lojix-meta` can reverse that marker.
 The desired configuration persists beside domain state and applies on the next
-restart, while the Sema path itself remains stable and is never configurable.
+restart, while the Memory path itself remains stable and is never configurable.
 
 `lojix-write-configuration` and the exact legacy startup archive remain only
 for an offline one-shot cutover. `lojix-migrate-configuration <archive>
-<new-store>` copies the archive-selected pre-Nexus v5 Sema, adds the desired
+<new-store>` copies the archive-selected pre-Nexus v5 Memory, adds the desired
 configuration record to the copy, and validates it. It never opens or mutates
-the source Sema and is not a daemon compatibility path.
+the source Memory and is not a daemon compatibility path.
 
 `lojix-inspect-store` is read-only and likewise accepts exactly one inline
 `InspectionRequest.InspectStore` Datom object, never a raw path, file, flag, or extra
@@ -161,7 +161,7 @@ until every deletion can be made inode-handle-bound.
 - `signal-lojix` — ordinary peer-callable wire contract.
 - `meta-signal-lojix` — owner/meta policy wire contract.
 - `nexus` — universal persisted configuration lifecycle ontology.
-- `sema-engine` — typed database engine library used for durable state.
+- `memory-engine` — typed database engine library used for durable state.
 - `horizon-rs` — cluster-proposal projection (read-only per request).
 - a deployment-specific cluster proposal source, supplied by each request.
 - `clavifaber` — per-host key material (separate component).

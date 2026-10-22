@@ -1,4 +1,4 @@
-//! Offline one-shot migration from the exact legacy startup archive and Sema.
+//! Offline one-shot migration from the exact legacy startup archive and Memory.
 
 use std::ffi::OsString;
 use std::path::PathBuf;

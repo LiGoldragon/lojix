@@ -1,7 +1,7 @@
 //! Read-only store inspection for operator diagnostics.
 //!
 //! This module deliberately bypasses `Store::open`: registering tables through
-//! `sema-engine` is a write when a catalog entry is missing. The inspector opens
+//! `memory-engine` is a write when a catalog entry is missing. The inspector opens
 //! redb in read-only mode and decodes known Lojix tables independently, so
 //! generation/event-log schema failures can be diagnosed without changing the
 //! inspected store.
@@ -11,6 +11,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use datom_codec::{Actualizing, Potential};
+use memory_engine::TableRegistration;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use rkyv::Deserialize as RkyvDeserialize;
 use rkyv::api::high::HighDeserializer;
@@ -19,7 +20,6 @@ use rkyv::rancor::{self, Strategy};
 use rkyv::validation::Validator;
 use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
-use sema_engine::TableRegistration;
 
 use crate::quarantine::QuarantinedRow;
 use crate::runtime_model::{
@@ -28,8 +28,8 @@ use crate::runtime_model::{
 };
 use crate::{Error, InlineDatomArguments as _, LojixRecord, OfflineCommand, Result, ingress};
 
-const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__sema_engine_catalog");
-const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__sema_meta");
+const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__memory_engine_catalog");
+const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__memory_meta");
 const SCHEMA_VERSION_KEY: &str = "schema_version";
 pub struct StoreInspectionCommand {
     path: PathBuf,
@@ -79,7 +79,7 @@ pub struct StoreInspector {
 }
 
 /// Reading a store file without changing it. Registering tables through
-/// `sema-engine` is a write when a catalog entry is missing, so the inspector
+/// `memory-engine` is a write when a catalog entry is missing, so the inspector
 /// opens redb read-only and decodes the known families itself.
 pub trait StoreInspecting {
     fn inspect(&self) -> StoreInspection;

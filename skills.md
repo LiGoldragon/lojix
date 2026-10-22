@@ -11,7 +11,7 @@ stack. The architectural decisions are settled (per `ARCHITECTURE.md`);
 what remains is implementation and validation.
 
 The library half (`lojix`) holds shared types, handwritten
-Nexus/SEMA runtime code, the actor-native socket shell, and
+Nexus/MEMORY runtime code, the actor-native socket shell, and
 request/reply plumbing. The three runtime/client binaries are thin entry
 points; migration, inspection, reset, configuration writing, and bootstrap
 remain explicit offline tools in their own package.
@@ -27,7 +27,7 @@ these):
   subscribe. Hard rule for every observation-emitting surface.
 - `~/primary/skills/rust-discipline.md` — methods on types, domain
   newtypes, one-object-in/out, error enums.
-- `~/primary/skills/rust/storage-and-wire.md` — sema-engine + signal-core
+- `~/primary/skills/rust/storage-and-wire.md` — memory-engine + signal-core
   defaults; rkyv archives between Rust components; redb tables for
   durable state.
 - `~/primary/skills/contract-repo.md` — how to consume
@@ -39,8 +39,8 @@ these):
 
 ## Storage and wire defaults
 
-- **Storage:** handwritten runtime nouns in SEMA tables at the stable
-  executable-discovered `lojix/lojix.sema` path. Desired configuration and the
+- **Storage:** handwritten runtime nouns in MEMORY tables at the stable
+  executable-discovered `lojix/lojix.memory` path. Desired configuration and the
   meta-Configure marker live beside domain state. The offline reset service supplies
   its archive through `LOJIX_CONFIGURATION` and calls only pathless inline
   `(ResetStore)`: it recreates recognised pre-v4 Lojix stores, reports v4 as
@@ -59,8 +59,8 @@ these):
 - `signal-lojix` — ordinary peer-callable wire contract.
 - `meta-signal-lojix` — owner/meta policy wire contract.
 - `nexus` — universal persisted configuration lifecycle ontology.
-- `sema-engine` — typed database engine; depend on this rather than
-  `sema` directly.
+- `memory-engine` — typed database engine; depend on this rather than
+  `memory` directly.
 - `horizon-rs` — cluster proposal projection; read-only per request.
 - deployment-specific cluster proposal sources (DOTOS records read by
   horizon-rs).
