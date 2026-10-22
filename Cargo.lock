@@ -774,7 +774,7 @@ dependencies = [
  "blake3",
  "memory",
  "rkyv",
- "signal-sema",
+ "signal-memory",
  "thiserror",
 ]
 
@@ -1242,9 +1242,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "signal-sema"
+name = "signal-memory"
 version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/signal-sema.git?rev=4f3a24e6677ab9d200672851016c4c760c1e36e8#4f3a24e6677ab9d200672851016c4c760c1e36e8"
+source = "git+https://github.com/LiGoldragon/signal-memory.git?rev=4f3a24e6677ab9d200672851016c4c760c1e36e8#4f3a24e6677ab9d200672851016c4c760c1e36e8"
 dependencies = [
  "rkyv",
  "thiserror",
