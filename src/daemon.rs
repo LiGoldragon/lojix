@@ -241,7 +241,7 @@ impl From<AsyncMultiListenerDaemonError<Error>> for Error {
 impl EnvironmentConstructible for Daemon {
     fn from_environment() -> Result<Self> {
         let default_configuration = NexusConfiguration::built_in();
-        let state_database_path = NexusConfiguration::store_path();
+        let state_database_path = NexusConfiguration::discover_store_path()?;
         if let Some(parent) = state_database_path.parent() {
             std::fs::create_dir_all(parent)?;
         }

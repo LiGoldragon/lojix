@@ -544,6 +544,29 @@ pub enum TestMode {
 const DEFAULT_RUNTIME_DIRECTORY: &str = "/run/lojix";
 const DEFAULT_STATE_DIRECTORY: &str = "/var/lib/lojix";
 
+fn discover_default_store_path(state: PathBuf) -> Result<PathBuf> {
+    let current = state.join("lojix.memory");
+    let legacy = state.join("lojix.sema");
+    match (current.exists(), legacy.exists()) {
+        (true, true) => Err(Error::StoreMaintenance(format!(
+            "default Memory has conflicting stores at {} and {}; refusing to choose",
+            current.display(),
+            legacy.display()
+        ))),
+        (false, true) => {
+            std::fs::rename(&legacy, &current).map_err(|error| {
+                Error::StoreMaintenance(format!(
+                    "migrate legacy Memory {} to {}: {error}",
+                    legacy.display(),
+                    current.display()
+                ))
+            })?;
+            Ok(current)
+        }
+        _ => Ok(current),
+    }
+}
+
 /// Capability supplied by Lojix's generated Nexus configuration.
 pub trait LojixNexusConfigurable {
     fn built_in() -> Self;
@@ -562,6 +585,9 @@ pub trait LojixNexusConfigurable {
 
     fn state_directory() -> PathBuf;
     fn store_path() -> PathBuf;
+    /// Select the default durable Memory path, migrating the legacy filename
+    /// when it is the only existing store.
+    fn discover_store_path() -> Result<PathBuf>;
     fn validate(&self) -> Result<()>;
 }
 
@@ -589,6 +615,10 @@ impl LojixNexusConfigurable for NexusConfiguration {
 
     fn store_path() -> PathBuf {
         Self::state_directory().join("lojix.memory")
+    }
+
+    fn discover_store_path() -> Result<PathBuf> {
+        discover_default_store_path(Self::state_directory())
     }
 
     fn validate(&self) -> Result<()> {
@@ -3166,6 +3196,57 @@ impl EngineRecord for StoredTestRun {
 impl EngineRecord for NexusConfigurationRecord {
     fn record_key(&self) -> RecordKey {
         RecordKey::new("desired")
+    }
+}
+
+#[cfg(test)]
+mod default_store_path_tests {
+    use super::discover_default_store_path;
+
+    #[test]
+    fn fresh_state_selects_memory_path() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let selected = discover_default_store_path(directory.path().to_path_buf()).expect("path");
+        assert_eq!(selected, directory.path().join("lojix.memory"));
+        assert!(!selected.exists());
+    }
+
+    #[test]
+    fn current_store_wins_and_legacy_is_not_present() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let current = directory.path().join("lojix.memory");
+        std::fs::write(&current, b"current").expect("current store");
+        let selected = discover_default_store_path(directory.path().to_path_buf()).expect("path");
+        assert_eq!(selected, current);
+        assert_eq!(std::fs::read(&selected).expect("read current"), b"current");
+    }
+
+    #[test]
+    fn legacy_only_store_is_renamed_to_memory() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let legacy = directory.path().join("lojix.sema");
+        let current = directory.path().join("lojix.memory");
+        std::fs::write(&legacy, b"legacy").expect("legacy store");
+        let selected = discover_default_store_path(directory.path().to_path_buf()).expect("path");
+        assert_eq!(selected, current);
+        assert!(!legacy.exists());
+        assert_eq!(std::fs::read(&current).expect("read migrated"), b"legacy");
+    }
+
+    #[test]
+    fn both_store_names_refuse_to_choose_and_remain_untouched() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let legacy = directory.path().join("lojix.sema");
+        let current = directory.path().join("lojix.memory");
+        std::fs::write(&legacy, b"legacy").expect("legacy store");
+        std::fs::write(&current, b"current").expect("current store");
+        let error =
+            discover_default_store_path(directory.path().to_path_buf()).expect_err("conflict");
+        let message = error.to_string();
+        assert!(message.contains("lojix.memory"));
+        assert!(message.contains("lojix.sema"));
+        assert_eq!(std::fs::read(&legacy).expect("read legacy"), b"legacy");
+        assert_eq!(std::fs::read(&current).expect("read current"), b"current");
     }
 }
 
