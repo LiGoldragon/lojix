@@ -4784,7 +4784,7 @@ impl MemoryApplying for SchemaRuntime {
             );
         };
         let job = pipeline.deploy_job(memory::DeployJobPhase::from(recorded_phase));
-        let recorded = self.store.advance_deployment_phase(
+        let recorded = self.store.advance_deployment_phase_with_job(
             *event.deployment_identifier.payload(),
             recorded_phase.deployment_lifecycle(),
             job,
@@ -4797,16 +4797,8 @@ impl MemoryApplying for SchemaRuntime {
                     event_log_position,
                     state_marker: marker,
                 };
-                let job = if let Some(pipeline) = self.active_deploy.as_mut() {
+                if let Some(pipeline) = self.active_deploy.as_mut() {
                     pipeline.phase_receipt = Some(receipt.clone());
-                    Some(pipeline.deploy_job(memory::DeployJobPhase::from(recorded_phase)))
-                } else {
-                    None
-                };
-                if let Some(job) = job {
-                    self.store
-                        .upsert_deploy_job(job)
-                        .expect("persist exact phase receipt before resuming its continuation");
                 }
                 memory::MemoryWriteOutput::PhaseRecorded(receipt)
             }

@@ -1203,12 +1203,40 @@ pub trait TransitionJournal {
     /// has been proven present.
     fn acknowledge_transition_intent(&self, intent: &PendingTransitionIntent) -> Result<()>;
 
+    /// A phase acknowledgement may also rewrite its resume job in the same
+    /// Memory transaction as the intent and outbox acknowledgement.
+    fn acknowledge_transition_intent_with_job(
+        &self,
+        intent: &PendingTransitionIntent,
+        job: DeployJob,
+    ) -> Result<()>;
+
+    fn acknowledge_transition_intent_with_optional_job(
+        &self,
+        intent: &PendingTransitionIntent,
+        job: Option<DeployJob>,
+    ) -> Result<()>;
+
     /// Drive one durable transition all the way to a locally-acknowledged
     /// journal record.  It is idempotent over every crash boundary above.
     fn complete_pending_transition_intent(
         &self,
         deployment_identifier: u64,
         transition_ordinal: u64,
+    ) -> Result<()>;
+
+    fn complete_pending_transition_intent_with_job(
+        &self,
+        deployment_identifier: u64,
+        transition_ordinal: u64,
+        job: DeployJob,
+    ) -> Result<()>;
+
+    fn complete_pending_transition_intent_with_optional_job(
+        &self,
+        deployment_identifier: u64,
+        transition_ordinal: u64,
+        job: Option<DeployJob>,
     ) -> Result<()>;
 
     /// Finish a committed write-ahead transition after restart. This runs
@@ -1361,6 +1389,25 @@ pub trait DeploymentLedger {
         deployment_lifecycle: DeploymentLifecycle,
         deploy_job: DeployJob,
         event: crate::runtime_model::DeploymentPhaseEvent,
+    ) -> Result<StateMarker>;
+
+    /// As above, with the phase receipt folded into the final acknowledgement
+    /// transaction that rewrites the resume job.
+    fn advance_deployment_phase_with_job(
+        &self,
+        deployment_identifier: u64,
+        deployment_lifecycle: DeploymentLifecycle,
+        deploy_job: DeployJob,
+        event: crate::runtime_model::DeploymentPhaseEvent,
+    ) -> Result<StateMarker>;
+
+    fn advance_deployment_phase_with_optional_job(
+        &self,
+        deployment_identifier: u64,
+        deployment_lifecycle: DeploymentLifecycle,
+        deploy_job: DeployJob,
+        event: crate::runtime_model::DeploymentPhaseEvent,
+        acknowledgement_job: Option<DeployJob>,
     ) -> Result<StateMarker>;
 
     fn record_deployment_phase(
@@ -2135,6 +2182,22 @@ impl TransitionJournal for Store {
     }
 
     fn acknowledge_transition_intent(&self, intent: &PendingTransitionIntent) -> Result<()> {
+        self.acknowledge_transition_intent_with_optional_job(intent, None)
+    }
+
+    fn acknowledge_transition_intent_with_job(
+        &self,
+        intent: &PendingTransitionIntent,
+        job: DeployJob,
+    ) -> Result<()> {
+        self.acknowledge_transition_intent_with_optional_job(intent, Some(job))
+    }
+
+    fn acknowledge_transition_intent_with_optional_job(
+        &self,
+        intent: &PendingTransitionIntent,
+        job: Option<DeployJob>,
+    ) -> Result<()> {
         let _write = self.lock_write()?;
         let mut intent = self.intent_from_key(
             *intent.deployment_identifier.payload(),
@@ -2197,6 +2260,13 @@ impl TransitionJournal for Store {
             .begin_atomic_commit()
             .mutate(self.directory.deployment_outbox, outbox)
             .mutate(self.directory.pending_transition_intents, intent);
+        if let Some(mut job) = job {
+            job.optional_phase_receipt = Some(crate::runtime_model::PhaseReceipt {
+                event_log_position: event.event_log_position.clone(),
+                state_marker: event.state_marker.clone(),
+            });
+            commit = commit.mutate(self.directory.deploy_jobs, job);
+        }
         if let Some(job_key) = terminal_job_key {
             commit = commit.retract(self.directory.deploy_jobs, job_key);
         }
@@ -2209,10 +2279,39 @@ impl TransitionJournal for Store {
         deployment_identifier: u64,
         transition_ordinal: u64,
     ) -> Result<()> {
+        self.complete_pending_transition_intent_with_optional_job(
+            deployment_identifier,
+            transition_ordinal,
+            None,
+        )
+    }
+
+    fn complete_pending_transition_intent_with_job(
+        &self,
+        deployment_identifier: u64,
+        transition_ordinal: u64,
+        job: DeployJob,
+    ) -> Result<()> {
+        self.complete_pending_transition_intent_with_optional_job(
+            deployment_identifier,
+            transition_ordinal,
+            Some(job),
+        )
+    }
+
+    fn complete_pending_transition_intent_with_optional_job(
+        &self,
+        deployment_identifier: u64,
+        transition_ordinal: u64,
+        job: Option<DeployJob>,
+    ) -> Result<()> {
         let intent = self.bind_transition_intent(deployment_identifier, transition_ordinal)?;
         let intent = self.dispatch_transition_intent(&intent)?;
         let intent = self.append_transition_intent_journal(&intent)?;
-        self.acknowledge_transition_intent(&intent)
+        match job {
+            Some(job) => self.acknowledge_transition_intent_with_job(&intent, job),
+            None => self.acknowledge_transition_intent(&intent),
+        }
     }
 
     fn reconcile_pending_transition_intents(&self) -> Result<()> {
@@ -2872,13 +2971,50 @@ impl DeploymentLedger for Store {
         deploy_job: DeployJob,
         event: crate::runtime_model::DeploymentPhaseEvent,
     ) -> Result<StateMarker> {
+        self.advance_deployment_phase_with_optional_job(
+            deployment_identifier,
+            deployment_lifecycle,
+            deploy_job,
+            event,
+            None,
+        )
+    }
+
+    fn advance_deployment_phase_with_job(
+        &self,
+        deployment_identifier: u64,
+        deployment_lifecycle: DeploymentLifecycle,
+        deploy_job: DeployJob,
+        event: crate::runtime_model::DeploymentPhaseEvent,
+    ) -> Result<StateMarker> {
+        self.advance_deployment_phase_with_optional_job(
+            deployment_identifier,
+            deployment_lifecycle,
+            deploy_job.clone(),
+            event,
+            Some(deploy_job),
+        )
+    }
+
+    fn advance_deployment_phase_with_optional_job(
+        &self,
+        deployment_identifier: u64,
+        deployment_lifecycle: DeploymentLifecycle,
+        deploy_job: DeployJob,
+        event: crate::runtime_model::DeploymentPhaseEvent,
+        acknowledgement_job: Option<DeployJob>,
+    ) -> Result<StateMarker> {
         let transition_ordinal = self.begin_deployment_phase_transition(
             deployment_identifier,
             deployment_lifecycle,
             deploy_job,
             event,
         )?;
-        self.complete_pending_transition_intent(deployment_identifier, transition_ordinal)?;
+        self.complete_pending_transition_intent_with_optional_job(
+            deployment_identifier,
+            transition_ordinal,
+            acknowledgement_job,
+        )?;
         let intent = self.intent_from_key(deployment_identifier, transition_ordinal)?;
         if !matches!(
             intent.transition_intent_state,
@@ -3801,6 +3937,85 @@ mod transition_intent_tests {
                     .all(|job| *job.deployment_identifier.payload() != deployment_identifier)
             );
         }
+    }
+
+    #[test]
+    fn phase_receipt_write_failure_keeps_intent_and_outbox_unacknowledged() {
+        let directory = tempfile::TempDir::new().expect("temporary store directory");
+        let path = directory.path().join("lojix.memory");
+        let store = Store::open(&path).expect("open store");
+        let record = store
+            .allocate_deployment_record(admission_identity(), admission_job())
+            .expect("admit deployment");
+        let deployment_identifier = *record.deployment_identifier.payload();
+        let position = store
+            .allocate_event_log_position()
+            .expect("reserve building journal position");
+        let mut job = admission_job();
+        job.deployment_identifier = record.deployment_identifier.clone();
+        job.generation_identifier = record.generation_identifier.clone();
+        job.deploy_job_phase = ordinary::DeployJobPhase::Building;
+        job.deploy_resume_stage = ordinary::DeployResumeStage::NixEval;
+        let ordinal = store
+            .begin_deployment_phase_transition(
+                deployment_identifier,
+                ordinary::DeploymentLifecycle::Building,
+                job.clone(),
+                building_event(&record, position),
+            )
+            .expect("persist phase intent");
+        let intent = store
+            .bind_transition_intent(deployment_identifier, ordinal)
+            .expect("bind phase intent");
+        let intent = store
+            .dispatch_transition_intent(&intent)
+            .expect("dispatch phase intent");
+        let intent = store
+            .append_transition_intent_journal(&intent)
+            .expect("append phase journal");
+
+        // A missing mutation target makes the one transaction fail during
+        // preflight. The intent, outbox, and existing cursor must remain as
+        // they were; a second durable write could not provide that boundary.
+        let mut missing_job = job;
+        missing_job.deployment_identifier = ordinary::DeploymentIdentifier::new(99_999);
+        assert!(
+            store
+                .acknowledge_transition_intent_with_job(&intent, missing_job)
+                .is_err()
+        );
+        let persisted_intent = store
+            .records::<PendingTransitionIntent>()
+            .expect("read intent")
+            .into_iter()
+            .find(|candidate| *candidate.deployment_identifier.payload() == deployment_identifier)
+            .expect("phase intent remains");
+        assert!(matches!(
+            persisted_intent.transition_intent_state,
+            TransitionIntentState::Appended
+        ));
+        let outbox = store
+            .records::<DeploymentOutboxRecord>()
+            .expect("read outbox")
+            .into_iter()
+            .find(|candidate| *candidate.deployment_identifier.payload() == deployment_identifier)
+            .expect("phase outbox remains");
+        assert!(matches!(
+            outbox.outbox_delivery_state,
+            OutboxDeliveryState::Dispatched
+        ));
+        assert!(
+            store
+                .deploy_jobs()
+                .expect("read resume job")
+                .into_iter()
+                .find(
+                    |candidate| *candidate.deployment_identifier.payload() == deployment_identifier
+                )
+                .expect("resume job remains")
+                .optional_phase_receipt
+                .is_none()
+        );
     }
 
     #[test]
