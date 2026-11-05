@@ -769,7 +769,7 @@ dependencies = [
 [[package]]
 name = "memory-engine"
 version = "0.18.0"
-source = "git+https://github.com/LiGoldragon/memory-engine.git?rev=abf9d85166e22440440baba03358913458905b8d#abf9d85166e22440440baba03358913458905b8d"
+source = "git+https://github.com/LiGoldragon/memory-engine.git?rev=17ada7f0df0342f789627da0e0c7d1c00aebbd63#17ada7f0df0342f789627da0e0c7d1c00aebbd63"
 dependencies = [
  "blake3",
  "memory",

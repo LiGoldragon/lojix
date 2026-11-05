@@ -544,47 +544,6 @@ pub enum TestMode {
 const DEFAULT_RUNTIME_DIRECTORY: &str = "/run/lojix";
 const DEFAULT_STATE_DIRECTORY: &str = "/var/lib/lojix";
 
-fn discover_default_store_path(state: PathBuf) -> Result<PathBuf> {
-    let current = state.join("lojix.memory");
-    let legacy = state.join("lojix.sema");
-    let conflict = || {
-        Error::StoreMaintenance(format!(
-            "default Memory has conflicting stores at {} and {}; refusing to choose",
-            current.display(),
-            legacy.display()
-        ))
-    };
-    match (current.exists(), legacy.exists()) {
-        (true, true) => Err(conflict()),
-        (false, true) => {
-            // A rename would replace a current store created by another
-            // starter between the existence check and this migration. A
-            // hard link creates the new name only while it remains absent;
-            // leaving both names on cleanup failure is safe because the next
-            // opener reports the typed conflict instead of choosing.
-            if let Err(error) = std::fs::hard_link(&legacy, &current) {
-                if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    return Err(conflict());
-                }
-                return Err(Error::StoreMaintenance(format!(
-                    "migrate legacy Memory {} to {}: {error}",
-                    legacy.display(),
-                    current.display()
-                )));
-            }
-            std::fs::remove_file(&legacy).map_err(|error| {
-                Error::StoreMaintenance(format!(
-                    "finish legacy Memory migration {} to {}: {error}",
-                    legacy.display(),
-                    current.display()
-                ))
-            })?;
-            Ok(current)
-        }
-        _ => Ok(current),
-    }
-}
-
 /// Capability supplied by Lojix's generated Nexus configuration.
 pub trait LojixNexusConfigurable {
     fn built_in() -> Self;
@@ -603,6 +562,7 @@ pub trait LojixNexusConfigurable {
 
     fn state_directory() -> PathBuf;
     fn store_path() -> PathBuf;
+    fn discover_default_store_path(state: PathBuf) -> Result<PathBuf>;
     /// Select the default durable Memory path, migrating the legacy filename
     /// when it is the only existing store.
     fn discover_store_path() -> Result<PathBuf>;
@@ -635,8 +595,49 @@ impl LojixNexusConfigurable for NexusConfiguration {
         Self::state_directory().join("lojix.memory")
     }
 
+    fn discover_default_store_path(state: PathBuf) -> Result<PathBuf> {
+        let current = state.join("lojix.memory");
+        let legacy = state.join("lojix.sema");
+        let conflict = || {
+            Error::StoreMaintenance(format!(
+                "default Memory has conflicting stores at {} and {}; refusing to choose",
+                current.display(),
+                legacy.display()
+            ))
+        };
+        match (current.exists(), legacy.exists()) {
+            (true, true) => Err(conflict()),
+            (false, true) => {
+                // A rename would replace a current store created by another
+                // starter between the existence check and this migration. A
+                // hard link creates the new name only while it remains absent;
+                // leaving both names on cleanup failure is safe because the next
+                // opener reports the typed conflict instead of choosing.
+                if let Err(error) = std::fs::hard_link(&legacy, &current) {
+                    if error.kind() == std::io::ErrorKind::AlreadyExists {
+                        return Err(conflict());
+                    }
+                    return Err(Error::StoreMaintenance(format!(
+                        "migrate legacy Memory {} to {}: {error}",
+                        legacy.display(),
+                        current.display()
+                    )));
+                }
+                std::fs::remove_file(&legacy).map_err(|error| {
+                    Error::StoreMaintenance(format!(
+                        "finish legacy Memory migration {} to {}: {error}",
+                        legacy.display(),
+                        current.display()
+                    ))
+                })?;
+                Ok(current)
+            }
+            _ => Ok(current),
+        }
+    }
+
     fn discover_store_path() -> Result<PathBuf> {
-        discover_default_store_path(Self::state_directory())
+        Self::discover_default_store_path(Self::state_directory())
     }
 
     fn validate(&self) -> Result<()> {
@@ -3355,7 +3356,11 @@ impl EngineRecord for NexusConfigurationRecord {
 
 #[cfg(test)]
 mod default_store_path_tests {
-    use super::discover_default_store_path;
+    use super::{LojixNexusConfigurable, NexusConfiguration};
+
+    fn discover_default_store_path(state: std::path::PathBuf) -> super::Result<std::path::PathBuf> {
+        NexusConfiguration::discover_default_store_path(state)
+    }
 
     #[test]
     fn fresh_state_selects_memory_path() {
@@ -3945,43 +3950,37 @@ mod transition_intent_tests {
         let path = directory.path().join("lojix.memory");
         let store = Store::open(&path).expect("open store");
         let record = store
-            .allocate_deployment_record(admission_identity(), admission_job())
-            .expect("admit deployment");
+            .begin_rejected_deployment_request(
+                admission_identity(),
+                ordinary::DeploymentTerminal::Rejected(
+                    ordinary::DeploymentTerminalReason::ProposalSourceUnreachable,
+                ),
+            )
+            .expect("persist terminal intent");
         let deployment_identifier = *record.deployment_identifier.payload();
-        let position = store
-            .allocate_event_log_position()
-            .expect("reserve building journal position");
         let mut job = admission_job();
         job.deployment_identifier = record.deployment_identifier.clone();
         job.generation_identifier = record.generation_identifier.clone();
-        job.deploy_job_phase = ordinary::DeployJobPhase::Building;
-        job.deploy_resume_stage = ordinary::DeployResumeStage::NixEval;
-        let ordinal = store
-            .begin_deployment_phase_transition(
-                deployment_identifier,
-                ordinary::DeploymentLifecycle::Building,
-                job.clone(),
-                building_event(&record, position),
-            )
-            .expect("persist phase intent");
+        store
+            .upsert_deploy_job(job.clone())
+            .expect("persist resume job");
+        let ordinal = 0;
         let intent = store
             .bind_transition_intent(deployment_identifier, ordinal)
-            .expect("bind phase intent");
+            .expect("bind terminal intent");
         let intent = store
             .dispatch_transition_intent(&intent)
-            .expect("dispatch phase intent");
+            .expect("dispatch terminal intent");
         let intent = store
             .append_transition_intent_journal(&intent)
-            .expect("append phase journal");
+            .expect("append terminal journal");
 
-        // A missing mutation target makes the one transaction fail during
-        // preflight. The intent, outbox, and existing cursor must remain as
-        // they were; a second durable write could not provide that boundary.
-        let mut missing_job = job;
-        missing_job.deployment_identifier = ordinary::DeploymentIdentifier::new(99_999);
+        // A terminal acknowledgement both mutates the cursor and retracts it.
+        // Those two writes intentionally share one key here, making Memory's
+        // transaction preflight fail. The earlier rows must remain untouched.
         assert!(
             store
-                .acknowledge_transition_intent_with_job(&intent, missing_job)
+                .acknowledge_transition_intent_with_job(&intent, job)
                 .is_err()
         );
         let persisted_intent = store

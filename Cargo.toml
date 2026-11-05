@@ -40,7 +40,7 @@ signal = { git = "https://github.com/LiGoldragon/signal", rev = "f35460de930943e
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 redb              = "4"
 rustix            = { version = "1", default-features = false, features = ["fs", "process"] }
-memory-engine       = { git = "https://github.com/LiGoldragon/memory-engine.git", rev = "abf9d85166e22440440baba03358913458905b8d" }
+memory-engine       = { git = "https://github.com/LiGoldragon/memory-engine.git", rev = "17ada7f0df0342f789627da0e0c7d1c00aebbd63" }
 serde_json        = "1"
 sha2              = "0.10"
 thiserror         = "2"
