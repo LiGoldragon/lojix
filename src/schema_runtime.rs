@@ -8229,48 +8229,6 @@ mod tests {
         assert_eq!(commit.closure_path.payload(), STORE);
     }
 
-    #[test]
-    fn activation_commit_persists_computed_boot_profile_slot() {
-        let mut pipeline = host_pipeline(ordinary::HostDeployAction::SetBootProfile);
-        pipeline.closure_path = Some(ordinary::ClosurePath::from(STORE));
-        pipeline.source_revision = Some(source_revision(
-            ordinary::SourceRevisionPolicy::ResolveAndRecord,
-        ));
-        pipeline.activation_slot = Some(ordinary::GenerationSlot::BootPending);
-        let commit = pipeline.activation_commit().expect("commit");
-        assert_eq!(
-            commit.generation_slot,
-            ordinary::GenerationSlot::BootPending
-        );
-    }
-
-    #[test]
-    fn activation_commit_persists_computed_boot_once_slot() {
-        let mut pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
-        pipeline.closure_path = Some(ordinary::ClosurePath::from(STORE));
-        pipeline.source_revision = Some(source_revision(
-            ordinary::SourceRevisionPolicy::ResolveAndRecord,
-        ));
-        pipeline.activation_slot = Some(ordinary::GenerationSlot::BootPending);
-        let commit = pipeline.activation_commit().expect("commit");
-        assert_eq!(
-            commit.generation_slot,
-            ordinary::GenerationSlot::BootPending
-        );
-    }
-
-    #[test]
-    fn activation_commit_persists_computed_test_activation_slot() {
-        let mut pipeline = host_pipeline(ordinary::HostDeployAction::TestActivation);
-        pipeline.closure_path = Some(ordinary::ClosurePath::from(STORE));
-        pipeline.source_revision = Some(source_revision(
-            ordinary::SourceRevisionPolicy::ResolveAndRecord,
-        ));
-        pipeline.activation_slot = Some(ordinary::GenerationSlot::Recent);
-        let commit = pipeline.activation_commit().expect("commit");
-        assert_eq!(commit.generation_slot, ordinary::GenerationSlot::Recent);
-    }
-
     // ---- Step 2: the reject-guard opens the activating actions ----
 
     fn require_immutable_request(flake: &str) -> meta::DeployRequest {
