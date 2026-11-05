@@ -547,16 +547,34 @@ const DEFAULT_STATE_DIRECTORY: &str = "/var/lib/lojix";
 fn discover_default_store_path(state: PathBuf) -> Result<PathBuf> {
     let current = state.join("lojix.memory");
     let legacy = state.join("lojix.sema");
-    match (current.exists(), legacy.exists()) {
-        (true, true) => Err(Error::StoreMaintenance(format!(
+    let conflict = || {
+        Error::StoreMaintenance(format!(
             "default Memory has conflicting stores at {} and {}; refusing to choose",
             current.display(),
             legacy.display()
-        ))),
+        ))
+    };
+    match (current.exists(), legacy.exists()) {
+        (true, true) => Err(conflict()),
         (false, true) => {
-            std::fs::rename(&legacy, &current).map_err(|error| {
-                Error::StoreMaintenance(format!(
+            // A rename would replace a current store created by another
+            // starter between the existence check and this migration. A
+            // hard link creates the new name only while it remains absent;
+            // leaving both names on cleanup failure is safe because the next
+            // opener reports the typed conflict instead of choosing.
+            if let Err(error) = std::fs::hard_link(&legacy, &current) {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    return Err(conflict());
+                }
+                return Err(Error::StoreMaintenance(format!(
                     "migrate legacy Memory {} to {}: {error}",
+                    legacy.display(),
+                    current.display()
+                )));
+            }
+            std::fs::remove_file(&legacy).map_err(|error| {
+                Error::StoreMaintenance(format!(
+                    "finish legacy Memory migration {} to {}: {error}",
                     legacy.display(),
                     current.display()
                 ))
