@@ -7,7 +7,10 @@
 //! `lojix.sema` beside itself (same owner, mode 0600), converts the copy with
 //! memory-engine's `LegacySemaStore`, opens the converted copy the way it opens
 //! any store, and only then renames it to `lojix.memory`, refusing to replace a
-//! file already there. `lojix.sema` is only ever read: it stays as it was, the
+//! file already there. A copy of a store that was not closed cleanly carries
+//! redb's needs-repair flag, which memory's read-only open refuses; the copy is
+//! the conversion's own file, so redb opens it read-write once and repairs it
+//! before the conversion. `lojix.sema` is only ever read: it stays as it was, the
 //! store an earlier Lojix reads back if this one is rolled back.
 //!
 //! Any failure removes the copy and stops startup with
@@ -16,7 +19,7 @@
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use memory_engine::{LegacySemaStore, SemaConversion};
@@ -44,7 +47,8 @@ pub struct LegacyStoreConversion {
 pub enum LegacyConversionStage {
     /// Copying the legacy store into a fresh file beside it.
     CopyingLegacyStore,
-    /// memory-engine rewriting the copy into the memory format.
+    /// redb repairing the copy, then memory-engine rewriting it into the
+    /// memory format.
     ConvertingCopy,
     /// Opening the converted copy as this Lojix opens its store.
     VerifyingConvertedCopy,
@@ -56,7 +60,7 @@ impl std::fmt::Display for LegacyConversionStage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::CopyingLegacyStore => "copying the legacy store",
-            Self::ConvertingCopy => "converting the copy",
+            Self::ConvertingCopy => "repairing and converting the copy",
             Self::VerifyingConvertedCopy => "opening the converted copy",
             Self::InstallingConvertedCopy => "renaming the converted copy into place",
         })
@@ -93,6 +97,10 @@ pub trait LegacyStoreConverting {
     /// 0600.
     fn fill_copy(&self, file: File) -> std::io::Result<()>;
 
+    /// Open the copy read-write with redb once, so redb repairs it when the
+    /// legacy store was copied without a clean close, then close it.
+    fn repair_copy(&self, copy: &Path) -> Result<()>;
+
     /// Run one stage, turning its error, or a panic inside it (a damaged file
     /// can panic the storage library), into the typed failure of that stage.
     fn stage<Value>(
@@ -123,6 +131,7 @@ impl LegacyStoreConverting for LegacyStoreConversion {
             Ok(self.fill_copy(file)?)
         })?;
         let conversion = self.stage(LegacyConversionStage::ConvertingCopy, || {
+            self.repair_copy(&copy.path)?;
             Ok(LegacySemaStore::new(&copy.path).convert()?)
         })?;
         self.stage(LegacyConversionStage::VerifyingConvertedCopy, || {
@@ -169,6 +178,11 @@ impl LegacyStoreConverting for LegacyStoreConversion {
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         std::io::copy(&mut &legacy, &mut file)?;
         file.sync_all()
+    }
+
+    fn repair_copy(&self, copy: &Path) -> Result<()> {
+        drop(redb::Database::open(copy).map_err(|error| Error::Invariant(error.to_string()))?);
+        Ok(())
     }
 
     fn stage<Value>(

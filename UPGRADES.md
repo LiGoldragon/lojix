@@ -1,5 +1,17 @@
 # Upgrades
 
+# 0.10.0 to 0.10.1
+
+A revision: the memory format is unchanged, and so is every contract. The
+startup conversion now repairs its own copy. A `lojix.sema` that was not
+closed cleanly (copied while its writer held it open, or left by a crash)
+carries redb's needs-repair flag, and memory's read-only open refused its
+copy with `RepairAborted`. After copying `lojix.sema` and before converting,
+the Nexus opens the copy read-write with redb once, so redb repairs it, and
+closes it; the conversion follows. `lojix.sema` itself is still never opened
+for writing. Every crate in the workspace is 0.10.1. Deploy by switching the
+package and restarting; no store step.
+
 # 9.0.2 to 0.10.0
 
 ## Numbering

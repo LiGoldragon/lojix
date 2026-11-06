@@ -170,6 +170,39 @@ fn a_truncated_legacy_store_fails_conversion_and_is_left_untouched() {
     assert_conversion_fails_untouched(truncated, LegacyConversionStage::ConvertingCopy);
 }
 
+#[test]
+fn a_store_copied_while_its_writer_holds_it_open_converts() {
+    let directory = TempDir::new().expect("tempdir");
+    let writer_path = directory.path().join("writer.sema");
+    std::fs::write(&writer_path, LOJIX_8_1_0_STORE).expect("write the 8.1.0 store");
+    let state = directory.path().join("lojix");
+    std::fs::create_dir_all(&state).expect("state directory");
+    let legacy = state.join("lojix.sema");
+
+    // The writer holds the store open read-write, as the deployed Nexus does,
+    // while the copy is taken: the copy carries redb's needs-repair flag.
+    let writer = redb::Database::open(&writer_path).expect("the writer opens the store");
+    std::fs::copy(&writer_path, &legacy).expect("copy the store under its writer");
+    assert!(
+        redb::ReadOnlyDatabase::open(&legacy).is_err(),
+        "the copy needs repair, so a read-only open refuses it"
+    );
+    drop(writer);
+    let legacy_bytes = std::fs::read(&legacy).expect("read the copied lojix.sema");
+
+    let path = NexusConfiguration::discover_default_store_path(state.clone())
+        .expect("the conversion repairs its copy and converts it");
+    assert_eq!(path, state.join("lojix.memory"));
+    assert_eq!(
+        std::fs::read(&legacy).expect("reread lojix.sema"),
+        legacy_bytes,
+        "lojix.sema stays byte for byte as it was"
+    );
+    assert_eq!(directory_names(&state), ["lojix.memory", "lojix.sema"]);
+    Store::open_with_default_configuration(&path, NexusConfiguration::built_in())
+        .expect("the converted store opens");
+}
+
 /// Acceptance on a copy of a deployed store: `LOJIX_LEGACY_STORE_ACCEPTANCE`
 /// names a scratch directory holding a copied `lojix.sema`. The copy is
 /// converted, opened the normal way, folded into a checkpoint, compacted, and
@@ -184,18 +217,11 @@ fn a_copied_deployed_store_converts_opens_folds_and_compacts() {
     let legacy = state.join("lojix.sema");
     let current = state.join("lojix.memory");
     // A copy taken while the deployed Nexus holds the store open is marked
-    // as needing repair, which a read-only open refuses. Setting
-    // `LOJIX_LEGACY_STORE_ACCEPTANCE_REPAIR` repairs the scratch copy first,
-    // as a clean stop of that Nexus would have left it.
+    // as needing repair, which a read-only open refuses; the conversion
+    // repairs its own copy of it.
     match redb::ReadOnlyDatabase::open(&legacy) {
         Ok(_) => println!("copy: closed cleanly"),
-        Err(error) => {
-            println!("copy: refused read-only: {error}");
-            if std::env::var_os("LOJIX_LEGACY_STORE_ACCEPTANCE_REPAIR").is_some() {
-                drop(redb::Database::open(&legacy).expect("the scratch copy repairs"));
-                println!("copy: repaired");
-            }
-        }
+        Err(error) => println!("copy: refused read-only, left to the conversion: {error}"),
     }
     let legacy_bytes = std::fs::read(&legacy).expect("read the copied lojix.sema");
 
