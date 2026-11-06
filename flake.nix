@@ -53,6 +53,7 @@
             || (type == "regular" && baseNameOf path == "horizon-definition.datom")
             || (type == "regular" && pkgs.lib.hasSuffix ".ethos" path)
             || (type == "regular" && pkgs.lib.hasSuffix ".memory" path)
+            || (type == "regular" && pkgs.lib.hasSuffix ".sema" path)
             || (
               type == "regular"
               && builtins.elem (baseNameOf path) [
