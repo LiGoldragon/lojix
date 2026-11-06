@@ -78,6 +78,15 @@ until a successful meta `Configure`; only `lojix-meta` can reverse that marker.
 The desired configuration persists beside domain state and applies on the next
 restart, while the Memory path itself remains stable and is never configurable.
 
+A state directory holding only `lojix.sema`, the store Lojix up to 9.0.2
+wrote with sema-engine, is converted on startup: the Nexus copies it beside
+itself (same owner, mode 0600), converts the copy with memory-engine's
+`LegacySemaStore`, opens the copy as it opens any store, and renames it to
+`lojix.memory`. `lojix.sema` is never written; it stays as the rollback store.
+A failed conversion removes the copy and stops startup with
+`LegacyStoreConversion`, naming the stage. Once `lojix.memory` exists it is
+the store, and `lojix.sema` beside it is ignored.
+
 `lojix-write-configuration` and the exact legacy startup archive remain only
 for an offline one-shot cutover. `lojix-migrate-configuration <archive>
 <new-store>` copies the archive-selected pre-Nexus v5 Memory, adds the desired

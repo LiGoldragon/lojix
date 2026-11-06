@@ -16,6 +16,7 @@
 //! fosp memory-engine-exclusive, ur16 self-resume).
 
 use crate::inspected_text::{NixStorePath, StoreItemShape};
+use crate::legacy_store::LegacyStoreConverting as _;
 use crate::quarantine::{OpeningReport as _, RowQuarantine as _};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -73,6 +74,7 @@ pub mod ingress;
 mod inspected_text;
 #[cfg(feature = "tools")]
 pub mod inspection;
+pub mod legacy_store;
 pub mod quarantine;
 #[cfg(feature = "tools")]
 pub mod reconstruction;
@@ -419,6 +421,17 @@ pub enum Error {
     StoreMaintenance(String),
 
     #[error(
+        "converting the legacy store {legacy:?} into {current:?} failed while {stage}; the legacy store is untouched, no converted store was installed, and daemon startup stopped: {source}"
+    )]
+    LegacyStoreConversion {
+        legacy: PathBuf,
+        current: PathBuf,
+        stage: legacy_store::LegacyConversionStage,
+        #[source]
+        source: Box<Error>,
+    },
+
+    #[error(
         "lojix store at {path:?} cannot be used by this daemon's startup schema/layout gate while {stage}; daemon startup stopped before serving requests; inspect it with an inline `lojix-inspect-store 'InspectStore.{{ <path> }}'` request: {source}"
     )]
     StoreStartupCompatibility {
@@ -563,8 +576,10 @@ pub trait LojixNexusConfigurable {
     fn state_directory() -> PathBuf;
     fn store_path() -> PathBuf;
     fn discover_default_store_path(state: PathBuf) -> Result<PathBuf>;
-    /// Select the default durable Memory path, migrating the legacy filename
-    /// when it is the only existing store.
+    /// Select the default durable Memory path. `lojix.memory` is the store
+    /// whenever it exists; when only a legacy `lojix.sema` exists, a converted
+    /// copy of it is installed as `lojix.memory` first, and `lojix.sema` stays
+    /// untouched as the rollback store.
     fn discover_store_path() -> Result<PathBuf>;
     fn validate(&self) -> Result<()>;
 }
@@ -598,42 +613,21 @@ impl LojixNexusConfigurable for NexusConfiguration {
     fn discover_default_store_path(state: PathBuf) -> Result<PathBuf> {
         let current = state.join("lojix.memory");
         let legacy = state.join("lojix.sema");
-        let conflict = || {
-            Error::StoreMaintenance(format!(
-                "default Memory has conflicting stores at {} and {}; refusing to choose",
-                current.display(),
-                legacy.display()
-            ))
-        };
-        match (current.exists(), legacy.exists()) {
-            (true, true) => Err(conflict()),
-            (false, true) => {
-                // A rename would replace a current store created by another
-                // starter between the existence check and this migration. A
-                // hard link creates the new name only while it remains absent;
-                // leaving both names on cleanup failure is safe because the next
-                // opener reports the typed conflict instead of choosing.
-                if let Err(error) = std::fs::hard_link(&legacy, &current) {
-                    if error.kind() == std::io::ErrorKind::AlreadyExists {
-                        return Err(conflict());
-                    }
-                    return Err(Error::StoreMaintenance(format!(
-                        "migrate legacy Memory {} to {}: {error}",
-                        legacy.display(),
-                        current.display()
-                    )));
+        if !current.exists() && legacy.exists() {
+            let conversion = legacy_store::LegacyStoreConversion {
+                legacy,
+                current: current.clone(),
+            };
+            let receipt = conversion.convert()?;
+            eprintln!(
+                "lojix-nexus: {}",
+                legacy_store::LegacyStoreConverted {
+                    conversion: &conversion,
+                    receipt: &receipt,
                 }
-                std::fs::remove_file(&legacy).map_err(|error| {
-                    Error::StoreMaintenance(format!(
-                        "finish legacy Memory migration {} to {}: {error}",
-                        legacy.display(),
-                        current.display()
-                    ))
-                })?;
-                Ok(current)
-            }
-            _ => Ok(current),
+            );
         }
+        Ok(current)
     }
 
     fn discover_store_path() -> Result<PathBuf> {
@@ -3381,29 +3375,14 @@ mod default_store_path_tests {
     }
 
     #[test]
-    fn legacy_only_store_is_renamed_to_memory() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let legacy = directory.path().join("lojix.sema");
-        let current = directory.path().join("lojix.memory");
-        std::fs::write(&legacy, b"legacy").expect("legacy store");
-        let selected = discover_default_store_path(directory.path().to_path_buf()).expect("path");
-        assert_eq!(selected, current);
-        assert!(!legacy.exists());
-        assert_eq!(std::fs::read(&current).expect("read migrated"), b"legacy");
-    }
-
-    #[test]
-    fn both_store_names_refuse_to_choose_and_remain_untouched() {
+    fn current_store_wins_over_the_legacy_store_and_neither_is_touched() {
         let directory = tempfile::tempdir().expect("tempdir");
         let legacy = directory.path().join("lojix.sema");
         let current = directory.path().join("lojix.memory");
         std::fs::write(&legacy, b"legacy").expect("legacy store");
         std::fs::write(&current, b"current").expect("current store");
-        let error =
-            discover_default_store_path(directory.path().to_path_buf()).expect_err("conflict");
-        let message = error.to_string();
-        assert!(message.contains("lojix.memory"));
-        assert!(message.contains("lojix.sema"));
+        let selected = discover_default_store_path(directory.path().to_path_buf()).expect("path");
+        assert_eq!(selected, current);
         assert_eq!(std::fs::read(&legacy).expect("read legacy"), b"legacy");
         assert_eq!(std::fs::read(&current).expect("read current"), b"current");
     }

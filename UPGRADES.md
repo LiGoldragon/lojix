@@ -1,5 +1,74 @@
 # Upgrades
 
+# 9.0.2 to 0.10.0
+
+## Numbering
+
+The major number is only for a full rewrite; the past majors 7, 8 and 9 were
+wrong. A store format change is a subversion. This release is 0.10.0,
+revisions after it are 0.10.x, and the next full rewrite is 1.0.0. Every
+crate in the workspace is 0.10.0.
+
+## The store moves from sema to memory
+
+Lojix up to 9.0.2 kept its state in `lojix.sema`, written by sema-engine.
+0.10.0 keeps it in `lojix.memory`, written by memory-engine 0.19.0
+(`27f256c39de975e6c1b5533506a926cdb51a288c`, over memory 0.2.0,
+`e78519c2fc8f213246328bf28f9e38f9a216f76e`). The two formats differ in table
+names and in the labels mixed into the store schema hash, the entry digests
+and the checkpoint digests, so a `lojix.sema` does not open as memory.
+
+On startup, when the state directory holds `lojix.sema` and no
+`lojix.memory`, the Nexus:
+
+1. copies `lojix.sema` to a new file beside it, owned like `lojix.sema`,
+   mode 0600;
+2. converts the copy with memory-engine's `LegacySemaStore::convert`;
+3. opens the converted copy as it opens any store (rows that no longer
+   decode are quarantined, as before);
+4. renames the copy to `lojix.memory`, refusing to replace a file already
+   there, and logs
+   `lojix-nexus: LegacyStoreConverted.{ <lojix.sema> <lojix.memory> <entries> <checkpoints> <segments> <kept-digests> }`.
+
+`lojix.sema` is only read and stays in place: it is the rollback store, and
+Lojix 8.1.0 reads `lojix.sema`. A failure at any step removes the copy,
+leaves `lojix.sema` as it was, creates no `lojix.memory`, and stops startup
+with `LegacyStoreConversion`, naming the stage that failed (copying,
+converting, opening the copy, renaming it into place) and its cause. Once
+`lojix.memory` exists it is the store and `lojix.sema` beside it is ignored;
+9.0.2 refused a directory holding both.
+
+The NixOS module that names the store path must move from `lojix.sema` to
+`lojix.memory`.
+
+## Horizon 0.15 and the new signal pair
+
+Pins, in the root and in every member that names them:
+
+- `horizon-lib` 0.14.0 (`2e09ebbd…`) to 0.15.0 (`91abfd754fe09e296bb4de074204885b1e209b0d`),
+  also as the `horizon` flake input that composes the fixture;
+- `signal-lojix` 7.0.0 (`0a83f2d6…`) to 0.8.0 (`a55516571f7fa58aca92c973738d1788b6bd3604`);
+- `meta-signal-lojix` 8.0.0 (`25f7f220…`) to 0.9.0 (`a26bd30a6acce7520f1681bb7746cc518a07cb59`);
+- `sema-engine` 0.18.0 (`9884905f…`) is replaced by `memory-engine` 0.19.0
+  (`27f256c39de975e6c1b5533506a926cdb51a288c`).
+
+`signal`, `protos`, `datom-codec`, `ethos-zero` and `triad-runtime` are
+unchanged.
+
+Horizon 0.15 gives `UserPubKey` a fourth position, the user's capabilities
+on that node: `UserPubKey.{ NodeName SshPubKey Keygrip Vector<UserCapability> }`
+with `UserCapability.[ AgentStack CodexCandidate ]`. Every message that holds a
+`HorizonDefinition` changes archive layout, so the wire changes: the Nexus and
+both clients move together, from one revision. A cluster definition submitted
+to 0.10.0 writes every `UserPubKey` with its fourth position (`[]` when
+empty). A stored row archived with a `HorizonDefinition` holding a
+`UserPubKey` in the 0.14 layout no longer decodes and is quarantined on open.
+
+Deploy: build `lojix` 0.10.0, stop `lojix-nexus`, switch the package (and the
+store path the module names), start it. The first start converts the store.
+Rolling back to 8.1.0 means running it on the untouched `lojix.sema`; what
+0.10.0 wrote into `lojix.memory` is not carried back.
+
 # 9.0.1 to 9.0.2
 
 `UserEnvironment` `ActivateNow` runs the Home Manager activation first, as
@@ -31,7 +100,8 @@ Pins, in the root and in every member that names them:
 `src/ingress.rs` is regenerated from `ethos/ingress.ethos`. Its types now
 derive rkyv always and their datom kinds under a new `datom` feature, which
 `tools` (the default) enables; the Nexus builds with neither, as before.
-`memory-engine`, `triad-runtime` and `nexus` are unchanged.
+`sema-engine`, `triad-runtime` and `nexus` are unchanged; the store stays
+`lojix.sema`, written by sema-engine. memory-engine first ships in 0.10.0.
 
 protos 0.32 prints vertically through `Textualizable::textualize`; `lojix`
 and `lojix-meta` now print their replies through `Compactable::compact`, so a

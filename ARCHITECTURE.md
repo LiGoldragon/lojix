@@ -219,7 +219,9 @@ the workspace actor-systems doctrine. No zero-state holders.
   advances to a later effect before acknowledgement. Retention can compact an
   acknowledged event and outbox together, while the acknowledged intent keeps
   restart from reconstructing or re-delivering that historical transition.
-  There is no migration or legacy resume path. A row that no longer decodes
+  The one store migration is the conversion of a sema-engine `lojix.sema`
+  into `lojix.memory` on a copy at startup, leaving `lojix.sema` untouched as
+  the rollback store; there is no legacy resume path. A row that no longer decodes
   under the current schema — a deploy job or the Nexus configuration archived
   with an earlier `HorizonDefinition` layout — is not served and does not stop
   the Nexus: each open reads every family row by row and moves each such row,
