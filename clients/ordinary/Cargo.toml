@@ -1,6 +1,6 @@
 [package]
 name = "lojix-client"
-version = "0.10.2"
+version = "0.10.3"
 edition = "2024"
 rust-version = "1.89"
 publish = false
@@ -13,7 +13,7 @@ path = "src/main.rs"
 lojix = { path = "../..", default-features = false }
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "4dff16b4f7412febc3b71aac8b49680cd20988cb" }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3" }
-signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "a55516571f7fa58aca92c973738d1788b6bd3604", features = ["datom"] }
+signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "e192aea5955692946e9bf7643f41be9fb5db15e7", features = ["datom"] }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "f35460de930943ea1a8a972453ccf3a092a655b5", default-features = false }
 
 [lints.rust]

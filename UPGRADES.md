@@ -1,5 +1,24 @@
 # Upgrades
 
+# 0.10.2 to 0.10.3
+
+A revision: the memory format is unchanged and the store stays readable. The
+contracts and Horizon move one subversion each, and nothing in Lojix matched on
+the changed payload.
+
+`horizon-lib` moves from 0.15.0 (`91abfd754fe09e296bb4de074204885b1e209b0d`)
+to 0.16.0 (`bd52627b24bf553de45eb639571c1127e44e7f1d`), `signal-lojix` from
+0.8.0 (`a55516571f7fa58aca92c973738d1788b6bd3604`) to 0.9.0
+(`e192aea5955692946e9bf7643f41be9fb5db15e7`), and `meta-signal-lojix` from
+0.9.0 (`a26bd30a6acce7520f1681bb7746cc518a07cb59`) to 0.10.0
+(`49f405c99b7fdd49006929111852032d184195f6`). `flake.nix` and `flake.lock`
+pin the same Horizon revision, so the VM fixture is composed by 0.16.0.
+
+In Horizon 0.16.0 `NodeCapability::OpenCodeTesting` carries a `UserName`, the
+server's owner, where it carried `NoSettings`, and `UserCapability` gains
+`StableCodex`. A `HorizonDefinition` crossing the wire changes archive layout,
+so clients and Nexus move together. Every crate of the workspace is 0.10.3.
+
 # 0.10.1 to 0.10.2
 
 A revision: the memory format is unchanged, and so is every contract. A

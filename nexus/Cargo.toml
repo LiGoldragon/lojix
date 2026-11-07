@@ -1,6 +1,6 @@
 [package]
 name = "lojix-nexus"
-version = "0.10.2"
+version = "0.10.3"
 edition = "2024"
 rust-version = "1.89"
 publish = false
@@ -13,8 +13,8 @@ path = "src/main.rs"
 lojix = { path = "..", default-features = false }
 
 [dev-dependencies]
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "a26bd30a6acce7520f1681bb7746cc518a07cb59" }
-signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "a55516571f7fa58aca92c973738d1788b6bd3604" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "49f405c99b7fdd49006929111852032d184195f6" }
+signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "e192aea5955692946e9bf7643f41be9fb5db15e7" }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "f35460de930943ea1a8a972453ccf3a092a655b5", default-features = false }
 tempfile = "3"
 redb = "4"
