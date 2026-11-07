@@ -68,17 +68,136 @@ impl crate::Named for HorizonUserName {
 
 /// The bound on durable failure detail. A Nexus keeps the evidence a retry
 /// needs, not a log stream: the tail is where a Nix or activation failure
-/// states its cause, so the tail is what is kept.
+/// states its cause, so the tail of each stream is what is kept.
 const FAILURE_DETAIL_BOUND: usize = 4096;
 
-/// What a stage reported when it failed: the text it printed and, when a
-/// subprocess ran, that process's identity and exit code. Every effect
-/// failure travels in this one carrier, so nothing actionable is discarded
-/// between the process and the durable record.
+/// How many journal lines are read back for a transient unit an activation
+/// ran in. The durable bound is `FAILURE_DETAIL_BOUND`; this only has to be
+/// enough lines to fill it.
+const UNIT_JOURNAL_LINES: usize = 200;
+
+/// What a stage reported when it failed: its own statement, every stream the
+/// failing process printed, and, when a subprocess ran, that process's
+/// identity and exit code. Every effect failure travels in this one carrier,
+/// so nothing actionable is discarded between the process and the durable
+/// record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StageFailure {
     detail: String,
     optional_failed_command: Option<crate::runtime_model::FailedCommand>,
+    reported_outputs: Vec<ReportedOutput>,
+}
+
+/// One stream a failing stage printed, under the name it is shown by:
+/// `stdout`, `stderr`, or the journal of the transient unit an activation ran
+/// in. Kept whole until the durable edge bounds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReportedOutput {
+    label: String,
+    text: String,
+}
+
+/// A labelled stream and the heading it is shown under.
+pub(crate) trait OutputReporting {
+    fn new(label: impl Into<String>, text: impl Into<String>) -> Self
+    where
+        Self: Sized;
+
+    fn text(&self) -> &str;
+
+    /// `--- stdout ---`, `--- stdout: empty ---`, or, when only its tail is
+    /// kept, `--- stdout (tail) ---`.
+    fn heading(&self, cut: bool) -> String;
+
+    /// The longest heading this stream can be shown under.
+    fn heading_allowance(&self) -> usize;
+}
+
+impl OutputReporting for ReportedOutput {
+    fn new(label: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            text: text.into().trim().to_string(),
+        }
+    }
+
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    fn heading(&self, cut: bool) -> String {
+        if self.text.is_empty() {
+            format!("--- {}: empty ---", self.label)
+        } else if cut {
+            format!("--- {} (tail) ---", self.label)
+        } else {
+            format!("--- {} ---", self.label)
+        }
+    }
+
+    fn heading_allowance(&self) -> usize {
+        self.heading(true).len().max(self.heading(false).len())
+    }
+}
+
+/// How a process ended, as its parent was told: an exit status, or the signal
+/// that killed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProcessEnd {
+    Exited(i32),
+    Signalled {
+        signal: i32,
+        core_dumped: bool,
+    },
+    /// A wait status that is neither, kept as the raw number.
+    Unreported(i32),
+}
+
+/// Reading a process end as the exit code the record keeps and the sentence
+/// the detail opens with.
+pub(crate) trait ProcessEnding {
+    /// Present only when the process itself exited.
+    fn exit_code(&self) -> Option<i32>;
+
+    fn statement(&self) -> String;
+}
+
+impl ProcessEnding for ProcessEnd {
+    fn exit_code(&self) -> Option<i32> {
+        match self {
+            Self::Exited(code) => Some(*code),
+            Self::Signalled { .. } | Self::Unreported(_) => None,
+        }
+    }
+
+    fn statement(&self) -> String {
+        match self {
+            Self::Exited(code) => format!("exited with status {code}"),
+            Self::Signalled {
+                signal,
+                core_dumped: false,
+            } => format!("killed by signal {signal}"),
+            Self::Signalled {
+                signal,
+                core_dumped: true,
+            } => format!("killed by signal {signal}, core dumped"),
+            Self::Unreported(raw) => format!("ended with wait status {raw}"),
+        }
+    }
+}
+
+impl From<std::process::ExitStatus> for ProcessEnd {
+    fn from(status: std::process::ExitStatus) -> Self {
+        use std::os::unix::process::ExitStatusExt as _;
+        match (status.code(), status.signal()) {
+            (Some(code), _) => Self::Exited(code),
+            (None, Some(signal)) => Self::Signalled {
+                signal,
+                core_dumped: status.core_dumped(),
+            },
+            (None, None) => Self::Unreported(status.into_raw()),
+        }
+    }
 }
 
 impl From<String> for StageFailure {
@@ -89,6 +208,7 @@ impl From<String> for StageFailure {
         Self {
             detail,
             optional_failed_command: None,
+            reported_outputs: Vec::new(),
         }
     }
 }
@@ -101,45 +221,156 @@ impl From<&str> for StageFailure {
 
 impl From<StageFailure> for String {
     /// The lossy edge. Intermediate helpers that still thread `String` errors
-    /// keep the detail and drop the command identity; every path that reaches
-    /// a durable record goes through `witness` instead.
+    /// keep everything the stage printed and drop the command identity; every
+    /// path that reaches a durable record goes through `witness` instead.
     fn from(failure: StageFailure) -> Self {
-        failure.detail
+        failure.reported_text()
+    }
+}
+
+/// Adding to what a failing stage reported, after the fact.
+pub(crate) trait FailureReporting {
+    /// A further stream that explains the failure — the journal of the unit
+    /// the failed command handed its work to.
+    fn with_output(self, output: ReportedOutput) -> Self;
+}
+
+impl FailureReporting for StageFailure {
+    fn with_output(mut self, output: ReportedOutput) -> Self {
+        self.reported_outputs.push(output);
+        self
     }
 }
 
 /// Turning what a failing stage reported into the bounded, redacted evidence
 /// the durable record keeps.
 pub(crate) trait Witnessing {
+    /// The stage's own statement: how the process ended, or what went wrong
+    /// when no process ran.
     fn reported_detail(&self) -> &str;
+
+    /// Every stream the failing stage printed, in the order they are shown.
+    fn reported_outputs(&self) -> &[ReportedOutput] {
+        &[]
+    }
+
     fn reported_command(&self) -> Option<crate::runtime_model::FailedCommand>;
 
-    /// Drop every line naming a credential, then keep the last
-    /// `FAILURE_DETAIL_BOUND` bytes on a line boundary.
-    fn bounded_redaction(detail: &str) -> (String, bool) {
-        let retained: Vec<&str> = detail
+    /// Everything reported, whole and unredacted, for an intermediate message
+    /// that is bounded and redacted later.
+    fn reported_text(&self) -> String {
+        let mut sections = Vec::new();
+        if !self.reported_detail().trim().is_empty() {
+            sections.push(self.reported_detail().trim().to_string());
+        }
+        for output in self.reported_outputs() {
+            sections.push(output.heading(false));
+            if !output.text().is_empty() {
+                sections.push(output.text().to_string());
+            }
+        }
+        sections.join("\n")
+    }
+
+    /// Drop every line naming a credential; say whether one was dropped.
+    fn redaction(text: &str) -> (String, bool)
+    where
+        Self: Sized,
+    {
+        let retained: Vec<&str> = text
             .lines()
             .filter(|line| !InspectedText::from(*line).names_credential_material())
             .collect();
-        let redacted = retained.join("\n");
-        let dropped_a_line = retained.len() != detail.lines().count();
-        if redacted.len() <= FAILURE_DETAIL_BOUND {
-            return (redacted, dropped_a_line);
-        }
-        let tail = &redacted[redacted.len() - FAILURE_DETAIL_BOUND..];
-        let bounded = match tail.find('\n') {
-            Some(break_at) => &tail[break_at + 1..],
-            None => tail,
-        };
-        (bounded.to_string(), true)
+        let dropped_a_line = retained.len() != text.lines().count();
+        (retained.join("\n"), dropped_a_line)
     }
 
-    fn witness(&self) -> crate::runtime_model::FailureEvidence {
-        let (detail, truncated) = Self::bounded_redaction(self.reported_detail());
+    /// The last `bound` bytes of `text`, starting on a character and, where
+    /// one is in reach, a line boundary; and whether anything was cut.
+    fn tail_within(text: &str, bound: usize) -> (String, bool)
+    where
+        Self: Sized,
+    {
+        if text.len() <= bound {
+            return (text.to_string(), false);
+        }
+        let mut start = text.len() - bound;
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        let tail = &text[start..];
+        let starts_a_line = text.as_bytes()[start - 1] == b'\n';
+        let kept = match tail.find('\n') {
+            Some(break_at) if !starts_a_line && break_at + 1 < tail.len() => &tail[break_at + 1..],
+            _ => tail,
+        };
+        (kept.to_string(), true)
+    }
+
+    /// Divide `available` bytes among texts of these lengths: a text shorter
+    /// than an even share keeps all of itself and leaves the rest to the
+    /// others, so no stream is cut while room is left unused.
+    fn fair_shares(lengths: &[usize], available: usize) -> Vec<usize>
+    where
+        Self: Sized,
+    {
+        let mut order: Vec<usize> = (0..lengths.len()).collect();
+        order.sort_by_key(|index| lengths[*index]);
+        let mut shares = vec![0; lengths.len()];
+        let mut remaining = available;
+        for (position, index) in order.into_iter().enumerate() {
+            let share = (remaining / (lengths.len() - position)).min(lengths[index]);
+            shares[index] = share;
+            remaining -= share;
+        }
+        shares
+    }
+
+    /// The statement, then each stream under its heading, every line naming a
+    /// credential dropped and each part cut to its tail so that the whole
+    /// fits `FAILURE_DETAIL_BOUND`. Any cut or dropped line sets
+    /// `detail_truncated`.
+    fn witness(&self) -> crate::runtime_model::FailureEvidence
+    where
+        Self: Sized,
+    {
+        let (statement, mut truncated) = Self::redaction(self.reported_detail().trim());
+        let outputs: Vec<(&ReportedOutput, String)> = self
+            .reported_outputs()
+            .iter()
+            .map(|output| {
+                let (text, dropped) = Self::redaction(output.text());
+                truncated |= dropped;
+                (output, text)
+            })
+            .collect();
+        let headings: usize = outputs
+            .iter()
+            .map(|(output, _)| output.heading_allowance() + 2)
+            .sum();
+        let lengths: Vec<usize> = std::iter::once(statement.len())
+            .chain(outputs.iter().map(|(_, text)| text.len()))
+            .collect();
+        let shares = Self::fair_shares(&lengths, FAILURE_DETAIL_BOUND.saturating_sub(headings + 1));
+        let mut sections = Vec::new();
+        let (statement, cut) = Self::tail_within(&statement, shares[0]);
+        truncated |= cut;
+        if !statement.is_empty() {
+            sections.push(statement);
+        }
+        for ((output, text), share) in outputs.iter().zip(shares.iter().skip(1)) {
+            let (kept, cut) = Self::tail_within(text, *share);
+            truncated |= cut;
+            sections.push(output.heading(cut));
+            if !kept.is_empty() {
+                sections.push(kept);
+            }
+        }
+        let (detail, cut) = Self::tail_within(&sections.join("\n"), FAILURE_DETAIL_BOUND);
         crate::runtime_model::FailureEvidence {
             optional_failed_command: self.reported_command(),
             failure_detail: crate::runtime_model::FailureDetail::new(detail),
-            detail_truncated: truncated,
+            detail_truncated: truncated || cut,
         }
     }
 }
@@ -147,6 +378,10 @@ pub(crate) trait Witnessing {
 impl Witnessing for StageFailure {
     fn reported_detail(&self) -> &str {
         &self.detail
+    }
+
+    fn reported_outputs(&self) -> &[ReportedOutput] {
+        &self.reported_outputs
     }
 
     fn reported_command(&self) -> Option<crate::runtime_model::FailedCommand> {
@@ -2163,21 +2398,36 @@ impl DeployJobResuming for memory::DeployJob {
         &self,
         daemon_host: &ordinary::NodeName,
     ) -> Option<DetachedActivationUnit> {
+        let host = match self.optional_deploy_submission.as_ref() {
+            Some(memory::DeploySubmission::Host(host))
+                if host.host_deploy_action == ordinary::HostDeployAction::TestActivation
+                    && host.activation_backend == memory::ActivationBackend::NixosSystemdBootV1 =>
+            {
+                host
+            }
+            _ => return None,
+        };
         if self.deploy_job_phase != memory::DeployJobPhase::Activating
             || self.node_name != *daemon_host
             || self.activation_backend != memory::ActivationBackend::NixosSystemdBootV1
-            || !matches!(
-                self.optional_deploy_submission.as_ref(),
-                Some(memory::DeploySubmission::Host(host))
-                    if host.host_deploy_action == ordinary::HostDeployAction::TestActivation
-                        && host.activation_backend == memory::ActivationBackend::NixosSystemdBootV1
-            )
         {
             return None;
         }
-        Some(DetachedActivationUnit::for_deployment(
-            &self.deployment_identifier,
-        ))
+        let unit = DetachedActivationUnit::for_deployment(&self.deployment_identifier);
+        let optional_journal = SshTarget::from_transport(&nexus::DeploymentTransport {
+            nix_store_uri: nexus::NixStoreUri::new(
+                host.deployment_transport.nix_store_uri.payload().clone(),
+            ),
+            ssh_destination: nexus::SshDestination::new(
+                host.deployment_transport.ssh_destination.payload().clone(),
+            ),
+        })
+        .ok()
+        .map(|target| UnitJournal::new(unit.name.clone(), target));
+        Some(DetachedActivationUnit {
+            optional_journal,
+            ..unit
+        })
     }
 
     fn resumption(&self) -> DeployJobResumption {
@@ -5434,7 +5684,11 @@ impl EffectRunning for SchemaRuntime {
         };
         match activation.run(self.configuration.effect_execution()).await {
             Ok(()) if let Some(observer) = detached_test_observer => {
-                observer.observe(self.store.clone(), *command.deployment_identifier.payload());
+                observer.observe(
+                    self.store.clone(),
+                    *command.deployment_identifier.payload(),
+                    self.configuration.effect_execution().clone(),
+                );
                 nexus::EffectResult::DetachedTestActivationDispatched
             }
             Ok(()) => nexus::EffectResult::GenerationActivated(nexus::ActivatedGeneration {
@@ -6067,7 +6321,7 @@ impl NarHashing for NarHash {
             .map_err(|detail| {
                 std::io::Error::other(format!(
                     "failed to hash generated input: {}",
-                    detail.reported_detail()
+                    detail.reported_text()
                 ))
             })?;
         Ok(Self(NixCommand::first_line(&output)))
@@ -6626,9 +6880,13 @@ impl Activating for Activation {
                     ordinary::HostDeployAction::TestActivation
                 ) && activation.detached_self_activation().is_some() =>
             {
-                Some(DetachedActivationUnit::new(
-                    activation.self_switch_unit_name(),
-                ))
+                Some(DetachedActivationUnit {
+                    name: activation.self_switch_unit_name(),
+                    optional_journal: Some(UnitJournal::new(
+                        activation.self_switch_unit_name(),
+                        activation.target.clone(),
+                    )),
+                })
             }
             _ => None,
         }
@@ -6932,12 +7190,28 @@ impl HostActivating for HostActivation {
         let unit_name = self.self_switch_unit_name();
         let script = self.self_switch_script(activation);
         match activation {
-            DetachedSelfActivation::Switch => self.detached_invocation(&unit_name, script),
-            DetachedSelfActivation::Test => self.retained_detached_invocation(&unit_name, script),
+            // `--wait` returns only once the unit has ended, and what the
+            // switch printed went to the unit's journal, not to this ssh.
+            DetachedSelfActivation::Switch => {
+                match self
+                    .detached_invocation(&unit_name, script)
+                    .run(execution)
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(failure) => Err(failure.with_output(
+                        UnitJournal::new(unit_name, self.target.clone())
+                            .tail(execution)
+                            .await,
+                    )),
+                }
+            }
+            DetachedSelfActivation::Test => self
+                .retained_detached_invocation(&unit_name, script)
+                .run(execution)
+                .await
+                .map(|_| ()),
         }
-        .run(execution)
-        .await
-        .map(|_| ())
     }
 
     fn retained_detached_invocation(&self, unit_name: &str, script: String) -> NixCommand {
@@ -6986,10 +7260,16 @@ impl HostActivating for HostActivation {
         execution: &EffectExecution,
     ) -> std::result::Result<(), StageFailure> {
         let unit_name = self.unit_name();
-        self.systemd_run_invocation(&unit_name)
-            .run(execution)
-            .await
-            .map(|_| ())
+        match self.systemd_run_invocation(&unit_name).run(execution).await {
+            Ok(_) => Ok(()),
+            // The boot-once script ran in its own unit; its output is in that
+            // unit's journal.
+            Err(failure) => Err(failure.with_output(
+                UnitJournal::new(unit_name, self.target.clone())
+                    .tail(execution)
+                    .await,
+            )),
+        }
     }
 }
 
@@ -7009,12 +7289,65 @@ impl Effect for HostActivation {
     }
 }
 
+/// The journal of a transient unit an activation was handed to, read on the
+/// node the unit ran on, over the same route that started it. A unit run by
+/// `systemd-run` writes what its script printed here, not to the command that
+/// started it, and `--collect` keeps the journal after the unit is gone.
+#[derive(Debug, Clone)]
+struct UnitJournal {
+    unit_name: String,
+    target: SshTarget,
+}
+
+/// Reading back the tail of one unit's journal as reported output.
+trait UnitJournalReading {
+    fn new(unit_name: String, target: SshTarget) -> Self
+    where
+        Self: Sized;
+
+    /// `journalctl --unit=<unit> --lines=<n> --no-pager --output=cat` on the
+    /// unit's node.
+    fn invocation(&self) -> NixCommand;
+
+    /// The journal tail under `journal of <unit>`; when it cannot be read,
+    /// what the read reported, under `journal of <unit> unavailable`.
+    async fn tail(&self, execution: &EffectExecution) -> ReportedOutput;
+}
+
+impl UnitJournalReading for UnitJournal {
+    fn new(unit_name: String, target: SshTarget) -> Self {
+        Self { unit_name, target }
+    }
+
+    fn invocation(&self) -> NixCommand {
+        self.target
+            .remote_invocation(ShellCommand::from_raw(format!(
+                "journalctl --unit={} --lines={UNIT_JOURNAL_LINES} --no-pager --output=cat",
+                ShellArgument::new(self.unit_name.clone()).to_command_text(),
+            )))
+    }
+
+    async fn tail(&self, execution: &EffectExecution) -> ReportedOutput {
+        let label = format!("journal of {}", self.unit_name);
+        match self.invocation().run(execution).await {
+            Ok(text) => ReportedOutput::new(label, text),
+            Err(failure) => {
+                ReportedOutput::new(format!("{label} unavailable"), failure.reported_text())
+            }
+        }
+    }
+}
+
 /// PID-1's retained receipt for a same-host non-persistent activation.  The
 /// unit name is derived from the already durable deployment identity; there is
 /// deliberately no BootOnce cursor or profile witness involved.
 #[derive(Debug, Clone)]
 pub(crate) struct DetachedActivationUnit {
     name: String,
+    /// Where the unit's journal is read from: the route the activation was
+    /// dispatched over. `None` only for a unit named without a deployment
+    /// behind it.
+    optional_journal: Option<UnitJournal>,
 }
 
 /// The exact Manager.UnitNew subscription created before dispatch.  It is
@@ -7028,13 +7361,15 @@ pub(crate) struct DetachedActivationObserver {
 }
 
 /// What PID 1 reported about a detached activation transient: its
-/// `ActiveState`, the service `Result`, and the main process's exit status
-/// when it had one. Observed, not inferred.
+/// `ActiveState`, the service `Result`, how the main process ended when it
+/// had one, and the unit's journal tail. Observed, not inferred.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DetachedActivationFailure {
+    unit_name: String,
     active_state: String,
     result: String,
-    optional_exit_status: Option<i32>,
+    optional_process_end: Option<ProcessEnd>,
+    reported_outputs: Vec<ReportedOutput>,
 }
 
 impl Witnessing for DetachedActivationFailure {
@@ -7042,18 +7377,59 @@ impl Witnessing for DetachedActivationFailure {
         &self.result
     }
 
+    fn reported_outputs(&self) -> &[ReportedOutput] {
+        &self.reported_outputs
+    }
+
     fn reported_command(&self) -> Option<crate::runtime_model::FailedCommand> {
         Some(crate::runtime_model::FailedCommand {
             command_program: crate::runtime_model::CommandProgram::from("systemd-run"),
-            command_argument_vector: vec![crate::runtime_model::CommandArgument::new(format!(
-                "ActiveState={}",
-                self.active_state
-            ))],
+            command_argument_vector: vec![
+                crate::runtime_model::CommandArgument::new(format!("--unit={}", self.unit_name)),
+                crate::runtime_model::CommandArgument::new(format!(
+                    "ActiveState={}",
+                    self.active_state
+                )),
+            ],
             optional_exit_code: self
-                .optional_exit_status
+                .optional_process_end
+                .and_then(|end| end.exit_code())
                 .and_then(|status| u64::try_from(status).ok())
                 .map(crate::runtime_model::ExitCode::new),
         })
+    }
+}
+
+impl FailureReporting for DetachedActivationFailure {
+    fn with_output(mut self, output: ReportedOutput) -> Self {
+        self.reported_outputs.push(output);
+        self
+    }
+}
+
+/// Reading PID 1's `ExecMainCode`/`ExecMainStatus` pair: `CLD_EXITED` (1)
+/// carries an exit status, `CLD_KILLED` (2) and `CLD_DUMPED` (3) a signal, and
+/// 0 means no main process ended.
+pub(crate) trait MainProcessReading {
+    fn from_main_process(code: i32, status: i32) -> Option<Self>
+    where
+        Self: Sized;
+}
+
+impl MainProcessReading for ProcessEnd {
+    fn from_main_process(code: i32, status: i32) -> Option<Self> {
+        match code {
+            1 => Some(Self::Exited(status)),
+            2 => Some(Self::Signalled {
+                signal: status,
+                core_dumped: false,
+            }),
+            3 => Some(Self::Signalled {
+                signal: status,
+                core_dumped: true,
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -7102,7 +7478,19 @@ pub(crate) trait DetachedActivation {
         connection: &'a Connection,
     ) -> std::result::Result<Option<DetachedActivationProxies<'a>>, String>;
 
-    async fn classify(proxy: &DetachedActivationProxies<'_>) -> DetachedActivationOutcome;
+    async fn classify(&self, proxy: &DetachedActivationProxies<'_>) -> DetachedActivationOutcome;
+
+    /// What is known of a unit PID 1 no longer holds: that it is gone, and
+    /// whatever its journal kept.
+    fn vanished(&self) -> DetachedActivationFailure;
+
+    /// The failure completed with the unit's journal tail, read over the
+    /// route the activation was dispatched on.
+    async fn journalled(
+        &self,
+        failure: DetachedActivationFailure,
+        execution: &EffectExecution,
+    ) -> DetachedActivationFailure;
 
     async fn clean(&self);
 
@@ -7111,7 +7499,10 @@ pub(crate) trait DetachedActivation {
 
 impl DetachedActivation for DetachedActivationUnit {
     fn new(name: String) -> Self {
-        Self { name }
+        Self {
+            name,
+            optional_journal: None,
+        }
     }
 
     fn canonical_name(deployment_identifier: &ordinary::DeploymentIdentifier) -> String {
@@ -7219,7 +7610,7 @@ impl DetachedActivation for DetachedActivationUnit {
         Ok(Some(DetachedActivationProxies { unit, service }))
     }
 
-    async fn classify(proxy: &DetachedActivationProxies<'_>) -> DetachedActivationOutcome {
+    async fn classify(&self, proxy: &DetachedActivationProxies<'_>) -> DetachedActivationOutcome {
         let active = proxy.unit.get_property::<String>("ActiveState").await;
         let result = proxy.service.get_property::<String>("Result").await;
         eprintln!(
@@ -7233,21 +7624,57 @@ impl DetachedActivation for DetachedActivationUnit {
                 // What PID 1 said is the whole evidence for this failure —
                 // keep it rather than printing it and terminalizing a generic
                 // reason.
-                let exit_status = proxy.service.get_property::<i32>("ExecMainStatus").await;
+                let main_code = proxy.service.get_property::<i32>("ExecMainCode").await;
+                let main_status = proxy.service.get_property::<i32>("ExecMainStatus").await;
+                let optional_process_end = match (main_code, main_status) {
+                    (Ok(code), Ok(status)) => ProcessEnd::from_main_process(code, status),
+                    _ => None,
+                };
+                let reported = match result {
+                    Ok(result) => format!("systemd reported Result={result}"),
+                    Err(error) => {
+                        format!("systemd reported ActiveState={state}, Result unreadable: {error}")
+                    }
+                };
                 DetachedActivationOutcome::Failed(DetachedActivationFailure {
+                    unit_name: self.name.clone(),
                     active_state: state.to_string(),
-                    result: match result {
-                        Ok(result) => format!("systemd reported Result={result}"),
-                        Err(error) => {
-                            format!(
-                                "systemd reported ActiveState={state}, Result unreadable: {error}"
-                            )
-                        }
+                    result: match optional_process_end {
+                        Some(end) => format!("{reported}; main process {}", end.statement()),
+                        None => reported,
                     },
-                    optional_exit_status: exit_status.ok(),
+                    optional_process_end,
+                    reported_outputs: Vec::new(),
                 })
             }
             _ => DetachedActivationOutcome::Missing,
+        }
+    }
+
+    fn vanished(&self) -> DetachedActivationFailure {
+        DetachedActivationFailure {
+            unit_name: self.name.clone(),
+            active_state: "missing".to_string(),
+            result: format!(
+                "systemd no longer holds {}, so it reported no result",
+                self.name
+            ),
+            optional_process_end: None,
+            reported_outputs: Vec::new(),
+        }
+    }
+
+    async fn journalled(
+        &self,
+        failure: DetachedActivationFailure,
+        execution: &EffectExecution,
+    ) -> DetachedActivationFailure {
+        match &self.optional_journal {
+            Some(journal) => failure.with_output(journal.tail(execution).await),
+            None => failure.with_output(ReportedOutput::new(
+                format!("journal of {} unavailable", self.name),
+                "no route to the node the unit ran on",
+            )),
         }
     }
 
@@ -7282,7 +7709,7 @@ pub(crate) trait DetachedObserving {
     /// Start the private event observer after `systemd-run --no-block` has
     /// accepted the handoff. An observer interruption is deliberately not a
     /// terminal result: a replacement daemon uses the retained PID-1 receipt.
-    fn observe(self, store: Arc<Store>, deployment_identifier: u64);
+    fn observe(self, store: Arc<Store>, deployment_identifier: u64, execution: EffectExecution);
 
     async fn await_completion(
         &mut self,
@@ -7294,7 +7721,7 @@ impl DetachedObserving for DetachedActivationObserver {
         &self,
     ) -> std::result::Result<Option<DetachedActivationOutcome>, String> {
         match self.unit.unit_proxy(&self.connection).await? {
-            Some(proxy) => Ok(Some(DetachedActivationUnit::classify(&proxy).await)),
+            Some(proxy) => Ok(Some(self.unit.classify(&proxy).await)),
             // PID 1 has not yet made this exact transient visible to GetUnit.
             // A registration window is the absence of an outcome, not one of
             // its values: `classify` reads a resolved unit and cannot report
@@ -7303,7 +7730,12 @@ impl DetachedObserving for DetachedActivationObserver {
         }
     }
 
-    fn observe(mut self, store: Arc<Store>, deployment_identifier: u64) {
+    fn observe(
+        mut self,
+        store: Arc<Store>,
+        deployment_identifier: u64,
+        execution: EffectExecution,
+    ) {
         tokio::spawn(async move {
             eprintln!(
                 "lojix detached test activation observer attached deployment={} unit={}",
@@ -7323,6 +7755,14 @@ impl DetachedObserving for DetachedActivationObserver {
                 "lojix detached test activation observer completion deployment={} unit={} outcome={outcome:?}",
                 deployment_identifier, self.unit.name
             );
+            let outcome = match outcome {
+                Some(DetachedActivationOutcome::Failed(failure)) => {
+                    Some(DetachedActivationOutcome::Failed(
+                        self.unit.journalled(failure, &execution).await,
+                    ))
+                }
+                other => other,
+            };
             let terminal = DetachedActivationUnit::terminal_outcome(outcome);
             if let Some(terminal) = terminal
                 && store
@@ -7369,7 +7809,7 @@ impl DetachedObserving for DetachedActivationObserver {
             .receive_property_changed::<String>("ActiveState")
             .await;
         loop {
-            match DetachedActivationUnit::classify(&proxy).await {
+            match self.unit.classify(&proxy).await {
                 outcome @ (DetachedActivationOutcome::Succeeded
                 | DetachedActivationOutcome::Failed(_)) => {
                     return Ok(Some(outcome));
@@ -7691,6 +8131,11 @@ trait NixInvoking {
     /// signal reports none.
     fn reported(&self, optional_code: Option<i32>, detail: String) -> StageFailure;
 
+    /// This command's identity after it ran and failed: how it ended, then
+    /// the tail of both of its streams. A failing step may print its cause on
+    /// either — Home Manager's `errorEcho` writes to stdout.
+    fn ended(&self, end: ProcessEnd, stdout: &[u8], stderr: &[u8]) -> StageFailure;
+
     fn first_line(output: &str) -> String;
 
     fn first_line_or(output: &str, fallback: &str) -> String;
@@ -7859,6 +8304,7 @@ impl NixInvoking for NixCommand {
     fn reported(&self, optional_code: Option<i32>, detail: String) -> StageFailure {
         StageFailure {
             detail,
+            reported_outputs: Vec::new(),
             optional_failed_command: Some(crate::runtime_model::FailedCommand {
                 command_program: crate::runtime_model::CommandProgram::new(self.program.clone()),
                 command_argument_vector: self
@@ -7871,6 +8317,18 @@ impl NixInvoking for NixCommand {
                     .map(crate::runtime_model::ExitCode::new),
             }),
         }
+    }
+
+    fn ended(&self, end: ProcessEnd, stdout: &[u8], stderr: &[u8]) -> StageFailure {
+        self.reported(end.exit_code(), end.statement())
+            .with_output(ReportedOutput::new(
+                "stdout",
+                String::from_utf8_lossy(stdout),
+            ))
+            .with_output(ReportedOutput::new(
+                "stderr",
+                String::from_utf8_lossy(stderr),
+            ))
     }
 
     fn first_line(output: &str) -> String {
@@ -7982,12 +8440,10 @@ impl Effect for NixCommand {
         if status.success() {
             Ok(String::from_utf8_lossy(&stdout).into_owned())
         } else {
-            // The exact stderr the process printed, kept whole here; bounding
-            // and redaction belong to `Witnessing`, at the durable edge.
-            Err(self.reported(
-                status.code(),
-                String::from_utf8_lossy(&stderr).trim().to_string(),
-            ))
+            // How the process ended and both streams it printed, kept whole
+            // here; bounding and redaction belong to `Witnessing`, at the
+            // durable edge.
+            Err(self.ended(ProcessEnd::from(status), &stdout, &stderr))
         }
     }
 }
@@ -10424,5 +10880,141 @@ mod tests {
         // no entries between the braces
         assert!(!flake.contains(" = ./"), "no entries: {flake}");
         let _ = fs::remove_dir_all(&generated);
+    }
+
+    // ---- every failed terminal carries its evidence ----
+
+    #[test]
+    fn a_tail_never_starts_inside_a_character() {
+        // 'é' is two bytes: a bound of 5 lands inside the third from the end.
+        let (tail, cut) = StageFailure::tail_within("ééééé", 5);
+        assert!(cut);
+        assert_eq!(tail, "éé");
+    }
+
+    #[test]
+    fn a_tail_keeps_a_whole_first_line_when_the_cut_falls_on_its_start() {
+        let (tail, cut) = StageFailure::tail_within("first\nsecond\nthird", 12);
+        assert!(cut);
+        assert_eq!(tail, "second\nthird");
+    }
+
+    #[test]
+    fn a_short_stream_leaves_its_unused_share_to_a_long_one() {
+        assert_eq!(
+            StageFailure::fair_shares(&[10, 5000, 0], 3000),
+            vec![10, 2990, 0]
+        );
+        assert_eq!(
+            StageFailure::fair_shares(&[5000, 5000], 3000),
+            vec![1500, 1500]
+        );
+    }
+
+    #[test]
+    fn a_main_process_killed_by_a_signal_has_no_exit_code() {
+        let killed = ProcessEnd::from_main_process(2, 9).expect("CLD_KILLED");
+        assert_eq!(killed.exit_code(), None);
+        assert_eq!(killed.statement(), "killed by signal 9");
+        let dumped = ProcessEnd::from_main_process(3, 6).expect("CLD_DUMPED");
+        assert_eq!(dumped.statement(), "killed by signal 6, core dumped");
+        let exited = ProcessEnd::from_main_process(1, 4).expect("CLD_EXITED");
+        assert_eq!(exited.exit_code(), Some(4));
+        assert_eq!(ProcessEnd::from_main_process(0, 0), None);
+    }
+
+    /// A fake `ssh` answering `journalctl` with `journal`, in a fresh program
+    /// directory.
+    fn journal_execution(journal: &str) -> (tempfile::TempDir, EffectExecution) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("program directory");
+        let ssh = directory.path().join("ssh");
+        fs::write(
+            &ssh,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/commands\"\ncase \"$*\" in *journalctl*) printf '%s\\n' '{journal}' ;; esac\n"
+            ),
+        )
+        .expect("write fake ssh");
+        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755))
+            .expect("make fake ssh executable");
+        let execution = EffectExecution::test(directory.path().to_path_buf());
+        (directory, execution)
+    }
+
+    fn detached_test_unit() -> DetachedActivationUnit {
+        let job_unit =
+            DetachedActivationUnit::for_deployment(&ordinary::DeploymentIdentifier::new(41));
+        DetachedActivationUnit {
+            optional_journal: Some(UnitJournal::new(
+                job_unit.name.clone(),
+                SshTarget::from_transport(&nexus_fixture_transport()).expect("fixture transport"),
+            )),
+            ..job_unit
+        }
+    }
+
+    #[test]
+    fn a_detached_test_failure_carries_its_main_process_end_and_journal() {
+        let (directory, execution) = journal_execution("switch-to-configuration: unit sshd failed");
+        let unit = detached_test_unit();
+        let main = ProcessEnd::from_main_process(2, 15);
+        let failure = DetachedActivationFailure {
+            unit_name: unit.name.clone(),
+            active_state: "failed".to_string(),
+            result: format!(
+                "systemd reported Result=signal; main process {}",
+                main.expect("signal").statement()
+            ),
+            optional_process_end: main,
+            reported_outputs: Vec::new(),
+        };
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let evidence = runtime
+            .block_on(unit.journalled(failure, &execution))
+            .witness();
+        let detail = evidence.failure_detail.payload();
+        assert!(
+            detail.contains("main process killed by signal 15"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("--- journal of lojix-self-switch-deploy-41.service ---"),
+            "{detail}"
+        );
+        assert!(detail.contains("unit sshd failed"), "{detail}");
+        let command = evidence.optional_failed_command.expect("systemd-run named");
+        assert_eq!(command.optional_exit_code, None);
+        assert_eq!(
+            command.command_argument_vector[0].payload(),
+            "--unit=lojix-self-switch-deploy-41.service"
+        );
+        let commands = fs::read_to_string(directory.path().join("commands")).expect("ssh log");
+        assert!(
+            commands.contains("journalctl --unit=lojix-self-switch-deploy-41.service"),
+            "{commands}"
+        );
+    }
+
+    #[test]
+    fn a_vanished_detached_unit_is_still_evidence() {
+        // PID 1 no longer holding the unit used to terminalize with no
+        // evidence at all.
+        let (_directory, execution) = journal_execution("activating the configuration...");
+        let unit = detached_test_unit();
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let evidence = runtime
+            .block_on(unit.journalled(unit.vanished(), &execution))
+            .witness();
+        let detail = evidence.failure_detail.payload();
+        assert!(
+            detail.contains("systemd no longer holds lojix-self-switch-deploy-41.service"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("activating the configuration..."),
+            "{detail}"
+        );
+        assert!(evidence.optional_failed_command.is_some());
     }
 }

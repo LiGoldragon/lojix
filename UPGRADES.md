@@ -1,5 +1,40 @@
 # Upgrades
 
+# 0.10.1 to 0.10.2
+
+A revision: the memory format is unchanged, and so is every contract. A
+failed deployment's `FailureEvidence` keeps its fields; what fills them
+changes.
+
+What was empty: a failed command kept only its stderr. Home Manager's
+`errorEcho` writes to stdout, so an activation that stopped on, for one,
+`checkLinkTargets` (a file in the way, then `exit 1`) left the detail empty
+beside exit code 1. A process killed by a signal left no exit code and no
+statement. An activation handed to its own `systemd-run --wait` unit (a
+self-switch, a boot-once) printed into that unit's journal, so the record held
+only `systemd-run`'s summary. A detached test activation PID 1 no longer held
+was recorded with no evidence at all. A tail cut inside a multibyte character
+panicked the deploy task, which then wrote no terminal.
+
+Now `failure_detail` opens with how the process ended (`exited with status
+N`, or `killed by signal N`), then holds the tail of each stream under a
+heading: `--- stdout ---`, `--- stderr ---`, and, for an activation run in a
+transient unit, `--- journal of <unit> ---`, read with `journalctl
+--unit=<unit> --lines=200 --no-pager --output=cat` over the route that
+started the unit. A stream that printed nothing shows as `--- stdout: empty
+---`; a cut stream as `--- stdout (tail) ---`. The streams share the 4096-byte
+bound, a short one leaving its room to the others; each tail starts on a
+character and, where one is in reach, a line boundary. `detail_truncated` is
+set when any part is cut or a credential line dropped. A journal that cannot
+be read shows as `--- journal of <unit> unavailable ---` with what the read
+reported. A detached test failure names `--unit=<unit>` in its command, and
+its exit code is present only when PID 1 reports that the main process
+exited; a killed main process is named by its signal.
+
+Records written before 0.10.2 keep the detail they were written with. Every
+crate in the workspace is 0.10.2. Deploy by switching the package and
+restarting; no store step.
+
 # 0.10.0 to 0.10.1
 
 A revision: the memory format is unchanged, and so is every contract. The

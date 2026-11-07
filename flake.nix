@@ -205,13 +205,14 @@
           );
 
           # What a failed deployment leaves behind: the command that failed,
-          # its exit status, and the bounded redacted detail, in the durable
-          # record and in the event log.
+          # how it ended, and the bounded redacted tail of stdout, stderr and,
+          # for an activation run in its own unit, that unit's journal, in the
+          # durable record and in the event log.
           failure-evidence = craneLib.cargoTest (
             commonArguments
             // {
               inherit cargoArtifacts;
-              cargoExtraArgs = "-p lojix --test failure_evidence";
+              cargoExtraArgs = "-p lojix --test failure_evidence --test failure_evidence_paths";
             }
           );
 
@@ -311,6 +312,32 @@
               machine.succeed("kill -0 $(cat /run/lojix-retained-waiter.pid)")
               machine.succeed("systemctl stop lojix-retained-waiter.service")
               machine.wait_until_succeeds("! kill -0 $(cat /run/lojix-retained-waiter.pid)")
+            '';
+          };
+
+          # What an activation prints inside a `systemd-run --collect --wait`
+          # unit goes to that unit's journal, not to the caller, and the
+          # journal still holds it once the failed unit has been collected:
+          # the read a failed self-switch or boot-once makes for its evidence.
+          collected-transient-journal = pkgs.testers.nixosTest {
+            name = "lojix-collected-transient-journal";
+            nodes.machine = { ... }: { };
+            testScript = ''
+              start_all()
+              machine.wait_for_unit("multi-user.target")
+              status, output = machine.execute(
+                  "systemd-run --unit=lojix-journal-witness --collect --wait --service-type=oneshot /bin/sh -c 'echo cause-on-stdout; echo cause-on-stderr >&2; exit 4' 2>&1"
+              )
+              assert status != 0, "the unit's failure reaches the caller"
+              assert "cause-on-stdout" not in output, output
+              machine.wait_until_succeeds(
+                  "systemctl show lojix-journal-witness.service --property=LoadState | grep -Fx LoadState=not-found"
+              )
+              journal = machine.succeed(
+                  "journalctl --unit=lojix-journal-witness.service --lines=200 --no-pager --output=cat"
+              )
+              assert "cause-on-stdout" in journal, journal
+              assert "cause-on-stderr" in journal, journal
             '';
           };
 

@@ -108,7 +108,10 @@ streams subscription events.
   Two-phase deletion respecting narinfo TTL.
 - **Deploy event log** — typed historical events
   (`BuildRealized`, `CachePublished`, `ActivationSucceeded`,
-  `GenerationRetired`, `ContainerStarted`, `ContainerStopped`). An explicit
+  `GenerationRetired`, `ContainerStarted`, `ContainerStopped`). A failed
+  terminal carries the command that failed, how it ended (exit status or
+  signal), and the bounded, redacted tail of its stdout, its stderr and, for
+  an activation run in its own transient unit, that unit's journal. An explicit
   `EventLogRetention` policy bounds retained event and matching container
   rows without touching live generations, GC roots, or deploy-resume jobs. The
   versioned store also persists a finite 4,096-entry raw-history policy and

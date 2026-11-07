@@ -765,14 +765,20 @@ impl DeployProcessable for DeployJobs {
                             | crate::schema_runtime::DetachedActivationOutcome::Missing,
                         ),
                     ) => {
-                        // A Missing transient is its own evidence: PID 1 no
-                        // longer has the unit, so there is nothing it reported.
-                        let optional_failure_evidence = match &outcome {
+                        // PID 1 either reported the failure or no longer
+                        // holds the unit; either way the unit's journal tail
+                        // is what the activation itself printed.
+                        let observed = match outcome {
                             Some(crate::schema_runtime::DetachedActivationOutcome::Failed(
                                 observed,
-                            )) => Some(crate::schema_runtime::Witnessing::witness(observed)),
-                            _ => None,
+                            )) => observed,
+                            _ => unit.vanished(),
                         };
+                        let observed = unit
+                            .journalled(observed, self.configuration.effect_execution())
+                            .await;
+                        let optional_failure_evidence =
+                            Some(crate::schema_runtime::Witnessing::witness(&observed));
                         if self
                             .store
                             .terminalize_deployment(
@@ -794,7 +800,11 @@ impl DeployProcessable for DeployJobs {
                         // A registration window (None) or a unit still running.
                         // The exact observer owns both the queued UnitNew and
                         // the subscribe-before-read terminal-state watcher.
-                        observer.observe(self.store.clone(), deployment_identifier);
+                        observer.observe(
+                            self.store.clone(),
+                            deployment_identifier,
+                            self.configuration.effect_execution().clone(),
+                        );
                     }
                     Err(_) => {
                         // Same as an observer interruption: no invented
