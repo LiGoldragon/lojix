@@ -14,7 +14,7 @@
     # fixture that has gone stale against the pinned schema fails the check at
     # build time instead of inside a booted guest.
     horizon = {
-      url = "github:LiGoldragon/horizon-rs/bd52627b24bf553de45eb639571c1127e44e7f1d";
+      url = "github:LiGoldragon/horizon-rs/187b028a1c1ec6c8926a618a3ca435440d077ae7";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };

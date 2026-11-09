@@ -1,5 +1,23 @@
 # Upgrades
 
+# 0.10.3 to 0.10.4
+
+A revision: the memory format is unchanged and the store stays readable.
+`NodeCapability::GitServer` is appended last, so every existing variant keeps
+its discriminant, and no existing variant's payload changed. Nothing in Lojix
+matched on `NodeCapability`.
+
+`horizon-lib` moves from 0.16.0 (bd52627b24bf553de45eb639571c1127e44e7f1d)
+to 0.17.0 (187b028a1c1ec6c8926a618a3ca435440d077ae7), `signal-lojix` from
+0.9.0 (e192aea5955692946e9bf7643f41be9fb5db15e7) to 0.10.0
+(a6ccf3f4e125f9651bc17b2f54ca8135a8aadbfd), and `meta-signal-lojix` from
+0.10.0 (49f405c99b7fdd49006929111852032d184195f6) to 0.11.0
+(ffb1d796c262aa3be9a61f689acbaf493aafacd2). `flake.nix` and `flake.lock`
+pin the same Horizon revision, so the VM fixture is composed by 0.17.0.
+
+A cluster definition naming `GitServer` can now be submitted and stored. Every
+crate of the workspace is 0.10.4.
+
 # 0.10.2 to 0.10.3
 
 A revision: the memory format is unchanged and the store stays readable. The
