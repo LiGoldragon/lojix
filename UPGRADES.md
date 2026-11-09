@@ -1,5 +1,19 @@
 # Upgrades
 
+# 0.10.4 to 0.10.5
+
+A revision: the memory format is unchanged and the store stays readable.
+`horizon-lib` moves from 0.17.0 (187b028a1c1ec6c8926a618a3ca435440d077ae7)
+to 0.17.1 (e723ce117104557a6eb88555008a68627adae313), `signal-lojix` from
+0.10.0 (a6ccf3f4e125f9651bc17b2f54ca8135a8aadbfd) to 0.10.1
+(ba4d4ac9fa0d189e78c912be8bb188b3b529c071), and `meta-signal-lojix` from
+0.11.0 (ffb1d796c262aa3be9a61f689acbaf493aafacd2) to 0.11.1
+(97ae0c7e9dc48b4e9ecf87c3138095fae8c3800a). None changes a type: the
+`isGitServer` gate no longer requires the node's base public keys, so a
+`GitServer` node holding only its SSH key projects as the Git server.
+`flake.nix` and `flake.lock` pin the same Horizon revision, so the VM fixture
+is composed by 0.17.1. Every crate of the workspace is 0.10.5.
+
 # 0.10.3 to 0.10.4
 
 A revision: the memory format is unchanged and the store stays readable.
