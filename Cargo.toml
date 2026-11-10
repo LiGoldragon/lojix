@@ -1,6 +1,6 @@
 [package]
 name         = "lojix"
-version      = "0.10.5"
+version      = "0.10.6"
 edition      = "2024"
 rust-version = "1.89"
 license      = "MIT OR Apache-2.0"
@@ -34,8 +34,8 @@ datom-codec       = { git = "https://github.com/LiGoldragon/datom-codec", rev = 
 protos            = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3", optional = true }
 kameo             = "0.20"
 nexus             = { git = "https://github.com/LiGoldragon/nexus", rev = "a84bfa960c0d5c02d30048c4bbbc67dfef79a67c" }
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "97ae0c7e9dc48b4e9ecf87c3138095fae8c3800a" }
-signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "ba4d4ac9fa0d189e78c912be8bb188b3b529c071" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "1b0aaeb70c9c8ee1bcd782b1ed4c4b0e98486cd4" }
+signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "bd5d250f6923c85ee785f0e9bb4b4b8320a67c11" }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "f35460de930943ea1a8a972453ccf3a092a655b5", default-features = false, features = ["transport"] }
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 redb              = "4"

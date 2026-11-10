@@ -204,6 +204,30 @@
             }
           );
 
+          # The streaming deployment watch, process-level: a watch prints
+          # Watching and then each phase event of a deploy through its
+          # terminal; an ordinary query prints one line and the Nexus closes;
+          # a watcher whose peer closes is dropped.
+          deployment-watch = craneLib.cargoTest (
+            commonArguments
+            // {
+              inherit cargoArtifacts;
+              cargoExtraArgs = "-p lojix-nexus --test deployment_watch";
+              # The watch test prints the lines the client printed.
+              cargoTestExtraArgs = "-- --nocapture";
+            }
+          );
+
+          # The `lojix` binary prints each reply as one line until the Nexus
+          # closes, and exits 0.
+          ordinary-client = craneLib.cargoTest (
+            commonArguments
+            // {
+              inherit cargoArtifacts;
+              cargoExtraArgs = "-p lojix-client";
+            }
+          );
+
           # What a failed deployment leaves behind: the command that failed,
           # how it ended, and the bounded redacted tail of stdout, stderr and,
           # for an activation run in its own unit, that unit's journal, in the

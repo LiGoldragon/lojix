@@ -35,6 +35,7 @@ use zbus::proxy::{Builder as ProxyBuilder, CacheProperties, SignalStream};
 use zbus::zvariant::OwnedObjectPath;
 use zbus::{Connection, Proxy};
 
+use crate::deployment_watch::WatchesDeployments as _;
 use crate::runtime_flow::{self as nexus, NexusEngine};
 use crate::runtime_model as memory;
 
@@ -3258,8 +3259,18 @@ pub(crate) trait SignalDeciding {
 
     fn decide_ordinary_input(&mut self, input: ordinary::Input) -> nexus::NexusAction;
 
-    fn open_subscription(&mut self) -> nexus::NexusAction;
+    /// Issue a subscription token and reply `Watching`. A deployment watch is
+    /// registered with its filter before the commit sequence is read, so
+    /// every phase event committed after that sequence reaches it; the
+    /// connection that carried it claims the watcher's stream.
+    fn open_subscription(
+        &mut self,
+        deployment_watch: Option<ordinary::DeploymentWatch>,
+    ) -> nexus::NexusAction;
 
+    /// End a live deployment watch, which closes the connection serving it.
+    /// A token issued and no longer live is already closed; any other token
+    /// is unknown.
     fn close_subscription(&mut self, close: ordinary::SubscriptionClose) -> nexus::NexusAction;
 
     fn decide_meta_input(&mut self, input: meta::Input) -> nexus::NexusAction;
@@ -3386,30 +3397,55 @@ impl SignalDeciding for SchemaRuntime {
                     ),
                 }
             }
-            ordinary::Input::WatchDeployments(_) | ordinary::Input::WatchCacheRetention(_) => {
-                self.open_subscription()
+            ordinary::Input::WatchDeployments(deployment_watch) => {
+                self.open_subscription(Some(deployment_watch))
             }
+            ordinary::Input::WatchCacheRetention(_) => self.open_subscription(None),
             ordinary::Input::Unwatch(close) => self.close_subscription(close),
         }
     }
 
-    fn open_subscription(&mut self) -> nexus::NexusAction {
+    fn open_subscription(
+        &mut self,
+        deployment_watch: Option<ordinary::DeploymentWatch>,
+    ) -> nexus::NexusAction {
         let subscription_token = self.store.next_subscription_token();
+        if let Some(deployment_watch) = deployment_watch {
+            self.store
+                .deployment_watchers()
+                .register(subscription_token, deployment_watch);
+        }
         let reply = match self.store.commit_sequence() {
             Ok(commit_sequence) => ordinary::Output::Watching(ordinary::SubscriptionOpened {
                 subscription_token: ordinary::SubscriptionToken::new(subscription_token),
                 commit_sequence: ordinary::CommitSequence::new(commit_sequence),
             }),
-            Err(_) => ordinary::Output::WatchRejected(ordinary::RejectedWatch::new(
-                ordinary::WatchRejectionReason::StreamUnavailable,
-            )),
+            Err(_) => {
+                self.store.deployment_watchers().end(subscription_token);
+                ordinary::Output::WatchRejected(ordinary::RejectedWatch::new(
+                    ordinary::WatchRejectionReason::StreamUnavailable,
+                ))
+            }
         };
         nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
     }
 
     fn close_subscription(&mut self, close: ordinary::SubscriptionClose) -> nexus::NexusAction {
-        let reply =
-            ordinary::Output::Unwatched(ordinary::SubscriptionClosed::new(close.into_payload()));
+        let subscription_token = close.into_payload();
+        let token = *subscription_token.payload();
+        let reply = if self.store.deployment_watchers().end(token) {
+            ordinary::Output::Unwatched(ordinary::SubscriptionClosed::new(subscription_token))
+        } else {
+            let unwatch_rejection_reason = if self.store.subscription_token_issued(token) {
+                ordinary::UnwatchRejectionReason::SubscriptionAlreadyClosed
+            } else {
+                ordinary::UnwatchRejectionReason::SubscriptionTokenUnknown
+            };
+            ordinary::Output::UnwatchRejected(ordinary::RejectedUnwatch {
+                unwatch_rejection_reason,
+                subscription_token,
+            })
+        };
         nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
     }
 

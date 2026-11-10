@@ -15,6 +15,7 @@
 //! back, so the daemon recovers without replay code (Spirit oh9l durable-first,
 //! fosp memory-engine-exclusive, ur16 self-resume).
 
+use crate::deployment_watch::WatchesDeployments as _;
 use crate::inspected_text::{NixStorePath, StoreItemShape};
 use crate::legacy_store::LegacyStoreConverting as _;
 use crate::quarantine::{OpeningReport as _, RowQuarantine as _};
@@ -69,6 +70,7 @@ pub mod adapters;
 pub mod bootstrap;
 pub mod client;
 pub mod daemon;
+pub mod deployment_watch;
 #[cfg(feature = "tools")]
 pub mod ingress;
 mod inspected_text;
@@ -827,6 +829,9 @@ pub struct Store {
     /// state, not durable state — they do NOT persist across restart — so an
     /// in-memory atomic is the correct issuer (decision 5).
     subscription_sequence: AtomicU64,
+    /// The live deployment watchers, fed at each committed phase event.
+    /// Connection state like the token counter, so held in memory only.
+    deployment_watchers: deployment_watch::DeploymentWatchers,
     /// What this open set aside or rebuilt; empty on a store that needed
     /// neither.
     opening: quarantine::StoreOpening,
@@ -1025,6 +1030,14 @@ pub trait DurableStore {
     /// The next subscription token: an in-memory atomic fetch-add. Subscriptions
     /// do not survive restart, so an ephemeral counter is correct (decision 5).
     fn next_subscription_token(&self) -> u64;
+
+    /// Whether `token` was issued by this open of the store. A token that was
+    /// issued and is no longer watched names a subscription already closed.
+    fn subscription_token_issued(&self, token: u64) -> bool;
+
+    /// The live deployment watchers this store announces each committed phase
+    /// event to.
+    fn deployment_watchers(&self) -> &deployment_watch::DeploymentWatchers;
 
     /// Every persisted row of one record family.
     fn records<Record>(&self) -> Result<Vec<Record>>
@@ -1486,6 +1499,14 @@ impl DurableStore for Store {
         self.subscription_sequence.fetch_add(1, Ordering::SeqCst) + 1
     }
 
+    fn subscription_token_issued(&self, token: u64) -> bool {
+        token != 0 && token <= self.subscription_sequence.load(Ordering::SeqCst)
+    }
+
+    fn deployment_watchers(&self) -> &deployment_watch::DeploymentWatchers {
+        &self.deployment_watchers
+    }
+
     fn records<Record>(&self) -> Result<Vec<Record>>
     where
         Record: LojixRecord,
@@ -1678,6 +1699,7 @@ impl NexusPersistable for Store {
             path,
             write_gate: Mutex::new(()),
             subscription_sequence: AtomicU64::new(0),
+            deployment_watchers: deployment_watch::DeploymentWatchers::default(),
             opening: quarantine::StoreOpening::default(),
         };
         // Rows the current schema does not read are set aside before anything
@@ -2139,7 +2161,7 @@ impl TransitionJournal for Store {
         let event = Self::transition_intent_event(&intent)?;
         let expected_entry = EventLogEntry {
             event_log_position: event.event_log_position.clone(),
-            logged_event: crate::runtime_model::LoggedEvent::Deployment(event),
+            logged_event: crate::runtime_model::LoggedEvent::Deployment(event.clone()),
         };
         match self
             .records::<EventLogEntry>()?
@@ -2160,6 +2182,9 @@ impl TransitionJournal for Store {
                         .assert(self.directory.event_log, expected_entry)
                         .mutate(self.directory.pending_transition_intents, intent.clone()),
                 )?;
+                // The one commit of a phase event to the log. Announced while
+                // the write gate is held, so every watcher sees commit order.
+                self.deployment_watchers.announce(&event);
                 return Ok(intent);
             }
         }

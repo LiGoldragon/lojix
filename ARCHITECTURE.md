@@ -74,8 +74,8 @@ The library half (`lojix`) holds the shared types, the daemon's
 actor implementations, and the CLI's request/reply plumbing. The
 daemon/client binaries are thin entry points: `lojix-nexus` brings up the
 actor supervisor and binds the socket; `lojix` opens the socket,
-sends one `signal-lojix` request, and prints one reply or
-streams subscription events.
+sends one `signal-lojix` request, and prints each reply as one Datom
+line until the daemon closes the connection.
 
 ## 1 · Owned surface
 
@@ -121,17 +121,18 @@ streams subscription events.
   has no configured mirror, so it creates no mirror-outbox replay rows. The
   bounded query window is not merely an in-memory or materialized-row
   projection.
-  Subscribers consume via `signal-lojix` `DeploymentObservation` and
-  `CacheRetentionObservation`, bridged through `memory-engine`'s
-  `SubscriptionSink` trait.
+  A `WatchDeployments` subscriber receives each phase event the store
+  commits to the log as `DeploymentPhaseObserved` (see §5, subscriptions).
+  `WatchCacheRetention` issues a token and streams nothing yet.
 - **Container lifecycle observation** — systemd dbus subscriptions
   for `containers.<name>.service` transitions; mirrors into the
   event log.
 - **Thin CLIs** — `lojix` and `lojix-meta` each read exactly one inline
   generated Datom object per the one-record operator-surface discipline; they reject
   raw paths, request files, signal files, and flags. Each forwards its object as a
-  `signal-lojix` frame to the daemon, and prints the reply or
-  streams events.
+  `signal-lojix` frame to the daemon, and prints each reply as one flushed
+  Datom line until the daemon closes the connection, then exits 0. The CLIs
+  hold no knowledge of how many replies an input has; the daemon decides.
 - **Maintained bootstrap app** — `lojix-bootstrap` is a flake package/app,
   not a daemon client. It accepts exactly one inline private `BootstrapRun`
   Datom object. The request explicitly supplies input mode, builder, optional
@@ -157,15 +158,13 @@ streams subscription events.
 
 ## 2 · Not owned
 
-- **Wire vocabulary** — `signal-lojix` owns the typed records and
-  the `signal_channel!` declaration that fixes the channel's verbs,
-  events, and stream relations. This crate consumes the macro
-  output.
-- **Wire kernel** — `signal-core` owns `StreamingFrame`,
-  `ExchangeIdentifier`, `StreamEventIdentifier`, the verb spine,
-  and the channel-macro engine. This crate uses signal-core types
-  for every inter-component byte and does not invent parallel
-  framing.
+- **Wire vocabulary** — `signal-lojix` owns the typed records, generated
+  from its Ethos source: the `Query` and `Response` roots, the
+  `DeploymentPhaseObserved` event a watch streams included. This crate
+  consumes the generated types.
+- **Wire kernel** — `signal` owns the length-prefixed frame and the
+  `Signal<T>` portable archive. Every reply, a streamed event included, is
+  one such frame; this crate does not invent parallel framing.
 - **Storage kernel** — `memory-engine` owns table registration, Signal
   verb execution (`assert`, `mutate`, `retract`, `commit`, `match`,
   `validate`, `subscribe`), the commit log, snapshot identity, and
@@ -278,8 +277,10 @@ the workspace actor-systems doctrine. No zero-state holders.
   Production starts from `NoTestDefaults`; tests may Configure explicit typed
   defaults through the ordinary or meta Signal surface.
 - Each public CLI sends one inline generated Datom object for its own contract per
-  invocation, never reads a caller-selected request file, and prints one
-  canonical Datom reply (or streams events until the subscription closes).
+  invocation, never reads a caller-selected request file, and prints each
+  reply as one canonical Datom line until the daemon closes the connection:
+  one line for an ordinary input; `Watching` and then each matching event for
+  a deployment watch.
 - `lojix-inspect-store` is read-only and accepts exactly one inline
   `InspectionRequest.InspectStore` object. It rejects raw paths, request files, flags,
   and extra arguments.
@@ -298,21 +299,32 @@ the workspace actor-systems doctrine. No zero-state holders.
   transition (correlation state/job plus intent, then acknowledgement and any
   terminal job retraction). A crash therefore cannot expose one half of those
   coupled facts; reopen finishes only pending intent delivery.
-- Subscription events ride on the acceptor's outbound lane via
-  `StreamingFrameBody::SubscriptionEvent`; the daemon mints each
-  event's `StreamEventIdentifier` from the lane's monotonic
-  `LaneSequence`.
-- The daemon's subscription bridge is downstream of the commit:
-  `memory-engine` delta delivery cannot roll back the write
-  transaction.
+- An ordinary input is one frame in and one frame out; the daemon then
+  closes the connection. A `WatchDeployments` keeps its connection: the
+  engine registers a watcher under the new subscription token with its
+  `DeploymentWatch` filter before it reads the commit sequence it replies in
+  `Watching`, and the connection claims the watcher's stream. Watchers are
+  held in memory beside the token counter and never survive a restart.
+- The subscription bridge is downstream of the commit: the store announces a
+  phase event to the watchers only after the commit that journals it, while
+  the write gate is held, so each watcher receives events in commit order and
+  nothing announced can be rolled back. Each event a watcher's filter matches
+  (every named deployment, cluster and node equal) is written to its
+  connection as one `DeploymentPhaseObserved` frame.
+- A watch ends when either side closes. When the peer closes, the daemon
+  drops the watcher; an `Unwatch` of a live token ends the watcher and the
+  daemon closes its connection. Either end is logged as
+  `DeploymentWatchEnded.{ <token> PeerClosed|Unwatched }`. An `Unwatch` of an
+  issued token no longer live is rejected `SubscriptionAlreadyClosed`; of any
+  other token, `SubscriptionTokenUnknown`. A live watch holds one of the
+  ordinary listener's request permits for as long as it is open.
 - Daemon-internal actor messages stay inside the crate; only
   `signal-lojix` records cross the socket.
 
 ## 6 · Invariants
 
 - Push, never poll. Subscribers register; the daemon pushes
-  `DeploymentObservation` and `CacheRetentionObservation` events as
-  they occur. See the workspace push-not-pull doctrine.
+  `DeploymentPhaseObserved` events as they commit. See the workspace push-not-pull doctrine.
 - The daemon is cluster-operator-owned, not per-host. A single
   instance per operator workstation (or per shared deploy host);
   not running on every cluster node.

@@ -1,5 +1,27 @@
 # Upgrades
 
+# 0.10.5 to 0.10.6
+
+A revision: the memory format is unchanged and the store stays readable;
+nothing stored is touched. `signal-lojix` moves from 0.10.1
+(ba4d4ac9fa0d189e78c912be8bb188b3b529c071) to 0.11.0
+(bd5d250f6923c85ee785f0e9bb4b4b8320a67c11), whose `Response` gains
+`DeploymentPhaseObserved.DeploymentPhaseEvent`, and `meta-signal-lojix` from
+0.11.1 (97ae0c7e9dc48b4e9ecf87c3138095fae8c3800a) to 0.12.0
+(1b0aaeb70c9c8ee1bcd782b1ed4c4b0e98486cd4).
+
+A deployment watch now streams. After `Watching`, the daemon keeps the
+connection of a `WatchDeployments` and writes each committed phase event its
+`DeploymentWatch` matches as `DeploymentPhaseObserved`, until the client
+closes or an `Unwatch` of its token ends it. An ordinary input still closes
+after its one reply. `Unwatch` of an issued token no longer live is now
+rejected `SubscriptionAlreadyClosed`, and of a token never issued
+`SubscriptionTokenUnknown`; it was answered `Unwatched` for any token.
+`lojix` and `lojix-meta` print each reply as one flushed Datom line until the
+daemon closes, then exit 0. Clients and daemon move together, since an older
+client cannot decode `DeploymentPhaseObserved`. Every crate of the workspace
+is 0.10.6.
+
 # 0.10.4 to 0.10.5
 
 A revision: the memory format is unchanged and the store stays readable.

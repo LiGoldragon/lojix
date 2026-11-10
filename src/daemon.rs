@@ -71,7 +71,32 @@ impl MetaResponseFraming for meta_signal_lojix::Response {
     }
 }
 
+/// Writing one ordinary-socket reply as the frame body that carries it.
+trait OrdinaryResponseFraming {
+    fn ordinary_frame(self) -> Result<Vec<u8>>;
+}
+
+impl OrdinaryResponseFraming for signal_lojix::Response {
+    fn ordinary_frame(self) -> Result<Vec<u8>> {
+        use signal::{ByteViewable, Signalizable};
+        self.signalize()
+            .map(|signal| signal.bytes().to_vec())
+            .map_err(|fault| Error::Wire(format!("{fault:?}")))
+    }
+}
+
+/// What woke a deployment watch's connection.
+enum WatchTurn {
+    /// A matching phase event, or `None` once an `Unwatch` ended the watch.
+    Observed(Option<memory::DeploymentPhaseEvent>),
+    PeerClosed,
+    PeerSpoke,
+}
+
 use crate::adapters::{Lowerable as _, Raisable as _};
+use crate::deployment_watch::{
+    DeploymentWatchStream, StreamsDeploymentEvents as _, WatchesDeployments as _,
+};
 use crate::runtime_flow::{self as nexus, NexusEngine};
 use crate::runtime_model as memory;
 use crate::schema_runtime::{
@@ -452,6 +477,11 @@ struct RequestWorker {
 trait RequestServable {
     async fn serve(self, listener: ListenerRole, connection: AcceptedConnection) -> Result<()>;
     async fn serve_ordinary(&self, connection: &mut AcceptedConnection) -> Result<()>;
+    async fn serve_deployment_watch(
+        &self,
+        connection: &mut AcceptedConnection,
+        watch: DeploymentWatchStream,
+    ) -> Result<()>;
     async fn serve_owner(&self, connection: &mut AcceptedConnection) -> Result<()>;
     async fn submit_deploy(&self, request: memory::DeploySubmission) -> Result<memory::MetaEgress>;
     async fn submit_test(&self, request: memory::TestRequest) -> Result<memory::MetaEgress>;
@@ -485,23 +515,80 @@ impl RequestServable for RequestWorker {
         let input = Signal::<signal_lojix::Query>::from(body.bytes().to_vec())
             .restore()
             .map_err(|fault| Error::Wire(format!("{fault:?}")))?;
+        let watches_deployments = matches!(input, signal_lojix::Query::WatchDeployments(_));
         let output = self
             .execute_request(
                 ListenerRole::Ordinary,
                 nexus::SignalInput::OrdinaryInput(input.lower()?),
             )
             .await?;
-        let reply = Self::ordinary_reply(output)?.raise()?;
-        use signal::{ByteViewable, Signalizable};
-        let frame = reply
-            .signalize()
-            .map_err(|fault| Error::Wire(format!("{fault:?}")))?
-            .bytes()
-            .to_vec();
+        let reply = Self::ordinary_reply(output)?;
+        // A deployment watch the engine opened is claimed before anything else
+        // can fail, so a watcher is never left registered with no connection:
+        // the claimed stream removes it when dropped.
+        let watch = match (&reply, watches_deployments) {
+            (memory::OrdinaryEgress::Watching(opened), true) => self
+                .store
+                .deployment_watchers()
+                .claim(*opened.subscription_token.payload()),
+            _ => None,
+        };
         connection
             .stream_mut()
-            .write_frame(&FrameBody::from(frame), self.capacity)
+            .write_frame(
+                &FrameBody::from(reply.raise()?.ordinary_frame()?),
+                self.capacity,
+            )
             .await?;
+        // An ordinary input closes after its one reply; a deployment watch
+        // keeps its connection and writes each matching event.
+        match watch {
+            Some(watch) => self.serve_deployment_watch(connection, watch).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Write each committed phase event the watch matches as one
+    /// `DeploymentPhaseObserved` frame, until the peer closes or an `Unwatch`
+    /// ends the watch. Either way the watch is dropped, which removes its
+    /// watcher, the end is logged, and the connection closes. The peer sends
+    /// nothing after its request; reading it only tells when it goes.
+    async fn serve_deployment_watch(
+        &self,
+        connection: &mut AcceptedConnection,
+        mut watch: DeploymentWatchStream,
+    ) -> Result<()> {
+        use tokio::io::AsyncReadExt;
+        let subscription_token = watch.subscription_token();
+        let (mut peer, mut writer) = connection.stream_mut().split();
+        let mut unread = [0_u8; 256];
+        let end = loop {
+            let turn = tokio::select! {
+                event = watch.next_event() => WatchTurn::Observed(event),
+                read = peer.read(&mut unread) => match read {
+                    Ok(0) | Err(_) => WatchTurn::PeerClosed,
+                    Ok(_) => WatchTurn::PeerSpoke,
+                },
+            };
+            match turn {
+                WatchTurn::Observed(Some(event)) => {
+                    let frame = signal_lojix::Response::DeploymentPhaseObserved(event.raise()?)
+                        .ordinary_frame()?;
+                    if writer
+                        .write_frame(&FrameBody::from(frame), self.capacity)
+                        .await
+                        .is_err()
+                    {
+                        break "PeerClosed";
+                    }
+                }
+                WatchTurn::Observed(None) => break "Unwatched",
+                WatchTurn::PeerClosed => break "PeerClosed",
+                WatchTurn::PeerSpoke => {}
+            }
+        };
+        drop(watch);
+        eprintln!("lojix-nexus: DeploymentWatchEnded.{{ {subscription_token} {end} }}");
         Ok(())
     }
 

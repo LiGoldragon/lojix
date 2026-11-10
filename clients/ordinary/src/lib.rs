@@ -1,9 +1,10 @@
 use lojix::InlineDatomArguments as _;
 use std::ffi::OsString;
+use std::io::Write;
 
-use datom_codec::{Actualizing, Budget, Potential};
+use datom_codec::{Actualizing, Budget, Datomizable, Potential};
 use lojix::client::{NexusSocket, SocketExchange};
-use protos::ReaderBudget;
+use protos::{Compactable, Protosizable, ReaderBudget};
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
 
 const SOCKET_ENV: &str = "LOJIX_ORDINARY_SOCKET";
@@ -19,16 +20,47 @@ pub trait Invocable {
     fn budget() -> Budget
     where
         Self: Sized;
-    fn run_from_environment() -> lojix::Result<signal_lojix::Response>
+    /// Read the one inline Datom argument, send it to the socket the
+    /// environment names, and hand on each reply until the Nexus closes.
+    fn run_from_environment(
+        each: &mut dyn FnMut(signal_lojix::Response) -> lojix::Result<()>,
+    ) -> lojix::Result<()>
     where
         Self: Sized;
     fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> lojix::Result<Self>
     where
         Self: Sized;
     fn input(&self) -> &signal_lojix::Query;
-    fn run(self) -> lojix::Result<signal_lojix::Response>
+    /// Send the input on `socket` and hand on each reply, in order, until the
+    /// Nexus closes the connection. The Nexus decides how many replies an
+    /// input has: one for an ordinary input, every matching event for a
+    /// deployment watch.
+    fn run(
+        self,
+        socket: &SocketExchange,
+        each: &mut dyn FnMut(signal_lojix::Response) -> lojix::Result<()>,
+    ) -> lojix::Result<()>
     where
         Self: Sized;
+}
+
+/// A reply as the client prints it: one compact Datom line.
+pub trait ReplyLine {
+    fn line(&self) -> String;
+
+    /// Write the line and flush it, so a watcher reading the client's output
+    /// sees each event as it arrives.
+    fn write_line(&self, output: &mut dyn Write) -> lojix::Result<()> {
+        writeln!(output, "{}", self.line())?;
+        output.flush()?;
+        Ok(())
+    }
+}
+
+impl ReplyLine for signal_lojix::Response {
+    fn line(&self) -> String {
+        self.clone().datomize(vec![]).protosize().compact()
+    }
 }
 
 impl Invocable for Client {
@@ -40,8 +72,11 @@ impl Invocable for Client {
             maximum_depth: 16_384,
         }
     }
-    fn run_from_environment() -> lojix::Result<signal_lojix::Response> {
-        Self::from_arguments(std::env::args_os().skip(1))?.run()
+    fn run_from_environment(
+        each: &mut dyn FnMut(signal_lojix::Response) -> lojix::Result<()>,
+    ) -> lojix::Result<()> {
+        let client = Self::from_arguments(std::env::args_os().skip(1))?;
+        client.run(&SocketExchange::for_environment(SOCKET_ENV)?, each)
     }
     fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> lojix::Result<Self> {
         let source = (arguments).single_inline_datom()?;
@@ -53,24 +88,29 @@ impl Invocable for Client {
     fn input(&self) -> &signal_lojix::Query {
         &self.input
     }
-    fn run(self) -> lojix::Result<signal_lojix::Response> {
+    fn run(
+        self,
+        socket: &SocketExchange,
+        each: &mut dyn FnMut(signal_lojix::Response) -> lojix::Result<()>,
+    ) -> lojix::Result<()> {
         let request = self
             .input
             .signalize()
             .map_err(|fault| lojix::Error::Wire(format!("{fault:?}")))?;
-        let reply =
-            SocketExchange::for_environment(SOCKET_ENV)?.exchange(request.bytes().to_vec())?;
-        Signal::<signal_lojix::Response>::from(reply)
-            .restore()
-            .map_err(|fault| lojix::Error::Wire(format!("{fault:?}")))
+        socket.exchange(request.bytes().to_vec(), &mut |reply| {
+            each(
+                Signal::<signal_lojix::Response>::from(reply)
+                    .restore()
+                    .map_err(|fault| lojix::Error::Wire(format!("{fault:?}")))?,
+            )
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datom_codec::Datomizable;
-    use protos::{Protosizable, Textualizable};
+    use protos::Textualizable;
     #[test]
     fn decodes_canonical_inline_query() {
         let input = signal_lojix::Query::Unwatch(signal_lojix::SubscriptionClose {
