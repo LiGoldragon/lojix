@@ -326,9 +326,8 @@ async fn a_refused_activation_leaves_the_profile_where_it_was() {
         "the fixture must reach the activation step under driver version 1, got {commands:?}"
     );
     assert!(
-        !commands
-            .iter()
-            .any(|line| line.contains("nix-env") || line.contains("--set")),
+        !commands.iter().any(|line| line.contains("nix-env")
+            || line.split_whitespace().any(|argument| argument == "--set")),
         "a refused activation must not set the profile, got {commands:?}"
     );
 
