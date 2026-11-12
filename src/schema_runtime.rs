@@ -7960,8 +7960,19 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
 
     fn local_activate_invocation(&self) -> NixCommand {
         NixCommand::new(
-            format!("{}/activate", self.store_path),
+            "/run/current-system/sw/bin/systemd-run",
             vec![
+                "--user".to_string(),
+                "--wait".to_string(),
+                "--pipe".to_string(),
+                "--collect".to_string(),
+                "--quiet".to_string(),
+                "--service-type=exec".to_string(),
+                "--expand-environment=no".to_string(),
+                "--property=PrivateTmp=yes".to_string(),
+                "--setenv=TMPDIR=/tmp".to_string(),
+                "--".to_string(),
+                format!("{}/activate", self.store_path),
                 HOME_MANAGER_DRIVER_VERSION_FLAG.to_string(),
                 HOME_MANAGER_DRIVER_VERSION.to_string(),
             ],
@@ -7976,10 +7987,13 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
     }
 
     fn remote_activate_invocation(&self) -> std::result::Result<NixCommand, String> {
-        self.remote_invocation(ShellCommand::from_raw(format!(
-            "{} {HOME_MANAGER_DRIVER_VERSION_FLAG} {HOME_MANAGER_DRIVER_VERSION}",
-            ShellArgument::new(format!("{}/activate", self.store_path)).to_command_text(),
-        )))
+        let invocation = self.local_activate_invocation();
+        let command = std::iter::once(invocation.program)
+            .chain(invocation.arguments)
+            .map(|argument| ShellArgument::new(argument).to_command_text())
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.remote_invocation(ShellCommand::from_raw(command))
     }
 
     fn remote_invocation(&self, command: ShellCommand) -> std::result::Result<NixCommand, String> {
@@ -10661,6 +10675,109 @@ mod tests {
         assert!(argv.contains("/home/li/.local/state/nix/profiles/home-manager"));
         assert!(!argv.contains("ssh"));
         assert!(!argv.contains("runuser"));
+    }
+
+    #[test]
+    fn user_environment_activation_uses_private_transient_service() {
+        let activation = user_environment_activation(
+            meta::UserEnvironmentAction::ActivateNow,
+            "li@fixture.invalid",
+        );
+        let invocation = activation.local_activate_invocation();
+        assert_eq!(invocation.program, "/run/current-system/sw/bin/systemd-run");
+        assert_eq!(
+            invocation.arguments,
+            vec![
+                "--user",
+                "--wait",
+                "--pipe",
+                "--collect",
+                "--quiet",
+                "--service-type=exec",
+                "--expand-environment=no",
+                "--property=PrivateTmp=yes",
+                "--setenv=TMPDIR=/tmp",
+                "--",
+                &format!("{STORE}/activate"),
+                "--driver-version",
+                "1",
+            ]
+        );
+        for login in ["li@fixture.invalid", "root@fixture.invalid"] {
+            let mut activation = activation.clone();
+            activation.target = SshTarget::from_transport(&nexus::DeploymentTransport {
+                nix_store_uri: nexus::NixStoreUri::from("ssh-ng://fixture.invalid"),
+                ssh_destination: nexus::SshDestination::from(login),
+            })
+            .expect("target");
+            activation.authority = activation
+                .target
+                .user_environment_activation_authority(&activation.user);
+            let invocation = activation
+                .remote_activate_invocation()
+                .expect("remote invocation");
+            let command = invocation.joined_arguments();
+            assert!(command.contains("/run/current-system/sw/bin/systemd-run"));
+            assert!(command.contains("--setenv=TMPDIR=/tmp"));
+            assert!(!command.contains("DRY_RUN"));
+        }
+    }
+
+    #[test]
+    fn user_environment_remote_activation_quotes_closure_as_one_argument() {
+        let mut activation = user_environment_activation(
+            meta::UserEnvironmentAction::ActivateNow,
+            "li@fixture.invalid",
+        );
+        activation.store_path = "/fixture/path with spaces'$literal".to_string();
+        let invocation = activation
+            .remote_activate_invocation()
+            .expect("remote invocation");
+        let expected = activation.local_activate_invocation();
+        let command = invocation.arguments.last().expect("SSH command");
+        assert!(command.contains(
+            &ShellArgument::new(format!("{}/activate", activation.store_path)).to_command_text()
+        ));
+        assert!(command.contains("--expand-environment=no"));
+        assert_eq!(expected.arguments.last().map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn user_environment_runner_status_and_streams_keep_existing_effect_contract() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().expect("fake runner directory");
+        let runner = directory.path().join("systemd-run");
+        let execution = EffectExecution::test(directory.path().to_path_buf());
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        for status in [0, 23] {
+            fs::write(&runner, format!("#!/bin/sh\nprintf 'activation stdout'\nprintf 'activation stderr' >&2\nexit {status}\n")).expect("runner script");
+            fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).expect("executable");
+            let activation = user_environment_activation(
+                meta::UserEnvironmentAction::ActivateNow,
+                "li@fixture.invalid",
+            );
+            let invocation = activation.local_activate_invocation();
+            let invocation = NixCommand::new("systemd-run", invocation.arguments);
+            let result = runtime.block_on(invocation.run(&execution));
+            if status == 0 {
+                assert_eq!(result.expect("success stdout"), "activation stdout");
+            } else {
+                let failure = result.expect_err("runner failure");
+                assert!(format!("{failure:?}").contains("23"));
+                assert!(
+                    failure
+                        .reported_outputs
+                        .iter()
+                        .any(|output| output.text == "activation stdout")
+                );
+                assert!(
+                    failure
+                        .reported_outputs
+                        .iter()
+                        .any(|output| output.text == "activation stderr")
+                );
+            }
+        }
     }
 
     // ---- per-deploy secrets provisioning ----
