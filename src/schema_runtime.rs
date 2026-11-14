@@ -1224,9 +1224,9 @@ pub enum DeploySubmissionOutcome {
 impl From<&NexusConfiguration> for RuntimeConfiguration {
     fn from(configuration: &NexusConfiguration) -> Self {
         Self {
-            generated_inputs_directory: PathBuf::from(&configuration.state_directory_path)
+            generated_inputs_directory: PathBuf::from(&configuration.state_directory_path.0)
                 .join("generated-inputs"),
-            daemon_host: ordinary::NodeName::new(configuration.daemon_host.clone()),
+            daemon_host: ordinary::NodeName::new(configuration.daemon_host.0.clone()),
             effect_execution: EffectExecution::production(),
             test_defaults: match &configuration.test_defaults_choice {
                 signal_lojix::TestDefaultsChoice::NoTestDefaults => None,
@@ -1351,17 +1351,21 @@ impl DaemonRuntime for RuntimeConfiguration {
 impl From<&signal_lojix::TestDefaults> for TestDefaults {
     fn from(defaults: &signal_lojix::TestDefaults) -> Self {
         Self {
-            cluster: ordinary::ClusterName::new(defaults.cluster_name.clone()),
-            default_vm_host: ordinary::NodeName::new(defaults.node_name.clone()),
+            cluster: ordinary::ClusterName::new(defaults.cluster_name.0.clone()),
+            default_vm_host: ordinary::NodeName::new(defaults.node_name.0.clone()),
             default_mode: match defaults.test_mode {
                 signal_lojix::TestMode::Hermetic => ordinary::TestMode::Hermetic,
                 signal_lojix::TestMode::Live => ordinary::TestMode::Live,
             },
-            test_flake: ordinary::FlakeReference::new(defaults.flake_reference.clone()),
-            test_nix_system: ordinary::NixSystem::new(defaults.nix_system.clone()),
+            test_flake: ordinary::FlakeReference::new(defaults.flake_reference.0.clone()),
+            test_nix_system: ordinary::NixSystem::new(defaults.nix_system.0.clone()),
             test_output_selector: ordinary::DeploymentOutputSelector::new(
                 ordinary::FlakeAttribute::new(
-                    defaults.deployment_output_selector.flake_attribute.clone(),
+                    defaults
+                        .deployment_output_selector
+                        .flake_attribute
+                        .0
+                        .clone(),
                 ),
             ),
             horizon_definition: defaults.horizon_definition_option.clone(),
@@ -3259,13 +3263,13 @@ pub(crate) trait SignalDeciding {
 
     fn decide_ordinary_input(&mut self, input: ordinary::Input) -> nexus::NexusAction;
 
-    /// Issue a subscription token and reply `Watching`. A deployment watch is
-    /// registered with its filter before the commit sequence is read, so
+    /// Issue a subscription token and reply `Watching`. The deployment watch
+    /// is registered with its filter before the commit sequence is read, so
     /// every phase event committed after that sequence reaches it; the
     /// connection that carried it claims the watcher's stream.
     fn open_subscription(
         &mut self,
-        deployment_watch: Option<ordinary::DeploymentWatch>,
+        deployment_watch: ordinary::DeploymentWatch,
     ) -> nexus::NexusAction;
 
     /// End a live deployment watch, which closes the connection serving it.
@@ -3398,23 +3402,20 @@ impl SignalDeciding for SchemaRuntime {
                 }
             }
             ordinary::Input::WatchDeployments(deployment_watch) => {
-                self.open_subscription(Some(deployment_watch))
+                self.open_subscription(deployment_watch)
             }
-            ordinary::Input::WatchCacheRetention(_) => self.open_subscription(None),
             ordinary::Input::Unwatch(close) => self.close_subscription(close),
         }
     }
 
     fn open_subscription(
         &mut self,
-        deployment_watch: Option<ordinary::DeploymentWatch>,
+        deployment_watch: ordinary::DeploymentWatch,
     ) -> nexus::NexusAction {
         let subscription_token = self.store.next_subscription_token();
-        if let Some(deployment_watch) = deployment_watch {
-            self.store
-                .deployment_watchers()
-                .register(subscription_token, deployment_watch);
-        }
+        self.store
+            .deployment_watchers()
+            .register(subscription_token, deployment_watch);
         let reply = match self.store.commit_sequence() {
             Ok(commit_sequence) => ordinary::Output::Watching(ordinary::SubscriptionOpened {
                 subscription_token: ordinary::SubscriptionToken::new(subscription_token),
@@ -3586,6 +3587,9 @@ impl SignalDeciding for SchemaRuntime {
                     state_marker: report.state_marker,
                 })
             }
+            memory::MemoryReadOutput::StoreRefused(detail) => {
+                ordinary::Output::StoreRefused(detail)
+            }
         };
         nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
     }
@@ -3644,6 +3648,10 @@ impl SignalDeciding for SchemaRuntime {
                 nexus::NexusAction::from(meta::Output::Tested(accepted))
             }
             memory::MemoryWriteOutput::WriteRejected(report) => self.reject_active_or_meta(report),
+            memory::MemoryWriteOutput::StoreRefused(detail) => {
+                self.active_operation = None;
+                nexus::NexusAction::from(meta::Output::StoreRefused(detail))
+            }
         }
     }
 
@@ -5151,7 +5159,11 @@ impl MemoryApplying for SchemaRuntime {
     fn pin_generation(&mut self, request: meta::PinRequest) -> memory::MemoryWriteOutput {
         let roots = match self.store.records::<crate::runtime_model::GcRoot>() {
             Ok(roots) => roots,
-            Err(error) => panic!("read durable gc roots for pin request: {error}"),
+            Err(error) => {
+                return memory::MemoryWriteOutput::StoreRefused(format!(
+                    "read durable gc roots for pin request: {error}"
+                ));
+            }
         };
         let current_sequence = self.current_commit_sequence();
         let already_used = roots
@@ -5185,14 +5197,20 @@ impl MemoryApplying for SchemaRuntime {
                 to_slot: ordinary::GenerationSlot::Pinned,
                 state_marker: ordinary::StateMarker::from(commit_sequence),
             }),
-            Err(error) => panic!("persist generation pin transition: {error}"),
+            Err(error) => memory::MemoryWriteOutput::StoreRefused(format!(
+                "persist generation pin transition: {error}"
+            )),
         }
     }
 
     fn unpin_generation(&mut self, request: meta::UnpinRequest) -> memory::MemoryWriteOutput {
         let roots = match self.store.records::<crate::runtime_model::GcRoot>() {
             Ok(roots) => roots,
-            Err(error) => panic!("read durable gc roots for unpin request: {error}"),
+            Err(error) => {
+                return memory::MemoryWriteOutput::StoreRefused(format!(
+                    "read durable gc roots for unpin request: {error}"
+                ));
+            }
         };
         let current_sequence = self.current_commit_sequence();
         let Some(mut root) = roots.into_iter().find(|root| {
@@ -5223,14 +5241,20 @@ impl MemoryApplying for SchemaRuntime {
                     state_marker: ordinary::StateMarker::from(commit_sequence),
                 })
             }
-            Err(error) => panic!("persist generation unpin transition: {error}"),
+            Err(error) => memory::MemoryWriteOutput::StoreRefused(format!(
+                "persist generation unpin transition: {error}"
+            )),
         }
     }
 
     fn retire_generation(&mut self, request: meta::RetireRequest) -> memory::MemoryWriteOutput {
         let roots = match self.store.records::<crate::runtime_model::GcRoot>() {
             Ok(roots) => roots,
-            Err(error) => panic!("read durable gc roots for retire request: {error}"),
+            Err(error) => {
+                return memory::MemoryWriteOutput::StoreRefused(format!(
+                    "read durable gc roots for retire request: {error}"
+                ));
+            }
         };
         let current_sequence = self.current_commit_sequence();
         let Some(root) = roots.into_iter().find(|root| {
@@ -5261,7 +5285,9 @@ impl MemoryApplying for SchemaRuntime {
                     state_marker: ordinary::StateMarker::from(commit_sequence),
                 })
             }
-            Err(error) => panic!("persist generation retirement: {error}"),
+            Err(error) => memory::MemoryWriteOutput::StoreRefused(format!(
+                "persist generation retirement: {error}"
+            )),
         }
     }
 
@@ -5355,7 +5381,11 @@ impl MemoryObserving for SchemaRuntime {
     fn query_test_runs(&self, lookup: ordinary::TestRunLookup) -> memory::MemoryReadOutput {
         let runs = match self.store.records::<crate::runtime_model::StoredTestRun>() {
             Ok(runs) => runs,
-            Err(error) => panic!("read durable test runs: {error}"),
+            Err(error) => {
+                return memory::MemoryReadOutput::StoreRefused(format!(
+                    "read durable test runs: {error}"
+                ));
+            }
         };
         let commit_sequence = self.current_commit_sequence();
         let mut matching: Vec<memory::StoredTestRun> =
@@ -5383,7 +5413,11 @@ impl MemoryObserving for SchemaRuntime {
             .matching_live_generations(|live| selection.matches_generation(live));
         let live_generations = match matching {
             Ok(live_generations) => live_generations,
-            Err(error) => panic!("read durable generations: {error}"),
+            Err(error) => {
+                return memory::MemoryReadOutput::StoreRefused(format!(
+                    "read durable generations: {error}"
+                ));
+            }
         };
         let commit_sequence = self.current_commit_sequence();
         let deployment_records: Vec<memory::DeploymentRecord> =
@@ -5395,7 +5429,11 @@ impl MemoryObserving for SchemaRuntime {
                     .into_iter()
                     .filter(|record| selection.matches_deployment_record(record))
                     .collect(),
-                Err(error) => panic!("read durable deployment records: {error}"),
+                Err(error) => {
+                    return memory::MemoryReadOutput::StoreRefused(format!(
+                        "read durable deployment records: {error}"
+                    ));
+                }
             };
         let generations: Vec<ordinary::Generation> = live_generations
             .iter()

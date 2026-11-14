@@ -95,33 +95,45 @@ where
 
 macro_rules! text_value {
     ($runtime:ident) => {
-        impl Lowerable<memory::$runtime> for String {
+        impl Lowerable<memory::$runtime> for ordinary::$runtime {
             fn lower(self) -> Result<memory::$runtime, WireShapeError> {
-                Ok(memory::$runtime::new(self))
+                Ok(memory::$runtime::new(self.0))
             }
         }
-        impl Raisable<String> for memory::$runtime {
-            fn raise(self) -> Result<String, WireShapeError> {
-                Ok(self.into_payload())
+        impl Raisable<ordinary::$runtime> for memory::$runtime {
+            fn raise(self) -> Result<ordinary::$runtime, WireShapeError> {
+                Ok(ordinary::$runtime(self.into_payload()))
             }
         }
     };
 }
 macro_rules! integer_value {
     ($runtime:ident) => {
-        impl Lowerable<memory::$runtime> for i64 {
+        impl Lowerable<memory::$runtime> for ordinary::$runtime {
             fn lower(self) -> Result<memory::$runtime, WireShapeError> {
                 Ok(memory::$runtime::new(
-                    u64::try_from(self).map_err(|_| WireShapeError)?,
+                    u64::try_from(self.0).map_err(|_| WireShapeError)?,
                 ))
             }
         }
-        impl Raisable<i64> for memory::$runtime {
-            fn raise(self) -> Result<i64, WireShapeError> {
-                i64::try_from(self.into_payload()).map_err(|_| WireShapeError)
+        impl Raisable<ordinary::$runtime> for memory::$runtime {
+            fn raise(self) -> Result<ordinary::$runtime, WireShapeError> {
+                i64::try_from(self.into_payload())
+                    .map(ordinary::$runtime)
+                    .map_err(|_| WireShapeError)
             }
         }
     };
+}
+impl Lowerable<bool> for ordinary::DetailTruncated {
+    fn lower(self) -> Result<bool, WireShapeError> {
+        Ok(self.0)
+    }
+}
+impl Raisable<ordinary::DetailTruncated> for bool {
+    fn raise(self) -> Result<ordinary::DetailTruncated, WireShapeError> {
+        Ok(ordinary::DetailTruncated(self))
+    }
 }
 macro_rules! shared_unit_enum { ($name:ident { $($variant:ident),+ $(,)? }) => {
     impl Lowerable<memory::$name> for ordinary::$name {
@@ -287,17 +299,21 @@ shared_unit_enum!(GenerationArtifact {
     CompleteHost,
     UserEnvironment
 });
-shared_unit_enum!(DeploymentLifecycle {
-    Failed,
-    Rejected,
-    Completed,
-    Building,
-    Activating,
-    Submitted,
-    Copying,
-    Activated,
-    Built
-});
+impl Raisable<ordinary::DeploymentPhase> for memory::DeploymentLifecycle {
+    fn raise(self) -> Result<ordinary::DeploymentPhase, WireShapeError> {
+        Ok(match self {
+            Self::Failed => ordinary::DeploymentPhase::Failed,
+            Self::Rejected => ordinary::DeploymentPhase::Rejected,
+            Self::Completed => ordinary::DeploymentPhase::Completed,
+            Self::Building => ordinary::DeploymentPhase::Building,
+            Self::Activating => ordinary::DeploymentPhase::Activating,
+            Self::Submitted => ordinary::DeploymentPhase::Submitted,
+            Self::Copying => ordinary::DeploymentPhase::Copying,
+            Self::Activated => ordinary::DeploymentPhase::Activated,
+            Self::Built => ordinary::DeploymentPhase::Built,
+        })
+    }
+}
 shared_unit_enum!(ActivationEffect {
     ProfileOnly,
     BootOnceProfile,
@@ -489,13 +505,15 @@ impl Raisable<ordinary::DeploymentTerminal> for memory::DeploymentTerminal {
         })
     }
 }
-shared_unary_enum!(Selection {
-    ByNode(ordinary::NodeSelector => memory::NodeSelector),
-    ByTestRun(ordinary::TestRunLookup => memory::TestRunLookup),
-    ByDeployment(ordinary::DeploymentLookup => memory::DeploymentLookup),
-    ByGeneration(ordinary::GenerationLookup => memory::GenerationLookup),
-    ByEventLog(ordinary::EventLogRange => memory::EventLogRange)
-});
+impl Lowerable<memory::Selection> for ordinary::Selection {
+    fn lower(self) -> Result<memory::Selection, WireShapeError> {
+        Ok(match self {
+            Self::ByNode(value) => memory::Selection::ByNode(value.lower()?),
+            Self::ByGeneration(value) => memory::Selection::ByGeneration(value.lower()?),
+            Self::ByDeployment(value) => memory::Selection::ByDeployment(value.lower()?),
+        })
+    }
+}
 owner_unary_enum!(TestRequest {
     Run(owner::TestRun => memory::TestRun), Check(owner::QuickCheck => memory::QuickCheck)
 });
@@ -523,11 +541,10 @@ impl Raisable<owner::NodeSelection> for memory::NodeSelection {
 shared_struct!(DeploymentTransport => DeploymentTransport { nix_store_uri => nix_store_uri, ssh_destination => ssh_destination });
 shared_struct!(TestExecutionProfile => TestExecutionProfile { test_mode => test_mode, nix_system => nix_system, deployment_output_selector => deployment_output_selector, deployment_transport_option => optional_deployment_transport });
 shared_struct!(DatabaseMarker => StateMarker { commit_sequence => commit_sequence, state_digest => state_digest });
-shared_struct!(NodeSelector => NodeSelector { cluster_name => cluster_name, node_name => node_name, requested_generation_artifact_option => optional_generation_artifact });
+shared_struct!(NodeSelector => NodeSelector { cluster_name => cluster_name, node_name => node_name, generation_artifact_option => optional_generation_artifact });
 shared_struct!(EventLogRange => EventLogRange { first_event_log_position => from, second_event_log_position => until });
 shared_struct!(TestRunLookup => TestRunLookup { cluster_name => cluster_name, node_name => node_name, test_run_identifier_option => optional_test_run_identifier });
 shared_struct!(DeploymentWatch => DeploymentWatch { deployment_identifier_option => optional_deployment_identifier, cluster_name_option => optional_cluster_name, node_name_option => optional_node_name });
-shared_struct!(CacheRetentionWatch => CacheRetentionWatch { cluster_name_option => optional_cluster_name, node_name_option => optional_node_name });
 shared_struct!(DeploymentFailure => DeploymentFailure { deployment_failure_stage => deployment_failure_stage, deployment_terminal_reason => deployment_terminal_reason, failure_evidence_option => optional_failure_evidence });
 shared_struct!(FailureEvidence => FailureEvidence { failed_command_option => optional_failed_command, failure_detail => failure_detail, detail_truncated => detail_truncated });
 shared_struct!(FailedCommand => FailedCommand { command_program => command_program, command_argument_vector => command_argument_vector, exit_code_option => optional_exit_code });
@@ -590,30 +607,12 @@ impl Raisable<ordinary::DeploymentOutputSelector> for memory::DeploymentOutputSe
 }
 impl Lowerable<memory::QuickCheck> for owner::QuickCheck {
     fn lower(self) -> Result<memory::QuickCheck, WireShapeError> {
-        Ok(memory::QuickCheck::new(self.lower()?))
+        Ok(memory::QuickCheck::new(self.0.lower()?))
     }
 }
 impl Raisable<owner::QuickCheck> for memory::QuickCheck {
     fn raise(self) -> Result<owner::QuickCheck, WireShapeError> {
-        self.into_payload().raise()
-    }
-}
-impl Lowerable<memory::GenerationArtifact> for ordinary::RequestedGenerationArtifact {
-    fn lower(self) -> Result<memory::GenerationArtifact, WireShapeError> {
-        Ok(match self {
-            Self::UserEnvironment => memory::GenerationArtifact::UserEnvironment,
-            Self::CompleteHost => memory::GenerationArtifact::CompleteHost,
-            Self::BaseHost => memory::GenerationArtifact::BaseHost,
-        })
-    }
-}
-impl Raisable<ordinary::RequestedGenerationArtifact> for memory::GenerationArtifact {
-    fn raise(self) -> Result<ordinary::RequestedGenerationArtifact, WireShapeError> {
-        Ok(match self {
-            Self::UserEnvironment => ordinary::RequestedGenerationArtifact::UserEnvironment,
-            Self::CompleteHost => ordinary::RequestedGenerationArtifact::CompleteHost,
-            Self::BaseHost => ordinary::RequestedGenerationArtifact::BaseHost,
-        })
+        self.into_payload().raise().map(owner::QuickCheck)
     }
 }
 
@@ -654,19 +653,32 @@ impl Lowerable<memory::DeploySubmission> for owner::ActualizedDeploySubmission {
     }
 }
 
+impl Raisable<ordinary::DatabaseMarker> for memory::DatabaseMarker {
+    fn raise(self) -> Result<ordinary::DatabaseMarker, WireShapeError> {
+        self.into_payload().raise()
+    }
+}
+// A marker is its own struct on the wire, holding the DatabaseMarker it marks.
 macro_rules! marker_wrapper {
     ($runtime:ident) => {
-        impl Raisable<ordinary::DatabaseMarker> for memory::$runtime {
-            fn raise(self) -> Result<ordinary::DatabaseMarker, WireShapeError> {
-                self.into_payload().raise()
+        impl Raisable<ordinary::$runtime> for memory::$runtime {
+            fn raise(self) -> Result<ordinary::$runtime, WireShapeError> {
+                Ok(ordinary::$runtime {
+                    database_marker: self.into_payload().raise()?,
+                })
             }
         }
     };
 }
-marker_wrapper!(DatabaseMarker);
 marker_wrapper!(AdmissionMarker);
-marker_wrapper!(TransitionMarker);
 marker_wrapper!(TerminalMarker);
+impl Raisable<ordinary::TransitionMarker> for memory::StateMarker {
+    fn raise(self) -> Result<ordinary::TransitionMarker, WireShapeError> {
+        Ok(ordinary::TransitionMarker {
+            database_marker: self.raise()?,
+        })
+    }
+}
 
 shared_raise_struct!(DeploymentRequestIdentity => DeploymentRequestIdentity {
     deployment_environment => deployment_environment, cluster_name => cluster_name,
@@ -677,7 +689,7 @@ shared_raise_struct!(DeploymentRequestIdentity => DeploymentRequestIdentity {
 shared_raise_struct!(DeploymentRecord => DeploymentRecord {
     deployment_identifier => deployment_identifier, generation_identifier => generation_identifier,
     deployment_request_identity => deployment_request_identity, admission_marker_option => optional_admission_marker,
-    deployment_lifecycle => deployment_lifecycle, terminal_marker_option => optional_terminal_marker,
+    deployment_phase => deployment_lifecycle, terminal_marker_option => optional_terminal_marker,
     deployment_terminal_option => optional_deployment_terminal
 });
 shared_raise_struct!(DeploymentPhaseEvent => DeploymentPhaseEvent {
@@ -770,106 +782,110 @@ impl Raisable<ordinary::TestRunRecord> for memory::TestRunRecord {
     }
 }
 
-impl Lowerable<memory::OrdinaryIngress> for ordinary::Query {
+impl Lowerable<memory::OrdinaryIngress> for ordinary::Input {
     fn lower(self) -> Result<memory::OrdinaryIngress, WireShapeError> {
         Ok(match self {
-            ordinary::Query::Configure(value) => memory::OrdinaryIngress::Configure(value.lower()?),
-            ordinary::Query::WatchDeployments(value) => {
+            ordinary::Input::Configure(value) => memory::OrdinaryIngress::Configure(value.lower()?),
+            ordinary::Input::WatchDeployments(value) => {
                 memory::OrdinaryIngress::WatchDeployments(value.lower()?)
             }
-            ordinary::Query::Query(value) => memory::OrdinaryIngress::Query(value.lower()?),
-            ordinary::Query::WatchCacheRetention(value) => {
-                memory::OrdinaryIngress::WatchCacheRetention(value.lower()?)
+            ordinary::Input::Query(value) => memory::OrdinaryIngress::Query(value.lower()?),
+            ordinary::Input::QueryDeploymentEvents(value) => {
+                memory::OrdinaryIngress::Query(memory::Selection::ByEventLog(value.lower()?))
             }
-            ordinary::Query::Unwatch(value) => memory::OrdinaryIngress::Unwatch(value.lower()?),
+            ordinary::Input::QueryTestRuns(value) => {
+                memory::OrdinaryIngress::Query(memory::Selection::ByTestRun(value.lower()?))
+            }
+            ordinary::Input::Unwatch(value) => memory::OrdinaryIngress::Unwatch(value.lower()?),
         })
     }
 }
-impl Lowerable<memory::MetaIngress> for owner::Query {
+impl Lowerable<memory::MetaIngress> for owner::Input {
     fn lower(self) -> Result<memory::MetaIngress, WireShapeError> {
         Ok(match self {
-            owner::Query::Configure(value) => memory::MetaIngress::Configure(value.lower()?),
-            owner::Query::ReverseConfiguration => memory::MetaIngress::ReverseConfiguration,
-            owner::Query::Retire(value) => memory::MetaIngress::Retire(value.lower()?),
-            owner::Query::Pin(value) => memory::MetaIngress::Pin(value.lower()?),
-            owner::Query::Deploy(value) => memory::MetaIngress::Deploy(value.lower()?),
-            owner::Query::Test(value) => memory::MetaIngress::Test(value.lower()?),
-            owner::Query::Unpin(value) => memory::MetaIngress::Unpin(value.lower()?),
+            owner::Input::Configure(value) => memory::MetaIngress::Configure(value.lower()?),
+            owner::Input::ReverseConfiguration => memory::MetaIngress::ReverseConfiguration,
+            owner::Input::Retire(value) => memory::MetaIngress::Retire(value.lower()?),
+            owner::Input::Pin(value) => memory::MetaIngress::Pin(value.lower()?),
+            owner::Input::Deploy(value) => memory::MetaIngress::Deploy(value.lower()?),
+            owner::Input::Test(value) => memory::MetaIngress::Test(value.lower()?),
+            owner::Input::Unpin(value) => memory::MetaIngress::Unpin(value.lower()?),
         })
     }
 }
 
-impl Raisable<ordinary::Response> for memory::OrdinaryEgress {
-    fn raise(self) -> Result<ordinary::Response, WireShapeError> {
+impl Raisable<ordinary::Output> for memory::OrdinaryEgress {
+    fn raise(self) -> Result<ordinary::Output, WireShapeError> {
         Ok(match self {
             memory::OrdinaryEgress::Configured(value) => {
-                ordinary::Response::Configured(ordinary::ConfigurationReceipt {
-                    lojix_nexus_configuration: value.configuration,
-                    meta_configure_occurred: value.meta_configure_occurred,
-                })
+                ordinary::Output::Configured(value.raise()?)
             }
             memory::OrdinaryEgress::ConfigurationRejected(value) => {
-                ordinary::Response::ConfigurationRejected(value.raise()?)
+                ordinary::Output::ConfigurationRejected(value.raise()?)
             }
             memory::OrdinaryEgress::TestRunsQueried(value) => {
-                ordinary::Response::TestRunsQueried(value.raise()?)
+                ordinary::Output::TestRunsQueried(value.raise()?)
             }
             memory::OrdinaryEgress::UnwatchRejected(value) => {
-                ordinary::Response::UnwatchRejected(value.raise()?)
+                ordinary::Output::UnwatchRejected(value.raise()?)
             }
             memory::OrdinaryEgress::QueryRejected(value) => {
-                ordinary::Response::QueryRejected(value.raise()?)
+                ordinary::Output::QueryRejected(value.raise()?)
             }
-            memory::OrdinaryEgress::Watching(value) => ordinary::Response::Watching(value.raise()?),
-            memory::OrdinaryEgress::Queried(value) => ordinary::Response::Queried(value.raise()?),
+            memory::OrdinaryEgress::Watching(value) => {
+                ordinary::Output::DeploymentsWatched(value.raise()?)
+            }
+            memory::OrdinaryEgress::Queried(value) => ordinary::Output::Queried(value.raise()?),
             memory::OrdinaryEgress::DeploymentEventsQueried(value) => {
-                ordinary::Response::DeploymentEventsQueried(value.raise()?)
+                ordinary::Output::DeploymentEventsQueried(value.raise()?)
             }
-            memory::OrdinaryEgress::Unwatched(value) => {
-                ordinary::Response::Unwatched(value.raise()?)
-            }
+            memory::OrdinaryEgress::Unwatched(value) => ordinary::Output::Unwatched(value.raise()?),
             memory::OrdinaryEgress::WatchRejected(value) => {
-                ordinary::Response::WatchRejected(value.raise()?)
+                ordinary::Output::WatchRejected(value.raise()?)
+            }
+            memory::OrdinaryEgress::StoreRefused(detail) => {
+                ordinary::Output::Refused(ordinary::Refusal::Store(detail))
             }
         })
     }
 }
-impl Raisable<owner::Response> for memory::MetaEgress {
-    fn raise(self) -> Result<owner::Response, WireShapeError> {
+impl Raisable<owner::Output> for memory::MetaEgress {
+    fn raise(self) -> Result<owner::Output, WireShapeError> {
         Ok(match self {
-            memory::MetaEgress::Configured(value) => owner::Response::Configured(value.raise()?),
+            memory::MetaEgress::Configured(value) => owner::Output::Configured(value.raise()?),
             memory::MetaEgress::ConfigurationRejected(value) => {
-                owner::Response::ConfigurationRejected(value.raise()?)
+                owner::Output::ConfigurationRejected(value.raise()?)
             }
             memory::MetaEgress::ConfigurationReversed(value) => {
-                owner::Response::ConfigurationReversed(value.raise()?)
+                owner::Output::ConfigurationReversed(value.raise()?)
             }
-            memory::MetaEgress::PinRejected(value) => owner::Response::PinRejected(value.raise()?),
+            memory::MetaEgress::PinRejected(value) => owner::Output::PinRejected(value.raise()?),
             memory::MetaEgress::DeployRefused(value) => {
-                owner::Response::DeployRefused(value.raise()?)
+                owner::Output::DeployRefused(value.raise()?)
             }
             memory::MetaEgress::DeployRejected(value) => {
-                owner::Response::DeployRejected(value.raise()?)
+                owner::Output::DeployRejected(value.raise()?)
             }
             memory::MetaEgress::DeployAccepted(value) => {
-                owner::Response::DeployAccepted(value.raise()?)
+                owner::Output::DeployAccepted(value.raise()?)
             }
-            memory::MetaEgress::TestRejected(value) => {
-                owner::Response::TestRejected(value.raise()?)
-            }
-            memory::MetaEgress::Unpinned(value) => owner::Response::Unpinned(value.raise()?),
-            memory::MetaEgress::Tested(value) => owner::Response::Tested(value.raise()?),
+            memory::MetaEgress::TestRejected(value) => owner::Output::TestRejected(value.raise()?),
+            memory::MetaEgress::Unpinned(value) => owner::Output::Unpinned(value.raise()?),
+            memory::MetaEgress::Tested(value) => owner::Output::Tested(value.raise()?),
             memory::MetaEgress::UnpinRejected(value) => {
-                owner::Response::UnpinRejected(value.raise()?)
+                owner::Output::UnpinRejected(value.raise()?)
             }
             memory::MetaEgress::DeployTerminal(value) => {
-                owner::Response::DeployTerminal(value.raise()?)
+                owner::Output::DeployTerminal(value.raise()?)
             }
-            memory::MetaEgress::Pinned(value) => owner::Response::Pinned(value.raise()?),
+            memory::MetaEgress::Pinned(value) => owner::Output::Pinned(value.raise()?),
             memory::MetaEgress::RetireRejected(value) => {
-                owner::Response::RetireRejected(value.raise()?)
+                owner::Output::RetireRejected(value.raise()?)
             }
-            memory::MetaEgress::Retired(value) => owner::Response::Retired(value.raise()?),
+            memory::MetaEgress::Retired(value) => owner::Output::Retired(value.raise()?),
+            memory::MetaEgress::StoreRefused(detail) => {
+                owner::Output::Refused(ordinary::Refusal::Store(detail))
+            }
         })
     }
 }
@@ -878,7 +894,7 @@ impl Raisable<ordinary::ConfigurationReceipt> for memory::ConfigurationReceipt {
     fn raise(self) -> Result<ordinary::ConfigurationReceipt, WireShapeError> {
         Ok(ordinary::ConfigurationReceipt {
             lojix_nexus_configuration: self.configuration,
-            meta_configure_occurred: self.meta_configure_occurred,
+            meta_configure_occurred: ordinary::MetaConfigureOccurred(self.meta_configure_occurred),
         })
     }
 }
@@ -948,10 +964,48 @@ mod tests {
         }
     }
     #[test]
+    fn a_store_failure_is_answered_as_a_store_refusal_on_either_socket() {
+        let detail = String::from("read durable generations: the file is gone");
+        assert_eq!(
+            memory::OrdinaryEgress::StoreRefused(detail.clone())
+                .raise()
+                .unwrap(),
+            ordinary::Output::Refused(ordinary::Refusal::Store(detail.clone()))
+        );
+        assert_eq!(
+            memory::MetaEgress::StoreRefused(detail.clone())
+                .raise()
+                .unwrap(),
+            owner::Output::Refused(ordinary::Refusal::Store(detail))
+        );
+    }
+    #[test]
+    fn the_split_query_inputs_lower_to_the_selections_the_engine_reads() {
+        let range = ordinary::EventLogRange {
+            first_event_log_position: ordinary::EventLogPosition(1),
+            second_event_log_position: ordinary::EventLogPosition(9),
+        };
+        assert!(matches!(
+            ordinary::Input::QueryDeploymentEvents(range)
+                .lower()
+                .unwrap(),
+            memory::OrdinaryIngress::Query(memory::Selection::ByEventLog(_))
+        ));
+        let lookup = ordinary::TestRunLookup {
+            cluster_name: ordinary::ClusterName("alpha".into()),
+            node_name: ordinary::NodeName("node-1".into()),
+            test_run_identifier_option: None,
+        };
+        assert!(matches!(
+            ordinary::Input::QueryTestRuns(lookup).lower().unwrap(),
+            memory::OrdinaryIngress::Query(memory::Selection::ByTestRun(_))
+        ));
+    }
+    #[test]
     fn negative_public_identifiers_are_rejected_without_wrapping() {
         assert!(
-            ordinary::Query::Unwatch(ordinary::SubscriptionClose {
-                subscription_token: -1
+            ordinary::Input::Unwatch(ordinary::SubscriptionClose {
+                subscription_token: ordinary::SubscriptionToken(-1)
             })
             .lower()
             .is_err()

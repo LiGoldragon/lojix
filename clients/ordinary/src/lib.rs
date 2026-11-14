@@ -11,7 +11,7 @@ const SOCKET_ENV: &str = "LOJIX_ORDINARY_SOCKET";
 
 #[derive(Debug)]
 pub struct Client {
-    input: signal_lojix::Query,
+    input: signal_lojix::Input,
 }
 
 pub trait Invocable {
@@ -23,14 +23,14 @@ pub trait Invocable {
     /// Read the one inline Datom argument, send it to the socket the
     /// environment names, and hand on each reply until the Nexus closes.
     fn run_from_environment(
-        each: &mut dyn FnMut(signal_lojix::Response) -> lojix::Result<()>,
+        each: &mut dyn FnMut(signal_lojix::Output) -> lojix::Result<()>,
     ) -> lojix::Result<()>
     where
         Self: Sized;
     fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> lojix::Result<Self>
     where
         Self: Sized;
-    fn input(&self) -> &signal_lojix::Query;
+    fn input(&self) -> &signal_lojix::Input;
     /// Send the input on `socket` and hand on each reply, in order, until the
     /// Nexus closes the connection. The Nexus decides how many replies an
     /// input has: one for an ordinary input, every matching event for a
@@ -38,7 +38,7 @@ pub trait Invocable {
     fn run(
         self,
         socket: &SocketExchange,
-        each: &mut dyn FnMut(signal_lojix::Response) -> lojix::Result<()>,
+        each: &mut dyn FnMut(signal_lojix::Output) -> lojix::Result<()>,
     ) -> lojix::Result<()>
     where
         Self: Sized;
@@ -57,7 +57,7 @@ pub trait ReplyLine {
     }
 }
 
-impl ReplyLine for signal_lojix::Response {
+impl ReplyLine for signal_lojix::Output {
     fn line(&self) -> String {
         self.clone().datomize(vec![]).protosize().compact()
     }
@@ -73,25 +73,25 @@ impl Invocable for Client {
         }
     }
     fn run_from_environment(
-        each: &mut dyn FnMut(signal_lojix::Response) -> lojix::Result<()>,
+        each: &mut dyn FnMut(signal_lojix::Output) -> lojix::Result<()>,
     ) -> lojix::Result<()> {
         let client = Self::from_arguments(std::env::args_os().skip(1))?;
         client.run(&SocketExchange::for_environment(SOCKET_ENV)?, each)
     }
     fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> lojix::Result<Self> {
         let source = (arguments).single_inline_datom()?;
-        let input = Potential::<signal_lojix::Query>::from(source)
+        let input = Potential::<signal_lojix::Input>::from(source)
             .actualize(&mut <Self as Invocable>::budget())
             .map_err(|fault| lojix::Error::DatomRequestText(format!("{fault:?}")))?;
         Ok(Self { input })
     }
-    fn input(&self) -> &signal_lojix::Query {
+    fn input(&self) -> &signal_lojix::Input {
         &self.input
     }
     fn run(
         self,
         socket: &SocketExchange,
-        each: &mut dyn FnMut(signal_lojix::Response) -> lojix::Result<()>,
+        each: &mut dyn FnMut(signal_lojix::Output) -> lojix::Result<()>,
     ) -> lojix::Result<()> {
         let request = self
             .input
@@ -99,7 +99,7 @@ impl Invocable for Client {
             .map_err(|fault| lojix::Error::Wire(format!("{fault:?}")))?;
         socket.exchange(request.bytes().to_vec(), &mut |reply| {
             each(
-                Signal::<signal_lojix::Response>::from(reply)
+                Signal::<signal_lojix::Output>::from(reply)
                     .restore()
                     .map_err(|fault| lojix::Error::Wire(format!("{fault:?}")))?,
             )
@@ -113,8 +113,8 @@ mod tests {
     use protos::Textualizable;
     #[test]
     fn decodes_canonical_inline_query() {
-        let input = signal_lojix::Query::Unwatch(signal_lojix::SubscriptionClose {
-            subscription_token: 7,
+        let input = signal_lojix::Input::Unwatch(signal_lojix::SubscriptionClose {
+            subscription_token: signal_lojix::SubscriptionToken(7),
         });
         let text = input.datomize(vec![]).protosize().textualize();
         assert_eq!(

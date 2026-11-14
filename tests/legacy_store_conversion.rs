@@ -84,13 +84,16 @@ fn a_lojix_8_1_0_store_opens_through_the_nexus_startup_path() {
         .nexus_configuration_state()
         .expect("configuration row reads back")
         .desired_configuration;
-    assert_eq!(desired.daemon_host, "localhost");
-    assert_eq!(desired.state_directory_path, "/var/lib/lojix");
+    assert_eq!(desired.daemon_host.0, "localhost");
+    assert_eq!(desired.state_directory_path.0, "/var/lib/lojix");
     assert_eq!(
-        desired.ordinary_socket_path,
+        desired.ordinary_socket_path.0,
         "/run/user/1001/lojix/ordinary.sock"
     );
-    assert_eq!(desired.owner_socket_path, "/run/user/1001/lojix/meta.sock");
+    assert_eq!(
+        desired.owner_socket_path.0,
+        "/run/user/1001/lojix/meta.sock"
+    );
 
     // The in-flight deploy job was archived in the Horizon 0.12 layout; it is
     // read back as the quarantined row holding its original bytes.
@@ -292,8 +295,8 @@ fn a_copied_deployed_store_converts_opens_folds_and_compacts() {
         .desired_configuration;
     println!(
         "reopened: daemon host {} state directory {} commit sequence {}",
-        desired.daemon_host,
-        desired.state_directory_path,
+        desired.daemon_host.0,
+        desired.state_directory_path.0,
         reopened.commit_sequence().expect("commit sequence")
     );
     assert_eq!(

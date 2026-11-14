@@ -591,12 +591,18 @@ impl LojixNexusConfigurable for NexusConfiguration {
         let runtime = Self::runtime_directory();
         let state = Self::state_directory();
         Self {
-            ordinary_socket_path: runtime.join("ordinary.sock").to_string_lossy().into_owned(),
-            ordinary_socket_mode: 0o660,
-            owner_socket_path: runtime.join("meta.sock").to_string_lossy().into_owned(),
-            owner_socket_mode: 0o600,
-            state_directory_path: state.to_string_lossy().into_owned(),
-            daemon_host: String::from("localhost"),
+            ordinary_socket_path: signal_lojix::OrdinarySocketPath(
+                runtime.join("ordinary.sock").to_string_lossy().into_owned(),
+            ),
+            ordinary_socket_mode: signal_lojix::OrdinarySocketMode(0o660),
+            owner_socket_path: signal_lojix::OwnerSocketPath(
+                runtime.join("meta.sock").to_string_lossy().into_owned(),
+            ),
+            owner_socket_mode: signal_lojix::OwnerSocketMode(0o600),
+            state_directory_path: signal_lojix::StateDirectoryPath(
+                state.to_string_lossy().into_owned(),
+            ),
+            daemon_host: signal_lojix::DaemonHost(String::from("localhost")),
             test_defaults_choice: signal_lojix::TestDefaultsChoice::NoTestDefaults,
         }
     }
@@ -638,24 +644,24 @@ impl LojixNexusConfigurable for NexusConfiguration {
 
     fn validate(&self) -> Result<()> {
         for (name, value) in [
-            ("ordinary socket path", self.ordinary_socket_path.as_str()),
-            ("meta socket path", self.owner_socket_path.as_str()),
-            ("state directory path", self.state_directory_path.as_str()),
-            ("daemon host", self.daemon_host.as_str()),
+            ("ordinary socket path", self.ordinary_socket_path.0.as_str()),
+            ("meta socket path", self.owner_socket_path.0.as_str()),
+            ("state directory path", self.state_directory_path.0.as_str()),
+            ("daemon host", self.daemon_host.0.as_str()),
         ] {
             if value.is_empty() {
                 return Err(Error::InvalidNexusConfiguration(format!("{name} is empty")));
             }
         }
-        if self.ordinary_socket_path == self.owner_socket_path {
+        if self.ordinary_socket_path.0 == self.owner_socket_path.0 {
             return Err(Error::InvalidNexusConfiguration(
                 "ordinary and meta socket paths are identical".to_string(),
             ));
         }
-        let owner_mode = u32::try_from(self.owner_socket_mode).map_err(|_| {
+        let owner_mode = u32::try_from(self.owner_socket_mode.0).map_err(|_| {
             Error::InvalidNexusConfiguration("meta socket mode is outside u32".to_string())
         })?;
-        let _ordinary_mode = u32::try_from(self.ordinary_socket_mode).map_err(|_| {
+        let _ordinary_mode = u32::try_from(self.ordinary_socket_mode.0).map_err(|_| {
             Error::InvalidNexusConfiguration("ordinary socket mode is outside u32".to_string())
         })?;
         if owner_mode & 0o007 != 0 {
@@ -691,26 +697,38 @@ impl LegacyConfigurationArchivable for LegacyStartupConfiguration {
 impl From<&LegacyStartupConfiguration> for NexusConfiguration {
     fn from(configuration: &LegacyStartupConfiguration) -> Self {
         Self {
-            ordinary_socket_path: configuration.ordinary_socket_path.clone(),
-            ordinary_socket_mode: i64::from(configuration.ordinary_socket_mode),
-            owner_socket_path: configuration.owner_socket_path.clone(),
-            owner_socket_mode: i64::from(configuration.owner_socket_mode),
-            state_directory_path: configuration.state_directory_path.clone(),
-            daemon_host: configuration.daemon_host.clone(),
+            ordinary_socket_path: signal_lojix::OrdinarySocketPath(
+                configuration.ordinary_socket_path.clone(),
+            ),
+            ordinary_socket_mode: signal_lojix::OrdinarySocketMode(i64::from(
+                configuration.ordinary_socket_mode,
+            )),
+            owner_socket_path: signal_lojix::OwnerSocketPath(
+                configuration.owner_socket_path.clone(),
+            ),
+            owner_socket_mode: signal_lojix::OwnerSocketMode(i64::from(
+                configuration.owner_socket_mode,
+            )),
+            state_directory_path: signal_lojix::StateDirectoryPath(
+                configuration.state_directory_path.clone(),
+            ),
+            daemon_host: signal_lojix::DaemonHost(configuration.daemon_host.clone()),
             test_defaults_choice: configuration.test_defaults.as_ref().map_or(
                 signal_lojix::TestDefaultsChoice::NoTestDefaults,
                 |defaults| {
                     signal_lojix::TestDefaultsChoice::TestDefaults(signal_lojix::TestDefaults {
-                        cluster_name: defaults.cluster.clone(),
-                        node_name: defaults.default_vm_host.clone(),
+                        cluster_name: signal_lojix::ClusterName(defaults.cluster.clone()),
+                        node_name: signal_lojix::NodeName(defaults.default_vm_host.clone()),
                         test_mode: match defaults.default_mode {
                             TestMode::Hermetic => signal_lojix::TestMode::Hermetic,
                             TestMode::Live => signal_lojix::TestMode::Live,
                         },
-                        flake_reference: defaults.test_flake.clone(),
-                        nix_system: defaults.test_nix_system.clone(),
+                        flake_reference: signal_lojix::FlakeReference(defaults.test_flake.clone()),
+                        nix_system: signal_lojix::NixSystem(defaults.test_nix_system.clone()),
                         deployment_output_selector: signal_lojix::DeploymentOutputSelector {
-                            flake_attribute: defaults.test_output_selector.clone(),
+                            flake_attribute: signal_lojix::FlakeAttribute(
+                                defaults.test_output_selector.clone(),
+                            ),
                         },
                         horizon_definition_option: defaults.horizon_definition.clone(),
                     })

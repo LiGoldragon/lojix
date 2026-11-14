@@ -443,11 +443,6 @@ pub struct DeploymentWatch {
     pub optional_cluster_name: Option<ClusterName>,
     pub optional_node_name: Option<NodeName>,
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct CacheRetentionWatch {
-    pub optional_cluster_name: Option<ClusterName>,
-    pub optional_node_name: Option<NodeName>,
-}
 runtime_newtype!(SubscriptionClose, SubscriptionToken);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SubscriptionOpened {
@@ -602,6 +597,8 @@ pub enum MemoryReadOutput {
     EventLogRead(EventLogPage),
     TestRunsQueried(TestRunListing),
     ReadMissed(RejectionReport),
+    /// The store failed under the read; the text names the failure.
+    StoreRefused(String),
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct EventLogPage {
@@ -670,6 +667,8 @@ pub enum MemoryWriteOutput {
     ContainerRecorded(ContainerReceipt),
     TestRunRecorded(AcceptedTest),
     WriteRejected(RejectionReport),
+    /// The store failed under the write; the text names the failure.
+    StoreRefused(String),
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PhaseReceipt {
@@ -825,7 +824,6 @@ pub enum OrdinaryIngress {
     Configure(crate::NexusConfiguration),
     Query(Selection),
     WatchDeployments(DeploymentWatch),
-    WatchCacheRetention(CacheRetentionWatch),
     Unwatch(SubscriptionClose),
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
@@ -840,6 +838,8 @@ pub enum OrdinaryEgress {
     QueryRejected(RejectedQuery),
     WatchRejected(RejectedWatch),
     UnwatchRejected(RejectedUnwatch),
+    /// The store failed under the request; the text names the failure.
+    StoreRefused(String),
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum MetaIngress {
@@ -868,6 +868,8 @@ pub enum MetaEgress {
     RetireRejected(RejectedRetire),
     Tested(AcceptedTest),
     TestRejected(RejectedTest),
+    /// The store failed under the request; the text names the failure.
+    StoreRefused(String),
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct LiveGeneration {

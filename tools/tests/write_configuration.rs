@@ -58,7 +58,7 @@ fn write_configuration_round_trips_through_rkyv() {
     let horizon = test_defaults
         .horizon_definition
         .expect("configuration writer actualizes the Horizon artifact");
-    assert_eq!(horizon.cluster_definition.cluster_name, "alpha");
+    assert_eq!(horizon.cluster_definition.cluster_name.0, "alpha");
 }
 
 /// The production posture: a `NoTestDefaults` choice lowers to `None`, so the

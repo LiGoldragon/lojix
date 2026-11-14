@@ -24,7 +24,7 @@ fn hardware() -> Hardware {
 
 fn node(name: &str, machine_definition: MachineDefinition) -> NodeDefinition {
     NodeDefinition {
-        node_name: name.to_owned(),
+        node_name: NodeName(name.to_owned()),
         node_variant: NodeVariant::Live(LiveDefinition {}),
         first_magnitude: Magnitude::Max,
         second_magnitude: Magnitude::Max,
@@ -41,12 +41,12 @@ fn node(name: &str, machine_definition: MachineDefinition) -> NodeDefinition {
             router_interfaces_option: None,
         },
         node_keys: NodeKeys {
-            ssh_pub_key: "ssh-ed25519 AAAAfixture".to_owned(),
+            ssh_pub_key: SshPubKey("ssh-ed25519 AAAAfixture".to_owned()),
             nix_pub_key_option: None,
             yggdrasil_key_option: None,
         },
         boolean_option: Some(true),
-        capabilities: vec![],
+        capabilities: Capabilities(vec![]),
         fixed_location_option: None,
     }
 }
@@ -54,18 +54,18 @@ fn node(name: &str, machine_definition: MachineDefinition) -> NodeDefinition {
 fn definition(nodes: Vec<NodeDefinition>) -> HorizonDefinition {
     HorizonDefinition {
         horizon_configuration: HorizonConfiguration {
-            generic_nodes: vec![],
+            generic_nodes: GenericNodes(vec![]),
             domain_configuration: DomainConfiguration {
                 string: "criome".to_owned(),
                 domain_name_vector: vec![],
             },
         },
         cluster_definition: ClusterDefinition {
-            cluster_name: "alpha".to_owned(),
-            cluster_nodes: nodes,
-            generic_node_names: vec![],
-            users: vec![],
-            domains: vec![],
+            cluster_name: ClusterName("alpha".to_owned()),
+            cluster_nodes: ClusterNodes(nodes),
+            generic_node_names: GenericNodeNames(vec![]),
+            users: Users(vec![]),
+            domains: Domains(vec![]),
             cluster_trust: ClusterTrust {
                 magnitude: Magnitude::Max,
                 cluster_trust_entry_vector: vec![],
@@ -106,9 +106,9 @@ pub fn write_hosted_pair(path: &Path) {
         "beacon",
         MachineDefinition::VirtualMachine(VirtualMachine_Data {
             virtual_machine_host: VirtualMachineHost::Cluster(Cluster_Data {
-                node_name: "atlas".to_owned(),
+                node_name: NodeName("atlas".to_owned()),
                 node_name_vector: vec![],
-                user_name_option: Some("operator".to_owned()),
+                user_name_option: Some(UserName("operator".to_owned())),
                 architecture_option: None,
             }),
             hardware: hardware(),

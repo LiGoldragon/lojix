@@ -11,17 +11,19 @@ use lojix_client::ReplyLine as _;
 use protos::{Protosizable, Textualizable};
 use signal::{ByteViewable, FrameBody, FrameCapacity, FrameReading, FrameWriting, Signalizable};
 
-fn observed(phase: signal_lojix::DeploymentPhase, terminal: bool) -> signal_lojix::Response {
-    signal_lojix::Response::DeploymentPhaseObserved(signal_lojix::DeploymentPhaseEvent {
-        deployment_identifier: 4,
-        generation_identifier: 2,
-        cluster_name: "alpha".into(),
-        node_name: "beacon".into(),
+fn observed(phase: signal_lojix::DeploymentPhase, terminal: bool) -> signal_lojix::Output {
+    signal_lojix::Output::DeploymentPhaseObserved(signal_lojix::DeploymentPhaseEvent {
+        deployment_identifier: signal_lojix::DeploymentIdentifier(4),
+        generation_identifier: signal_lojix::GenerationIdentifier(2),
+        cluster_name: signal_lojix::ClusterName("alpha".into()),
+        node_name: signal_lojix::NodeName("beacon".into()),
         deployment_phase: phase,
-        event_log_position: 9,
-        transition_marker: signal_lojix::DatabaseMarker {
-            commit_sequence: 3,
-            state_digest: 3,
+        event_log_position: signal_lojix::EventLogPosition(9),
+        transition_marker: signal_lojix::TransitionMarker {
+            database_marker: signal_lojix::DatabaseMarker {
+                commit_sequence: signal_lojix::CommitSequence(3),
+                state_digest: signal_lojix::StateDigest(3),
+            },
         },
         immutable_revision_option: None,
         deployment_terminal_option: terminal.then_some(signal_lojix::DeploymentTerminal::Succeeded),
@@ -30,7 +32,7 @@ fn observed(phase: signal_lojix::DeploymentPhase, terminal: bool) -> signal_loji
 
 /// Run `lojix` against a stand-in Nexus that answers its one request with
 /// `replies` and then closes; return the client's exit status and its lines.
-fn run_against(replies: Vec<signal_lojix::Response>) -> (std::process::ExitStatus, Vec<String>) {
+fn run_against(replies: Vec<signal_lojix::Output>) -> (std::process::ExitStatus, Vec<String>) {
     let directory = tempfile::tempdir().expect("socket directory");
     let socket = directory.path().join("ordinary.sock");
     let listener = UnixListener::bind(&socket).expect("bind stand-in Nexus");
@@ -50,8 +52,8 @@ fn run_against(replies: Vec<signal_lojix::Response>) -> (std::process::ExitStatu
     let output = Command::new(env!("CARGO_BIN_EXE_lojix"))
         .env("LOJIX_ORDINARY_SOCKET", &socket)
         .arg(
-            signal_lojix::Query::Unwatch(signal_lojix::SubscriptionClose {
-                subscription_token: 1,
+            signal_lojix::Input::Unwatch(signal_lojix::SubscriptionClose {
+                subscription_token: signal_lojix::SubscriptionToken(1),
             })
             .datomize(vec![])
             .protosize()
@@ -76,16 +78,16 @@ fn run_against(replies: Vec<signal_lojix::Response>) -> (std::process::ExitStatu
 #[test]
 fn each_reply_is_one_line_until_the_nexus_closes() {
     let (status, lines) = run_against(vec![
-        signal_lojix::Response::Watching(signal_lojix::SubscriptionOpened {
-            subscription_token: 1,
-            commit_sequence: 3,
+        signal_lojix::Output::DeploymentsWatched(signal_lojix::SubscriptionOpened {
+            subscription_token: signal_lojix::SubscriptionToken(1),
+            commit_sequence: signal_lojix::CommitSequence(3),
         }),
         observed(signal_lojix::DeploymentPhase::Building, false),
         observed(signal_lojix::DeploymentPhase::Completed, true),
     ]);
     assert_eq!(status.code(), Some(0));
     assert_eq!(lines.len(), 3, "{lines:?}");
-    assert!(lines[0].starts_with("Watching."), "{}", lines[0]);
+    assert!(lines[0].starts_with("DeploymentsWatched."), "{}", lines[0]);
     assert!(
         lines[1].starts_with("DeploymentPhaseObserved."),
         "{}",
@@ -100,8 +102,8 @@ fn each_reply_is_one_line_until_the_nexus_closes() {
 
 #[test]
 fn one_reply_and_a_close_is_one_line() {
-    let unwatched = signal_lojix::Response::Unwatched(signal_lojix::SubscriptionClosed {
-        subscription_token: 1,
+    let unwatched = signal_lojix::Output::Unwatched(signal_lojix::SubscriptionClosed {
+        subscription_token: signal_lojix::SubscriptionToken(1),
     });
     let (status, lines) = run_against(vec![unwatched.clone()]);
     assert_eq!(status.code(), Some(0));

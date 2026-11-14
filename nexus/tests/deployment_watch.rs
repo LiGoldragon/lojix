@@ -50,7 +50,7 @@ struct RunningNexus {
 /// One client watching: each reply it printed, as the typed reply and its
 /// line, and the client's own end once the Nexus closes.
 struct WatchingClient {
-    replies: mpsc::Receiver<(signal_lojix::Response, String)>,
+    replies: mpsc::Receiver<(signal_lojix::Output, String)>,
     ended: thread::JoinHandle<lojix::Result<()>>,
 }
 
@@ -151,12 +151,12 @@ fn stop_nexus(mut nexus: RunningNexus) {
 }
 
 /// The input as the `lojix` binary takes it: one inline Datom argument.
-fn client(query: &signal_lojix::Query) -> Client {
+fn client(query: &signal_lojix::Input) -> Client {
     let text = query.clone().datomize(vec![]).protosize().textualize();
     Client::from_arguments([OsString::from(text)]).expect("the client reads its inline datom")
 }
 
-fn watch(nexus: &RunningNexus, query: signal_lojix::Query) -> WatchingClient {
+fn watch(nexus: &RunningNexus, query: signal_lojix::Input) -> WatchingClient {
     let socket = SocketExchange::at_path(nexus.ordinary_socket.display().to_string());
     let client = client(&query);
     let (printed, replies) = mpsc::channel();
@@ -170,18 +170,18 @@ fn watch(nexus: &RunningNexus, query: signal_lojix::Query) -> WatchingClient {
     WatchingClient { replies, ended }
 }
 
-fn next_reply(watching: &WatchingClient, occasion: &str) -> (signal_lojix::Response, String) {
+fn next_reply(watching: &WatchingClient, occasion: &str) -> (signal_lojix::Output, String) {
     watching
         .replies
         .recv_timeout(BACKSTOP)
         .unwrap_or_else(|_| panic!("no reply line for {occasion}"))
 }
 
-fn deployment_watch(node: &str) -> signal_lojix::Query {
-    signal_lojix::Query::WatchDeployments(signal_lojix::DeploymentWatch {
+fn deployment_watch(node: &str) -> signal_lojix::Input {
+    signal_lojix::Input::WatchDeployments(signal_lojix::DeploymentWatch {
         deployment_identifier_option: None,
-        cluster_name_option: Some("alpha".into()),
-        node_name_option: Some(node.into()),
+        cluster_name_option: Some(signal_lojix::ClusterName("alpha".into())),
+        node_name_option: Some(signal_lojix::NodeName(node.into())),
     })
 }
 
@@ -197,48 +197,56 @@ fn exchange(socket: &Path, bytes: Vec<u8>) -> Vec<u8> {
         .to_vec()
 }
 
-fn ordinary_exchange(socket: &Path, request: signal_lojix::Query) -> signal_lojix::Response {
+fn ordinary_exchange(socket: &Path, request: signal_lojix::Input) -> signal_lojix::Output {
     let signal = request.signalize().expect("archive ordinary query");
-    signal::Signal::<signal_lojix::Response>::from(exchange(socket, signal.bytes().to_vec()))
+    signal::Signal::<signal_lojix::Output>::from(exchange(socket, signal.bytes().to_vec()))
         .restore()
         .expect("restore ordinary response")
 }
 
-fn meta_exchange(socket: &Path, request: meta_signal_lojix::Query) -> meta_signal_lojix::Response {
+fn meta_exchange(socket: &Path, request: meta_signal_lojix::Input) -> meta_signal_lojix::Output {
     let signal = request.signalize().expect("archive meta query");
-    signal::Signal::<meta_signal_lojix::Response>::from(exchange(socket, signal.bytes().to_vec()))
+    signal::Signal::<meta_signal_lojix::Output>::from(exchange(socket, signal.bytes().to_vec()))
         .restore()
         .expect("restore meta response")
 }
 
-fn unwatch(nexus: &RunningNexus, subscription_token: i64) -> signal_lojix::Response {
+fn unwatch(nexus: &RunningNexus, subscription_token: i64) -> signal_lojix::Output {
     ordinary_exchange(
         &nexus.ordinary_socket,
-        signal_lojix::Query::Unwatch(signal_lojix::SubscriptionClose { subscription_token }),
+        signal_lojix::Input::Unwatch(signal_lojix::SubscriptionClose {
+            subscription_token: signal_lojix::SubscriptionToken(subscription_token),
+        }),
     )
 }
 
 /// A user-environment deploy of `beacon` in cluster `alpha`, carrying its
 /// Horizon definition.
-fn user_environment_deploy(nexus: &RunningNexus) -> meta_signal_lojix::Query {
+fn user_environment_deploy(nexus: &RunningNexus) -> meta_signal_lojix::Input {
     let source = nexus.directory.path().join("horizon-definition.datom");
     common::write_hosted_pair(&source);
-    meta_signal_lojix::Query::Deploy(meta_signal_lojix::ActualizedDeploySubmission {
+    meta_signal_lojix::Input::Deploy(meta_signal_lojix::ActualizedDeploySubmission {
         deploy_submission: meta_signal_lojix::DeploySubmission::UserEnvironment(
             meta_signal_lojix::UserEnvironmentDeployment {
-                cluster_name: "alpha".into(),
-                node_name: "beacon".into(),
-                user_name: "bird".into(),
-                proposal_source: source.display().to_string(),
+                cluster_name: signal_lojix::ClusterName("alpha".into()),
+                node_name: signal_lojix::NodeName("beacon".into()),
+                user_name: signal_lojix::UserName("bird".into()),
+                proposal_source: signal_lojix::ProposalSource(source.display().to_string()),
                 secrets_input: signal_lojix::SecretsInput::NoSecrets,
-                flake_reference: FLAKE.into(),
+                flake_reference: signal_lojix::FlakeReference(FLAKE.into()),
                 deployment_transport: signal_lojix::DeploymentTransport {
-                    nix_store_uri: "ssh-ng://root@fixture-target.invalid".into(),
-                    ssh_destination: "root@fixture-target.invalid".into(),
+                    nix_store_uri: signal_lojix::NixStoreUri(
+                        "ssh-ng://root@fixture-target.invalid".into(),
+                    ),
+                    ssh_destination: signal_lojix::SshDestination(
+                        "root@fixture-target.invalid".into(),
+                    ),
                 },
                 deployment_input_mode: signal_lojix::DeploymentInputMode::Horizon,
                 deployment_output_selector: signal_lojix::DeploymentOutputSelector {
-                    flake_attribute: "packages.x86_64-linux.fixture-home".into(),
+                    flake_attribute: signal_lojix::FlakeAttribute(
+                        "packages.x86_64-linux.fixture-home".into(),
+                    ),
                 },
                 activation_backend: signal_lojix::ActivationBackend::HomeManagerNixProfileV1,
                 user_environment_action: signal_lojix::UserEnvironmentAction::ActivateNow,
@@ -251,11 +259,14 @@ fn user_environment_deploy(nexus: &RunningNexus) -> meta_signal_lojix::Query {
     })
 }
 
-fn watching_token(reply: &signal_lojix::Response, line: &str) -> i64 {
-    assert!(line.starts_with("Watching."), "first line: {line}");
+fn watching_token(reply: &signal_lojix::Output, line: &str) -> i64 {
+    assert!(
+        line.starts_with("DeploymentsWatched."),
+        "first line: {line}"
+    );
     match reply {
-        signal_lojix::Response::Watching(opened) => opened.subscription_token,
-        other => panic!("a watch opens with Watching, got {other:?}"),
+        signal_lojix::Output::DeploymentsWatched(opened) => opened.subscription_token.0,
+        other => panic!("a watch opens with DeploymentsWatched, got {other:?}"),
     }
 }
 
@@ -271,7 +282,7 @@ fn a_watch_streams_watching_then_each_phase_of_a_deployment_through_its_terminal
     let (reply, line) = next_reply(&elsewhere, "the atlas watch opening");
     let elsewhere_token = watching_token(&reply, &line);
 
-    let meta_signal_lojix::Response::DeployAccepted(accepted) =
+    let meta_signal_lojix::Output::DeployAccepted(accepted) =
         meta_exchange(&nexus.meta_socket, user_environment_deploy(&nexus))
     else {
         panic!("the fixture deploy is accepted")
@@ -285,8 +296,8 @@ fn a_watch_streams_watching_then_each_phase_of_a_deployment_through_its_terminal
             line.starts_with("DeploymentPhaseObserved."),
             "each event is one observed line: {line}"
         );
-        let signal_lojix::Response::DeploymentPhaseObserved(event) = reply else {
-            panic!("a watch writes only observed events after Watching")
+        let signal_lojix::Output::DeploymentPhaseObserved(event) = reply else {
+            panic!("a watch writes only observed events after DeploymentsWatched")
         };
         assert_eq!(event.deployment_identifier, accepted.deployment_identifier);
         let terminal = event.deployment_terminal_option.is_some();
@@ -319,8 +330,8 @@ fn a_watch_streams_watching_then_each_phase_of_a_deployment_through_its_terminal
     // client's stream ends cleanly. The atlas watch saw no event of beacon.
     assert_eq!(
         unwatch(&nexus, token),
-        signal_lojix::Response::Unwatched(signal_lojix::SubscriptionClosed {
-            subscription_token: token
+        signal_lojix::Output::Unwatched(signal_lojix::SubscriptionClosed {
+            subscription_token: signal_lojix::SubscriptionToken(token)
         })
     );
     watching
@@ -331,7 +342,7 @@ fn a_watch_streams_watching_then_each_phase_of_a_deployment_through_its_terminal
     assert!(watching.replies.try_recv().is_err());
     assert!(matches!(
         unwatch(&nexus, elsewhere_token),
-        signal_lojix::Response::Unwatched(_)
+        signal_lojix::Output::Unwatched(_)
     ));
     elsewhere
         .ended
@@ -350,11 +361,11 @@ fn an_ordinary_query_answers_one_line_and_the_nexus_closes() {
     let nexus = start_nexus();
     let socket = SocketExchange::at_path(nexus.ordinary_socket.display().to_string());
     let mut lines = Vec::new();
-    client(&signal_lojix::Query::Query(
+    client(&signal_lojix::Input::Query(
         signal_lojix::Selection::ByNode(signal_lojix::NodeSelector {
-            cluster_name: "alpha".into(),
-            node_name: "beacon".into(),
-            requested_generation_artifact_option: None,
+            cluster_name: signal_lojix::ClusterName("alpha".into()),
+            node_name: signal_lojix::NodeName("beacon".into()),
+            generation_artifact_option: None,
         }),
     ))
     .run(&socket, &mut |reply| {
@@ -382,21 +393,21 @@ fn a_watcher_whose_peer_closes_is_dropped() {
         .expect("write watch");
     let opened = stream
         .read_frame(FrameCapacity::default())
-        .expect("read Watching");
-    let signal_lojix::Response::Watching(opened) =
-        signal::Signal::<signal_lojix::Response>::from(opened.bytes().to_vec())
+        .expect("read DeploymentsWatched");
+    let signal_lojix::Output::DeploymentsWatched(opened) =
+        signal::Signal::<signal_lojix::Output>::from(opened.bytes().to_vec())
             .restore()
-            .expect("restore Watching")
+            .expect("restore DeploymentsWatched")
     else {
-        panic!("a watch opens with Watching")
+        panic!("a watch opens with DeploymentsWatched")
     };
-    let token = opened.subscription_token;
+    let token = opened.subscription_token.0;
     assert_eq!(
         unwatch(&nexus, token + 1_000),
-        signal_lojix::Response::UnwatchRejected(signal_lojix::RejectedUnwatch {
+        signal_lojix::Output::UnwatchRejected(signal_lojix::RejectedUnwatch {
             unwatch_rejection_reason:
                 signal_lojix::UnwatchRejectionReason::SubscriptionTokenUnknown,
-            subscription_token: token + 1_000,
+            subscription_token: signal_lojix::SubscriptionToken(token + 1_000),
         })
     );
 
@@ -413,10 +424,10 @@ fn a_watcher_whose_peer_closes_is_dropped() {
     }
     assert_eq!(
         unwatch(&nexus, token),
-        signal_lojix::Response::UnwatchRejected(signal_lojix::RejectedUnwatch {
+        signal_lojix::Output::UnwatchRejected(signal_lojix::RejectedUnwatch {
             unwatch_rejection_reason:
                 signal_lojix::UnwatchRejectionReason::SubscriptionAlreadyClosed,
-            subscription_token: token,
+            subscription_token: signal_lojix::SubscriptionToken(token),
         }),
         "the dropped watcher is no longer live"
     );

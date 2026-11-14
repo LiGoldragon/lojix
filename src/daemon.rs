@@ -45,13 +45,13 @@ const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Reading one meta-socket frame body as the request it archives.
 trait MetaRequestFraming {
-    fn meta_request(&self) -> Result<meta_signal_lojix::Query>;
+    fn meta_request(&self) -> Result<meta_signal_lojix::Input>;
 }
 
 impl MetaRequestFraming for [u8] {
-    fn meta_request(&self) -> Result<meta_signal_lojix::Query> {
+    fn meta_request(&self) -> Result<meta_signal_lojix::Input> {
         use signal::{Restorable, Signal};
-        Signal::<meta_signal_lojix::Query>::from(self.to_vec())
+        Signal::<meta_signal_lojix::Input>::from(self.to_vec())
             .restore()
             .map_err(|fault| Error::Wire(format!("{fault:?}")))
     }
@@ -62,7 +62,7 @@ trait MetaResponseFraming {
     fn meta_frame(self) -> Result<Vec<u8>>;
 }
 
-impl MetaResponseFraming for meta_signal_lojix::Response {
+impl MetaResponseFraming for meta_signal_lojix::Output {
     fn meta_frame(self) -> Result<Vec<u8>> {
         use signal::{ByteViewable, Signalizable};
         self.signalize()
@@ -76,7 +76,7 @@ trait OrdinaryResponseFraming {
     fn ordinary_frame(self) -> Result<Vec<u8>>;
 }
 
-impl OrdinaryResponseFraming for signal_lojix::Response {
+impl OrdinaryResponseFraming for signal_lojix::Output {
     fn ordinary_frame(self) -> Result<Vec<u8>> {
         use signal::{ByteViewable, Signalizable};
         self.signalize()
@@ -177,8 +177,8 @@ impl NexusReadiness for NexusConfiguration {
             standard_output,
             "{} {} {})",
             Self::READY,
-            self.ordinary_socket_path,
-            self.owner_socket_path
+            self.ordinary_socket_path.0,
+            self.owner_socket_path.0
         )?;
         standard_output.flush()?;
         Ok(())
@@ -188,28 +188,32 @@ impl NexusReadiness for NexusConfiguration {
 async fn run_daemon(daemon_configuration: Daemon) -> Result<()> {
     let configuration = daemon_configuration.configuration;
     configuration.validate()?;
-    let ordinary_socket_mode = u32::try_from(configuration.ordinary_socket_mode).map_err(|_| {
-        Error::InvalidNexusConfiguration("ordinary socket mode is outside u32".into())
-    })?;
-    let owner_socket_mode = u32::try_from(configuration.owner_socket_mode)
+    let ordinary_socket_mode =
+        u32::try_from(configuration.ordinary_socket_mode.0).map_err(|_| {
+            Error::InvalidNexusConfiguration("ordinary socket mode is outside u32".into())
+        })?;
+    let owner_socket_mode = u32::try_from(configuration.owner_socket_mode.0)
         .map_err(|_| Error::InvalidNexusConfiguration("meta socket mode is outside u32".into()))?;
     for path in [
-        &configuration.ordinary_socket_path,
-        &configuration.owner_socket_path,
+        &configuration.ordinary_socket_path.0,
+        &configuration.owner_socket_path.0,
     ] {
         if let Some(parent) = std::path::Path::new(path).parent() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    std::fs::create_dir_all(&configuration.state_directory_path)?;
+    std::fs::create_dir_all(&configuration.state_directory_path.0)?;
     let sockets = vec![
         AsyncListenerSocket::new(
             ListenerRole::Ordinary,
-            configuration.ordinary_socket_path.clone(),
+            configuration.ordinary_socket_path.0.clone(),
         )
         .with_socket_mode(SocketMode::new(ordinary_socket_mode)),
-        AsyncListenerSocket::new(ListenerRole::Owner, configuration.owner_socket_path.clone())
-            .with_socket_mode(SocketMode::new(owner_socket_mode)),
+        AsyncListenerSocket::new(
+            ListenerRole::Owner,
+            configuration.owner_socket_path.0.clone(),
+        )
+        .with_socket_mode(SocketMode::new(owner_socket_mode)),
     ];
     let runtime = LojixRuntime::new(
         RuntimeConfiguration::from(&configuration),
@@ -512,10 +516,10 @@ impl RequestServable for RequestWorker {
     async fn serve_ordinary(&self, connection: &mut AcceptedConnection) -> Result<()> {
         let body = self.read_body(connection).await?;
         use signal::{Restorable, Signal};
-        let input = Signal::<signal_lojix::Query>::from(body.bytes().to_vec())
+        let input = Signal::<signal_lojix::Input>::from(body.bytes().to_vec())
             .restore()
             .map_err(|fault| Error::Wire(format!("{fault:?}")))?;
-        let watches_deployments = matches!(input, signal_lojix::Query::WatchDeployments(_));
+        let watches_deployments = matches!(input, signal_lojix::Input::WatchDeployments(_));
         let output = self
             .execute_request(
                 ListenerRole::Ordinary,
@@ -572,7 +576,7 @@ impl RequestServable for RequestWorker {
             };
             match turn {
                 WatchTurn::Observed(Some(event)) => {
-                    let frame = signal_lojix::Response::DeploymentPhaseObserved(event.raise()?)
+                    let frame = signal_lojix::Output::DeploymentPhaseObserved(event.raise()?)
                         .ordinary_frame()?;
                     if writer
                         .write_frame(&FrameBody::from(frame), self.capacity)

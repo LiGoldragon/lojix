@@ -1,5 +1,42 @@
 # Upgrades
 
+# 0.10.6 to 0.10.7
+
+A revision: the memory format is unchanged and the store stays readable;
+nothing stored is touched. The contracts move onto ethos-zero 28, in one wire
+break, and clients and daemon move together:
+
+- `signal-lojix` 0.11.0 (bd5d250f6923c85ee785f0e9bb4b4b8320a67c11) to 0.12.0
+  (8a776198db368c7f5d39e1615c3d3d319fc2cf5d);
+- `meta-signal-lojix` 0.12.0 (1b0aaeb70c9c8ee1bcd782b1ed4c4b0e98486cd4) to
+  0.13.0 (4e4226990d8849b5d59e00635eb75b64ff798f93);
+- `horizon-lib` 0.17.1 (e723ce117104557a6eb88555008a68627adae313) to 0.18.0
+  (825a7f09242380a7b3d2609b26e20647db46a8ce), the flake's `horizon` input with it;
+- `datom-codec` 0.32.2 (4dff16b4f7412febc3b71aac8b49680cd20988cb) to 0.32.3
+  (eb792265a67b2c6865f9b8c9ed9d2e5ae5a7174c), which writes a newtype as the
+  value it wraps;
+- `nexus` 0.1.1 (a84bfa960c0d5c02d30048c4bbbc67dfef79a67c) to 0.5.0
+  (64a735db884cbbb86fe492ec16b7dd7a2d492b4e); `ConfigurationState` gains only
+  `Hash`, and its archive is unchanged.
+
+What the wire now says:
+
+- The roots are `Input` and `Output`; the n-th output answers the n-th input.
+- A watch opens with `DeploymentsWatched.{ … }`, where it was `Watching.{ … }`.
+- `Query.ByEventLog.{ … }` is the input `QueryDeploymentEvents.{ … }`, and
+  `Query.ByTestRun.{ … }` the input `QueryTestRuns.{ … }`.
+  `Query.ByNode`, `Query.ByGeneration` and `Query.ByDeployment` are unchanged.
+- `WatchCacheRetention` is gone: it opened a token and nothing ever streamed.
+- A deployment record's admission and terminal markers, and a phase event's
+  transition marker, are each a struct holding the database marker, so their
+  text gains braces: `Some.{ { 9 17 } }` where it was `Some.{ 9 17 }`.
+- A store that fails under a query, or under a pin, unpin or retire, is
+  answered `Refused.Store.«<what failed>»`; the request's task used to panic
+  and the connection closed with no reply.
+
+The scalar fields of the contracts are newtypes in Rust; their Datom text and
+their archived bytes are as before.
+
 # 0.10.5 to 0.10.6
 
 A revision: the memory format is unchanged and the store stays readable;

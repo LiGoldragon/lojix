@@ -14,7 +14,7 @@
     # fixture that has gone stale against the pinned schema fails the check at
     # build time instead of inside a booted guest.
     horizon = {
-      url = "github:LiGoldragon/horizon-rs/e723ce117104557a6eb88555008a68627adae313";
+      url = "github:LiGoldragon/horizon-rs/825a7f09242380a7b3d2609b26e20647db46a8ce";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -205,7 +205,7 @@
           );
 
           # The streaming deployment watch, process-level: a watch prints
-          # Watching and then each phase event of a deploy through its
+          # DeploymentsWatched and then each phase event of a deploy through its
           # terminal; an ordinary query prints one line and the Nexus closes;
           # a watcher whose peer closes is dropped.
           deployment-watch = craneLib.cargoTest (

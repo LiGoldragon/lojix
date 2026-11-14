@@ -14,21 +14,27 @@ use signal_lojix::{
 
 fn configuration(directory: &std::path::Path, name: &str) -> NexusConfiguration {
     LojixNexusConfiguration {
-        ordinary_socket_path: directory
-            .join(format!("{name}-ordinary.sock"))
-            .display()
-            .to_string(),
-        ordinary_socket_mode: 0o660,
-        owner_socket_path: directory
-            .join(format!("{name}-meta.sock"))
-            .display()
-            .to_string(),
-        owner_socket_mode: 0o600,
-        state_directory_path: directory
-            .join(format!("{name}-state"))
-            .display()
-            .to_string(),
-        daemon_host: format!("{name}-host"),
+        ordinary_socket_path: signal_lojix::OrdinarySocketPath(
+            directory
+                .join(format!("{name}-ordinary.sock"))
+                .display()
+                .to_string(),
+        ),
+        ordinary_socket_mode: signal_lojix::OrdinarySocketMode(0o660),
+        owner_socket_path: signal_lojix::OwnerSocketPath(
+            directory
+                .join(format!("{name}-meta.sock"))
+                .display()
+                .to_string(),
+        ),
+        owner_socket_mode: signal_lojix::OwnerSocketMode(0o600),
+        state_directory_path: signal_lojix::StateDirectoryPath(
+            directory
+                .join(format!("{name}-state"))
+                .display()
+                .to_string(),
+        ),
+        daemon_host: signal_lojix::DaemonHost(format!("{name}-host")),
         test_defaults_choice: TestDefaultsChoice::NoTestDefaults,
     }
 }
@@ -148,7 +154,7 @@ fn exact_pre_nexus_store_is_never_opened_in_place_and_migrates_on_a_copy() {
         TestDefaultsChoice::TestDefaults(WireTestDefaults {
             deployment_output_selector: DeploymentOutputSelector { ref flake_attribute },
             ..
-        }) if flake_attribute == "checks.fixture"
+        }) if flake_attribute.0 == "checks.fixture"
     ));
     let migrated_sequence = migrated.commit_sequence().expect("migrated sequence");
     drop(migrated);

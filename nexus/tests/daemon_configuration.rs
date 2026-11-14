@@ -90,9 +90,9 @@ fn zero_argument_daemon_persists_lifecycle_and_uses_desired_sockets_on_restart()
         &initial_state,
         "ordinary-configured-host",
     );
-    let signal_lojix::Response::Configured(ordinary_receipt) = ordinary_exchange(
+    let signal_lojix::Output::Configured(ordinary_receipt) = ordinary_exchange(
         &ordinary_socket,
-        signal_lojix::Query::Configure(ordinary_configuration.clone()),
+        signal_lojix::Input::Configure(ordinary_configuration.clone()),
     ) else {
         panic!("ordinary Configure must return a typed receipt")
     };
@@ -100,7 +100,7 @@ fn zero_argument_daemon_persists_lifecycle_and_uses_desired_sockets_on_restart()
         ordinary_receipt.lojix_nexus_configuration,
         ordinary_configuration
     );
-    assert!(!ordinary_receipt.meta_configure_occurred);
+    assert!(!ordinary_receipt.meta_configure_occurred.0);
 
     let next_runtime = runtime_root.join("configured");
     let next_ordinary_socket = next_runtime.join("ordinary.sock");
@@ -111,33 +111,33 @@ fn zero_argument_daemon_persists_lifecycle_and_uses_desired_sockets_on_restart()
         &initial_state,
         "meta-configured-host",
     );
-    let meta_signal_lojix::Response::Configured(meta_receipt) = meta_exchange(
+    let meta_signal_lojix::Output::Configured(meta_receipt) = meta_exchange(
         &meta_socket,
-        meta_signal_lojix::Query::Configure(meta_configuration.clone()),
+        meta_signal_lojix::Input::Configure(meta_configuration.clone()),
     ) else {
         panic!("meta Configure must return a typed receipt")
     };
     assert_eq!(meta_receipt.lojix_nexus_configuration, meta_configuration);
-    assert!(meta_receipt.meta_configure_occurred);
+    assert!(meta_receipt.meta_configure_occurred.0);
 
     assert!(matches!(
         ordinary_exchange(
             &ordinary_socket,
-            signal_lojix::Query::Configure(ordinary_configuration),
+            signal_lojix::Input::Configure(ordinary_configuration),
         ),
-        signal_lojix::Response::ConfigurationRejected(signal_lojix::ConfigurationRejection {
+        signal_lojix::Output::ConfigurationRejected(signal_lojix::ConfigurationRejection {
             configuration_rejection_reason:
                 signal_lojix::ConfigurationRejectionReason::OrdinaryConfigureClosed,
         })
     ));
 
-    let meta_signal_lojix::Response::ConfigurationReversed(reversed) =
-        meta_exchange(&meta_socket, meta_signal_lojix::Query::ReverseConfiguration)
+    let meta_signal_lojix::Output::ConfigurationReversed(reversed) =
+        meta_exchange(&meta_socket, meta_signal_lojix::Input::ReverseConfiguration)
     else {
         panic!("meta reversal must return the desired configuration")
     };
     assert_eq!(reversed.lojix_nexus_configuration, meta_configuration);
-    assert!(!reversed.meta_configure_occurred);
+    assert!(!reversed.meta_configure_occurred.0);
 
     stop_daemon(daemon, "configured daemon");
     assert!(store.exists(), "stable XDG-discovered Memory must persist");
@@ -153,15 +153,15 @@ fn zero_argument_daemon_persists_lifecycle_and_uses_desired_sockets_on_restart()
     );
     let reply = ordinary_exchange(
         &next_ordinary_socket,
-        signal_lojix::Query::Query(signal_lojix::Selection::ByNode(
+        signal_lojix::Input::Query(signal_lojix::Selection::ByNode(
             signal_lojix::NodeSelector {
-                cluster_name: text("fresh-cluster"),
-                node_name: text("fresh-node"),
-                requested_generation_artifact_option: None,
+                cluster_name: signal_lojix::ClusterName(text("fresh-cluster")),
+                node_name: signal_lojix::NodeName(text("fresh-node")),
+                generation_artifact_option: None,
             },
         )),
     );
-    assert!(matches!(reply, signal_lojix::Response::Queried(_)));
+    assert!(matches!(reply, signal_lojix::Output::Queried(_)));
     stop_daemon(restarted, "restarted daemon");
 }
 
@@ -217,15 +217,15 @@ fn nexus_over_undecodable_rows_quarantines_them_and_answers_a_query() {
     );
     let reply = ordinary_exchange(
         &ordinary_socket,
-        signal_lojix::Query::Query(signal_lojix::Selection::ByNode(
+        signal_lojix::Input::Query(signal_lojix::Selection::ByNode(
             signal_lojix::NodeSelector {
-                cluster_name: text("fixture-cluster"),
-                node_name: text("fixture-node"),
-                requested_generation_artifact_option: None,
+                cluster_name: signal_lojix::ClusterName(text("fixture-cluster")),
+                node_name: signal_lojix::NodeName(text("fixture-node")),
+                generation_artifact_option: None,
             },
         )),
     );
-    assert!(matches!(reply, signal_lojix::Response::Queried(_)));
+    assert!(matches!(reply, signal_lojix::Output::Queried(_)));
     let output = stopped_daemon_output(daemon, "daemon over undecodable rows");
     let stderr = String::from_utf8_lossy(&output.stderr);
     for line in [
@@ -248,12 +248,16 @@ fn configuration(
     daemon_host: &str,
 ) -> signal_lojix::LojixNexusConfiguration {
     signal_lojix::LojixNexusConfiguration {
-        ordinary_socket_path: ordinary_socket.display().to_string(),
-        ordinary_socket_mode: 0o660,
-        owner_socket_path: meta_socket.display().to_string(),
-        owner_socket_mode: 0o600,
-        state_directory_path: state_directory.display().to_string(),
-        daemon_host: daemon_host.to_string(),
+        ordinary_socket_path: signal_lojix::OrdinarySocketPath(
+            ordinary_socket.display().to_string(),
+        ),
+        ordinary_socket_mode: signal_lojix::OrdinarySocketMode(0o660),
+        owner_socket_path: signal_lojix::OwnerSocketPath(meta_socket.display().to_string()),
+        owner_socket_mode: signal_lojix::OwnerSocketMode(0o600),
+        state_directory_path: signal_lojix::StateDirectoryPath(
+            state_directory.display().to_string(),
+        ),
+        daemon_host: signal_lojix::DaemonHost(daemon_host.to_string()),
         test_defaults_choice: signal_lojix::TestDefaultsChoice::NoTestDefaults,
     }
 }
@@ -315,16 +319,16 @@ fn exchange(socket: &Path, bytes: Vec<u8>) -> Vec<u8> {
         .to_vec()
 }
 
-fn ordinary_exchange(socket: &Path, request: signal_lojix::Query) -> signal_lojix::Response {
+fn ordinary_exchange(socket: &Path, request: signal_lojix::Input) -> signal_lojix::Output {
     let signal = request.signalize().expect("archive ordinary query");
-    signal::Signal::<signal_lojix::Response>::from(exchange(socket, signal.bytes().to_vec()))
+    signal::Signal::<signal_lojix::Output>::from(exchange(socket, signal.bytes().to_vec()))
         .restore()
         .expect("restore ordinary response")
 }
 
-fn meta_exchange(socket: &Path, request: meta_signal_lojix::Query) -> meta_signal_lojix::Response {
+fn meta_exchange(socket: &Path, request: meta_signal_lojix::Input) -> meta_signal_lojix::Output {
     let signal = request.signalize().expect("archive meta query");
-    signal::Signal::<meta_signal_lojix::Response>::from(exchange(socket, signal.bytes().to_vec()))
+    signal::Signal::<meta_signal_lojix::Output>::from(exchange(socket, signal.bytes().to_vec()))
         .restore()
         .expect("restore meta response")
 }

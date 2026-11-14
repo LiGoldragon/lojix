@@ -11,30 +11,34 @@ fn text(value: &str) -> String {
     value.to_owned()
 }
 
-fn host_deploy(action: signal_lojix::HostDeployAction) -> meta_signal_lojix::Query {
+fn host_deploy(action: signal_lojix::HostDeployAction) -> meta_signal_lojix::Input {
     host_deploy_with_secrets(action, signal_lojix::SecretsInput::NoSecrets)
 }
 
 fn host_deploy_with_secrets(
     action: signal_lojix::HostDeployAction,
     secrets_input: signal_lojix::SecretsInput,
-) -> meta_signal_lojix::Query {
-    meta_signal_lojix::Query::Deploy(meta_signal_lojix::ActualizedDeploySubmission {
+) -> meta_signal_lojix::Input {
+    meta_signal_lojix::Input::Deploy(meta_signal_lojix::ActualizedDeploySubmission {
         deploy_submission: meta_signal_lojix::DeploySubmission::Host(
             meta_signal_lojix::HostDeployment {
-                cluster_name: text("fixture-cluster"),
-                node_name: text("fixture-node"),
+                cluster_name: signal_lojix::ClusterName(text("fixture-cluster")),
+                node_name: signal_lojix::NodeName(text("fixture-node")),
                 host_composition: signal_lojix::HostComposition::BaseHost,
-                proposal_source: text("/dev/null"),
+                proposal_source: signal_lojix::ProposalSource(text("/dev/null")),
                 secrets_input,
-                flake_reference: text("github:fixture-owner/fixture-flake"),
+                flake_reference: signal_lojix::FlakeReference(text(
+                    "github:fixture-owner/fixture-flake",
+                )),
                 deployment_transport: signal_lojix::DeploymentTransport {
-                    nix_store_uri: text("ssh-ng://fixture-copy.invalid"),
-                    ssh_destination: text("fixture-login@fixture-activate.invalid"),
+                    nix_store_uri: signal_lojix::NixStoreUri(text("ssh-ng://fixture-copy.invalid")),
+                    ssh_destination: signal_lojix::SshDestination(text(
+                        "fixture-login@fixture-activate.invalid",
+                    )),
                 },
                 deployment_input_mode: signal_lojix::DeploymentInputMode::Direct,
                 deployment_output_selector: signal_lojix::DeploymentOutputSelector {
-                    flake_attribute: text("checks.fixture-a"),
+                    flake_attribute: signal_lojix::FlakeAttribute(text("checks.fixture-a")),
                 },
                 activation_backend: signal_lojix::ActivationBackend::NixosSystemdBootV1,
                 host_deploy_action: action,
@@ -51,7 +55,9 @@ fn host_deploy_with_secrets(
 fn owner_deploy_lowers_nonempty_secret_reference_without_reading_it() {
     let input = host_deploy_with_secrets(
         signal_lojix::HostDeployAction::Realize,
-        signal_lojix::SecretsInput::SecretsDirectory("fixture-secret-directory".into()),
+        signal_lojix::SecretsInput::SecretsDirectory(signal_lojix::SecretsDirectory(
+            "fixture-secret-directory".into(),
+        )),
     );
     let lojix::runtime_model::MetaIngress::Deploy(lojix::runtime_model::DeploySubmission::Host(
         host,
@@ -87,7 +93,7 @@ fn owner_deploy_lowers_to_runtime_shape_with_explicit_no_secrets() {
 #[test]
 fn owner_deploy_rejection_lowers_to_public_shape() {
     let mut input = host_deploy(signal_lojix::HostDeployAction::ActivateNow);
-    let meta_signal_lojix::Query::Deploy(actualized) = &mut input else {
+    let meta_signal_lojix::Input::Deploy(actualized) = &mut input else {
         unreachable!()
     };
     let meta_signal_lojix::DeploySubmission::Host(host) = &mut actualized.deploy_submission else {
@@ -112,7 +118,7 @@ fn owner_deploy_rejection_lowers_to_public_shape() {
 fn owner_request_round_trips_fresh_portable_signal_bytes() {
     let input = host_deploy(signal_lojix::HostDeployAction::Evaluate);
     let bytes = input.signalize().expect("signalize query").bytes().to_vec();
-    let received = Signal::<meta_signal_lojix::Query>::from(bytes);
+    let received = Signal::<meta_signal_lojix::Input>::from(bytes);
     assert_eq!(received.restore().expect("restore peer bytes"), input);
 }
 

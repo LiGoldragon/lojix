@@ -88,8 +88,8 @@ line until the daemon closes the connection.
   The two-contract authority split places `Deploy`/`Pin`/`Unpin`/`Retire`
   as owner-only policy in `meta-signal-lojix` — a deploy mutates the live
   cluster and can break the router, the strongest owner-socket case —
-  while `Query`, the `WatchDeployments`/`WatchCacheRetention`
-  subscriptions, and `Unwatch` are peer-callable on the ordinary
+  while `Query`, `QueryDeploymentEvents`, `QueryTestRuns`, the
+  `WatchDeployments` subscription, and `Unwatch` are peer-callable on the ordinary
   `signal-lojix`. The policy contract is born `meta-signal-lojix`, never
   `owner-signal-lojix` (Spirit `vudl`). `meta-signal-lojix` is the maintained
   standalone dependency; Lojix does not carry a local compatibility contract.
@@ -123,7 +123,6 @@ line until the daemon closes the connection.
   projection.
   A `WatchDeployments` subscriber receives each phase event the store
   commits to the log as `DeploymentPhaseObserved` (see §5, subscriptions).
-  `WatchCacheRetention` issues a token and streams nothing yet.
 - **Container lifecycle observation** — systemd dbus subscriptions
   for `containers.<name>.service` transitions; mirrors into the
   event log.
@@ -159,7 +158,7 @@ line until the daemon closes the connection.
 ## 2 · Not owned
 
 - **Wire vocabulary** — `signal-lojix` owns the typed records, generated
-  from its Ethos source: the `Query` and `Response` roots, the
+  from its Ethos source: the `Input` and `Output` roots, the
   `DeploymentPhaseObserved` event a watch streams included. This crate
   consumes the generated types.
 - **Wire kernel** — `signal` owns the length-prefixed frame and the
@@ -279,7 +278,7 @@ the workspace actor-systems doctrine. No zero-state holders.
 - Each public CLI sends one inline generated Datom object for its own contract per
   invocation, never reads a caller-selected request file, and prints each
   reply as one canonical Datom line until the daemon closes the connection:
-  one line for an ordinary input; `Watching` and then each matching event for
+  one line for an ordinary input; `DeploymentsWatched` and then each matching event for
   a deployment watch.
 - `lojix-inspect-store` is read-only and accepts exactly one inline
   `InspectionRequest.InspectStore` object. It rejects raw paths, request files, flags,
@@ -303,7 +302,7 @@ the workspace actor-systems doctrine. No zero-state holders.
   closes the connection. A `WatchDeployments` keeps its connection: the
   engine registers a watcher under the new subscription token with its
   `DeploymentWatch` filter before it reads the commit sequence it replies in
-  `Watching`, and the connection claims the watcher's stream. Watchers are
+  `DeploymentsWatched`, and the connection claims the watcher's stream. Watchers are
   held in memory beside the token counter and never survive a restart.
 - The subscription bridge is downstream of the commit: the store announces a
   phase event to the watchers only after the commit that journals it, while

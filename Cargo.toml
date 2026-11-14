@@ -1,6 +1,6 @@
 [package]
 name         = "lojix"
-version      = "0.10.6"
+version      = "0.10.7"
 edition      = "2024"
 rust-version = "1.89"
 license      = "MIT OR Apache-2.0"
@@ -29,13 +29,13 @@ name = "lojix"
 path = "src/lib.rs"
 
 [dependencies]
-horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "e723ce117104557a6eb88555008a68627adae313", package = "horizon-lib", default-features = false }
-datom-codec       = { git = "https://github.com/LiGoldragon/datom-codec", rev = "4dff16b4f7412febc3b71aac8b49680cd20988cb", optional = true }
+horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "825a7f09242380a7b3d2609b26e20647db46a8ce", package = "horizon-lib", default-features = false }
+datom-codec       = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eb792265a67b2c6865f9b8c9ed9d2e5ae5a7174c", optional = true }
 protos            = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3", optional = true }
 kameo             = "0.20"
-nexus             = { git = "https://github.com/LiGoldragon/nexus", rev = "a84bfa960c0d5c02d30048c4bbbc67dfef79a67c" }
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "1b0aaeb70c9c8ee1bcd782b1ed4c4b0e98486cd4" }
-signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "bd5d250f6923c85ee785f0e9bb4b4b8320a67c11" }
+nexus             = { git = "https://github.com/LiGoldragon/nexus", rev = "64a735db884cbbb86fe492ec16b7dd7a2d492b4e" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "4e4226990d8849b5d59e00635eb75b64ff798f93" }
+signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "8a776198db368c7f5d39e1615c3d3d319fc2cf5d" }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "f35460de930943ea1a8a972453ccf3a092a655b5", default-features = false, features = ["transport"] }
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 redb              = "4"

@@ -15,7 +15,7 @@ const SOCKET_ENV: &str = "LOJIX_OWNER_SOCKET";
 
 #[derive(Debug)]
 pub struct Client {
-    input: meta_signal_lojix::Query,
+    input: meta_signal_lojix::Input,
 }
 
 pub trait Invocable {
@@ -27,20 +27,20 @@ pub trait Invocable {
     /// Read the one inline Datom argument, send it to the socket the
     /// environment names, and hand on each reply until the Nexus closes.
     fn run_from_environment(
-        each: &mut dyn FnMut(meta_signal_lojix::Response) -> lojix::Result<()>,
+        each: &mut dyn FnMut(meta_signal_lojix::Output) -> lojix::Result<()>,
     ) -> lojix::Result<()>
     where
         Self: Sized;
     fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> lojix::Result<Self>
     where
         Self: Sized;
-    fn input(&self) -> &meta_signal_lojix::Query;
+    fn input(&self) -> &meta_signal_lojix::Input;
     /// Send the input on `socket` and hand on each reply until the Nexus
     /// closes the connection.
     fn run(
         self,
         socket: &SocketExchange,
-        each: &mut dyn FnMut(meta_signal_lojix::Response) -> lojix::Result<()>,
+        each: &mut dyn FnMut(meta_signal_lojix::Output) -> lojix::Result<()>,
     ) -> lojix::Result<()>
     where
         Self: Sized;
@@ -58,7 +58,7 @@ pub trait ReplyLine {
     }
 }
 
-impl ReplyLine for meta_signal_lojix::Response {
+impl ReplyLine for meta_signal_lojix::Output {
     fn line(&self) -> String {
         self.clone().datomize(vec![]).protosize().compact()
     }
@@ -74,7 +74,7 @@ impl Invocable for Client {
         }
     }
     fn run_from_environment(
-        each: &mut dyn FnMut(meta_signal_lojix::Response) -> lojix::Result<()>,
+        each: &mut dyn FnMut(meta_signal_lojix::Output) -> lojix::Result<()>,
     ) -> lojix::Result<()> {
         let client = Self::from_arguments(std::env::args_os().skip(1))?;
         client.run(&SocketExchange::for_environment(SOCKET_ENV)?, each)
@@ -88,13 +88,13 @@ impl Invocable for Client {
             input: input.actualized()?,
         })
     }
-    fn input(&self) -> &meta_signal_lojix::Query {
+    fn input(&self) -> &meta_signal_lojix::Input {
         &self.input
     }
     fn run(
         self,
         socket: &SocketExchange,
-        each: &mut dyn FnMut(meta_signal_lojix::Response) -> lojix::Result<()>,
+        each: &mut dyn FnMut(meta_signal_lojix::Output) -> lojix::Result<()>,
     ) -> lojix::Result<()> {
         let request = self
             .input
@@ -102,7 +102,7 @@ impl Invocable for Client {
             .map_err(|fault| lojix::Error::Wire(format!("{fault:?}")))?;
         socket.exchange(request.bytes().to_vec(), &mut |reply| {
             each(
-                Signal::<meta_signal_lojix::Response>::from(reply)
+                Signal::<meta_signal_lojix::Output>::from(reply)
                     .restore()
                     .map_err(|fault| lojix::Error::Wire(format!("{fault:?}")))?,
             )
@@ -111,22 +111,22 @@ impl Invocable for Client {
 }
 
 /// A `ClientQuery` carries the *reference* to a Horizon proposal; the Nexus is
-/// sent the actualized definition. Raising one to a wire `Query` is the client's
+/// sent the actualized definition. Raising one to a wire `Input` is the client's
 /// own verb, so it is homed on the query it raises.
 trait ClientQueryActualizing {
-    fn actualized(self) -> lojix::Result<meta_signal_lojix::Query>;
+    fn actualized(self) -> lojix::Result<meta_signal_lojix::Input>;
 }
 
 impl ClientQueryActualizing for meta_signal_lojix::ClientQuery {
-    fn actualized(self) -> lojix::Result<meta_signal_lojix::Query> {
-        use meta_signal_lojix::{ClientQuery, Query};
+    fn actualized(self) -> lojix::Result<meta_signal_lojix::Input> {
+        use meta_signal_lojix::{ClientQuery, Input};
         Ok(match self {
-            ClientQuery::Configure(value) => Query::Configure(value),
-            ClientQuery::ReverseConfiguration => Query::ReverseConfiguration,
-            ClientQuery::Retire(value) => Query::Retire(value),
-            ClientQuery::Pin(value) => Query::Pin(value),
-            ClientQuery::Test(value) => Query::Test(value),
-            ClientQuery::Unpin(value) => Query::Unpin(value),
+            ClientQuery::Configure(value) => Input::Configure(value),
+            ClientQuery::ReverseConfiguration => Input::ReverseConfiguration,
+            ClientQuery::Retire(value) => Input::Retire(value),
+            ClientQuery::Pin(value) => Input::Pin(value),
+            ClientQuery::Test(value) => Input::Test(value),
+            ClientQuery::Unpin(value) => Input::Unpin(value),
             ClientQuery::Deploy(value) => {
                 let horizon_definition_option = match &value {
                     meta_signal_lojix::DeploySubmission::Host(deployment) => HorizonProposal {
@@ -142,7 +142,7 @@ impl ClientQueryActualizing for meta_signal_lojix::ClientQuery {
                         .definition()?
                     }
                 };
-                Query::Deploy(meta_signal_lojix::ActualizedDeploySubmission {
+                Input::Deploy(meta_signal_lojix::ActualizedDeploySubmission {
                     deploy_submission: value,
                     horizon_definition_option,
                 })
@@ -189,7 +189,7 @@ impl HorizonProposing for HorizonProposal<'_> {
 
     fn checked_path(&self) -> lojix::Result<PathBuf> {
         const ARTIFACT: &str = "horizon-definition.datom";
-        let source: &str = self.source;
+        let source: &str = &self.source.0;
         if source.is_empty() || source.chars().any(char::is_control) {
             return Err(lojix::Error::DatomRequestText(
                 "proposal source is not a safe canonical Horizon artifact".into(),
@@ -237,19 +237,19 @@ mod tests {
     #[test]
     fn decodes_canonical_inline_query() {
         let input = meta_signal_lojix::ClientQuery::Unpin(meta_signal_lojix::UnpinRequest {
-            cluster_name: "cluster".into(),
-            node_name: "node".into(),
-            pin_label: "keep".into(),
+            cluster_name: signal_lojix::ClusterName("cluster".into()),
+            node_name: signal_lojix::NodeName("node".into()),
+            pin_label: signal_lojix::PinLabel("keep".into()),
         });
         let text = input.datomize(vec![]).protosize().textualize();
         assert_eq!(
             Client::from_arguments([OsString::from(text)])
                 .unwrap()
                 .input(),
-            &meta_signal_lojix::Query::Unpin(meta_signal_lojix::UnpinRequest {
-                cluster_name: "cluster".into(),
-                node_name: "node".into(),
-                pin_label: "keep".into(),
+            &meta_signal_lojix::Input::Unpin(meta_signal_lojix::UnpinRequest {
+                cluster_name: signal_lojix::ClusterName("cluster".into()),
+                node_name: signal_lojix::NodeName("node".into()),
+                pin_label: signal_lojix::PinLabel("keep".into()),
             })
         );
     }
@@ -262,18 +262,18 @@ mod tests {
     fn horizon_definition() -> horizon_lib::HorizonDefinition {
         horizon_lib::HorizonDefinition {
             horizon_configuration: horizon_lib::HorizonConfiguration {
-                generic_nodes: vec![],
+                generic_nodes: horizon_lib::GenericNodes(vec![]),
                 domain_configuration: horizon_lib::DomainConfiguration {
                     string: "internal.invalid".into(),
                     domain_name_vector: vec![],
                 },
             },
             cluster_definition: horizon_lib::ClusterDefinition {
-                cluster_name: "fixture-cluster".into(),
-                cluster_nodes: vec![],
-                generic_node_names: vec![],
-                users: vec![],
-                domains: vec![],
+                cluster_name: horizon_lib::ClusterName("fixture-cluster".into()),
+                cluster_nodes: horizon_lib::ClusterNodes(vec![]),
+                generic_node_names: horizon_lib::GenericNodeNames(vec![]),
+                users: horizon_lib::Users(vec![]),
+                domains: horizon_lib::Domains(vec![]),
                 cluster_trust: horizon_lib::ClusterTrust {
                     magnitude: horizon_lib::Magnitude::Zero,
                     cluster_trust_entry_vector: vec![],
@@ -296,21 +296,21 @@ mod tests {
         .expect("write authored Horizon fixture");
         let client_query = meta_signal_lojix::ClientQuery::Deploy(
             meta_signal_lojix::DeploySubmission::Host(meta_signal_lojix::HostDeployment {
-                cluster_name: "fixture-cluster".into(),
-                node_name: "fixture-node".into(),
+                cluster_name: signal_lojix::ClusterName("fixture-cluster".into()),
+                node_name: signal_lojix::NodeName("fixture-node".into()),
                 host_composition: signal_lojix::HostComposition::BaseHost,
-                proposal_source: path.display().to_string(),
+                proposal_source: signal_lojix::ProposalSource(path.display().to_string()),
                 secrets_input: signal_lojix::SecretsInput::SecretsDirectory(
-                    "fixture-secret-reference".into(),
+                    signal_lojix::SecretsDirectory("fixture-secret-reference".into()),
                 ),
-                flake_reference: "github:fixture/system".into(),
+                flake_reference: signal_lojix::FlakeReference("github:fixture/system".into()),
                 deployment_transport: signal_lojix::DeploymentTransport {
-                    nix_store_uri: "ssh-ng://builder.invalid".into(),
-                    ssh_destination: "root@node.invalid".into(),
+                    nix_store_uri: signal_lojix::NixStoreUri("ssh-ng://builder.invalid".into()),
+                    ssh_destination: signal_lojix::SshDestination("root@node.invalid".into()),
                 },
                 deployment_input_mode: signal_lojix::DeploymentInputMode::Horizon,
                 deployment_output_selector: signal_lojix::DeploymentOutputSelector {
-                    flake_attribute: "checks.fixture".into(),
+                    flake_attribute: signal_lojix::FlakeAttribute("checks.fixture".into()),
                 },
                 activation_backend: signal_lojix::ActivationBackend::NixosSystemdBootV1,
                 host_deploy_action: signal_lojix::HostDeployAction::Realize,
@@ -321,7 +321,7 @@ mod tests {
         );
         let rendered = client_query.datomize(vec![]).protosize().textualize();
         let client = Client::from_arguments([OsString::from(rendered)]).expect("actualize client");
-        let meta_signal_lojix::Query::Deploy(actualized) = client.input() else {
+        let meta_signal_lojix::Input::Deploy(actualized) = client.input() else {
             panic!("expected actualized deployment")
         };
         assert_eq!(
