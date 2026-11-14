@@ -42,8 +42,8 @@ these):
 - **Storage:** handwritten runtime nouns in MEMORY tables at the stable
   executable-discovered `lojix/lojix.memory` path. Desired configuration and the
   meta-Configure marker live beside domain state. The offline reset service supplies
-  its archive through `LOJIX_CONFIGURATION` and calls only pathless inline
-  `{}`, the empty `ResetStore` struct: it recreates recognised pre-v4 Lojix stores, reports v4 as
+  its archive through `LOJIX_CONFIGURATION` and calls the reset with no
+  arguments: it recreates recognised pre-v4 Lojix stores, reports v4 as
   `AlreadyCurrent`, and never selects a caller-named file.
 - **Wire:** raw portable rkyv Signals from `signal-lojix` and
   `meta-signal-lojix`, length-prefixed by the transport over two Unix sockets.

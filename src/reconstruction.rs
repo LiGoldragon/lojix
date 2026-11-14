@@ -14,7 +14,6 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use datom_codec::{Actualizing, Potential};
 use memory_engine::TableRegistration;
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use rkyv::rancor;
@@ -25,8 +24,8 @@ use crate::runtime_model::{
     StoredTestRun,
 };
 use crate::{
-    DurableStore as _, Error, InlineDatomArguments as _, LegacyConfigurationArchivable as _,
-    LegacyStartupConfiguration, LojixRecord as _, OfflineCommand, Result, Store, ingress,
+    DurableStore as _, Error, LegacyConfigurationArchivable as _, LegacyStartupConfiguration,
+    LojixRecord as _, OfflineCommand, Result, Store,
 };
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__memory_engine_catalog");
@@ -84,9 +83,9 @@ impl std::fmt::Display for StoreResetOutcome {
     }
 }
 
-/// One exact, version-aware Lojix store reset. It accepts only the inline
-/// empty `ResetStore` struct, `{}`, never a raw path, configuration path, directory, glob, or
-/// request file. The archive supplied by the service environment owns the
+/// One exact, version-aware Lojix store reset. It takes no input: no argument,
+/// raw path, configuration path, directory, glob, or request file. The archive
+/// supplied by the service environment owns the
 /// store selection. That configured primary must be an existing regular,
 /// non-symlink file with a recognised Lojix catalog; a sibling Spirit database
 /// is never selected by name.
@@ -127,8 +126,9 @@ impl StoreResetting for StoreResetCommand {
         arguments: impl IntoIterator<Item = OsString>,
         configuration_path: impl Into<PathBuf>,
     ) -> Result<Self> {
-        let text = (arguments).single_inline_datom()?;
-        text.require_reset_store()?;
+        if arguments.into_iter().next().is_some() {
+            return Err(Error::UnexpectedResetArguments);
+        }
         Ok(Self {
             configuration_path: configuration_path.into(),
         })
@@ -165,25 +165,6 @@ impl StoreResetting for StoreResetCommand {
             path,
             removed_sidecars: sidecars,
         })
-    }
-}
-
-/// Reading the reset command's one inline operand as the request it must be.
-trait ResetRequestText {
-    /// `{}`, the empty `ResetStore` struct, is the whole command. It is deliberately parsed
-    /// structurally rather than treated as a magic string so extra fields,
-    /// another delimiter, and a malformed document are all rejected at the
-    /// same boundary.
-    fn require_reset_store(&self) -> Result<()>;
-}
-
-impl ResetRequestText for str {
-    fn require_reset_store(&self) -> Result<()> {
-        let request = Potential::<ingress::ResetStore>::from(self.to_owned())
-            .actualize(&mut <crate::Ingress as crate::Budgeted>::budget())
-            .map_err(|fault| Error::DatomRequestText(format!("{fault:?}")))?;
-        let ingress::ResetStore {} = request;
-        Ok(())
     }
 }
 
@@ -484,7 +465,7 @@ mod tests {
 
     fn reset_command(archive: &Path) -> StoreResetCommand {
         StoreResetCommand::from_arguments_with_configuration(
-            [OsString::from("{}")],
+            Vec::<OsString>::new(),
             archive.to_path_buf(),
         )
         .expect("exact reset command")
@@ -505,11 +486,11 @@ mod tests {
     }
 
     #[test]
-    fn reset_cli_requires_exactly_one_inline_pathless_object() {
+    fn reset_cli_takes_no_arguments() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let archive = startup_archive(directory.path(), &directory.path().join("store.memory"));
         for arguments in [
-            Vec::new(),
+            vec![OsString::from("{}")],
             vec![OsString::from("--help")],
             vec![OsString::from("--pretty")],
             vec![OsString::from("/tmp/lojix-store.memory")],
@@ -522,7 +503,7 @@ mod tests {
             assert!(
                 StoreResetCommand::from_arguments_with_configuration(arguments, archive.clone())
                     .is_err(),
-                "reset must accept only one inline empty ResetStore struct"
+                "reset takes no arguments"
             );
         }
     }

@@ -2,7 +2,7 @@
 //! the struct itself; ethos/ingress.ethos is held to src/ingress.rs by build.rs.
 
 use datom_codec::{Actualizing as _, Potential};
-use lojix::ingress::{InspectStore, ResetStore};
+use lojix::ingress::{BootstrapSshPolicy, InspectStore};
 
 #[test]
 fn string_ingress_preserves_bare_paths_and_colon_urls() {
@@ -20,9 +20,13 @@ fn string_ingress_preserves_bare_paths_and_colon_urls() {
 }
 
 #[test]
-fn the_reset_request_is_the_empty_struct_and_nothing_else() {
-    for (source, reads) in [("{}", true), ("ResetStore", false), ("{ extra }", false)] {
-        let read = Potential::<ResetStore>::from(source.to_owned())
+fn the_ssh_policy_is_its_two_files_and_nothing_else() {
+    for (source, reads) in [
+        ("{ /run/identity /run/known-hosts }", true),
+        ("{ /run/identity /run/known-hosts {} }", false),
+        ("{ /run/identity /run/known-hosts RequireKnownHost }", false),
+    ] {
+        let read = Potential::<BootstrapSshPolicy>::from(source.to_owned())
             .actualize(&mut <lojix::Ingress as lojix::Budgeted>::budget());
         assert_eq!(read.is_ok(), reads, "{source}");
     }

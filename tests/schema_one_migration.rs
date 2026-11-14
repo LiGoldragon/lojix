@@ -32,17 +32,28 @@ fn startup_archive(
 
 fn reset_command(archive: &std::path::Path) -> StoreResetCommand {
     StoreResetCommand::from_arguments_with_configuration(
-        [OsString::from("{}")],
+        Vec::<OsString>::new(),
         archive.to_path_buf(),
     )
     .expect("exact reset command")
 }
 
 #[test]
-fn reset_requires_one_inline_pathless_request() {
+fn reset_takes_no_arguments() {
     let archive = std::path::PathBuf::from("/missing/generated-startup.rkyv");
     assert!(
-        StoreResetCommand::from_arguments_with_configuration(Vec::new(), archive.clone()).is_err()
+        StoreResetCommand::from_arguments_with_configuration(
+            Vec::<OsString>::new(),
+            archive.clone()
+        )
+        .is_ok()
+    );
+    assert!(
+        StoreResetCommand::from_arguments_with_configuration(
+            [OsString::from("{}")],
+            archive.clone()
+        )
+        .is_err()
     );
     assert!(
         StoreResetCommand::from_arguments_with_configuration(

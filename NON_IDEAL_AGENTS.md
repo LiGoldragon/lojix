@@ -67,13 +67,12 @@ a test attribute from a host or node name.
 
 Schema v4 refuses older Lojix data. There is no migration or legacy-resume
 path. With `lojix-nexus` stopped, a privileged operator may manually start
-the dedicated `lojix-reset-store` unit. It invokes `lojix-reset-store` only
-with the inline empty `ResetStore` struct, `{}`, and supplies its generated startup archive as the
+the dedicated `lojix-reset-store` unit. It invokes `lojix-reset-store` with
+no arguments, and supplies its generated startup archive as the
 service-owned `LOJIX_CONFIGURATION` environment value; it conflicts with the
 daemon.
 
-The reset binary accepts exactly one pathless inline request object, never a
-raw path, file, or flag. Its archive and configured store must be regular,
+The reset binary takes no arguments: never a raw path, file, or flag. Its archive and configured store must be regular,
 non-symlinked, absolute, and traversal-free. Only recognised pre-v4 Lojix
 schemas are removed; v4 returns `AlreadyCurrent` without touching data. Only
 then are the three protocol sidecars mechanically derived. It does not select,

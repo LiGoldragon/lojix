@@ -13,10 +13,6 @@ pub struct InspectStore {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct ResetStore {}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct BootstrapRun {
     pub bootstrap_request_id: BootstrapRequestId,
     pub bootstrap_mode: BootstrapMode,
@@ -141,12 +137,7 @@ pub struct BootstrapRemoteNixosSystemdBootV1 {
 pub struct BootstrapSshPolicy {
     pub bootstrap_ssh_identity_file: BootstrapSshIdentityFile,
     pub bootstrap_ssh_known_hosts_file: BootstrapSshKnownHostsFile,
-    pub require_known_host: RequireKnownHost,
 }
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct RequireKnownHost {}
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]

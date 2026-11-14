@@ -1,7 +1,6 @@
 Library
 []
 [ InspectStore.{ String }
-  ResetStore.{}
   BootstrapRun.{ BootstrapRequestId BootstrapMode }
   BootstrapRequestId.String
   BootstrapMode.[ BuildOnly.BootstrapBuildOnly BootOnce.BootstrapBootOnce ]
@@ -17,8 +16,7 @@ Library
   BootstrapHermeticTest.{ BootstrapFlakeReference BootstrapNixSystem BootstrapOutputSelector }
   BootstrapActivationBackend.[ RemoteNixosSystemdBootV1.BootstrapRemoteNixosSystemdBootV1 LocalBootstrapV1.BootstrapLocalBootstrapV1 ]
   BootstrapRemoteNixosSystemdBootV1.{ BootstrapNixStoreUri BootstrapSshDestination BootstrapSshPolicy BootstrapSystemProfilePath BootstrapBootEntriesDirectory }
-  BootstrapSshPolicy.{ BootstrapSshIdentityFile BootstrapSshKnownHostsFile RequireKnownHost }
-  RequireKnownHost.{}
+  BootstrapSshPolicy.{ BootstrapSshIdentityFile BootstrapSshKnownHostsFile }
   BootstrapLocalBootstrapV1.{ BootstrapSystemProfilePath BootstrapBootEntriesDirectory }
   BootstrapFlakeReference.String
   BootstrapNixSystem.String

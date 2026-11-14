@@ -2300,7 +2300,6 @@ impl From<ingress::BootstrapActivationBackend> for BootstrapActivationBackend {
                                 ingress::BootstrapSshIdentityFile(identity_file),
                             bootstrap_ssh_known_hosts_file:
                                 ingress::BootstrapSshKnownHostsFile(known_hosts_file),
-                            require_known_host: ingress::RequireKnownHost {},
                         },
                     bootstrap_system_profile_path:
                         ingress::BootstrapSystemProfilePath(system_profile_path),

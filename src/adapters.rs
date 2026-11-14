@@ -242,7 +242,7 @@ impl Raisable<ordinary::Output> for memory::OrdinaryEgress {
             memory::OrdinaryEgress::Unwatched(value) => ordinary::Output::Unwatched(value),
             memory::OrdinaryEgress::WatchRejected(value) => ordinary::Output::WatchRejected(value),
             memory::OrdinaryEgress::StoreRefused(detail) => {
-                ordinary::Output::Refused(ordinary::Refusal::Store(detail))
+                ordinary::Output::Refused(ordinary::StoreFailure(detail))
             }
         })
     }
@@ -270,7 +270,7 @@ impl Raisable<owner::Output> for memory::MetaEgress {
             memory::MetaEgress::RetireRejected(value) => owner::Output::RetireRejected(value),
             memory::MetaEgress::Retired(value) => owner::Output::Retired(value),
             memory::MetaEgress::StoreRefused(detail) => {
-                owner::Output::Refused(ordinary::Refusal::Store(detail))
+                owner::Output::Refused(ordinary::StoreFailure(detail))
             }
         })
     }
@@ -332,13 +332,13 @@ mod tests {
             memory::OrdinaryEgress::StoreRefused(detail.clone())
                 .raise()
                 .unwrap(),
-            ordinary::Output::Refused(ordinary::Refusal::Store(detail.clone()))
+            ordinary::Output::Refused(ordinary::StoreFailure(detail.clone()))
         );
         assert_eq!(
             memory::MetaEgress::StoreRefused(detail.clone())
                 .raise()
                 .unwrap(),
-            owner::Output::Refused(ordinary::Refusal::Store(detail))
+            owner::Output::Refused(ordinary::StoreFailure(detail))
         );
     }
     #[test]

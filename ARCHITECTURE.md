@@ -241,7 +241,7 @@ the workspace actor-systems doctrine. No zero-state holders.
   the family keeps its 0.10.6 identity. `lojix-inspect-store` reports the
   set-aside rows the next open drops, the deploy-job rows it upgrades, and the
   rows that would refuse it. With the daemon stopped, the
-  manually started `lojix-reset-store` accepts only the inline empty `ResetStore` struct, `{}`. Its
+  manually started `lojix-reset-store` takes no arguments. Its
   service-owned `LOJIX_CONFIGURATION` archive supplies the exact store path;
   an existing archive and primary must be absolute, regular, and non-symlinked.
   A recognised v2/v3 Lojix catalog is removed and recreated as v4, while a v4

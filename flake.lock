@@ -100,17 +100,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1794671219,
-        "narHash": "sha256-2EgQ0uVcw2PHy84kg8vD1lP57vWc5AW3rptMZrvapQg=",
+        "lastModified": 1794675472,
+        "narHash": "sha256-zaNuLdAMKSnlirTHn/KJ7IGjJVKmyb/lIgHKHkajof8=",
         "owner": "LiGoldragon",
         "repo": "horizon-rs",
-        "rev": "825a7f09242380a7b3d2609b26e20647db46a8ce",
+        "rev": "182f5307962896e95a2a83c45f68785b1f7c84d3",
         "type": "github"
       },
       "original": {
         "owner": "LiGoldragon",
         "repo": "horizon-rs",
-        "rev": "825a7f09242380a7b3d2609b26e20647db46a8ce",
+        "rev": "182f5307962896e95a2a83c45f68785b1f7c84d3",
         "type": "github"
       }
     },

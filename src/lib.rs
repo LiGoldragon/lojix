@@ -362,6 +362,9 @@ pub enum Error {
     #[error("the Lojix Nexus starts with no arguments")]
     UnexpectedNexusArguments,
 
+    #[error("the store reset takes no arguments")]
+    UnexpectedResetArguments,
+
     #[error("configuration migration expects exactly a legacy archive and a new target path")]
     ExpectedMigrationArguments,
 
