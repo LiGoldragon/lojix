@@ -375,7 +375,7 @@ pub enum Outcome {
     ClosureBuilt(BuiltClosure),
     ClosureCopied(CopiedClosure),
     ActivationCompleted(ActivatedGeneration),
-    DetachedTestActivationDispatched,
+    DetachedActivationDispatched,
     PathsCollected(GarbageCollected),
     HermeticCheckBuilt(CheckBuilt),
     TestVmStarted(TestVmBroughtUp),

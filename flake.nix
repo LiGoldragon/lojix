@@ -469,6 +469,157 @@
                 assert profile_before == machine.succeed("readlink -f /nix/var/nix/profiles/system").strip()
               '';
             };
+
+          # Three owner requests drive the real daemon into a same-host
+          # `switch` (bead primary-6llk). The switch is handed to PID 1 with
+          # its receipt retained, and the daemon that reads that receipt, the
+          # successor when the candidate replaces `lojix.service` or the
+          # dispatcher when it survives, settles the deployment from the
+          # unit's own result and records the generation Current from the
+          # system profile the switch set:
+          #
+          # 1. the VM's loader has no boot-loader interface, so the clearing
+          #    after the switch fails: the successor records the generation
+          #    Current and the deployment Failed(Activate/ActivationFailed),
+          #    with what bootctl printed;
+          # 2. the loader interface is present and clearing succeeds: the
+          #    successor records Current and Succeeded, then stops the unit;
+          # 3. as 2, but the switch leaves the daemon running: the dispatcher
+          #    settles it itself.
+          #
+          # Nix, SSH and, for 2 and 3, the loader interface are the fake
+          # boundaries.
+          same-host-switch-activation =
+            let
+              package = self.packages.${system}.default;
+              candidate = pkgs.writeShellScriptBin "switch-to-configuration" ''
+                if [ "$1" = switch ]; then
+                  : > /run/lojix-switch-candidate-entered
+                  if [ -e /run/lojix-candidate-restarts-daemon ]; then
+                    systemctl restart lojix.service
+                  fi
+                fi
+              '';
+              loader-interface = pkgs.writeShellScriptBin "bootctl" ''
+                printf '%s\n' "$*" >> /run/lojix-bootctl-argv
+                if [ -e /run/lojix-loader-interface ]; then
+                  exit 0
+                fi
+                exec ${pkgs.systemd}/bin/bootctl "$@"
+              '';
+              fake-nix = pkgs.writeShellScriptBin "nix" ''
+                printf '%s\n' "$@" > /run/lojix-fake-nix-argv
+                case "$1" in
+                  flake) printf '%s\n' '{"url":"github:fixture-owner/fixture-flake?ref=main","locked":{"rev":"0123456789abcdef0123456789abcdef01234567"}}' ;;
+                  eval) printf '%s\n' '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-lojix-switch-candidate.drv' ;;
+                  build) printf '%s\n' '${candidate}' ;;
+                  copy) exit 0 ;;
+                  *) exit 89 ;;
+                esac
+              '';
+              fake-ssh = pkgs.writeShellScriptBin "ssh" ''
+                for argument in "$@"; do command="$argument"; done
+                exec /bin/sh -c "$command"
+              '';
+            in
+            pkgs.testers.nixosTest {
+              name = "lojix-same-host-switch-activation";
+              nodes.machine = { lib, ... }: {
+                environment.systemPackages = [
+                  package
+                  fake-nix
+                  fake-ssh
+                  candidate
+                  (lib.hiPrio loader-interface)
+                ];
+                systemd.services.lojix = {
+                  wantedBy = [ "multi-user.target" ];
+                  serviceConfig = {
+                    ExecStart = "${package}/bin/lojix-nexus";
+                    Restart = "always";
+                    KillMode = "control-group";
+                    StateDirectory = "lojix";
+                    Environment = "PATH=${
+                      pkgs.lib.makeBinPath [
+                        fake-nix
+                        fake-ssh
+                        pkgs.systemd
+                        pkgs.coreutils
+                        candidate
+                      ]
+                    }";
+                  };
+                  preStart = ''
+                    install -m 0644 ${horizonDefinition}/horizon-definition.datom /var/lib/lojix/horizon-definition.datom
+                  '';
+                };
+              };
+              testScript = ''
+                ordinary = "LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix"
+                owner = "LOJIX_OWNER_SOCKET=/run/lojix/meta.sock ${package}/bin/lojix-meta"
+
+                def invocation():
+                    return machine.succeed("systemctl show lojix.service --property=InvocationID --value").strip()
+
+                def sockets():
+                    machine.wait_for_unit("lojix.service")
+                    machine.wait_until_succeeds("test -S /run/lojix/ordinary.sock && test -S /run/lojix/meta.sock")
+
+                def deploy(deployment):
+                    machine.succeed("rm -f /run/lojix-switch-candidate-entered")
+                    machine.succeed(owner + " 'Deploy.Host.{ fixture-cluster atlas BaseHost /var/lib/lojix/horizon-definition.datom NoSecrets github:fixture-owner/fixture-flake?ref=main { ssh-ng://fixture-copy.invalid fixture-login@fixture-activate.invalid } Direct { checks.fixture-a } NixosSystemdBootV1 ActivateNow ResolveAndRecord None [] }' >/run/lojix-admission-" + deployment)
+                    machine.log(machine.succeed("cat /run/lojix-admission-" + deployment))
+                    machine.succeed("grep -F 'DeployAccepted.' /run/lojix-admission-" + deployment)
+                    machine.wait_until_succeeds("test -e /run/lojix-switch-candidate-entered")
+
+                def settled(deployment, terminal):
+                    machine.wait_until_succeeds(ordinary + " 'Query.ByDeployment.{ " + deployment + " }' | grep -Fq " + terminal)
+                    reply = machine.succeed(ordinary + " 'Query.ByDeployment.{ " + deployment + " }'")
+                    machine.log(reply)
+                    assert "LiveActivation Current" in reply, reply
+                    return reply
+
+                start_all()
+                sockets()
+                machine.succeed(ordinary + " 'Configure.{ /run/lojix/ordinary.sock 432 /run/lojix/meta.sock 384 /var/lib/lojix atlas NoTestDefaults }' | grep -F Configured")
+                machine.succeed("systemctl restart lojix.service")
+                sockets()
+
+                # 1. No boot-loader interface: the clearing after the switch
+                # fails, and the successor reads the retained failure.
+                machine.succeed("touch /run/lojix-candidate-restarts-daemon")
+                predecessor = invocation()
+                deploy("1")
+                machine.wait_until_succeeds("test \"$(systemctl show lojix.service --property=InvocationID --value)\" != '" + predecessor + "'")
+                sockets()
+                reply = settled("1", "ActivationFailed")
+                assert "Succeeded" not in reply, reply
+                assert "Not booted with" in reply, reply
+                machine.succeed("systemctl show lojix-self-switch-deploy-1.service --property=Result --value | grep -Fx exit-code")
+                assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == "${candidate}"
+
+                # 2. The loader interface is present: the successor reads the
+                # retained success and stops the unit.
+                machine.succeed("touch /run/lojix-loader-interface")
+                predecessor = invocation()
+                deploy("2")
+                machine.wait_until_succeeds("test \"$(systemctl show lojix.service --property=InvocationID --value)\" != '" + predecessor + "'")
+                sockets()
+                settled("2", "Succeeded")
+                machine.wait_until_succeeds("systemctl show lojix-self-switch-deploy-2.service --property=LoadState --value | grep -Fx not-found")
+                machine.succeed("grep -Fx 'set-default ' /run/lojix-bootctl-argv && grep -Fx 'set-oneshot ' /run/lojix-bootctl-argv")
+
+                # 3. The switch leaves the daemon running: the dispatcher
+                # settles its own deployment.
+                machine.succeed("rm /run/lojix-candidate-restarts-daemon")
+                dispatcher = invocation()
+                deploy("3")
+                settled("3", "Succeeded")
+                assert invocation() == dispatcher
+                machine.wait_until_succeeds("systemctl show lojix-self-switch-deploy-3.service --property=LoadState --value | grep -Fx not-found")
+                machine.log(machine.succeed("journalctl -u lojix.service --no-pager"))
+              '';
+            };
         };
 
         formatter = pkgs.nixfmt;

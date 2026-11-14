@@ -155,6 +155,22 @@ effect command and result enumerations are gone; a pipeline attempts one
 and its service `Result` are read as systemd's own values, an undocumented one
 kept as the text systemd sent. Nothing a peer sees changes.
 
+A same-host `ActivateNow` is settled from PID 1's receipt (bead
+primary-6llk). Its unit, `lojix-self-switch-deploy-<id>.service`, is
+dispatched as the same-host `TestActivation` is, `systemd-run --no-block
+--service-type=oneshot --remain-after-exit`, where it was `--collect --wait`;
+the script is unchanged. The daemon that reads the retained unit, the
+dispatcher or the successor the switch started, takes the deployment's
+terminal from the unit's `ActiveState`, `Result` and main process, records the
+generation Current when the system profile is the switched closure, and then
+stops the unit. A switch whose boot-entry clearing failed after it is now
+Current and `Failed(Activate/ActivationFailed)`, with the unit's result and
+journal, where the successor used to read the system profile alone and record
+`Succeeded`. The recorded artifact is the submission's own composition, where
+it was always `CompleteHost`. A self-switch dispatched by an earlier daemon,
+`--collect`, is read the same way while PID 1 still holds it; one that exited
+0 without remaining is a success.
+
 # 0.10.5 to 0.10.6
 
 A revision: the memory format is unchanged and the store stays readable;

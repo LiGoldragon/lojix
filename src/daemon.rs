@@ -15,9 +15,7 @@ use crate::schema_runtime::{
     DaemonRuntime as _, DeployDriving as _, DeployJobResuming as _, DetachedActivation as _,
     DetachedObserving as _, RuntimeCore as _, TestDriving as _,
 };
-use crate::{
-    DeploymentLedger as _, DurableStore as _, GenerationLedger as _, NexusPersistable as _,
-};
+use crate::{DeploymentLedger as _, DurableStore as _, NexusPersistable as _};
 use std::fmt::{Display, Formatter};
 use std::io::Write;
 use std::sync::Arc;
@@ -708,13 +706,6 @@ trait DeployProcessable {
     ) -> ActorRef<DeployJobs>;
     fn launch_pipeline(&self, engine: SchemaRuntime, slot: JobSlot);
     async fn reconcile_persisted_jobs(&mut self);
-    fn daemon_host_system_closure() -> Option<String>;
-    fn persist_reconciled_self_switch(
-        &self,
-        deployment_identifier: i64,
-        generation: crate::runtime_model::LiveGeneration,
-        root: crate::runtime_model::GcRoot,
-    );
 }
 
 impl DeployProcessable for DeployJobs {
@@ -766,10 +757,12 @@ impl DeployProcessable for DeployJobs {
         let daemon_host = self.configuration.daemon_host();
         for job in jobs {
             let deployment_identifier = *job.deployment_identifier.payload();
-            if let Some(unit) = job.detached_test_activation_unit(daemon_host) {
-                // Test activation is deliberately non-persistent. Its retained
-                // PID-1 receipt, not /nix/var/nix/profiles/system, is the only
-                // authority for the successor's terminal outcome.
+            if let Some(unit) = job.detached_activation_unit(daemon_host) {
+                // A same-host Switch or Test was handed to PID 1, which
+                // retains the unit's receipt. That receipt, not
+                // /nix/var/nix/profiles/system, is the authority for the
+                // deployment's terminal; a Switch's live generation is
+                // recorded Current beside it when the profile is its closure.
                 // Subscribe before the first GetUnit lookup. systemd-run's
                 // accepted transient can still be in PID 1's registration
                 // window while the candidate has already replaced us.
@@ -779,54 +772,32 @@ impl DeployProcessable for DeployJobs {
                     continue;
                 };
                 match observer.initial_outcome().await {
-                    Ok(Some(crate::schema_runtime::DetachedActivationOutcome::Succeeded)) => {
-                        if self
-                            .store
-                            .terminalize_deployment(
-                                deployment_identifier,
-                                memory::DeploymentTerminal::Succeeded,
-                            )
-                            .is_ok()
-                        {
-                            unit.clean().await;
-                        }
-                    }
                     Ok(
                         outcome @ Some(
-                            crate::schema_runtime::DetachedActivationOutcome::Failed(_)
-                            | crate::schema_runtime::DetachedActivationOutcome::Missing,
+                            crate::schema_runtime::DetachedActivationOutcome::Succeeded
+                            | crate::schema_runtime::DetachedActivationOutcome::Failed(_),
                         ),
                     ) => {
-                        // PID 1 either reported the failure or no longer
-                        // holds the unit; either way the unit's journal tail
-                        // is what the activation itself printed.
-                        let observed = match outcome {
+                        unit.settle(
+                            outcome,
+                            &self.store,
+                            deployment_identifier,
+                            self.configuration.effect_execution(),
+                        )
+                        .await;
+                    }
+                    Ok(Some(crate::schema_runtime::DetachedActivationOutcome::Missing)) => {
+                        // PID 1 no longer holds the unit; its journal tail is
+                        // what the activation itself printed.
+                        unit.settle(
                             Some(crate::schema_runtime::DetachedActivationOutcome::Failed(
-                                observed,
-                            )) => observed,
-                            _ => unit.vanished(),
-                        };
-                        let observed = unit
-                            .journalled(observed, self.configuration.effect_execution())
-                            .await;
-                        let failure_evidence_option =
-                            Some(crate::schema_runtime::Witnessing::witness(&observed));
-                        if self
-                            .store
-                            .terminalize_deployment(
-                                deployment_identifier,
-                                memory::DeploymentTerminal::Failed(memory::DeploymentFailure {
-                                    deployment_failure_stage:
-                                        memory::DeploymentFailureStage::Activate,
-                                    deployment_terminal_reason:
-                                        memory::DeploymentTerminalReason::ActivationFailed,
-                                    failure_evidence_option,
-                                }),
-                            )
-                            .is_ok()
-                        {
-                            unit.clean().await;
-                        }
+                                unit.vanished(),
+                            )),
+                            &self.store,
+                            deployment_identifier,
+                            self.configuration.effect_execution(),
+                        )
+                        .await;
                     }
                     Ok(None | Some(crate::schema_runtime::DetachedActivationOutcome::Running)) => {
                         // A registration window (None) or a unit still running.
@@ -846,39 +817,6 @@ impl DeployProcessable for DeployJobs {
                 continue;
             }
             match job.resumption() {
-                // A detached self-switch (bead primary-7u8p): a persisted host
-                // `ActivateNow` through `NixosSystemdBootV1` targeting the
-                // daemon's OWN host restarts the daemon inside the switch, so
-                // the terminal activation write never committed. Only that exact
-                // persisted submission can take this repair, and only a
-                // COMPLETED self-switch has set the live system profile to this
-                // job's closure. `self_switch_activation_record` requires both
-                // predicates before it considers that exact profile match; a
-                // racy unrelated restart during SetBootProfile, boot-once, test,
-                // or user-environment activation therefore falls through to the
-                // S5 arm. Recording the generation the interrupted pipeline
-                // could not also advances the live-set-scanned id allocator,
-                // ending the id reuse.
-                crate::schema_runtime::DeployJobResumption::PollActivationUnit { unit: None }
-                    if job.node_name == *daemon_host =>
-                {
-                    let system_closure = Self::daemon_host_system_closure();
-                    match job.self_switch_activation_record(system_closure.as_deref()) {
-                        Some((generation, root)) => {
-                            self.persist_reconciled_self_switch(
-                                deployment_identifier,
-                                generation,
-                                root,
-                            );
-                        }
-                        None => {
-                            // Not a completed host self-switch (the live system
-                            // profile does not resolve to this closure): leave the
-                            // row for the S5 unit-poll path rather than recording
-                            // it as a Current complete-host generation.
-                        }
-                    }
-                }
                 crate::schema_runtime::DeployJobResumption::PollActivationUnit { .. } => {
                     // S5: poll `journalctl -u <unit>` and adopt the unit's
                     // outcome rather than re-activating. Until then leave the
@@ -913,48 +851,6 @@ impl DeployProcessable for DeployJobs {
                 }
             }
         }
-    }
-
-    /// The store path the daemon host's live system profile currently resolves
-    /// to (`/nix/var/nix/profiles/system` -> the running system closure), or
-    /// `None` when it cannot be read. A completed host self-switch set exactly
-    /// this to the deploy's closure (`nix-env --set`) before the switch
-    /// restarted the daemon, so a reconcile uses it as the tight witness that an
-    /// interrupted `Activating` job really finished as a host switch (bead
-    /// primary-7u8p).
-    fn daemon_host_system_closure() -> Option<String> {
-        std::fs::canonicalize("/nix/var/nix/profiles/system")
-            .ok()
-            .map(|path| path.display().to_string())
-    }
-
-    /// Persist a reconciled self-switch generation idempotently and fail-safe.
-    /// A recovered generation is not a completed deployment until its public
-    /// terminal-success transition has been journalled and acknowledged. The
-    /// terminal transition retires the private cursor in that acknowledgement
-    /// commit, so neither an activation-store failure nor a terminal-write
-    /// failure can erase the only durable retry witness.
-    fn persist_reconciled_self_switch(
-        &self,
-        deployment_identifier: i64,
-        generation: crate::runtime_model::LiveGeneration,
-        root: crate::runtime_model::GcRoot,
-    ) {
-        let already_recorded = self
-            .store
-            .records::<crate::runtime_model::GcRoot>()
-            .map(|roots| {
-                roots.iter().any(|existing| {
-                    existing.generation_identifier == generation.generation_identifier
-                })
-            })
-            .unwrap_or(false);
-        if !already_recorded && self.store.record_activation(generation, root).is_err() {
-            return;
-        }
-        let _ = self
-            .store
-            .terminalize_deployment(deployment_identifier, memory::DeploymentTerminal::Succeeded);
     }
 }
 
@@ -1170,11 +1066,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn successor_reconciles_self_switch_as_current_and_public_terminal_success() {
-        let directory = tempfile::tempdir().expect("temporary store directory");
-        let store =
-            Arc::new(Store::open(directory.path().join("lojix.memory")).expect("open store"));
+    /// A same-host Switch admitted, copied and handed to PID 1: its durable
+    /// cursor is Activating, as a successor reads it after the switch
+    /// restarted the daemon.
+    fn activating_self_switch(store: &Store) -> (i64, memory::DeployJob) {
         let mut job = self_switch_job();
         let record = store
             .allocate_deployment_record(self_switch_identity(), job.clone())
@@ -1218,36 +1113,69 @@ mod tests {
         store
             .upsert_deploy_job(job.clone())
             .expect("persist activating cursor");
+        (deployment_identifier, job)
+    }
 
-        let (generation, root) = job
-            .self_switch_activation_record(Some(CLOSURE))
-            .expect("matching live system profile proves the switch completed");
-        let successor = DeployJobs {
-            store: store.clone(),
-            configuration: Arc::new(RuntimeConfiguration::test_default()),
-            slots: JobSlots::with_capacity(1),
-        };
-        successor.persist_reconciled_self_switch(deployment_identifier, generation, root);
+    /// The retained self-switch unit the successor reads for this job.
+    fn retained_unit(job: &memory::DeployJob) -> crate::schema_runtime::DetachedActivationUnit {
+        job.detached_activation_unit(&ordinary::NodeName::new("fixture-daemon".into()))
+            .expect("a same-host ActivateNow is settled from its retained unit")
+    }
 
-        assert!(
-            store
-                .records::<crate::runtime_model::LiveGeneration>()
-                .expect("current live generation")
-                .iter()
-                .any(|generation| {
-                    *generation.deployment_identifier.payload() == deployment_identifier
-                        && matches!(
-                            generation.generation_slot,
-                            ordinary::GenerationSlot::Current
-                        )
-                })
-        );
-        let record = store
+    /// What PID 1 retained for a unit whose script failed after the switch,
+    /// as on ouranos for deployment 586: `failed`, `exit-code`, status 1.
+    fn failed_after_the_switch() -> crate::emission::UnitState {
+        crate::emission::UnitState {
+            active_state_reading: crate::emission::ActiveStateReading::Read(
+                crate::emission::ActiveState::Failed,
+            ),
+            service_result_reading: crate::emission::ServiceResultReading::Read(
+                crate::emission::ServiceResult::ExitCode,
+            ),
+            process_end_option: Some(crate::emission::ProcessEnd::Exited(
+                crate::emission::ExitStatus(1),
+            )),
+        }
+    }
+
+    fn current_generation_recorded(store: &Store, deployment_identifier: i64) -> bool {
+        store
+            .records::<crate::runtime_model::LiveGeneration>()
+            .expect("live generations")
+            .iter()
+            .any(|generation| {
+                *generation.deployment_identifier.payload() == deployment_identifier
+                    && matches!(
+                        generation.generation_slot,
+                        ordinary::GenerationSlot::Current
+                    )
+            })
+    }
+
+    fn terminal_of(store: &Store, deployment_identifier: i64) -> ordinary::DeploymentRecord {
+        store
             .deployment_records()
             .expect("public deployment record")
             .into_iter()
             .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
-            .expect("reconciled deployment record");
+            .expect("settled deployment record")
+    }
+
+    #[test]
+    fn a_succeeded_self_switch_unit_settles_current_and_succeeded() {
+        let directory = tempfile::tempdir().expect("temporary store directory");
+        let store = Store::open(directory.path().join("lojix.memory")).expect("open store");
+        let (deployment_identifier, job) = activating_self_switch(&store);
+        let unit = retained_unit(&job);
+        let terminal = crate::schema_runtime::DetachedActivationUnit::terminal_outcome(Some(
+            crate::schema_runtime::DetachedActivationOutcome::Succeeded,
+        ))
+        .expect("a succeeded unit is a terminal");
+
+        assert!(unit.conclude(terminal, &store, deployment_identifier, Some(CLOSURE)));
+
+        assert!(current_generation_recorded(&store, deployment_identifier));
+        let record = terminal_of(&store, deployment_identifier);
         assert!(matches!(
             record.deployment_phase,
             ordinary::DeploymentPhase::Completed
@@ -1268,6 +1196,93 @@ mod tests {
                         )
             )
         ));
-        assert!(store.deploy_jobs().expect("reconciled cursor").is_empty());
+        assert!(store.deploy_jobs().expect("settled cursor").is_empty());
+    }
+
+    /// bead primary-6llk: the switch set the profile live and a later command
+    /// in the unit failed. The generation is recorded Current, and the
+    /// deployment is Failed(Activate/ActivationFailed) with PID 1's result.
+    #[test]
+    fn a_self_switch_unit_that_failed_after_the_switch_settles_current_and_failed() {
+        let directory = tempfile::tempdir().expect("temporary store directory");
+        let store = Store::open(directory.path().join("lojix.memory")).expect("open store");
+        let (deployment_identifier, job) = activating_self_switch(&store);
+        let unit = retained_unit(&job);
+        let outcome = unit.classify(failed_after_the_switch());
+        assert!(matches!(
+            outcome,
+            crate::schema_runtime::DetachedActivationOutcome::Failed(_)
+        ));
+        let terminal =
+            crate::schema_runtime::DetachedActivationUnit::terminal_outcome(Some(outcome))
+                .expect("a failed unit is a terminal");
+
+        assert!(unit.conclude(terminal, &store, deployment_identifier, Some(CLOSURE)));
+
+        assert!(current_generation_recorded(&store, deployment_identifier));
+        let record = terminal_of(&store, deployment_identifier);
+        let Some(ordinary::DeploymentTerminal::Failed(failure)) = record.deployment_terminal_option
+        else {
+            panic!("the unit's failure is the deployment's terminal, got {record:?}");
+        };
+        assert_eq!(
+            failure.deployment_failure_stage,
+            ordinary::DeploymentFailureStage::Activate
+        );
+        assert_eq!(
+            failure.deployment_terminal_reason,
+            ordinary::DeploymentTerminalReason::ActivationFailed
+        );
+        let evidence = failure
+            .failure_evidence_option
+            .expect("PID 1's result is the evidence");
+        assert!(
+            evidence
+                .failure_detail
+                .payload()
+                .contains("systemd reported Result=exit-code; main process exited with status 1"),
+            "{:?}",
+            evidence.failure_detail
+        );
+        let command = evidence
+            .failed_command_option
+            .expect("the unit names itself");
+        assert_eq!(command.exit_code_option, Some(ordinary::ExitCode::new(1)));
+        assert!(store.deploy_jobs().expect("settled cursor").is_empty());
+    }
+
+    /// The system profile records a generation live; it settles no terminal
+    /// and makes no failure a success. A profile that is not this closure
+    /// records nothing, and the unit's result is still the terminal.
+    #[test]
+    fn the_system_profile_records_current_and_never_the_terminal() {
+        let directory = tempfile::tempdir().expect("temporary store directory");
+        let store = Store::open(directory.path().join("lojix.memory")).expect("open store");
+        let (deployment_identifier, job) = activating_self_switch(&store);
+        let unit = retained_unit(&job);
+        let terminal = crate::schema_runtime::DetachedActivationUnit::terminal_outcome(Some(
+            unit.classify(failed_after_the_switch()),
+        ))
+        .expect("a failed unit is a terminal");
+
+        assert!(unit.conclude(
+            terminal,
+            &store,
+            deployment_identifier,
+            Some("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-other-system"),
+        ));
+
+        assert!(!current_generation_recorded(&store, deployment_identifier));
+        assert!(matches!(
+            terminal_of(&store, deployment_identifier).deployment_terminal_option,
+            Some(ordinary::DeploymentTerminal::Failed(_))
+        ));
+        assert!(
+            crate::schema_runtime::DetachedActivationUnit::terminal_outcome(Some(
+                crate::schema_runtime::DetachedActivationOutcome::Running
+            ))
+            .is_none(),
+            "a unit still running settles nothing, whatever the profile says"
+        );
     }
 }

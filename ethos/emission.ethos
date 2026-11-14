@@ -101,8 +101,8 @@ Emission
   BootEntryClearing.{ SshDestination BootEntry }
   BootEntry.[ Default Oneshot ]
   TransientUnitRun.{ SshDestination UnitName TransientScript }
-  TransientScript.[ BootOnce.ClosurePath SelfSwitch.ClosurePath ]
-  RetainedUnitDispatch.{ SshDestination UnitName ClosurePath }
+  TransientScript.[ BootOnce.ClosurePath SelfSwitch.ClosurePath SelfTest.ClosurePath ]
+  RetainedUnitDispatch.{ SshDestination UnitName TransientScript }
   UnitJournalQuery.{ SshDestination UnitName }
   LocalHomeProfile.{ HomeDirectory.String ClosurePath }
   LocalHomeActivation.{ ClosurePath }

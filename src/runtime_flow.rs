@@ -111,7 +111,7 @@ mod tests {
     impl NexusEngine for EndlessPipeline {
         async fn attempt(&mut self, _operation: Operation) -> Outcome {
             self.stages_attempted += 1;
-            Outcome::DetachedTestActivationDispatched
+            Outcome::DetachedActivationDispatched
         }
 
         fn step_limit_reached(&self, _limit: PipelineStepLimit) -> PipelineOutput {
@@ -134,9 +134,7 @@ mod tests {
         let mut engine = EndlessPipeline {
             stages_attempted: 0,
         };
-        let output = engine
-            .drive(Outcome::DetachedTestActivationDispatched)
-            .await;
+        let output = engine.drive(Outcome::DetachedActivationDispatched).await;
         assert_eq!(
             output,
             PipelineOutput::Refused(signal_lojix::StoreFailure("stopped after 32".into()))

@@ -154,6 +154,7 @@ pub struct TransientUnitRun {
 pub enum TransientScript {
     BootOnce(signal_lojix::ClosurePath),
     SelfSwitch(signal_lojix::ClosurePath),
+    SelfTest(signal_lojix::ClosurePath),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -161,7 +162,7 @@ pub enum TransientScript {
 pub struct RetainedUnitDispatch {
     pub ssh_destination: signal_lojix::SshDestination,
     pub unit_name: UnitName,
-    pub closure_path: signal_lojix::ClosurePath,
+    pub transient_script: TransientScript,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

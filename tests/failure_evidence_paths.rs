@@ -306,51 +306,6 @@ async fn a_tail_cut_inside_a_multibyte_character_is_kept_whole() {
     );
 }
 
-/// A self-switch hands the switch to its own `systemd-run --wait` unit; what
-/// the switch printed is in that unit's journal.
-#[tokio::test]
-async fn a_self_switch_that_fails_carries_its_unit_journal() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    fake_programs(
-        &directory.path().join("programs"),
-        SYSTEM_OUTPUT,
-        "",
-        "  *journalctl*)\n    printf '%s\\n' 'activating the configuration...' 'Failed to install bootloader' 'error: switch-to-configuration exited with status 4'\n    exit 0 ;;\n  *systemd-run*)\n    printf '%s\\n' 'Running as unit: lojix-self-switch-deploy-1.service' '          Finished with result: exit-code' 'Main processes terminated with: code=exited, status=4/NOPERMISSION' >&2\n    exit 4 ;;",
-    );
-    let driven = drive(
-        directory.path(),
-        NODE,
-        host_request(ordinary::HostDeployAction::ActivateNow),
-    )
-    .await;
-    assert_eq!(
-        driven.failure.deployment_failure_stage,
-        ordinary::DeploymentFailureStage::Activate
-    );
-    let evidence = evidence(&driven.failure);
-    let detail = evidence.failure_detail.payload();
-    assert_eq!(exit_code(evidence), Some(4));
-    let journal_read = driven
-        .commands
-        .iter()
-        .find(|line| line.contains("journalctl"))
-        .unwrap_or_else(|| panic!("the unit's journal was read, got {:?}", driven.commands));
-    assert!(
-        journal_read.contains("root@fixture-activate.invalid")
-            && journal_read.contains("--unit=lojix-self-switch-deploy-"),
-        "the journal is read on the unit's node, for that unit, got {journal_read:?}"
-    );
-    assert!(detail.contains("status=4/NOPERMISSION"), "got {detail:?}");
-    assert!(
-        detail.contains("--- journal of lojix-self-switch-deploy-"),
-        "got {detail:?}"
-    );
-    assert!(
-        detail.contains("Failed to install bootloader"),
-        "got {detail:?}"
-    );
-}
-
 #[tokio::test]
 async fn a_boot_once_that_fails_carries_its_unit_journal() {
     let directory = tempfile::tempdir().expect("tempdir");
@@ -366,6 +321,16 @@ async fn a_boot_once_that_fails_carries_its_unit_journal() {
         host_request(ordinary::HostDeployAction::ScheduleBootOnce),
     )
     .await;
+    let journal_read = driven
+        .commands
+        .iter()
+        .find(|line| line.contains("journalctl"))
+        .unwrap_or_else(|| panic!("the unit's journal was read, got {:?}", driven.commands));
+    assert!(
+        journal_read.contains("root@fixture-activate.invalid")
+            && journal_read.contains("--unit=lojix-boot-once-deploy-"),
+        "the journal is read on the unit's node, for that unit, got {journal_read:?}"
+    );
     let detail = evidence(&driven.failure).failure_detail.payload().clone();
     assert!(
         detail.contains("--- journal of lojix-boot-once-deploy-"),
@@ -389,7 +354,7 @@ async fn an_unreadable_unit_journal_says_why() {
     let driven = drive(
         directory.path(),
         NODE,
-        host_request(ordinary::HostDeployAction::ActivateNow),
+        host_request(ordinary::HostDeployAction::ScheduleBootOnce),
     )
     .await;
     let detail = evidence(&driven.failure).failure_detail.payload().clone();

@@ -496,6 +496,8 @@ impl ActivationScript for TransientScript {
     /// lands NEW; reboot 2+ returns to OLD. `SelfSwitch`: set the system
     /// profile, `switch-to-configuration switch`, then clear both EFI
     /// overrides so the declarative `loader.conf` is the sole authority.
+    /// `SelfTest`: `switch-to-configuration test`, the system profile left
+    /// where it is.
     fn script(&self) -> String {
         match self {
             Self::BootOnce(closure) => format!(
@@ -524,6 +526,12 @@ impl ActivationScript for TransientScript {
                  bootctl set-oneshot ''\n",
                 store = closure.0,
             ),
+            Self::SelfTest(closure) => format!(
+                "export PATH=/run/current-system/sw/bin:/run/wrappers/bin:$PATH\n\
+                 set -eu\n\
+                 {store}/bin/switch-to-configuration test\n",
+                store = closure.0,
+            ),
         }
     }
 }
@@ -546,20 +554,15 @@ impl Commanded for TransientUnitRun {
 }
 
 impl Commanded for RetainedUnitDispatch {
-    /// A same-host test activation, handed to PID 1 without tying its
-    /// lifetime to the daemon: `--remain-after-exit` keeps PID 1's terminal
-    /// receipt until the successor has read it and stops the unit.
+    /// A same-host switch or test activation, handed to PID 1 without tying
+    /// its lifetime to the daemon: `--remain-after-exit` keeps PID 1's
+    /// terminal receipt until the daemon that reads it, the dispatching one or
+    /// its successor, has settled the deployment and stops the unit.
     fn command_line(&self) -> CommandLine {
-        let script = format!(
-            "export PATH=/run/current-system/sw/bin:/run/wrappers/bin:$PATH\n\
-             set -eu\n\
-             {store}/bin/switch-to-configuration test\n",
-            store = self.closure_path.0,
-        );
         self.ssh_destination.remote(format!(
             "systemd-run --unit={unit_name} --no-block --service-type=oneshot --remain-after-exit /bin/sh -c {script}",
             unit_name = self.unit_name.0,
-            script = ShellArgument(&script).to_command_text(),
+            script = ShellArgument(&self.transient_script.script()).to_command_text(),
         ))
     }
 }

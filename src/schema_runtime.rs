@@ -2117,10 +2117,10 @@ pub enum DeployJobResumption {
 /// belongs to after the connection that submitted it is gone.
 pub(crate) trait DeployJobResuming {
     /// Reconstruct the retained PID-1 receipt for exactly a same-host host
-    /// `TestActivation`. The durable submission already binds the deployment
-    /// id, action, backend, and target node, so a second BootOnce-shaped field
-    /// would be redundant and misleading.
-    fn detached_test_activation_unit(
+    /// `ActivateNow` or `TestActivation`. The durable submission already binds
+    /// the deployment id, action, backend, and target node, so a second
+    /// BootOnce-shaped field would be redundant and misleading.
+    fn detached_activation_unit(
         &self,
         daemon_host: &ordinary::NodeName,
     ) -> Option<DetachedActivationUnit>;
@@ -2130,13 +2130,17 @@ pub(crate) trait DeployJobResuming {
     /// per resumed row and acts on the typed verdict (up9q resume scaffolding).
     fn resumption(&self) -> DeployJobResumption;
 
-    /// The live-set + gc-root rows a restarted daemon persists for a detached
-    /// self-switch it could not record before its own activation restarted it
-    /// (bead primary-7u8p). A host `ActivateNow` whose target IS the daemon host
-    /// runs `switch-to-configuration switch` inside a PID-1-owned unit that
-    /// restarts the daemon mid-pipeline, so the terminal activation write never
-    /// commits: the generation is lost, and because `next_deployment_identifier`
-    /// scans only the live set, its id is reused on the next deploy.
+    /// The live-set + gc-root rows a daemon persists for a detached
+    /// self-switch when it settles the deployment from the retained unit
+    /// (bead primary-7u8p). A host `ActivateNow` whose target IS the daemon
+    /// host runs `switch-to-configuration switch` inside a PID-1-owned unit
+    /// that may restart the daemon mid-switch, so the pipeline never records
+    /// the generation; recording it here also keeps
+    /// `next_deployment_identifier`, which scans only the live set, from
+    /// reusing its id. The record says the generation is live; the unit's own
+    /// result, not this record, is the deployment's terminal (bead
+    /// primary-6llk): a switch whose later clearing failed is recorded Current
+    /// and terminalized Failed.
     ///
     /// This repair is available only to the exact persisted submission that
     /// can cause it: `Host(ActivateNow)` through `NixosSystemdBootV1`. The
@@ -2150,8 +2154,8 @@ pub(crate) trait DeployJobResuming {
     /// A COMPLETED host self-switch is the only activation that set that profile
     /// to this job's closure (`nix-env -p /nix/var/nix/profiles/system --set
     /// <closure>` runs before the switch restarts the daemon), so an exact match
-    /// is the tight witness that this interrupted `Activating` job really is a
-    /// finished host switch — genuinely `Current`. Every other row that could
+    /// is the tight witness that the generation is live — genuinely
+    /// `Current`. Every other row that could
     /// reach `Activating` on the daemon host (a racy unrelated restart during a
     /// self-host `SetBootProfile`/`TestActivation`, or a user-environment
     /// activation, none of which touch the system profile) fails the match and
@@ -2163,24 +2167,33 @@ pub(crate) trait DeployJobResuming {
         daemon_host_system_closure: Option<&str>,
     ) -> Option<(memory::LiveGeneration, memory::GcRoot)>;
 
-    fn is_persisted_host_activate_now(&self) -> bool;
+    /// The persisted host submission when it is a host `ActivateNow` through
+    /// `NixosSystemdBootV1`, the job snapshot agreeing on that backend.
+    fn persisted_host_activate_now(&self) -> Option<&memory::HostDeployment>;
 }
 
 impl DeployJobResuming for memory::DeployJob {
-    fn detached_test_activation_unit(
+    fn detached_activation_unit(
         &self,
         daemon_host: &ordinary::NodeName,
     ) -> Option<DetachedActivationUnit> {
-        let host = match self
+        let (host, activation) = match self
             .actualized_deploy_submission_option
             .as_ref()
             .map(|submission| &submission.deploy_submission)
         {
             Some(meta_signal_lojix::DeploySubmission::Host(host))
-                if host.host_deploy_action == ordinary::HostDeployAction::TestActivation
-                    && host.activation_backend == memory::ActivationBackend::NixosSystemdBootV1 =>
+                if host.activation_backend == memory::ActivationBackend::NixosSystemdBootV1 =>
             {
-                host
+                match host.host_deploy_action {
+                    ordinary::HostDeployAction::ActivateNow => {
+                        (host, DetachedSelfActivation::Switch)
+                    }
+                    ordinary::HostDeployAction::TestActivation => {
+                        (host, DetachedSelfActivation::Test)
+                    }
+                    _ => return None,
+                }
             }
             _ => return None,
         };
@@ -2190,7 +2203,7 @@ impl DeployJobResuming for memory::DeployJob {
         {
             return None;
         }
-        let unit = DetachedActivationUnit::for_deployment(&self.deployment_identifier);
+        let unit = DetachedActivationUnit::for_deployment(&self.deployment_identifier, activation);
         let journal_option = SshTarget::from_transport(&nexus::DeploymentTransport {
             nix_store_uri: nexus::NixStoreUri::new(
                 host.deployment_transport.nix_store_uri.payload().clone(),
@@ -2226,9 +2239,7 @@ impl DeployJobResuming for memory::DeployJob {
         &self,
         daemon_host_system_closure: Option<&str>,
     ) -> Option<(memory::LiveGeneration, memory::GcRoot)> {
-        if !self.is_persisted_host_activate_now() {
-            return None;
-        }
+        let host = self.persisted_host_activate_now()?;
         let closure_path = self.closure_path_option.clone()?;
         if daemon_host_system_closure != Some(closure_path.payload().as_str()) {
             return None;
@@ -2253,9 +2264,14 @@ impl DeployJobResuming for memory::DeployJob {
             node_name: self.node_name.clone(),
             deployment_environment: memory::DeploymentEnvironment::HostEnvironment,
             // The detached self-switch is only reached by a host `ActivateNow`,
-            // and a daemon host is a complete host, so the recorded artifact is
-            // CompleteHost and the effect a live activation.
-            generation_artifact: ordinary::GenerationArtifact::CompleteHost,
+            // so the effect is a live activation; the artifact is the one the
+            // submission composed, as the pipeline would have recorded it.
+            generation_artifact: match host.host_composition {
+                ordinary::HostComposition::CompleteHost => {
+                    ordinary::GenerationArtifact::CompleteHost
+                }
+                ordinary::HostComposition::BaseHost => ordinary::GenerationArtifact::BaseHost,
+            },
             activation_effect: ordinary::ActivationEffect::LiveActivation,
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path: closure_path.clone(),
@@ -2272,16 +2288,23 @@ impl DeployJobResuming for memory::DeployJob {
         Some((generation, root))
     }
 
-    fn is_persisted_host_activate_now(&self) -> bool {
-        self.activation_backend == memory::ActivationBackend::NixosSystemdBootV1
-            && matches!(
-                self.actualized_deploy_submission_option
-                    .as_ref()
-                    .map(|submission| &submission.deploy_submission),
-                Some(meta_signal_lojix::DeploySubmission::Host(host))
-                    if host.host_deploy_action == ordinary::HostDeployAction::ActivateNow
-                        && host.activation_backend == memory::ActivationBackend::NixosSystemdBootV1
-            )
+    fn persisted_host_activate_now(&self) -> Option<&memory::HostDeployment> {
+        if self.activation_backend != memory::ActivationBackend::NixosSystemdBootV1 {
+            return None;
+        }
+        match self
+            .actualized_deploy_submission_option
+            .as_ref()
+            .map(|submission| &submission.deploy_submission)
+        {
+            Some(meta_signal_lojix::DeploySubmission::Host(host))
+                if host.host_deploy_action == ordinary::HostDeployAction::ActivateNow
+                    && host.activation_backend == memory::ActivationBackend::NixosSystemdBootV1 =>
+            {
+                Some(host)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -3149,7 +3172,7 @@ impl PipelineDeciding for SchemaRuntime {
             | memory::Outcome::ClosureBuilt(_)
             | memory::Outcome::ClosureCopied(_)
             | memory::Outcome::ActivationCompleted(_)
-            | memory::Outcome::DetachedTestActivationDispatched
+            | memory::Outcome::DetachedActivationDispatched
             | memory::Outcome::PathsCollected(_)
             | memory::Outcome::HermeticCheckBuilt(_)
             | memory::Outcome::TestVmStarted(_)
@@ -3353,12 +3376,12 @@ impl PipelineDeciding for SchemaRuntime {
                 self.set_activation_slot(activated.generation_slot);
                 self.record_phase(ordinary::DeploymentPhase::Activated)
             }
-            memory::Outcome::DetachedTestActivationDispatched => {
+            memory::Outcome::DetachedActivationDispatched => {
                 // The dispatch acknowledgement is not a terminal deployment
-                // outcome. PID 1 retains the exact test unit; the private
-                // observer terminalizes an observed result, while a replaced
-                // predecessor leaves this durable Activating cursor for its
-                // successor to reconcile.
+                // outcome. PID 1 retains the exact switch or test unit; the
+                // private observer settles the deployment from its observed
+                // result, while a replaced predecessor leaves this durable
+                // Activating cursor for its successor to settle.
                 let accepted = meta::DeployHandle {
                     deployment_identifier: pipeline.deployment_identifier,
                     database_marker: pipeline.accepted_marker.clone(),
@@ -5224,7 +5247,7 @@ impl EffectRunning for SchemaRuntime {
         // dispatch command itself has succeeded.  This makes the narrow
         // accepted handoff durable without mistaking that registration window
         // for an activation failure.
-        let detached_test_observer = match activation.detached_test_activation_unit() {
+        let detached_observer = match activation.detached_activation_unit() {
             Some(unit) => match unit.prepare_observer().await {
                 Ok(observer) => Some(observer),
                 Err(detail) => return Self::effect_failed(nexus::EffectStage::Activate, detail),
@@ -5232,13 +5255,13 @@ impl EffectRunning for SchemaRuntime {
             None => None,
         };
         match activation.run(self.configuration.effect_execution()).await {
-            Ok(()) if let Some(observer) = detached_test_observer => {
+            Ok(()) if let Some(observer) = detached_observer => {
                 observer.observe(
                     self.store.clone(),
                     *command.deployment_identifier.payload(),
                     self.configuration.effect_execution().clone(),
                 );
-                memory::Outcome::DetachedTestActivationDispatched
+                memory::Outcome::DetachedActivationDispatched
             }
             Ok(()) => memory::Outcome::ActivationCompleted(nexus::ActivatedGeneration {
                 generation_identifier: command.generation_identifier,
@@ -6255,7 +6278,9 @@ trait Activating: Sized {
         daemon_host: Option<&ordinary::NodeName>,
     ) -> std::result::Result<Self, String>;
 
-    fn detached_test_activation_unit(&self) -> Option<DetachedActivationUnit>;
+    /// The retained PID-1 unit a same-host Switch or Test is handed to, which
+    /// the daemon that reads its receipt settles the deployment from.
+    fn detached_activation_unit(&self) -> Option<DetachedActivationUnit>;
 }
 
 impl Activating for Activation {
@@ -6298,23 +6323,21 @@ impl Activating for Activation {
         }
     }
 
-    fn detached_test_activation_unit(&self) -> Option<DetachedActivationUnit> {
+    fn detached_activation_unit(&self) -> Option<DetachedActivationUnit> {
         match self {
-            Self::Host(activation)
-                if matches!(
-                    activation.action,
-                    ordinary::HostDeployAction::TestActivation
-                ) && activation.detached_self_activation().is_some() =>
-            {
-                Some(DetachedActivationUnit {
-                    name: activation.self_switch_unit_name(),
-                    journal_option: Some(UnitJournal::new(
-                        activation.self_switch_unit_name(),
-                        activation.target.clone(),
-                    )),
-                })
+            Self::Host(activation) => {
+                activation
+                    .detached_self_activation()
+                    .map(|detached| DetachedActivationUnit {
+                        name: activation.self_switch_unit_name(),
+                        activation: detached,
+                        journal_option: Some(UnitJournal::new(
+                            activation.self_switch_unit_name(),
+                            activation.target.clone(),
+                        )),
+                    })
             }
-            _ => None,
+            Self::UserEnvironment(_) => None,
         }
     }
 }
@@ -6331,15 +6354,18 @@ impl Effect for Activation {
 }
 
 /// The two host actions that hand activation to a PID-1-owned transient unit
-/// on the daemon's own node. Every other action activates in the foreground
-/// and has no handoff script.
+/// on the daemon's own node, its receipt retained for whichever daemon reads
+/// it, the dispatching one or its successor. Every other action activates in
+/// the foreground and has no handoff script.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DetachedSelfActivation {
-    /// `switch-to-configuration switch`, run detached so the daemon restart it
-    /// triggers cannot kill it mid-flight.
+pub(crate) enum DetachedSelfActivation {
+    /// Set the system profile and `switch-to-configuration switch`, run
+    /// detached so the daemon restart it triggers cannot kill it mid-flight.
+    /// The generation it set live is recorded Current whatever the unit's
+    /// result; the deployment's terminal is the unit's result.
     Switch,
-    /// `switch-to-configuration test`, whose PID-1 receipt is retained for the
-    /// successor daemon to read.
+    /// `switch-to-configuration test`, which leaves the system profile
+    /// where it is.
     Test,
 }
 
@@ -6401,14 +6427,15 @@ trait HostActivating {
     /// `lojix-self-switch-deploy-<deployment-identifier>.service`.
     fn self_switch_unit_name(&self) -> String;
 
-    /// The detached self-Switch: the whole Switch, profile set and EFI
-    /// overrides cleared, inside a waited-on transient unit.
-    fn self_switch_emission(&self) -> emission::TransientUnitRun;
-
-    /// The detached self-Test: dispatched without tying its lifetime to the
-    /// old daemon cgroup, its PID-1 receipt retained until the successor has
-    /// reconciled and explicitly cleans it.
-    fn self_test_emission(&self) -> emission::RetainedUnitDispatch;
+    /// The detached self-activation, dispatched without tying its lifetime to
+    /// the daemon's cgroup, its PID-1 receipt retained until the daemon that
+    /// reads it has settled the deployment and cleans it: for a Switch the
+    /// whole Switch, profile set and EFI overrides cleared; for a Test the
+    /// test action alone.
+    fn retained_emission(
+        &self,
+        activation: DetachedSelfActivation,
+    ) -> emission::RetainedUnitDispatch;
 
     /// Whether this action reconciles EFI bootloader vars after activation.
     /// `Boot`/`Switch` write the declarative `loader.conf` default; reconcile
@@ -6493,19 +6520,20 @@ impl HostActivating for HostActivation {
         DetachedActivationUnit::canonical_name(&self.deployment_identifier)
     }
 
-    fn self_switch_emission(&self) -> emission::TransientUnitRun {
-        emission::TransientUnitRun {
-            ssh_destination: self.target.ssh_destination.clone(),
-            unit_name: emission::UnitName(self.self_switch_unit_name()),
-            transient_script: emission::TransientScript::SelfSwitch(self.closure_path.clone()),
-        }
-    }
-
-    fn self_test_emission(&self) -> emission::RetainedUnitDispatch {
+    fn retained_emission(
+        &self,
+        activation: DetachedSelfActivation,
+    ) -> emission::RetainedUnitDispatch {
+        let closure_path = self.closure_path.clone();
         emission::RetainedUnitDispatch {
             ssh_destination: self.target.ssh_destination.clone(),
             unit_name: emission::UnitName(self.self_switch_unit_name()),
-            closure_path: self.closure_path.clone(),
+            transient_script: match activation {
+                DetachedSelfActivation::Switch => {
+                    emission::TransientScript::SelfSwitch(closure_path)
+                }
+                DetachedSelfActivation::Test => emission::TransientScript::SelfTest(closure_path),
+            },
         }
     }
 
@@ -6528,19 +6556,12 @@ impl HostActivating for HostActivation {
         execution: &EffectExecution,
         activation: DetachedSelfActivation,
     ) -> std::result::Result<(), StageFailure> {
-        match activation {
-            // `--wait` returns only once the unit has ended, and what the
-            // switch printed went to the unit's journal, not to this ssh.
-            DetachedSelfActivation::Switch => {
-                self.run_journalled_unit(execution, self.self_switch_emission())
-                    .await
-            }
-            DetachedSelfActivation::Test => {
-                match execution.emitted(self.self_test_emission()).await {
-                    emission::CallOutcome::Completed => Ok(()),
-                    emission::CallOutcome::Failed(failure) => Err(failure.into()),
-                }
-            }
+        // The dispatch returns once PID 1 holds the unit; what the
+        // activation prints goes to the unit's journal, and its result is
+        // read from the retained receipt.
+        match execution.emitted(self.retained_emission(activation)).await {
+            emission::CallOutcome::Completed => Ok(()),
+            emission::CallOutcome::Failed(failure) => Err(failure.into()),
         }
     }
 
@@ -6662,12 +6683,16 @@ impl UnitJournalReading for UnitJournal {
     }
 }
 
-/// PID-1's retained receipt for a same-host non-persistent activation.  The
+/// PID-1's retained receipt for a same-host Switch or Test activation. The
 /// unit name is derived from the already durable deployment identity; there is
-/// deliberately no BootOnce cursor or profile witness involved.
+/// deliberately no BootOnce cursor involved, and the unit's own result, never
+/// the system profile, is the deployment's terminal.
 #[derive(Debug, Clone)]
 pub(crate) struct DetachedActivationUnit {
     name: String,
+    /// What the unit runs: a Switch, whose live generation is recorded
+    /// Current whatever its result, or a Test, which records none.
+    activation: DetachedSelfActivation,
     /// Where the unit's journal is read from: the route the activation was
     /// dispatched over. `None` only for a unit named without a deployment
     /// behind it.
@@ -6744,7 +6769,7 @@ pub(crate) enum DetachedActivationOutcome {
 /// The transient systemd unit a same-host activation is handed to, and what is
 /// asked of PID 1 about it afterwards.
 pub(crate) trait DetachedActivation {
-    fn new(name: String) -> Self
+    fn new(name: String, activation: DetachedSelfActivation) -> Self
     where
         Self: Sized;
 
@@ -6754,7 +6779,10 @@ pub(crate) trait DetachedActivation {
     /// logging, and cleanup must share it exactly.
     fn canonical_name(deployment_identifier: &ordinary::DeploymentIdentifier) -> String;
 
-    fn for_deployment(deployment_identifier: &ordinary::DeploymentIdentifier) -> Self
+    fn for_deployment(
+        deployment_identifier: &ordinary::DeploymentIdentifier,
+        activation: DetachedSelfActivation,
+    ) -> Self
     where
         Self: Sized;
 
@@ -6786,12 +6814,57 @@ pub(crate) trait DetachedActivation {
     ) -> DetachedActivationFailure;
 
     async fn clean(&self);
+
+    /// Settle the deployment from the unit's terminal outcome: a failure is
+    /// completed with the unit's journal, a Switch's live generation is
+    /// recorded Current when the system profile is its closure, and the
+    /// terminal is written; the unit is cleaned once that terminal is
+    /// durable. An outcome that is no terminal leaves the deployment
+    /// Activating.
+    async fn settle(
+        &self,
+        outcome: Option<DetachedActivationOutcome>,
+        store: &Store,
+        deployment_identifier: i64,
+        execution: &EffectExecution,
+    );
+
+    /// Write a terminal the unit's result came to, after recording a Switch's
+    /// live generation Current when `system_profile` is its closure. True
+    /// when the terminal is durable; a failed generation write leaves the
+    /// deployment Activating for the next start to settle.
+    fn conclude(
+        &self,
+        terminal: memory::DeploymentTerminal,
+        store: &Store,
+        deployment_identifier: i64,
+        system_profile: Option<&str>,
+    ) -> bool;
+}
+
+/// The store path the daemon host's system profile resolves to:
+/// `/nix/var/nix/profiles/system`, which a Switch sets with `nix-env --set`
+/// before it switches. `None` when it cannot be read.
+pub(crate) struct SystemProfile;
+
+/// Reading where the system profile points.
+pub(crate) trait SystemProfileReading {
+    fn closure() -> Option<String>;
+}
+
+impl SystemProfileReading for SystemProfile {
+    fn closure() -> Option<String> {
+        fs::canonicalize("/nix/var/nix/profiles/system")
+            .ok()
+            .map(|path| path.display().to_string())
+    }
 }
 
 impl DetachedActivation for DetachedActivationUnit {
-    fn new(name: String) -> Self {
+    fn new(name: String, activation: DetachedSelfActivation) -> Self {
         Self {
             name,
+            activation,
             journal_option: None,
         }
     }
@@ -6803,8 +6876,11 @@ impl DetachedActivation for DetachedActivationUnit {
         )
     }
 
-    fn for_deployment(deployment_identifier: &ordinary::DeploymentIdentifier) -> Self {
-        Self::new(Self::canonical_name(deployment_identifier))
+    fn for_deployment(
+        deployment_identifier: &ordinary::DeploymentIdentifier,
+        activation: DetachedSelfActivation,
+    ) -> Self {
+        Self::new(Self::canonical_name(deployment_identifier), activation)
     }
 
     async fn prepare_observer(&self) -> std::result::Result<DetachedActivationObserver, String> {
@@ -6853,7 +6929,7 @@ impl DetachedActivation for DetachedActivationUnit {
             emission::ServiceResultReading::Unreadable(fault) => Err(fault.0),
         };
         eprintln!(
-            "lojix detached test activation observer state active={:?} result={:?}",
+            "lojix detached activation observer state active={:?} result={:?}",
             active
                 .as_ref()
                 .map(|active_state| active_state.systemd_word()),
@@ -6863,6 +6939,15 @@ impl DetachedActivation for DetachedActivationUnit {
         );
         match (&active, &result) {
             (Ok(emission::ActiveState::Active), Ok(emission::ServiceResult::Success)) => {
+                DetachedActivationOutcome::Succeeded
+            }
+            // A oneshot that does not remain after exit, as one dispatched
+            // before its receipt was retained, ends inactive; its receipt is
+            // a success when its main process exited 0.
+            (Ok(emission::ActiveState::Inactive), Ok(emission::ServiceResult::Success))
+                if state.process_end_option
+                    == Some(emission::ProcessEnd::Exited(emission::ExitStatus(0))) =>
+            {
                 DetachedActivationOutcome::Succeeded
             }
             (Ok(emission::ActiveState::Activating | emission::ActiveState::Reloading), _) => {
@@ -6930,6 +7015,66 @@ impl DetachedActivation for DetachedActivationUnit {
             })
             .await;
     }
+
+    async fn settle(
+        &self,
+        outcome: Option<DetachedActivationOutcome>,
+        store: &Store,
+        deployment_identifier: i64,
+        execution: &EffectExecution,
+    ) {
+        let outcome = match outcome {
+            Some(DetachedActivationOutcome::Failed(failure)) => Some(
+                DetachedActivationOutcome::Failed(self.journalled(failure, execution).await),
+            ),
+            other => other,
+        };
+        let Some(terminal) = Self::terminal_outcome(outcome) else {
+            return;
+        };
+        if self.conclude(
+            terminal,
+            store,
+            deployment_identifier,
+            SystemProfile::closure().as_deref(),
+        ) {
+            self.clean().await;
+        }
+    }
+
+    fn conclude(
+        &self,
+        terminal: memory::DeploymentTerminal,
+        store: &Store,
+        deployment_identifier: i64,
+        system_profile: Option<&str>,
+    ) -> bool {
+        if self.activation == DetachedSelfActivation::Switch {
+            let Ok(jobs) = store.deploy_jobs() else {
+                return false;
+            };
+            let recorded = jobs
+                .into_iter()
+                .find(|job| *job.deployment_identifier.payload() == deployment_identifier)
+                .and_then(|job| job.self_switch_activation_record(system_profile));
+            if let Some((generation, root)) = recorded {
+                let already_recorded = store
+                    .records::<memory::GcRoot>()
+                    .map(|roots| {
+                        roots.iter().any(|existing| {
+                            existing.generation_identifier == generation.generation_identifier
+                        })
+                    })
+                    .unwrap_or(false);
+                if !already_recorded && store.record_activation(generation, root).is_err() {
+                    return false;
+                }
+            }
+        }
+        store
+            .terminalize_deployment(deployment_identifier, terminal)
+            .is_ok()
+    }
 }
 
 /// Watching a detached activation to its terminal outcome and persisting it,
@@ -6985,39 +7130,26 @@ impl DetachedObserving for DetachedActivationObserver {
     ) {
         tokio::spawn(async move {
             eprintln!(
-                "lojix detached test activation observer attached deployment={} unit={}",
+                "lojix detached activation observer attached deployment={} unit={}",
                 deployment_identifier, self.unit.name
             );
             let outcome = match self.await_completion().await {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     eprintln!(
-                        "lojix detached test activation observer error deployment={} unit={} error={}",
+                        "lojix detached activation observer error deployment={} unit={} error={}",
                         deployment_identifier, self.unit.name, error
                     );
                     return;
                 }
             };
             eprintln!(
-                "lojix detached test activation observer completion deployment={} unit={} outcome={outcome:?}",
+                "lojix detached activation observer completion deployment={} unit={} outcome={outcome:?}",
                 deployment_identifier, self.unit.name
             );
-            let outcome = match outcome {
-                Some(DetachedActivationOutcome::Failed(failure)) => {
-                    Some(DetachedActivationOutcome::Failed(
-                        self.unit.journalled(failure, &execution).await,
-                    ))
-                }
-                other => other,
-            };
-            let terminal = DetachedActivationUnit::terminal_outcome(outcome);
-            if let Some(terminal) = terminal
-                && store
-                    .terminalize_deployment(deployment_identifier, terminal)
-                    .is_ok()
-            {
-                self.unit.clean().await;
-            }
+            self.unit
+                .settle(outcome, &store, deployment_identifier, &execution)
+                .await;
         });
     }
 
@@ -7037,7 +7169,7 @@ impl DetachedObserving for DetachedActivationObserver {
                 emission::UnitLookupOutcome::Refused(fault) => return Err(fault.0),
                 emission::UnitLookupOutcome::NoSuchUnit => {
                     eprintln!(
-                        "lojix detached test activation observer awaiting registration unit={}",
+                        "lojix detached activation observer awaiting registration unit={}",
                         self.unit.name
                     );
                     match self
@@ -8682,7 +8814,10 @@ mod tests {
         // A registration window is the absence of an outcome: `initial_outcome`
         // answers `None` when PID 1 has not yet made the transient visible.
         assert!(DetachedActivationUnit::needs_completion_observer(None));
-        let unit = DetachedActivationUnit::new("lojix-self-switch-deploy-41.service".to_string());
+        let unit = DetachedActivationUnit::new(
+            "lojix-self-switch-deploy-41.service".to_string(),
+            DetachedSelfActivation::Test,
+        );
         assert!(unit.is_expected_unit_new("lojix-self-switch-deploy-41.service"));
     }
 
@@ -8691,7 +8826,10 @@ mod tests {
         // UnitNew is subscribed before `systemd-run --no-block`. A matching
         // signal queued while dispatch returns must make a following NoSuchUnit
         // lookup retry; an unrelated transient must not wake this deployment.
-        let unit = DetachedActivationUnit::new("lojix-self-switch-deploy-41.service".to_string());
+        let unit = DetachedActivationUnit::new(
+            "lojix-self-switch-deploy-41.service".to_string(),
+            DetachedSelfActivation::Switch,
+        );
         assert!(unit.is_expected_unit_new("lojix-self-switch-deploy-41.service"));
         assert!(!unit.is_expected_unit_new("lojix-self-switch-deploy-42.service"));
     }
@@ -8701,7 +8839,12 @@ mod tests {
         let identifier = ordinary::DeploymentIdentifier::new(41);
         let name = DetachedActivationUnit::canonical_name(&identifier);
         assert_eq!(name, "lojix-self-switch-deploy-41.service");
-        assert!(DetachedActivationUnit::for_deployment(&identifier).is_expected_unit_new(&name));
+        for activation in [DetachedSelfActivation::Switch, DetachedSelfActivation::Test] {
+            assert!(
+                DetachedActivationUnit::for_deployment(&identifier, activation)
+                    .is_expected_unit_new(&name)
+            );
+        }
     }
 
     #[test]
@@ -8726,12 +8869,23 @@ mod tests {
             activation.detached_self_activation().is_some(),
             "self-host Switch must take the detached shape"
         );
-        let invocation = activation.self_switch_emission().command_line();
+        assert_eq!(
+            activation.detached_self_activation(),
+            Some(DetachedSelfActivation::Switch)
+        );
+        let invocation = activation
+            .retained_emission(DetachedSelfActivation::Switch)
+            .command_line();
         assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
         assert!(argv.contains("systemd-run"), "PID-1-owned unit: {argv}");
         assert!(argv.contains("--service-type=oneshot"), "{argv}");
-        assert!(argv.contains("--wait"), "{argv}");
+        // bead primary-6llk: PID 1 retains the unit's receipt for the daemon
+        // that settles the deployment, the dispatcher or its successor.
+        assert!(argv.contains("--no-block"), "{argv}");
+        assert!(argv.contains("--remain-after-exit"), "{argv}");
+        assert!(!argv.contains("--wait"), "{argv}");
+        assert!(!argv.contains("--collect"), "{argv}");
         assert!(
             argv.contains("--unit=lojix-self-switch-deploy-7.service"),
             "deterministic self-switch unit name: {argv}"
@@ -8760,7 +8914,13 @@ mod tests {
             activation.detached_self_activation().is_some(),
             "same-host TestActivation must survive the service replacement"
         );
-        let invocation = activation.self_test_emission().command_line();
+        assert_eq!(
+            activation.detached_self_activation(),
+            Some(DetachedSelfActivation::Test)
+        );
+        let invocation = activation
+            .retained_emission(DetachedSelfActivation::Test)
+            .command_line();
         let argv = invocation.joined_arguments();
         assert!(argv.contains("systemd-run"), "PID-1-owned unit: {argv}");
         assert!(
@@ -8854,9 +9014,11 @@ mod tests {
             generation.activation_effect,
             ordinary::ActivationEffect::LiveActivation
         );
+        // The artifact is the one the submission composed: this fixture's
+        // host is a BaseHost.
         assert_eq!(
             generation.generation_artifact,
-            ordinary::GenerationArtifact::CompleteHost
+            ordinary::GenerationArtifact::BaseHost
         );
         assert_eq!(
             generation.closure_path.payload(),
@@ -10073,8 +10235,10 @@ mod tests {
     }
 
     fn detached_test_unit() -> DetachedActivationUnit {
-        let job_unit =
-            DetachedActivationUnit::for_deployment(&ordinary::DeploymentIdentifier::new(41));
+        let job_unit = DetachedActivationUnit::for_deployment(
+            &ordinary::DeploymentIdentifier::new(41),
+            DetachedSelfActivation::Test,
+        );
         DetachedActivationUnit {
             journal_option: Some(UnitJournal::new(
                 job_unit.name.clone(),
@@ -10129,6 +10293,55 @@ mod tests {
         );
     }
 
+    /// What PID 1 retained for a self-switch whose boot-entry clearing failed
+    /// after the switch, as on ouranos for deployment 586, carries the unit's
+    /// journal: what bootctl printed is there and nowhere else.
+    #[test]
+    fn a_self_switch_unit_that_failed_carries_its_result_and_journal() {
+        let (directory, execution) =
+            journal_execution("bootctl: Not booted with a supported boot loader.");
+        let unit = DetachedActivationUnit {
+            activation: DetachedSelfActivation::Switch,
+            ..detached_test_unit()
+        };
+        let DetachedActivationOutcome::Failed(failure) = unit.classify(emission::UnitState {
+            active_state_reading: emission::ActiveStateReading::Read(emission::ActiveState::Failed),
+            service_result_reading: emission::ServiceResultReading::Read(
+                emission::ServiceResult::ExitCode,
+            ),
+            process_end_option: Some(emission::ProcessEnd::Exited(emission::ExitStatus(1))),
+        }) else {
+            panic!("a failed unit is a failure");
+        };
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let evidence = runtime
+            .block_on(unit.journalled(failure, &execution))
+            .witness();
+        let detail = evidence.failure_detail.payload();
+        assert!(
+            detail.contains("systemd reported Result=exit-code; main process exited with status 1"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("--- journal of lojix-self-switch-deploy-41.service ---"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("Not booted with a supported boot loader."),
+            "{detail}"
+        );
+        let command = evidence.failed_command_option.expect("systemd-run named");
+        assert_eq!(
+            command.exit_code_option,
+            Some(crate::runtime_model::ExitCode::new(1))
+        );
+        let commands = fs::read_to_string(directory.path().join("commands")).expect("ssh log");
+        assert!(
+            commands.contains("journalctl --unit=lojix-self-switch-deploy-41.service"),
+            "{commands}"
+        );
+    }
+
     #[test]
     fn a_vanished_detached_unit_is_still_evidence() {
         // PID 1 no longer holding the unit used to terminalize with no
@@ -10149,6 +10362,85 @@ mod tests {
             "{detail}"
         );
         assert!(evidence.failed_command_option.is_some());
+    }
+
+    fn unit_state(
+        active_state: emission::ActiveState,
+        service_result: emission::ServiceResult,
+        process_end_option: Option<emission::ProcessEnd>,
+    ) -> emission::UnitState {
+        emission::UnitState {
+            active_state_reading: emission::ActiveStateReading::Read(active_state),
+            service_result_reading: emission::ServiceResultReading::Read(service_result),
+            process_end_option,
+        }
+    }
+
+    /// PID 1's receipt decides the outcome: ActiveState, Result and how the
+    /// main process ended, each as systemd's own value.
+    #[test]
+    fn a_retained_receipt_is_classified_from_systemd_values() {
+        let unit = detached_test_unit();
+        let exited = |status| Some(emission::ProcessEnd::Exited(emission::ExitStatus(status)));
+        assert_eq!(
+            unit.classify(unit_state(
+                emission::ActiveState::Active,
+                emission::ServiceResult::Success,
+                exited(0),
+            )),
+            DetachedActivationOutcome::Succeeded
+        );
+        // A oneshot that does not remain after exit ends inactive; it
+        // succeeded when its main process exited 0, and not otherwise.
+        assert_eq!(
+            unit.classify(unit_state(
+                emission::ActiveState::Inactive,
+                emission::ServiceResult::Success,
+                exited(0),
+            )),
+            DetachedActivationOutcome::Succeeded
+        );
+        assert!(matches!(
+            unit.classify(unit_state(
+                emission::ActiveState::Inactive,
+                emission::ServiceResult::Success,
+                Some(emission::ProcessEnd::Signalled(emission::SignalEnd {
+                    signal_number: emission::SignalNumber(15),
+                    core_dumped: emission::CoreDumped(false),
+                })),
+            )),
+            DetachedActivationOutcome::Failed(_)
+        ));
+        assert_eq!(
+            unit.classify(unit_state(
+                emission::ActiveState::Activating,
+                emission::ServiceResult::Success,
+                None,
+            )),
+            DetachedActivationOutcome::Running
+        );
+        let DetachedActivationOutcome::Failed(failure) = unit.classify(unit_state(
+            emission::ActiveState::Failed,
+            emission::ServiceResult::ExitCode,
+            exited(1),
+        )) else {
+            panic!("a failed unit is a failure");
+        };
+        assert_eq!(failure.active_state, "failed");
+        assert_eq!(
+            failure.result,
+            "systemd reported Result=exit-code; main process exited with status 1"
+        );
+        // A word systemd adds later is kept as the text it sent.
+        let DetachedActivationOutcome::Failed(failure) = unit.classify(unit_state(
+            emission::ActiveState::Unrecognized("hibernating".into()),
+            emission::ServiceResult::Unrecognized("dreaming".into()),
+            None,
+        )) else {
+            panic!("an unrecognized state is no success");
+        };
+        assert_eq!(failure.active_state, "hibernating");
+        assert_eq!(failure.result, "systemd reported Result=dreaming");
     }
 
     // ---- Every emission's argv equals what 0.11.0 at 23f88f2 ran ----
@@ -10384,13 +10676,17 @@ mod tests {
             host_activation_on_host(ordinary::HostDeployAction::ActivateNow, Some(node()));
         line(
             "host self-switch",
-            self_switch.self_switch_emission().command_line(),
+            self_switch
+                .retained_emission(DetachedSelfActivation::Switch)
+                .command_line(),
         );
         let self_test =
             host_activation_on_host(ordinary::HostDeployAction::TestActivation, Some(node()));
         line(
             "host self-test",
-            self_test.self_test_emission().command_line(),
+            self_test
+                .retained_emission(DetachedSelfActivation::Test)
+                .command_line(),
         );
         line(
             "journal boot-once",
@@ -10475,7 +10771,26 @@ mod tests {
 
     #[test]
     fn every_emission_runs_the_argv_23f88f2_ran_for_the_same_inputs() {
-        let recorded = include_str!("../tests/fixtures/emission-argv.txt");
+        // One line moves from what 23f88f2 ran, and only as named here: the
+        // same-host self-switch is dispatched with its receipt retained, as
+        // the self-test is, rather than waited on and collected (bead
+        // primary-6llk). Its script is unchanged.
+        let recorded: String = include_str!("../tests/fixtures/emission-argv.txt")
+            .lines()
+            .map(|line| {
+                if line.starts_with("host self-switch\t") {
+                    line.replacen(
+                        "--collect --wait --service-type=oneshot /bin/sh",
+                        "--no-block --service-type=oneshot --remain-after-exit /bin/sh",
+                        1,
+                    )
+                } else {
+                    line.to_string()
+                }
+            })
+            .map(|line| line + "\n")
+            .collect();
+        assert!(recorded.contains("host self-switch\t\"ssh\"\t[\"-o\", \"BatchMode=yes\", \"fixture-login@fixture-activate.invalid\", \"systemd-run --unit=lojix-self-switch-deploy-7.service --no-block --service-type=oneshot --remain-after-exit /bin/sh"));
         let emitted: String = emitted_command_lines()
             .into_iter()
             .map(|(label, command_line)| {
