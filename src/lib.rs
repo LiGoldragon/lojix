@@ -434,7 +434,7 @@ pub enum Error {
     },
 
     #[error(
-        "lojix store at {path:?} cannot be used by this daemon's startup schema/layout gate while {stage}; daemon startup stopped before serving requests; inspect it with an inline `lojix-inspect-store 'InspectStore.{{ <path> }}'` request: {source}"
+        "lojix store at {path:?} cannot be used by this daemon's startup schema/layout gate while {stage}; daemon startup stopped before serving requests; inspect it with an inline `lojix-inspect-store '{{ <path> }}'` request: {source}"
     )]
     StoreStartupCompatibility {
         path: PathBuf,

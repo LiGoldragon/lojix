@@ -24,7 +24,7 @@ fn write_configuration_round_trips_through_rkyv() {
     let horizon = directory.path().join("horizon-definition.datom");
     common::write_single_node(&horizon);
     let request = format!(
-        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon TestDefaults.{{fixture-cluster fixture-vm-host Hermetic github:fixture-owner/fixture-test-flake x86_64-linux checks.fixture-a {}}} {}}}",
+        "{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon TestDefaults.{{fixture-cluster fixture-vm-host Hermetic github:fixture-owner/fixture-test-flake x86_64-linux checks.fixture-a {}}} {}}}",
         horizon.display(),
         output.display()
     );
@@ -69,7 +69,7 @@ fn write_configuration_bakes_no_test_defaults_for_production() {
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon NoTestDefaults {}}}",
+        "{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon NoTestDefaults {}}}",
         output.display()
     );
 
@@ -86,7 +86,7 @@ fn write_configuration_requires_one_inline_object_and_never_reads_a_request_file
     let directory = tempfile::tempdir().expect("tempdir");
     let output = directory.path().join("startup.rkyv");
     let request = format!(
-        "ConfigurationWriteRequest.{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon NoTestDefaults {}}}",
+        "{{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon NoTestDefaults {}}}",
         output.display()
     );
     let request_file = directory.path().join("request.datom");

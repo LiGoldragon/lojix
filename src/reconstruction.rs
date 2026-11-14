@@ -83,8 +83,8 @@ impl std::fmt::Display for StoreResetOutcome {
     }
 }
 
-/// One exact, version-aware Lojix store reset. It accepts only inline
-/// `ResetStore`, never a raw path, configuration path, directory, glob, or
+/// One exact, version-aware Lojix store reset. It accepts only the inline
+/// empty `ResetStore` struct, `{}`, never a raw path, configuration path, directory, glob, or
 /// request file. The archive supplied by the service environment owns the
 /// store selection. That configured primary must be an existing regular,
 /// non-symlink file with a recognised Lojix catalog; a sibling Spirit database
@@ -169,7 +169,7 @@ impl StoreResetting for StoreResetCommand {
 
 /// Reading the reset command's one inline operand as the request it must be.
 trait ResetRequestText {
-    /// `ResetStore` is a bare current Datom command. It is deliberately parsed
+    /// `{}`, the empty `ResetStore` struct, is the whole command. It is deliberately parsed
     /// structurally rather than treated as a magic string so extra fields,
     /// another delimiter, and a malformed document are all rejected at the
     /// same boundary.
@@ -178,10 +178,10 @@ trait ResetRequestText {
 
 impl ResetRequestText for str {
     fn require_reset_store(&self) -> Result<()> {
-        let request = Potential::<ingress::ResetStoreRequest>::from(self.to_owned())
+        let request = Potential::<ingress::ResetStore>::from(self.to_owned())
             .actualize(&mut <crate::Ingress as crate::Budgeted>::budget())
             .map_err(|fault| Error::DatomRequestText(format!("{fault:?}")))?;
-        let ingress::ResetStoreRequest::ResetStore = request;
+        let ingress::ResetStore {} = request;
         Ok(())
     }
 }
@@ -464,7 +464,7 @@ mod tests {
 
     fn reset_command(archive: &Path) -> StoreResetCommand {
         StoreResetCommand::from_arguments_with_configuration(
-            [OsString::from("ResetStore")],
+            [OsString::from("{}")],
             archive.to_path_buf(),
         )
         .expect("exact reset command")
@@ -496,12 +496,13 @@ mod tests {
             vec![OsString::from(
                 "StoreResetRequest.{/tmp/lojix-store.memory}",
             )],
-            vec![OsString::from("ResetStore"), OsString::from("extra")],
+            vec![OsString::from("ResetStore")],
+            vec![OsString::from("{}"), OsString::from("extra")],
         ] {
             assert!(
                 StoreResetCommand::from_arguments_with_configuration(arguments, archive.clone())
                     .is_err(),
-                "reset must accept only one inline ResetStore Datom"
+                "reset must accept only one inline empty ResetStore struct"
             );
         }
     }

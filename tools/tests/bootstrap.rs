@@ -721,12 +721,12 @@ fn cli_remains_exactly_one_inline_object() {
     for arguments in [
         Vec::<OsString>::new(),
         vec![OsString::from("--help")],
-        vec![OsString::from("BootstrapRun.{}"), OsString::from("extra")],
+        vec![OsString::from("{}"), OsString::from("extra")],
     ] {
         assert!(BootstrapRun::decode_single_inline(arguments).is_err());
     }
     let parsed = BootstrapRun::decode_single_inline([OsString::from(format!(
-        "BootstrapRun.{{fixture BuildOnly.{{Direct.{{{FLAKE} x86_64-linux nixosConfigurations.target.config.system.build.toplevel}} NoBuilder {} {} {}}}}}",
+        "{{fixture BuildOnly.{{Direct.{{{FLAKE} x86_64-linux nixosConfigurations.target.config.system.build.toplevel}} NoBuilder {} {} {}}}}}",
         directory.path().display(),
         directory.path().join("root").display(),
         directory.path().join("evidence").display(),

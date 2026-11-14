@@ -32,7 +32,7 @@ fn startup_archive(
 
 fn reset_command(archive: &std::path::Path) -> StoreResetCommand {
     StoreResetCommand::from_arguments_with_configuration(
-        [OsString::from("ResetStore")],
+        [OsString::from("{}")],
         archive.to_path_buf(),
     )
     .expect("exact reset command")
@@ -67,7 +67,7 @@ fn reset_requires_one_inline_pathless_request() {
     );
     assert!(
         StoreResetCommand::from_arguments_with_configuration(
-            [OsString::from("ResetStore"), OsString::from("unexpected"),],
+            [OsString::from("{}"), OsString::from("unexpected"),],
             archive
         )
         .is_err()

@@ -28,10 +28,9 @@ impl ConfigurationWritable for ConfigurationWriterCli {
         Self
     }
     fn run(&self) -> Result<(), ConfigurationWriterError> {
-        let request = Potential::<ingress::ConfigurationWriterInput>::from(self.source()?)
+        let request = Potential::<ingress::ConfigurationWriteRequest>::from(self.source()?)
             .actualize(&mut <lojix::Ingress as lojix::Budgeted>::budget())
             .map_err(|fault| ConfigurationWriterError::Decode(format!("{fault:?}")))?;
-        let ingress::ConfigurationWriterInput::ConfigurationWriteRequest(request) = request;
         let output_path = request.write()?;
         println!("ConfigurationWritten.{{ {} }}", output_path.display());
         Ok(())
@@ -66,15 +65,15 @@ trait ConfigurationWriting {
 impl ConfigurationWriting for ingress::ConfigurationWriteRequest {
     fn write(self) -> Result<PathBuf, ConfigurationWriterError> {
         let ingress::ConfigurationWriteRequest {
-            first_writer_path: ordinary_socket_path,
-            first_writer_mode: ordinary_socket_mode,
-            second_writer_path: owner_socket_path,
-            second_writer_mode: owner_socket_mode,
-            third_writer_path: state_directory_path,
-            fourth_writer_path: store_path,
-            writer_cluster: daemon_host,
+            first_writer_path: ingress::WriterPath(ordinary_socket_path),
+            first_writer_mode: ingress::WriterMode(ordinary_socket_mode),
+            second_writer_path: ingress::WriterPath(owner_socket_path),
+            second_writer_mode: ingress::WriterMode(owner_socket_mode),
+            third_writer_path: ingress::WriterPath(state_directory_path),
+            fourth_writer_path: ingress::WriterPath(store_path),
+            writer_cluster: ingress::WriterCluster(daemon_host),
             writer_test_defaults_choice: test_defaults,
-            fifth_writer_path: output_path,
+            fifth_writer_path: ingress::WriterPath(output_path),
         } = self;
         let output_path = PathBuf::from(output_path);
         let configuration = LegacyStartupConfiguration {
@@ -88,13 +87,13 @@ impl ConfigurationWriting for ingress::ConfigurationWriteRequest {
             test_defaults: match test_defaults {
                 ingress::WriterTestDefaultsChoice::NoTestDefaults => None,
                 ingress::WriterTestDefaultsChoice::TestDefaults(ingress::WriterTestDefaults {
-                    first_writer_cluster: cluster,
-                    second_writer_cluster: default_vm_host,
+                    first_writer_cluster: ingress::WriterCluster(cluster),
+                    second_writer_cluster: ingress::WriterCluster(default_vm_host),
                     writer_test_mode: default_mode,
-                    third_writer_cluster: test_flake,
-                    fourth_writer_cluster: test_nix_system,
-                    fifth_writer_cluster: test_output_selector,
-                    writer_path: proposal_source,
+                    third_writer_cluster: ingress::WriterCluster(test_flake),
+                    fourth_writer_cluster: ingress::WriterCluster(test_nix_system),
+                    fifth_writer_cluster: ingress::WriterCluster(test_output_selector),
+                    writer_path: ingress::WriterPath(proposal_source),
                 }) => Some(TestDefaults {
                     cluster,
                     default_vm_host,

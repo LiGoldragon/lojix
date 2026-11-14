@@ -14,7 +14,7 @@ resolver = "3"
 [features]
 default = ["tools"]
 # The generated ingress derives its datom kinds under `datom`, as
-# ethos-zero 16 emits them; the offline tools read datom text, so `tools`
+# ethos-zero 29 emits them; the offline tools read datom text, so `tools`
 # carries it. The Nexus builds with neither.
 datom = ["dep:datom-codec", "dep:protos"]
 tools = [
@@ -49,8 +49,10 @@ triad-runtime     = { git = "https://github.com/LiGoldragon/triad-runtime.git", 
 futures-util      = "0.3"
 zbus              = "4.4"
 
+[build-dependencies]
+ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "f23eacf338a90ce4a6dea011554724fa6488fcc9" }
+
 [dev-dependencies]
-ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "c2653dd82adbdb1f1f2f654405c6620e0d06fd58" }
 tempfile = "3"
 
 [lints.rust]

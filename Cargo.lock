@@ -749,7 +749,7 @@ name = "lojix"
 version = "0.10.7"
 dependencies = [
  "datom-codec 0.32.3",
- "ethos-zero 16.0.0",
+ "ethos-zero 29.0.0",
  "futures-util",
  "horizon-lib",
  "kameo",

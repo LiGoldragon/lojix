@@ -56,7 +56,7 @@ impl OfflineCommand for StoreInspectionCommand {
 
 /// Reading the CLI's one inline operand as the request it must be.
 trait InspectionRequestText {
-    /// Decode exactly one inline current Datom `InspectStore.{ <path> }`
+    /// Decode exactly one inline current Datom `{ <path> }`, an `InspectStore`
     /// request and answer with the store path it names. The CLI never hands
     /// its operand to a file-classifying component parser, so an existing
     /// request-like path remains plain rejected text rather than input.
@@ -65,11 +65,10 @@ trait InspectionRequestText {
 
 impl InspectionRequestText for str {
     fn inspected_store_path(&self) -> Result<String> {
-        let request = Potential::<ingress::InspectionRequest>::from(self.to_owned())
+        let request = Potential::<ingress::InspectStore>::from(self.to_owned())
             .actualize(&mut <crate::Ingress as crate::Budgeted>::budget())
             .map_err(|fault| Error::DatomRequestText(format!("{fault:?}")))?;
-        let ingress::InspectionRequest::InspectStore(ingress::InspectStore { string: path }) =
-            request;
+        let ingress::InspectStore { string: path } = request;
         Ok(path)
     }
 }

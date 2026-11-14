@@ -1,9 +1,7 @@
 Library
 []
-[ InspectionRequest.[ InspectStore.InspectStore ]
-  InspectStore.{ String }
-  ResetStoreRequest.[ ResetStore ]
-  BootstrapRequest.[ BootstrapRun.BootstrapRun ]
+[ InspectStore.{ String }
+  ResetStore.{}
   BootstrapRun.{ BootstrapRequestId BootstrapMode }
   BootstrapRequestId.String
   BootstrapMode.[ BuildOnly.BootstrapBuildOnly BootOnce.BootstrapBootOnce ]
@@ -19,8 +17,8 @@ Library
   BootstrapHermeticTest.{ BootstrapFlakeReference BootstrapNixSystem BootstrapOutputSelector }
   BootstrapActivationBackend.[ RemoteNixosSystemdBootV1.BootstrapRemoteNixosSystemdBootV1 LocalBootstrapV1.BootstrapLocalBootstrapV1 ]
   BootstrapRemoteNixosSystemdBootV1.{ BootstrapNixStoreUri BootstrapSshDestination BootstrapSshPolicy BootstrapSystemProfilePath BootstrapBootEntriesDirectory }
-  BootstrapSshPolicy.{ BootstrapSshIdentityFile BootstrapSshKnownHostsFile BootstrapStrictHostKeyMode }
-  BootstrapStrictHostKeyMode.[ RequireKnownHost ]
+  BootstrapSshPolicy.{ BootstrapSshIdentityFile BootstrapSshKnownHostsFile RequireKnownHost }
+  RequireKnownHost.{}
   BootstrapLocalBootstrapV1.{ BootstrapSystemProfilePath BootstrapBootEntriesDirectory }
   BootstrapFlakeReference.String
   BootstrapNixSystem.String
@@ -39,7 +37,6 @@ Library
   BootstrapSshKnownHostsFile.String
   BootstrapSystemProfilePath.String
   BootstrapBootEntriesDirectory.String
-  ConfigurationWriterInput.[ ConfigurationWriteRequest.ConfigurationWriteRequest ]
   ConfigurationWriteRequest.{ WriterPath WriterMode WriterPath WriterMode WriterPath WriterPath WriterCluster WriterTestDefaultsChoice WriterPath }
   WriterTestDefaultsChoice.[ NoTestDefaults TestDefaults.WriterTestDefaults ]
   WriterTestDefaults.{ WriterCluster WriterCluster WriterTestMode WriterCluster WriterCluster WriterCluster WriterPath }

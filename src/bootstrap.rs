@@ -2160,12 +2160,12 @@ impl PrivatePathAdmission for OfferedPath<'_> {
     }
 }
 
-impl From<ingress::BootstrapRequest> for BootstrapRun {
-    fn from(request: ingress::BootstrapRequest) -> Self {
-        let ingress::BootstrapRequest::BootstrapRun(ingress::BootstrapRun {
-            bootstrap_request_id: request_id,
+impl From<ingress::BootstrapRun> for BootstrapRun {
+    fn from(request: ingress::BootstrapRun) -> Self {
+        let ingress::BootstrapRun {
+            bootstrap_request_id: ingress::BootstrapRequestId(request_id),
             bootstrap_mode: mode,
-        }) = request;
+        } = request;
         Self {
             request_id: BootstrapRequestId(request_id),
             mode: BootstrapMode::from(mode),
@@ -2179,9 +2179,10 @@ impl From<ingress::BootstrapMode> for BootstrapMode {
             ingress::BootstrapMode::BuildOnly(ingress::BootstrapBuildOnly {
                 bootstrap_input: input,
                 bootstrap_builder: builder,
-                bootstrap_journal_parent: journal_parent,
-                bootstrap_gc_root_path: gc_root_path,
-                bootstrap_terminal_evidence_path: terminal_evidence_path,
+                bootstrap_journal_parent: ingress::BootstrapJournalParent(journal_parent),
+                bootstrap_gc_root_path: ingress::BootstrapGcRootPath(gc_root_path),
+                bootstrap_terminal_evidence_path:
+                    ingress::BootstrapTerminalEvidencePath(terminal_evidence_path),
             }) => BootstrapMode::BuildOnly(BootstrapBuildOnly {
                 input: BootstrapInput::from(input),
                 builder: BootstrapBuilder::from(builder),
@@ -2194,9 +2195,10 @@ impl From<ingress::BootstrapMode> for BootstrapMode {
                 bootstrap_builder: builder,
                 bootstrap_test_plan: test_plan,
                 bootstrap_activation_backend: activation_backend,
-                bootstrap_journal_parent: journal_parent,
-                bootstrap_gc_root_path: gc_root_path,
-                bootstrap_terminal_evidence_path: terminal_evidence_path,
+                bootstrap_journal_parent: ingress::BootstrapJournalParent(journal_parent),
+                bootstrap_gc_root_path: ingress::BootstrapGcRootPath(gc_root_path),
+                bootstrap_terminal_evidence_path:
+                    ingress::BootstrapTerminalEvidencePath(terminal_evidence_path),
             }) => BootstrapMode::BootOnce(BootstrapBootOnce {
                 input: BootstrapInput::from(input),
                 builder: BootstrapBuilder::from(builder),
@@ -2214,23 +2216,23 @@ impl From<ingress::BootstrapInput> for BootstrapInput {
     fn from(value: ingress::BootstrapInput) -> Self {
         match value {
             ingress::BootstrapInput::Direct(ingress::BootstrapDirectInput {
-                bootstrap_flake_reference: flake_reference,
-                bootstrap_nix_system: nix_system,
-                bootstrap_output_selector: output_selector,
+                bootstrap_flake_reference: ingress::BootstrapFlakeReference(flake_reference),
+                bootstrap_nix_system: ingress::BootstrapNixSystem(nix_system),
+                bootstrap_output_selector: ingress::BootstrapOutputSelector(output_selector),
             }) => BootstrapInput::Direct(BootstrapDirectInput {
                 flake_reference: BootstrapFlakeReference(flake_reference),
                 nix_system: BootstrapNixSystem(nix_system),
                 output_selector: BootstrapOutputSelector(output_selector),
             }),
             ingress::BootstrapInput::Horizon(ingress::BootstrapHorizonInput {
-                bootstrap_proposal_source: proposal_source,
-                bootstrap_cluster_name: cluster_name,
-                bootstrap_node_name: node_name,
+                bootstrap_proposal_source: ingress::BootstrapProposalSource(proposal_source),
+                bootstrap_cluster_name: ingress::BootstrapClusterName(cluster_name),
+                bootstrap_node_name: ingress::BootstrapNodeName(node_name),
                 bootstrap_materialization_shape: materialization_shape,
                 bootstrap_secrets_input: secrets_input,
-                bootstrap_flake_reference: flake_reference,
-                bootstrap_nix_system: nix_system,
-                bootstrap_output_selector: output_selector,
+                bootstrap_flake_reference: ingress::BootstrapFlakeReference(flake_reference),
+                bootstrap_nix_system: ingress::BootstrapNixSystem(nix_system),
+                bootstrap_output_selector: ingress::BootstrapOutputSelector(output_selector),
             }) => BootstrapInput::Horizon(BootstrapHorizonInput {
                 proposal_source: BootstrapProposalSource(proposal_source),
                 cluster_name: BootstrapClusterName(cluster_name),
@@ -2245,9 +2247,9 @@ impl From<ingress::BootstrapInput> for BootstrapInput {
                 },
                 secrets_input: match secrets_input {
                     ingress::BootstrapSecretsInput::NoSecrets => BootstrapSecretsInput::NoSecrets,
-                    ingress::BootstrapSecretsInput::SecretsDirectory(path) => {
-                        BootstrapSecretsInput::SecretsDirectory(BootstrapSecretsDirectory(path))
-                    }
+                    ingress::BootstrapSecretsInput::SecretsDirectory(
+                        ingress::BootstrapSecretsDirectory(path),
+                    ) => BootstrapSecretsInput::SecretsDirectory(BootstrapSecretsDirectory(path)),
                 },
                 flake_reference: BootstrapFlakeReference(flake_reference),
                 nix_system: BootstrapNixSystem(nix_system),
@@ -2261,7 +2263,7 @@ impl From<ingress::BootstrapBuilder> for BootstrapBuilder {
     fn from(value: ingress::BootstrapBuilder) -> Self {
         match value {
             ingress::BootstrapBuilder::NoBuilder => BootstrapBuilder::NoBuilder,
-            ingress::BootstrapBuilder::NixBuilder(value) => {
+            ingress::BootstrapBuilder::NixBuilder(ingress::BootstrapBuilderSpec(value)) => {
                 BootstrapBuilder::NixBuilder(BootstrapBuilderSpec(value))
             }
         }
@@ -2273,9 +2275,9 @@ impl From<ingress::BootstrapTestPlan> for BootstrapTestPlan {
         match value {
             ingress::BootstrapTestPlan::NoTest => BootstrapTestPlan::NoTest,
             ingress::BootstrapTestPlan::RunHermeticTest(ingress::BootstrapHermeticTest {
-                bootstrap_flake_reference: flake_reference,
-                bootstrap_nix_system: nix_system,
-                bootstrap_output_selector: output_selector,
+                bootstrap_flake_reference: ingress::BootstrapFlakeReference(flake_reference),
+                bootstrap_nix_system: ingress::BootstrapNixSystem(nix_system),
+                bootstrap_output_selector: ingress::BootstrapOutputSelector(output_selector),
             }) => BootstrapTestPlan::RunHermeticTest(BootstrapHermeticTest {
                 flake_reference: BootstrapFlakeReference(flake_reference),
                 nix_system: BootstrapNixSystem(nix_system),
@@ -2290,16 +2292,20 @@ impl From<ingress::BootstrapActivationBackend> for BootstrapActivationBackend {
         match value {
             ingress::BootstrapActivationBackend::RemoteNixosSystemdBootV1(
                 ingress::BootstrapRemoteNixosSystemdBootV1 {
-                    bootstrap_nix_store_uri: nix_store_uri,
-                    bootstrap_ssh_destination: ssh_destination,
+                    bootstrap_nix_store_uri: ingress::BootstrapNixStoreUri(nix_store_uri),
+                    bootstrap_ssh_destination: ingress::BootstrapSshDestination(ssh_destination),
                     bootstrap_ssh_policy:
                         ingress::BootstrapSshPolicy {
-                            bootstrap_ssh_identity_file: identity_file,
-                            bootstrap_ssh_known_hosts_file: known_hosts_file,
-                            bootstrap_strict_host_key_mode: strict_host_key_mode,
+                            bootstrap_ssh_identity_file:
+                                ingress::BootstrapSshIdentityFile(identity_file),
+                            bootstrap_ssh_known_hosts_file:
+                                ingress::BootstrapSshKnownHostsFile(known_hosts_file),
+                            require_known_host: ingress::RequireKnownHost {},
                         },
-                    bootstrap_system_profile_path: system_profile_path,
-                    bootstrap_boot_entries_directory: boot_entries_directory,
+                    bootstrap_system_profile_path:
+                        ingress::BootstrapSystemProfilePath(system_profile_path),
+                    bootstrap_boot_entries_directory:
+                        ingress::BootstrapBootEntriesDirectory(boot_entries_directory),
                 },
             ) => BootstrapActivationBackend::RemoteNixosSystemdBootV1(
                 BootstrapRemoteNixosSystemdBootV1 {
@@ -2308,11 +2314,7 @@ impl From<ingress::BootstrapActivationBackend> for BootstrapActivationBackend {
                     ssh_policy: BootstrapSshPolicy {
                         identity_file: BootstrapSshIdentityFile(identity_file),
                         known_hosts_file: BootstrapSshKnownHostsFile(known_hosts_file),
-                        strict_host_key_mode: match strict_host_key_mode {
-                            ingress::BootstrapStrictHostKeyMode::RequireKnownHost => {
-                                BootstrapStrictHostKeyMode::RequireKnownHost
-                            }
-                        },
+                        strict_host_key_mode: BootstrapStrictHostKeyMode::RequireKnownHost,
                     },
                     system_profile_path: BootstrapSystemProfilePath(system_profile_path),
                     boot_entries_directory: BootstrapBootEntriesDirectory(boot_entries_directory),
@@ -2320,8 +2322,10 @@ impl From<ingress::BootstrapActivationBackend> for BootstrapActivationBackend {
             ),
             ingress::BootstrapActivationBackend::LocalBootstrapV1(
                 ingress::BootstrapLocalBootstrapV1 {
-                    bootstrap_system_profile_path: system_profile_path,
-                    bootstrap_boot_entries_directory: boot_entries_directory,
+                    bootstrap_system_profile_path:
+                        ingress::BootstrapSystemProfilePath(system_profile_path),
+                    bootstrap_boot_entries_directory:
+                        ingress::BootstrapBootEntriesDirectory(boot_entries_directory),
                 },
             ) => BootstrapActivationBackend::LocalBootstrapV1(BootstrapLocalBootstrapV1 {
                 system_profile_path: BootstrapSystemProfilePath(system_profile_path),
@@ -2384,7 +2388,7 @@ impl BootstrapInvocation for BootstrapRun {
         arguments: impl IntoIterator<Item = OsString>,
     ) -> std::result::Result<Self, BootstrapError> {
         let text = arguments.single_inline_datom()?;
-        let request = Potential::<ingress::BootstrapRequest>::from(text)
+        let request = Potential::<ingress::BootstrapRun>::from(text)
             .actualize(&mut <crate::Ingress as crate::Budgeted>::budget())
             .map_err(|fault| BootstrapError::Decode(format!("{fault:?}")))?;
         Ok(Self::from(request))

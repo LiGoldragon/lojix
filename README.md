@@ -58,7 +58,8 @@ systemctl start lojix-reset-store.service
 
 The unit supplies its generated startup archive through
 `LOJIX_CONFIGURATION`; the binary accepts exactly one pathless inline
-`ResetStore` Datom word and never accepts a store path, file, or flag form. The
+`ResetStore`, the empty struct `{}`, and never accepts a store path, file, or
+flag form. The
 archive must be a regular non-symlink file and its configured store must be an
 existing, absolute, traversal-free regular non-symlink file. `ResetStore` is an
 opt-in destructive operation: a recognised v2, v3, or v4 Lojix catalog is
@@ -94,8 +95,8 @@ configuration record to the copy, and validates it. It never opens or mutates
 the source Memory and is not a daemon compatibility path.
 
 `lojix-inspect-store` is read-only and likewise accepts exactly one inline
-`InspectionRequest.InspectStore` Datom object, never a raw path, file, flag, or extra
-argument.
+`InspectStore` Datom object, `'{ <store-path> }'`, never a raw path, file, flag,
+or extra argument.
 
 ## Maintained bootstrap app
 
@@ -110,13 +111,14 @@ maintained CriomOS/Home flakes, with exactly one inline Datom object and no
 flags or request files:
 
 ```text
-nix run github:LiGoldragon/lojix/<rev>#lojix-bootstrap -- 'BootstrapRun.{<request-id> <mode>}'
+nix run github:LiGoldragon/lojix/<rev>#lojix-bootstrap -- '{<request-id> <mode>}'
 ```
 
-The complete shape is positional and explicit:
+The request is a `BootstrapRun`, written as the struct itself; the complete
+shape is positional and explicit:
 
 ```text
-BootstrapRun.{
+{
   <request-id>
   BuildOnly.{
     Direct.{<immutable-github-flake-ref> <nix-system> <output-selector>}
@@ -127,7 +129,7 @@ BootstrapRun.{
   | BootOnce.{
     <same-input> <same-builder>
     <NoTest-or-RunHermeticTest.{<immutable-github-flake-ref> <nix-system> <output-selector>}>
-    <RemoteNixosSystemdBootV1.{<nix-store-uri> <ssh-destination> SshPolicy.{<private-identity-file> <private-known-hosts-file> RequireKnownHost} <system-profile-path> <boot-entries-directory>}
+    <RemoteNixosSystemdBootV1.{<nix-store-uri> <ssh-destination> {<private-identity-file> <private-known-hosts-file> {}} <system-profile-path> <boot-entries-directory>}
       | LocalBootstrapV1.{<system-profile-path> <boot-entries-directory>}>
     <journal-parent> <new-gc-root-path> <new-terminal-evidence-path>
   }
@@ -142,7 +144,8 @@ explicit pair: `ssh-ng://<user>@<lowercase-host>[:port]` and
 options/config defaults or passwords can be embedded, and an explicit port is
 passed as an SSH argument rather than folded into a host name. The required
 `SshPolicy` supplies caller-owned-private `0600` identity and known-hosts
-files plus `RequireKnownHost`; it forces identities-only, no agent, no proxy,
+files plus `RequireKnownHost`, an empty struct written `{}`; it forces
+identities-only, no agent, no proxy,
 no multiplexing, and generates the same private OpenSSH config for direct SSH
 and `nix copy`. The flake wrapper resolves OpenSSH from its own closure rather
 than ambient `PATH`.

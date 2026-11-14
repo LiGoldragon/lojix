@@ -442,7 +442,7 @@
                 # Horizon reader before anything else runs: a definition the
                 # pinned horizon-lib refuses fails here, named, rather than
                 # sitting inert in a Direct-mode request that never reads it.
-                machine.succeed("${package}/bin/lojix-write-configuration 'ConfigurationWriteRequest.{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon TestDefaults.{fixture-cluster atlas Hermetic github:fixture-owner/fixture-flake x86_64-linux checks.fixture-a /var/lib/lojix/horizon-definition.datom} /run/lojix-fixture-startup.rkyv}' | grep -F 'ConfigurationWritten.'")
+                machine.succeed("${package}/bin/lojix-write-configuration '{/run/fixture-lojix/ordinary.sock 432 /run/fixture-lojix/owner.sock 384 /var/lib/fixture-lojix /var/lib/fixture-lojix/configured-lojix-store.db fixture-daemon TestDefaults.{fixture-cluster atlas Hermetic github:fixture-owner/fixture-flake x86_64-linux checks.fixture-a /var/lib/lojix/horizon-definition.datom} /run/lojix-fixture-startup.rkyv}' | grep -F 'ConfigurationWritten.'")
                 machine.succeed("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Configure.{ /run/lojix/ordinary.sock 432 /run/lojix/meta.sock 384 /var/lib/lojix atlas NoTestDefaults }' | grep -F Configured")
                 machine.succeed("systemctl restart lojix.service")
                 machine.wait_for_unit("lojix.service")

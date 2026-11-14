@@ -68,7 +68,7 @@ a test attribute from a host or node name.
 Schema v4 refuses older Lojix data. There is no migration or legacy-resume
 path. With `lojix-nexus` stopped, a privileged operator may manually start
 the dedicated `lojix-reset-store` unit. It invokes `lojix-reset-store` only
-with inline `(ResetStore)` and supplies its generated startup archive as the
+with the inline empty `ResetStore` struct, `{}`, and supplies its generated startup archive as the
 service-owned `LOJIX_CONFIGURATION` environment value; it conflicts with the
 daemon.
 

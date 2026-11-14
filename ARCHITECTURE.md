@@ -134,7 +134,7 @@ line until the daemon closes the connection.
   hold no knowledge of how many replies an input has; the daemon decides.
 - **Maintained bootstrap app** — `lojix-bootstrap` is a flake package/app,
   not a daemon client. It accepts exactly one inline private `BootstrapRun`
-  Datom object. The request explicitly supplies input mode, builder, optional
+  Datom object, written as the struct itself, `{ … }`. The request explicitly supplies input mode, builder, optional
   hermetic test, local-or-remote BootOnce backend, journal parent, GC-root
   path, and terminal-evidence path. It creates a private v5 journal and
   configuration beneath that journal parent. The journal binds a request hash,
@@ -232,14 +232,14 @@ the workspace actor-systems doctrine. No zero-state holders.
   configuration row is rebuilt from the Nexus's built-in configuration and
   logged `NexusConfigurationRebuilt`. `lojix-inspect-store` reports both the
   quarantined rows and the rows the next open will set aside. With the daemon stopped, the
-  manually started `lojix-reset-store` accepts only the inline `ResetStore` Datom word. Its
+  manually started `lojix-reset-store` accepts only the inline empty `ResetStore` struct, `{}`. Its
   service-owned `LOJIX_CONFIGURATION` archive supplies the exact store path;
   an existing archive and primary must be absolute, regular, and non-symlinked.
   A recognised v2/v3 Lojix catalog is removed and recreated as v4, while a v4
   catalog returns `AlreadyCurrent` without any data deletion. Protocol
   sidecars are derived only from a proven pre-v4 primary; the reset never
   selects a Spirit store.
-- **Wire:** typed `Signal<Query>` and `Signal<Response>` portable rkyv bytes
+- **Wire:** typed `Signal<Input>` and `Signal<Output>` portable rkyv bytes
   from the ordinary and meta contracts, length-prefixed over Unix sockets.
 - **Generated Nix inputs:** production deploys materialize projected
   Horizon data into tiny flake inputs under
@@ -259,7 +259,7 @@ the workspace actor-systems doctrine. No zero-state holders.
   configuration, and binds ordinary and owner/meta Unix sockets. The owner/meta socket refuses any mode with
   "other" access and admits only same-uid/gid owner peers.
 - `lojix-write-configuration` is an offline migration input tool: it accepts
-  exactly one inline `ConfigurationWriteRequest` object (never a file, raw
+  exactly one inline `ConfigurationWriteRequest` object, written `{ … }` (never a file, raw
   path, or flag) and writes the rkyv signal file from the ordered socket/mode, state-directory,
   daemon-host, test-default, and output-path request. Test defaults
   include their exact Nix system and output selector. Production
@@ -281,7 +281,7 @@ the workspace actor-systems doctrine. No zero-state holders.
   one line for an ordinary input; `DeploymentsWatched` and then each matching event for
   a deployment watch.
 - `lojix-inspect-store` is read-only and accepts exactly one inline
-  `InspectionRequest.InspectStore` object. It rejects raw paths, request files, flags,
+  `InspectStore` object, `{ <path> }`. It rejects raw paths, request files, flags,
   and extra arguments.
 - Every external operation is a typed `signal-lojix` variant;
   there is no untyped escape hatch on the wire.

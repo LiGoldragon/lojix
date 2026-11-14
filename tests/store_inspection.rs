@@ -182,7 +182,7 @@ fn command_requires_one_inline_inspect_store_object() {
     assert!(StoreInspectionCommand::from_arguments([OsString::from("lojix.memory")]).is_err());
     assert!(
         StoreInspectionCommand::from_arguments([
-            OsString::from("InspectStore.{ /tmp/lojix.memory }"),
+            OsString::from("{ /tmp/lojix.memory }"),
             OsString::from("extra"),
         ])
         .is_err()
@@ -191,6 +191,10 @@ fn command_requires_one_inline_inspect_store_object() {
         StoreInspectionCommand::from_arguments([OsString::from(
             "InspectStore.{ /tmp/lojix.memory }",
         )])
-        .is_ok()
+        .is_err(),
+        "the request is the InspectStore struct itself, written without a head"
+    );
+    assert!(
+        StoreInspectionCommand::from_arguments([OsString::from("{ /tmp/lojix.memory }",)]).is_ok()
     );
 }
