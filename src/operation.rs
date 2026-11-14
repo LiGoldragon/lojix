@@ -229,6 +229,7 @@ pub struct ActivatedGeneration {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum BootEntryReconciliation {
     Cleared,
+    ClearFailed(signal_lojix::FailureEvidence),
     SkippedWithoutLoaderInterface,
     NotRequired,
 }

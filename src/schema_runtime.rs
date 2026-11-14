@@ -1236,6 +1236,10 @@ pub struct DeployPipeline {
     generation_artifact: ordinary::GenerationArtifact,
     activation_effect: ordinary::ActivationEffect,
     activation_slot: Option<ordinary::GenerationSlot>,
+    /// The evidence of a boot-entry clear that failed after the switch: the
+    /// generation is recorded where the switch put it, and the deployment
+    /// then ends Failed with this evidence rather than Succeeded.
+    uncleared_boot_entries: Option<ordinary::FailureEvidence>,
     secrets_input: memory::SecretsInput,
     requested_flake: ordinary::FlakeReference,
     flake: ordinary::FlakeReference,
@@ -1739,6 +1743,7 @@ impl DeployCursor for DeployPipeline {
                     deployment.host_deploy_action.clone(),
                 ),
                 activation_slot: None,
+                uncleared_boot_entries: None,
                 secrets_input: deployment.secrets_input,
                 requested_flake: deployment.flake_reference.clone(),
                 flake: deployment.flake_reference,
@@ -1770,6 +1775,7 @@ impl DeployCursor for DeployPipeline {
                     deployment.user_environment_action.clone(),
                 ),
                 activation_slot: None,
+                uncleared_boot_entries: None,
                 secrets_input: deployment.secrets_input,
                 requested_flake: deployment.flake_reference.clone(),
                 flake: deployment.flake_reference,
@@ -3371,8 +3377,16 @@ impl PipelineDeciding for SchemaRuntime {
                 // back through advance_after_phase, which fires the
                 // RecordGenerationActivated write that commits the live set. The
                 // slot returned by the activation effect is persisted on that
-                // commit rather than re-defaulting to Current.
+                // commit rather than re-defaulting to Current. A boot-entry
+                // clear that failed after the switch still records the
+                // generation where the switch put it; the deployment then ends
+                // Failed with the clear's evidence.
                 self.set_activation_slot(activated.generation_slot);
+                if let nexus::BootEntryReconciliation::ClearFailed(evidence) =
+                    activated.boot_entry_reconciliation
+                {
+                    self.set_uncleared_boot_entries(evidence);
+                }
                 self.record_phase(ordinary::DeploymentPhase::Activated)
             }
             memory::Outcome::DetachedActivationDispatched(_) => {
@@ -3567,6 +3581,10 @@ pub trait DeployDriving {
     fn finish_deploy_pipeline(&mut self, pipeline: &DeployPipeline) -> nexus::NexusAction;
 
     fn set_activation_slot(&mut self, generation_slot: ordinary::GenerationSlot);
+
+    /// Keep the evidence of a boot-entry clear that failed after the switch,
+    /// for the terminal the recorded generation is followed by.
+    fn set_uncleared_boot_entries(&mut self, evidence: ordinary::FailureEvidence);
 
     /// Capture a closure only after validating it at the typed effect ingress.
     /// This is intentionally independent of Nix-command parsing: an injected
@@ -3981,6 +3999,17 @@ impl DeployDriving for SchemaRuntime {
     }
 
     fn finish_deploy_pipeline(&mut self, pipeline: &DeployPipeline) -> nexus::NexusAction {
+        // The generation is recorded where the switch put it; a boot-entry
+        // clear that failed after the switch is the deployment's terminal.
+        if let Some(evidence) = pipeline.uncleared_boot_entries.clone() {
+            return self.fail_pipeline(
+                pipeline.clone(),
+                nexus::EffectFailure {
+                    effect_stage: nexus::EffectStage::Activate,
+                    failure_evidence: evidence,
+                },
+            );
+        }
         let record = match self.store.terminalize_deployment(
             *pipeline.deployment_identifier.payload(),
             memory::DeploymentTerminal::Succeeded,
@@ -4007,6 +4036,12 @@ impl DeployDriving for SchemaRuntime {
     fn set_activation_slot(&mut self, generation_slot: ordinary::GenerationSlot) {
         if let Some(pipeline) = self.active_deploy.as_mut() {
             pipeline.activation_slot = Some(generation_slot);
+        }
+    }
+
+    fn set_uncleared_boot_entries(&mut self, evidence: ordinary::FailureEvidence) {
+        if let Some(pipeline) = self.active_deploy.as_mut() {
+            pipeline.uncleared_boot_entries = Some(evidence);
         }
     }
 
@@ -6767,9 +6802,15 @@ impl HostActivating for HostActivation {
             Some(emission::LoaderInterface::NotImplemented) => {
                 Ok(nexus::BootEntryReconciliation::SkippedWithoutLoaderInterface)
             }
+            // The switch has happened: a clear that fails now leaves the
+            // generation switched, and says so with the clear's evidence.
             Some(emission::LoaderInterface::Implemented) => {
-                self.reconcile_efi(execution).await?;
-                Ok(nexus::BootEntryReconciliation::Cleared)
+                match self.reconcile_efi(execution).await {
+                    Ok(()) => Ok(nexus::BootEntryReconciliation::Cleared),
+                    Err(failure) => Ok(nexus::BootEntryReconciliation::ClearFailed(
+                        failure.witness(),
+                    )),
+                }
             }
         }
     }
@@ -11240,11 +11281,29 @@ mod tests {
     }
 
     #[test]
-    fn a_clear_that_fails_under_a_loader_with_the_interface_fails_the_activation() {
+    fn a_clear_that_fails_after_the_switch_says_the_switch_happened_and_the_clear_failed() {
         let (result, bodies) = foreground_switch_under("implemented", true);
-        let failure = result.expect_err("the failed clear is the activation's failure");
-        assert!(format!("{failure:?}").contains("bootctl"), "{failure:?}");
+        let evidence = match result.expect("the switch itself succeeded") {
+            nexus::BootEntryReconciliation::ClearFailed(evidence) => evidence,
+            other => panic!("expected the clear's failure, got {other:?}"),
+        };
+        let command = evidence
+            .failed_command_option
+            .as_ref()
+            .expect("the failed clear is named");
+        assert_eq!(
+            command
+                .command_argument_vector
+                .last()
+                .map(|argument| argument.payload().as_str()),
+            Some("bootctl set-default ''"),
+            "{evidence:?}"
+        );
         assert_eq!(bodies.len(), 3, "{bodies:?}");
+        assert!(
+            bodies[1].contains("switch-to-configuration switch"),
+            "{bodies:?}"
+        );
     }
 
     #[test]

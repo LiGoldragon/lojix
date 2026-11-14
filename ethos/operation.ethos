@@ -20,8 +20,11 @@
 ; Switch clears the default and one-shot overrides so the declarative
 ; loader.conf is the one authority, or skips the clears when the running
 ; loader does not implement the boot loader interface; every other action
-; requires none. A same-host activation's dispatch says what its unit's
-; script will do.
+; requires none. A clear that fails after the switch leaves the generation
+; switched, and says so with the clear's evidence: the generation is
+; recorded where the switch put it and the deployment ends Failed with that
+; evidence. A same-host activation's dispatch says what its unit's script
+; will do.
 Operation
 
 [ signal_lojix:[ LojixNexusConfiguration DeploymentPhaseEvent TestRunRecord Selection
@@ -130,7 +133,8 @@ Operation
   ActivationProfile.[ Host.HostDeployAction UserEnvironment.UserEnvironmentActivationProfile ]
   UserEnvironmentActivationProfile.{ UserEnvironmentAction UserName }
   ActivatedGeneration.{ GenerationIdentifier NodeName GenerationSlot BootEntryReconciliation }
-  BootEntryReconciliation.[ Cleared SkippedWithoutLoaderInterface NotRequired ]
+  BootEntryReconciliation.[ Cleared ClearFailed.FailureEvidence SkippedWithoutLoaderInterface
+                            NotRequired ]
   PathInfoGcCommand.{ ClusterName NodeName }
   GarbageCollected.{ ClusterName NodeName CollectedPaths }
   HermeticCheckCommand.{ ClusterName NodeName FlakeReference TestExecutionProfile }

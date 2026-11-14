@@ -212,6 +212,15 @@ system scope bus via machine transport: Permission denied"), so the runtime
 directory is named instead. The user must have a running manager, as for any
 `--user` unit. A remote activation is unchanged.
 
+A remote Boot or Switch whose boot-entry clear fails after the switch is
+settled as a same-host switch is (bead primary-6llk). The switch has happened,
+so the generation is recorded where it put it, Current for a Switch, with its
+`Activated` event, and the deployment then ends
+`Failed(Activate/ActivationFailed)` with the clear's evidence, where it ended
+Failed with no generation recorded. The activation's outcome says both:
+`BootEntryReconciliation` gains `ClearFailed`, carrying that evidence. Nothing
+a peer sees changes shape, and the store's families are unchanged.
+
 # 0.10.5 to 0.10.6
 
 A revision: the memory format is unchanged and the store stays readable;

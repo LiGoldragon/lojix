@@ -365,6 +365,76 @@ async fn an_unreadable_unit_journal_says_why() {
     );
 }
 
+/// A remote Switch whose boot-entry clear fails after the switch succeeded:
+/// the generation is live on the node, so it is recorded Current, and the
+/// deployment ends Failed(Activate/ActivationFailed) with the clear's
+/// evidence, as a same-host switch is settled.
+#[tokio::test]
+async fn a_remote_clear_that_fails_after_the_switch_records_current_and_fails() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    fake_programs(
+        &directory.path().join("programs"),
+        SYSTEM_OUTPUT,
+        "",
+        "  *LoaderInfo*)\n    printf '%s\\n' implemented\n    exit 0 ;;\n  *bootctl\\ set-default*)\n    printf '%s\\n' 'Failed to update EFI variable: Read-only file system' >&2\n    exit 1 ;;",
+    );
+    let driven = drive(
+        directory.path(),
+        "daemon-host",
+        host_request(ordinary::HostDeployAction::ActivateNow),
+    )
+    .await;
+    assert_eq!(
+        driven.failure.deployment_failure_stage,
+        ordinary::DeploymentFailureStage::Activate
+    );
+    assert_eq!(
+        driven.failure.deployment_terminal_reason,
+        ordinary::DeploymentTerminalReason::ActivationFailed
+    );
+    let detail = evidence(&driven.failure).failure_detail.payload().clone();
+    assert!(detail.contains("Read-only file system"), "got {detail:?}");
+    let switched = driven
+        .commands
+        .iter()
+        .position(|line| line.contains("switch-to-configuration switch"))
+        .unwrap_or_else(|| panic!("the switch ran, got {:?}", driven.commands));
+    let cleared = driven
+        .commands
+        .iter()
+        .position(|line| line.contains("bootctl set-default"))
+        .unwrap_or_else(|| panic!("the clear ran, got {:?}", driven.commands));
+    assert!(switched < cleared, "{:?}", driven.commands);
+    assert!(
+        driven
+            .commands
+            .iter()
+            .all(|line| !line.contains("bootctl set-oneshot")),
+        "the second clear does not run after the first failed: {:?}",
+        driven.commands
+    );
+    let store = Store::open(directory.path().join("lojix.memory")).expect("reopen store");
+    let live = store
+        .records::<lojix::memory::LiveGeneration>()
+        .expect("read live generations");
+    assert_eq!(live.len(), 1, "{live:?}");
+    assert_eq!(live[0].generation_slot, ordinary::GenerationSlot::Current);
+    assert_eq!(live[0].closure_path.payload(), SYSTEM_OUTPUT);
+    let record = store
+        .deployment_records()
+        .expect("read records")
+        .into_iter()
+        .next()
+        .expect("the record");
+    assert!(
+        matches!(
+            record.deployment_terminal_option,
+            Some(ordinary::DeploymentTerminal::Failed(_))
+        ),
+        "{record:?}"
+    );
+}
+
 /// Evaluation, build and copy fail through the same command carrier: each
 /// keeps the command, its status, and both streams.
 #[tokio::test]
