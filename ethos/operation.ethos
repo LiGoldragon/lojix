@@ -15,6 +15,13 @@
 ; outcomes. The behaviour that carries out each operation is hand-written
 ; beside it, in schema_runtime.rs: the Memory operations synchronously, the
 ; stages awaiting their emissions.
+;
+; An activation says what became of the node's EFI boot entries: a Boot or
+; Switch clears the default and one-shot overrides so the declarative
+; loader.conf is the one authority, or skips the clears when the running
+; loader does not implement the boot loader interface; every other action
+; requires none. A same-host activation's dispatch says what its unit's
+; script will do.
 Operation
 
 [ signal_lojix:[ LojixNexusConfiguration DeploymentPhaseEvent TestRunRecord Selection
@@ -83,7 +90,7 @@ Operation
   ClosureBuilt.BuiltClosure
   ClosureCopied.CopiedClosure
   ActivationCompleted.ActivatedGeneration
-  DetachedActivationDispatched
+  DetachedActivationDispatched.BootEntryReconciliation
   PathsCollected.GarbageCollected
   HermeticCheckBuilt.CheckBuilt
   TestVmStarted.TestVmBroughtUp
@@ -122,7 +129,8 @@ Operation
                               ActivationProfile }
   ActivationProfile.[ Host.HostDeployAction UserEnvironment.UserEnvironmentActivationProfile ]
   UserEnvironmentActivationProfile.{ UserEnvironmentAction UserName }
-  ActivatedGeneration.{ GenerationIdentifier NodeName GenerationSlot }
+  ActivatedGeneration.{ GenerationIdentifier NodeName GenerationSlot BootEntryReconciliation }
+  BootEntryReconciliation.[ Cleared SkippedWithoutLoaderInterface NotRequired ]
   PathInfoGcCommand.{ ClusterName NodeName }
   GarbageCollected.{ ClusterName NodeName CollectedPaths }
   HermeticCheckCommand.{ ClusterName NodeName FlakeReference TestExecutionProfile }

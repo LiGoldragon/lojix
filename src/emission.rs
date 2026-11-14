@@ -129,6 +129,19 @@ pub enum SwitchAction {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct LoaderInterfaceQuery {
+    pub ssh_destination: signal_lojix::SshDestination,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum LoaderInterface {
+    Implemented,
+    NotImplemented,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct BootEntryClearing {
     pub ssh_destination: signal_lojix::SshDestination,
     pub boot_entry: BootEntry,
@@ -153,8 +166,15 @@ pub struct TransientUnitRun {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum TransientScript {
     BootOnce(signal_lojix::ClosurePath),
-    SelfSwitch(signal_lojix::ClosurePath),
+    SelfSwitch(SelfSwitchScript),
     SelfTest(signal_lojix::ClosurePath),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct SelfSwitchScript {
+    pub closure_path: signal_lojix::ClosurePath,
+    pub loader_interface: LoaderInterface,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -330,6 +350,14 @@ pub struct MetadataFault(pub String);
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum JournalOutcome {
     Read(JournalText),
+    Failed(ProcessFailure),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum LoaderInterfaceOutcome {
+    Read(LoaderInterface),
+    Unrecognized(Stdout),
     Failed(ProcessFailure),
 }
 #[rustfmt::skip]
@@ -531,6 +559,7 @@ pub enum Emission {
     CheckClosurePresence(ClosurePresence),
     CopyClosure(ClosureCopy),
     SwitchConfiguration(ConfigurationSwitch),
+    ReadLoaderInterface(LoaderInterfaceQuery),
     ClearBootEntry(BootEntryClearing),
     RunTransientUnit(TransientUnitRun),
     DispatchRetainedUnit(RetainedUnitDispatch),
@@ -565,6 +594,7 @@ pub enum Outcome {
     ClosurePresenceChecked(CallOutcome),
     ClosureCopied(CallOutcome),
     ConfigurationSwitched(CallOutcome),
+    LoaderInterfaceRead(LoaderInterfaceOutcome),
     BootEntryCleared(CallOutcome),
     TransientUnitRan(CallOutcome),
     RetainedUnitDispatched(CallOutcome),
@@ -635,6 +665,10 @@ impl Emitted for ClosureCopy {
 #[rustfmt::skip]
 impl Emitted for ConfigurationSwitch {
     type Outcome = CallOutcome;
+}
+#[rustfmt::skip]
+impl Emitted for LoaderInterfaceQuery {
+    type Outcome = LoaderInterfaceOutcome;
 }
 #[rustfmt::skip]
 impl Emitted for BootEntryClearing {

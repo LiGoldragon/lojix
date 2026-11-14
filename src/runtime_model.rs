@@ -21,13 +21,14 @@ pub use crate::memory::{
 };
 pub use crate::operation::{
     ActivateGenerationCommand, ActivatedGeneration, ActivationCommit, ActivationProfile,
-    AppliedActivation, BringUpTestVmCommand, BuildTarget, BuiltClosure, CheckBuilt, ClosureOrigin,
-    ContainerReceipt, ContainerTransition, CopiedClosure, CopyClosureCommand, EffectFailure,
-    EffectStage, EvaluatedClosure, FlakeAuthRequest, GarbageCollected, HermeticCheckCommand,
-    HorizonMaterializationCommand, IgnoredBuilder, MaterializationShape, MaterializedInputs,
-    NixBuildCommand, NixEvalCommand, Operation, Outcome, PathInfoGcCommand, RejectionReason,
-    RejectionReport, ResolvedFlake, TargetStoreBuild, TearDownTestVmCommand, TestVmBroughtUp,
-    TestVmHost, TestVmTornDown, UserEnvironmentActivationProfile, UserEnvironmentMaterialization,
+    AppliedActivation, BootEntryReconciliation, BringUpTestVmCommand, BuildTarget, BuiltClosure,
+    CheckBuilt, ClosureOrigin, ContainerReceipt, ContainerTransition, CopiedClosure,
+    CopyClosureCommand, EffectFailure, EffectStage, EvaluatedClosure, FlakeAuthRequest,
+    GarbageCollected, HermeticCheckCommand, HorizonMaterializationCommand, IgnoredBuilder,
+    MaterializationShape, MaterializedInputs, NixBuildCommand, NixEvalCommand, Operation, Outcome,
+    PathInfoGcCommand, RejectionReason, RejectionReport, ResolvedFlake, TargetStoreBuild,
+    TearDownTestVmCommand, TestVmBroughtUp, TestVmHost, TestVmTornDown,
+    UserEnvironmentActivationProfile, UserEnvironmentMaterialization,
 };
 pub use meta_signal_lojix::{
     AcceptedTest, ActualizedDeploySubmission, AppliedPin, AppliedRetire, AppliedUnpin,

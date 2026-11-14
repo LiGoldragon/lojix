@@ -3172,7 +3172,7 @@ impl PipelineDeciding for SchemaRuntime {
             | memory::Outcome::ClosureBuilt(_)
             | memory::Outcome::ClosureCopied(_)
             | memory::Outcome::ActivationCompleted(_)
-            | memory::Outcome::DetachedActivationDispatched
+            | memory::Outcome::DetachedActivationDispatched(_)
             | memory::Outcome::PathsCollected(_)
             | memory::Outcome::HermeticCheckBuilt(_)
             | memory::Outcome::TestVmStarted(_)
@@ -3376,7 +3376,7 @@ impl PipelineDeciding for SchemaRuntime {
                 self.set_activation_slot(activated.generation_slot);
                 self.record_phase(ordinary::DeploymentPhase::Activated)
             }
-            memory::Outcome::DetachedActivationDispatched => {
+            memory::Outcome::DetachedActivationDispatched(_) => {
                 // The dispatch acknowledgement is not a terminal deployment
                 // outcome. PID 1 retains the exact switch or test unit; the
                 // private observer settles the deployment from its observed
@@ -5255,19 +5255,24 @@ impl EffectRunning for SchemaRuntime {
             None => None,
         };
         match activation.run(self.configuration.effect_execution()).await {
-            Ok(()) if let Some(observer) = detached_observer => {
+            Ok(reconciliation) if let Some(observer) = detached_observer => {
+                reconciliation.announce(&command.node_name);
                 observer.observe(
                     self.store.clone(),
                     *command.deployment_identifier.payload(),
                     self.configuration.effect_execution().clone(),
                 );
-                memory::Outcome::DetachedActivationDispatched
+                memory::Outcome::DetachedActivationDispatched(reconciliation)
             }
-            Ok(()) => memory::Outcome::ActivationCompleted(nexus::ActivatedGeneration {
-                generation_identifier: command.generation_identifier,
-                node_name: command.node_name,
-                generation_slot: slot,
-            }),
+            Ok(reconciliation) => {
+                reconciliation.announce(&command.node_name);
+                memory::Outcome::ActivationCompleted(nexus::ActivatedGeneration {
+                    generation_identifier: command.generation_identifier,
+                    node_name: command.node_name,
+                    generation_slot: slot,
+                    boot_entry_reconciliation: reconciliation,
+                })
+            }
             Err(detail) => Self::effect_failed(nexus::EffectStage::Activate, detail),
         }
     }
@@ -6343,12 +6348,20 @@ impl Activating for Activation {
 }
 
 impl Effect for Activation {
-    type Product = ();
+    /// What became of the node's EFI boot entries; a user environment
+    /// requires no reconciliation.
+    type Product = nexus::BootEntryReconciliation;
 
-    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
+    async fn run(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<nexus::BootEntryReconciliation, StageFailure> {
         match self {
             Self::Host(activation) => activation.run(execution).await,
-            Self::UserEnvironment(activation) => activation.run(execution).await,
+            Self::UserEnvironment(activation) => activation
+                .run(execution)
+                .await
+                .map(|()| nexus::BootEntryReconciliation::NotRequired),
         }
     }
 }
@@ -6435,6 +6448,7 @@ trait HostActivating {
     fn retained_emission(
         &self,
         activation: DetachedSelfActivation,
+        loader_interface: emission::LoaderInterface,
     ) -> emission::RetainedUnitDispatch;
 
     /// Whether this action reconciles EFI bootloader vars after activation.
@@ -6447,16 +6461,29 @@ trait HostActivating {
     /// persistent boot) or a pending one-shot from a prior BootOnce.
     fn boot_entry_clearing(&self, boot_entry: emission::BootEntry) -> emission::BootEntryClearing;
 
+    /// Reading whether the node's running loader implements the boot loader
+    /// interface, over the route the activation takes.
+    fn loader_interface_query(&self) -> emission::LoaderInterfaceQuery;
+
+    /// The loader interface as read on the node, before anything there is
+    /// changed: a loader sets `LoaderInfo` at boot, so no switch alters it.
+    async fn read_loader_interface(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<emission::LoaderInterface, StageFailure>;
+
+    /// The dispatch of a same-host Switch or Test, and what its unit's script
+    /// does with the boot entries.
     async fn run_detached_self_activation(
         &self,
         execution: &EffectExecution,
         activation: DetachedSelfActivation,
-    ) -> std::result::Result<(), StageFailure>;
+    ) -> std::result::Result<nexus::BootEntryReconciliation, StageFailure>;
 
     async fn run_simple(
         &self,
         execution: &EffectExecution,
-    ) -> std::result::Result<(), StageFailure>;
+    ) -> std::result::Result<nexus::BootEntryReconciliation, StageFailure>;
 
     async fn reconcile_efi(
         &self,
@@ -6523,6 +6550,7 @@ impl HostActivating for HostActivation {
     fn retained_emission(
         &self,
         activation: DetachedSelfActivation,
+        loader_interface: emission::LoaderInterface,
     ) -> emission::RetainedUnitDispatch {
         let closure_path = self.closure_path.clone();
         emission::RetainedUnitDispatch {
@@ -6530,7 +6558,10 @@ impl HostActivating for HostActivation {
             unit_name: emission::UnitName(self.self_switch_unit_name()),
             transient_script: match activation {
                 DetachedSelfActivation::Switch => {
-                    emission::TransientScript::SelfSwitch(closure_path)
+                    emission::TransientScript::SelfSwitch(emission::SelfSwitchScript {
+                        closure_path,
+                        loader_interface,
+                    })
                 }
                 DetachedSelfActivation::Test => emission::TransientScript::SelfTest(closure_path),
             },
@@ -6551,16 +6582,52 @@ impl HostActivating for HostActivation {
         }
     }
 
+    fn loader_interface_query(&self) -> emission::LoaderInterfaceQuery {
+        emission::LoaderInterfaceQuery {
+            ssh_destination: self.target.ssh_destination.clone(),
+        }
+    }
+
+    async fn read_loader_interface(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<emission::LoaderInterface, StageFailure> {
+        match execution.emitted(self.loader_interface_query()).await {
+            emission::LoaderInterfaceOutcome::Read(loader_interface) => Ok(loader_interface),
+            emission::LoaderInterfaceOutcome::Unrecognized(printed) => {
+                Err(StageFailure::from(format!(
+                    "the boot loader interface read printed neither answer: {}",
+                    printed.0.trim()
+                )))
+            }
+            emission::LoaderInterfaceOutcome::Failed(failure) => Err(failure.into()),
+        }
+    }
+
     async fn run_detached_self_activation(
         &self,
         execution: &EffectExecution,
         activation: DetachedSelfActivation,
-    ) -> std::result::Result<(), StageFailure> {
+    ) -> std::result::Result<nexus::BootEntryReconciliation, StageFailure> {
+        let (loader_interface, reconciliation) = match activation {
+            DetachedSelfActivation::Switch => {
+                let loader_interface = self.read_loader_interface(execution).await?;
+                let reconciliation = loader_interface.reconciliation();
+                (loader_interface, reconciliation)
+            }
+            DetachedSelfActivation::Test => (
+                emission::LoaderInterface::NotImplemented,
+                nexus::BootEntryReconciliation::NotRequired,
+            ),
+        };
         // The dispatch returns once PID 1 holds the unit; what the
         // activation prints goes to the unit's journal, and its result is
         // read from the retained receipt.
-        match execution.emitted(self.retained_emission(activation)).await {
-            emission::CallOutcome::Completed => Ok(()),
+        match execution
+            .emitted(self.retained_emission(activation, loader_interface))
+            .await
+        {
+            emission::CallOutcome::Completed => Ok(reconciliation),
             emission::CallOutcome::Failed(failure) => Err(failure.into()),
         }
     }
@@ -6568,20 +6635,30 @@ impl HostActivating for HostActivation {
     async fn run_simple(
         &self,
         execution: &EffectExecution,
-    ) -> std::result::Result<(), StageFailure> {
+    ) -> std::result::Result<nexus::BootEntryReconciliation, StageFailure> {
         let Some(switch) = self.switch_emission() else {
             return Err(StageFailure::from(format!(
                 "no simple activation for action {:?}",
                 self.action
             )));
         };
+        let loader_interface_option = match self.requires_efi_reconcile() {
+            true => Some(self.read_loader_interface(execution).await?),
+            false => None,
+        };
         if let emission::CallOutcome::Failed(failure) = execution.emitted(switch).await {
             return Err(failure.into());
         }
-        if self.requires_efi_reconcile() {
-            self.reconcile_efi(execution).await?;
+        match loader_interface_option {
+            None => Ok(nexus::BootEntryReconciliation::NotRequired),
+            Some(emission::LoaderInterface::NotImplemented) => {
+                Ok(nexus::BootEntryReconciliation::SkippedWithoutLoaderInterface)
+            }
+            Some(emission::LoaderInterface::Implemented) => {
+                self.reconcile_efi(execution).await?;
+                Ok(nexus::BootEntryReconciliation::Cleared)
+            }
         }
-        Ok(())
     }
 
     async fn reconcile_efi(
@@ -6617,20 +6694,57 @@ impl HostActivating for HostActivation {
 }
 
 impl Effect for HostActivation {
-    type Product = ();
+    type Product = nexus::BootEntryReconciliation;
 
-    async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
+    async fn run(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<nexus::BootEntryReconciliation, StageFailure> {
         if let Some(activation) = self.detached_self_activation() {
             return self
                 .run_detached_self_activation(execution, activation)
                 .await;
         }
         match self.action {
-            ordinary::HostDeployAction::ScheduleBootOnce => {
-                self.run_journalled_unit(execution, self.boot_once_emission())
-                    .await
-            }
+            ordinary::HostDeployAction::ScheduleBootOnce => self
+                .run_journalled_unit(execution, self.boot_once_emission())
+                .await
+                .map(|()| nexus::BootEntryReconciliation::NotRequired),
             _ => self.run_simple(execution).await,
+        }
+    }
+}
+
+/// Saying what an activation did with the node's boot entries where it is
+/// news: a skip is said in the daemon's log, beside the outcome that carries
+/// it.
+trait ReconciliationAnnouncing {
+    fn announce(&self, node_name: &ordinary::NodeName);
+}
+
+impl ReconciliationAnnouncing for nexus::BootEntryReconciliation {
+    fn announce(&self, node_name: &ordinary::NodeName) {
+        if let Self::SkippedWithoutLoaderInterface = self {
+            eprintln!(
+                "lojix: {} boots a loader that does not implement the boot loader interface (no LoaderInfo); its boot-entry clears are skipped",
+                node_name.payload()
+            );
+        }
+    }
+}
+
+/// What a Boot or Switch does with the boot entries under the loader it runs
+/// on: clears them where the loader implements the boot loader interface,
+/// and skips the clears where it does not.
+trait LoaderReconciliation {
+    fn reconciliation(&self) -> nexus::BootEntryReconciliation;
+}
+
+impl LoaderReconciliation for emission::LoaderInterface {
+    fn reconciliation(&self) -> nexus::BootEntryReconciliation {
+        match self {
+            Self::Implemented => nexus::BootEntryReconciliation::Cleared,
+            Self::NotImplemented => nexus::BootEntryReconciliation::SkippedWithoutLoaderInterface,
         }
     }
 }
@@ -8874,7 +8988,10 @@ mod tests {
             Some(DetachedSelfActivation::Switch)
         );
         let invocation = activation
-            .retained_emission(DetachedSelfActivation::Switch)
+            .retained_emission(
+                DetachedSelfActivation::Switch,
+                emission::LoaderInterface::Implemented,
+            )
             .command_line();
         assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
@@ -8919,7 +9036,10 @@ mod tests {
             Some(DetachedSelfActivation::Test)
         );
         let invocation = activation
-            .retained_emission(DetachedSelfActivation::Test)
+            .retained_emission(
+                DetachedSelfActivation::Test,
+                emission::LoaderInterface::NotImplemented,
+            )
             .command_line();
         let argv = invocation.joined_arguments();
         assert!(argv.contains("systemd-run"), "PID-1-owned unit: {argv}");
@@ -10677,7 +10797,10 @@ mod tests {
         line(
             "host self-switch",
             self_switch
-                .retained_emission(DetachedSelfActivation::Switch)
+                .retained_emission(
+                    DetachedSelfActivation::Switch,
+                    emission::LoaderInterface::Implemented,
+                )
                 .command_line(),
         );
         let self_test =
@@ -10685,7 +10808,10 @@ mod tests {
         line(
             "host self-test",
             self_test
-                .retained_emission(DetachedSelfActivation::Test)
+                .retained_emission(
+                    DetachedSelfActivation::Test,
+                    emission::LoaderInterface::NotImplemented,
+                )
                 .command_line(),
         );
         line(
@@ -10805,5 +10931,141 @@ mod tests {
             assert_eq!(recorded_line, emitted_line);
         }
         assert_eq!(emitted, recorded);
+    }
+
+    /// A host Switch run against a fake `ssh` that answers the loader read
+    /// with `answer`, fails a `bootctl` call when `failing_clear` is set, and
+    /// logs every remote body it ran; what the activation came to, and the
+    /// bodies in order.
+    fn foreground_switch_under(
+        answer: &str,
+        failing_clear: bool,
+    ) -> (
+        std::result::Result<nexus::BootEntryReconciliation, StageFailure>,
+        Vec<String>,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().expect("fake ssh directory");
+        let ssh = directory.path().join("ssh");
+        let log = directory.path().join("bodies");
+        fs::write(
+            &ssh,
+            format!(
+                "#!/bin/sh\nfor argument in \"$@\"; do body=\"$argument\"; done\nprintf '%s\\n' \"$body\" >> {log}\ncase \"$body\" in\n  *LoaderInfo*) echo {answer} ;;\n  bootctl*) exit {clear_status} ;;\nesac\nexit 0\n",
+                log = log.display(),
+                clear_status = if failing_clear { 1 } else { 0 },
+            ),
+        )
+        .expect("fake ssh");
+        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700)).expect("executable");
+        let execution = EffectExecution::test(directory.path().to_path_buf());
+        let activation = host_activation(ordinary::HostDeployAction::ActivateNow);
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let result = runtime.block_on(activation.run(&execution));
+        let bodies = fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        (result, bodies)
+    }
+
+    #[test]
+    fn a_switch_under_a_loader_without_the_interface_skips_the_clears_and_says_so() {
+        let (result, bodies) = foreground_switch_under("not-implemented", false);
+        assert_eq!(
+            result.expect("the switch succeeds"),
+            nexus::BootEntryReconciliation::SkippedWithoutLoaderInterface
+        );
+        assert_eq!(bodies.len(), 2, "{bodies:?}");
+        assert!(bodies[0].contains("LoaderInfo-4a67b082"), "{bodies:?}");
+        assert!(
+            bodies[1].contains("switch-to-configuration switch"),
+            "{bodies:?}"
+        );
+        assert!(
+            bodies.iter().all(|body| !body.contains("bootctl")),
+            "{bodies:?}"
+        );
+    }
+
+    #[test]
+    fn a_switch_under_a_loader_with_the_interface_clears_both_entries() {
+        let (result, bodies) = foreground_switch_under("implemented", false);
+        assert_eq!(
+            result.expect("the switch succeeds"),
+            nexus::BootEntryReconciliation::Cleared
+        );
+        assert_eq!(
+            bodies[2..],
+            ["bootctl set-default ''", "bootctl set-oneshot ''"],
+            "{bodies:?}"
+        );
+    }
+
+    #[test]
+    fn a_clear_that_fails_under_a_loader_with_the_interface_fails_the_activation() {
+        let (result, bodies) = foreground_switch_under("implemented", true);
+        let failure = result.expect_err("the failed clear is the activation's failure");
+        assert!(format!("{failure:?}").contains("bootctl"), "{failure:?}");
+        assert_eq!(bodies.len(), 3, "{bodies:?}");
+    }
+
+    #[test]
+    fn a_loader_read_that_prints_neither_answer_fails_before_the_switch() {
+        let (result, bodies) = foreground_switch_under("", false);
+        let failure = result.expect_err("an unreadable loader is no answer");
+        assert!(
+            format!("{failure:?}").contains("printed neither answer"),
+            "{failure:?}"
+        );
+        assert_eq!(bodies.len(), 1, "{bodies:?}");
+    }
+
+    #[test]
+    fn the_loader_interface_read_and_a_self_switch_without_clears_are_the_named_additions() {
+        // bead primary-6llk: before a Boot or Switch clears the boot entries,
+        // the node is asked whether its running loader implements the boot
+        // loader interface, over the route the activation takes; a
+        // self-switch under a loader that does not carries no clears. Neither
+        // call existed at 23f88f2, so each is written out here whole.
+        let boot = host_activation(ordinary::HostDeployAction::SetBootProfile);
+        let read = boot.loader_interface_query().command_line();
+        assert_eq!(read.program, "ssh");
+        assert_eq!(
+            read.arguments,
+            vec![
+                "-o".to_string(),
+                "BatchMode=yes".into(),
+                "fixture-login@fixture-activate.invalid".into(),
+                "if [ -e /sys/firmware/efi/efivars/LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f ]; then echo implemented; else echo not-implemented; fi".into(),
+            ]
+        );
+        let self_switch =
+            host_activation_on_host(ordinary::HostDeployAction::ActivateNow, Some(node()));
+        let with_clears = self_switch
+            .retained_emission(
+                DetachedSelfActivation::Switch,
+                emission::LoaderInterface::Implemented,
+            )
+            .command_line();
+        let without_clears = self_switch
+            .retained_emission(
+                DetachedSelfActivation::Switch,
+                emission::LoaderInterface::NotImplemented,
+            )
+            .command_line();
+        let clears = "bootctl set-default '\\'''\\''\nbootctl set-oneshot '\\'''\\''\n";
+        let body = |command_line: &CommandLine| command_line.arguments[3].clone();
+        assert!(
+            body(&with_clears).ends_with(&format!("switch\n{clears}'")),
+            "{}",
+            body(&with_clears)
+        );
+        assert_eq!(
+            body(&without_clears),
+            body(&with_clears).replacen(clears, "", 1)
+        );
+        assert!(!body(&without_clears).contains("bootctl"));
     }
 }

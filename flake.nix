@@ -478,17 +478,22 @@
           # unit's own result and records the generation Current from the
           # system profile the switch set:
           #
-          # 1. the VM's loader has no boot-loader interface, so the clearing
-          #    after the switch fails: the successor records the generation
-          #    Current and the deployment Failed(Activate/ActivationFailed),
-          #    with what bootctl printed;
-          # 2. the loader interface is present and clearing succeeds: the
+          # 1. the VM's loader does not implement the boot loader interface
+          #    (no LoaderInfo), so the unit's script carries no clears and
+          #    bootctl is never run: the successor records Current and
+          #    Succeeded, and the dispatcher said the skip;
+          # 2. the loader interface is present and a clear fails after the
+          #    switch: the successor records the generation Current and the
+          #    deployment Failed(Activate/ActivationFailed), with what bootctl
+          #    printed;
+          # 3. the loader interface is present and clearing succeeds: the
           #    successor records Current and Succeeded, then stops the unit;
-          # 3. as 2, but the switch leaves the daemon running: the dispatcher
+          # 4. as 3, but the switch leaves the daemon running: the dispatcher
           #    settles it itself.
           #
-          # Nix, SSH and, for 2 and 3, the loader interface are the fake
-          # boundaries.
+          # Nix, SSH and, for 2 to 4, the loader interface are the fake
+          # boundaries: a LoaderInfo variable on a tmpfs over /sys/firmware,
+          # and a bootctl that records its arguments.
           same-host-switch-activation =
             let
               package = self.packages.${system}.default;
@@ -502,10 +507,10 @@
               '';
               loader-interface = pkgs.writeShellScriptBin "bootctl" ''
                 printf '%s\n' "$*" >> /run/lojix-bootctl-argv
-                if [ -e /run/lojix-loader-interface ]; then
-                  exit 0
+                if [ -e /run/lojix-bootctl-refuses ]; then
+                  echo "fixture: the loader refused the entry" >&2
+                  exit 1
                 fi
-                exec ${pkgs.systemd}/bin/bootctl "$@"
               '';
               fake-nix = pkgs.writeShellScriptBin "nix" ''
                 printf '%s\n' "$@" > /run/lojix-fake-nix-argv
@@ -585,38 +590,57 @@
                 machine.succeed("systemctl restart lojix.service")
                 sockets()
 
-                # 1. No boot-loader interface: the clearing after the switch
-                # fails, and the successor reads the retained failure.
+                # 1. No boot loader interface: the script carries no clears,
+                # bootctl never runs, and the successor reads the retained
+                # success.
+                machine.fail("test -e /sys/firmware/efi/efivars/LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f")
                 machine.succeed("touch /run/lojix-candidate-restarts-daemon")
                 predecessor = invocation()
                 deploy("1")
                 machine.wait_until_succeeds("test \"$(systemctl show lojix.service --property=InvocationID --value)\" != '" + predecessor + "'")
                 sockets()
-                reply = settled("1", "ActivationFailed")
-                assert "Succeeded" not in reply, reply
-                assert "Not booted with" in reply, reply
-                machine.succeed("systemctl show lojix-self-switch-deploy-1.service --property=Result --value | grep -Fx exit-code")
+                reply = settled("1", "Succeeded")
+                assert "ActivationFailed" not in reply, reply
+                machine.fail("test -e /run/lojix-bootctl-argv")
+                machine.succeed("journalctl -u lojix.service --no-pager | grep -F 'atlas boots a loader that does not implement the boot loader interface (no LoaderInfo); its boot-entry clears are skipped'")
+                machine.wait_until_succeeds("systemctl show lojix-self-switch-deploy-1.service --property=LoadState --value | grep -Fx not-found")
                 assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == "${candidate}"
 
-                # 2. The loader interface is present: the successor reads the
-                # retained success and stops the unit.
-                machine.succeed("touch /run/lojix-loader-interface")
+                # The loader interface, as the loader would set it at boot.
+                machine.succeed("mount -t tmpfs fixture-firmware /sys/firmware && mkdir -p /sys/firmware/efi/efivars && touch /sys/firmware/efi/efivars/LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f")
+
+                # 2. The loader interface is present and a clear fails after
+                # the switch: the successor reads the retained failure.
+                machine.succeed("touch /run/lojix-bootctl-refuses")
                 predecessor = invocation()
                 deploy("2")
                 machine.wait_until_succeeds("test \"$(systemctl show lojix.service --property=InvocationID --value)\" != '" + predecessor + "'")
                 sockets()
-                settled("2", "Succeeded")
-                machine.wait_until_succeeds("systemctl show lojix-self-switch-deploy-2.service --property=LoadState --value | grep -Fx not-found")
+                reply = settled("2", "ActivationFailed")
+                assert "Succeeded" not in reply, reply
+                assert "fixture: the loader refused the entry" in reply, reply
+                machine.succeed("systemctl show lojix-self-switch-deploy-2.service --property=Result --value | grep -Fx exit-code")
+                machine.succeed("grep -Fx 'set-default ' /run/lojix-bootctl-argv")
+                machine.succeed("rm /run/lojix-bootctl-refuses /run/lojix-bootctl-argv")
+
+                # 3. The loader interface is present and both clears succeed:
+                # the successor reads the retained success and stops the unit.
+                predecessor = invocation()
+                deploy("3")
+                machine.wait_until_succeeds("test \"$(systemctl show lojix.service --property=InvocationID --value)\" != '" + predecessor + "'")
+                sockets()
+                settled("3", "Succeeded")
+                machine.wait_until_succeeds("systemctl show lojix-self-switch-deploy-3.service --property=LoadState --value | grep -Fx not-found")
                 machine.succeed("grep -Fx 'set-default ' /run/lojix-bootctl-argv && grep -Fx 'set-oneshot ' /run/lojix-bootctl-argv")
 
-                # 3. The switch leaves the daemon running: the dispatcher
+                # 4. The switch leaves the daemon running: the dispatcher
                 # settles its own deployment.
                 machine.succeed("rm /run/lojix-candidate-restarts-daemon")
                 dispatcher = invocation()
-                deploy("3")
-                settled("3", "Succeeded")
+                deploy("4")
+                settled("4", "Succeeded")
                 assert invocation() == dispatcher
-                machine.wait_until_succeeds("systemctl show lojix-self-switch-deploy-3.service --property=LoadState --value | grep -Fx not-found")
+                machine.wait_until_succeeds("systemctl show lojix-self-switch-deploy-4.service --property=LoadState --value | grep -Fx not-found")
                 machine.log(machine.succeed("journalctl -u lojix.service --no-pager"))
               '';
             };

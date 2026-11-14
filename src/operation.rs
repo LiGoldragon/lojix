@@ -222,6 +222,15 @@ pub struct ActivatedGeneration {
     pub generation_identifier: signal_lojix::GenerationIdentifier,
     pub node_name: signal_lojix::NodeName,
     pub generation_slot: signal_lojix::GenerationSlot,
+    pub boot_entry_reconciliation: BootEntryReconciliation,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum BootEntryReconciliation {
+    Cleared,
+    SkippedWithoutLoaderInterface,
+    NotRequired,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -375,7 +384,7 @@ pub enum Outcome {
     ClosureBuilt(BuiltClosure),
     ClosureCopied(CopiedClosure),
     ActivationCompleted(ActivatedGeneration),
-    DetachedActivationDispatched,
+    DetachedActivationDispatched(BootEntryReconciliation),
     PathsCollected(GarbageCollected),
     HermeticCheckBuilt(CheckBuilt),
     TestVmStarted(TestVmBroughtUp),

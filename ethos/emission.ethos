@@ -9,6 +9,13 @@
 ; Result are systemd's documented values, each with the value systemd may
 ; add later kept as the text it sent.
 ;
+; Whether the running boot loader implements the EFI boot loader interface
+; is read on the node before its boot entries are cleared, the check bootctl
+; itself makes: the LoaderInfo variable the loader sets at boot. A loader
+; that does not implement it has no entries of this interface to clear, so
+; a host switched under it is never asked to clear them, and a self-switch
+; script carries no clears.
+;
 ; The process emissions run under the effect execution, which says where a
 ; program comes from; the D-Bus emissions run on one system-bus session that
 ; keeps the subscriptions a detached activation is watched through. An
@@ -33,6 +40,7 @@ Emission
   CheckClosurePresence.ClosurePresence
   CopyClosure.ClosureCopy
   SwitchConfiguration.ConfigurationSwitch
+  ReadLoaderInterface.LoaderInterfaceQuery
   ClearBootEntry.BootEntryClearing
   RunTransientUnit.TransientUnitRun
   DispatchRetainedUnit.RetainedUnitDispatch
@@ -63,6 +71,7 @@ Emission
   ClosurePresenceChecked.CallOutcome
   ClosureCopied.CallOutcome
   ConfigurationSwitched.CallOutcome
+  LoaderInterfaceRead.LoaderInterfaceOutcome
   BootEntryCleared.CallOutcome
   TransientUnitRan.CallOutcome
   RetainedUnitDispatched.CallOutcome
@@ -98,10 +107,13 @@ Emission
   ClosureCopy.{ NixStoreUri ClosurePath }
   ConfigurationSwitch.{ SshDestination ClosurePath SwitchAction }
   SwitchAction.[ Boot Switch Test ]
+  LoaderInterfaceQuery.{ SshDestination }
+  LoaderInterface.[ Implemented NotImplemented ]
   BootEntryClearing.{ SshDestination BootEntry }
   BootEntry.[ Default Oneshot ]
   TransientUnitRun.{ SshDestination UnitName TransientScript }
-  TransientScript.[ BootOnce.ClosurePath SelfSwitch.ClosurePath SelfTest.ClosurePath ]
+  TransientScript.[ BootOnce.ClosurePath SelfSwitch.SelfSwitchScript SelfTest.ClosurePath ]
+  SelfSwitchScript.{ ClosurePath LoaderInterface }
   RetainedUnitDispatch.{ SshDestination UnitName TransientScript }
   UnitJournalQuery.{ SshDestination UnitName }
   LocalHomeProfile.{ HomeDirectory.String ClosurePath }
@@ -129,6 +141,7 @@ Emission
   FlakeMetadata.{ Option<FlakeReference> Option<ResolvedRevision> }
   MetadataFault.String
   JournalOutcome.[ Read.JournalText Failed.ProcessFailure ]
+  LoaderInterfaceOutcome.[ Read.LoaderInterface Unrecognized.Stdout Failed.ProcessFailure ]
   JournalText.String
   HostNameOutcome.[ Named.NodeName Failed.ProcessFailure ]
   GarbageOutcome.[ Collected.CollectedPaths Failed.ProcessFailure ]

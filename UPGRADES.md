@@ -171,6 +171,22 @@ it was always `CompleteHost`. A self-switch dispatched by an earlier daemon,
 `--collect`, is read the same way while PID 1 still holds it; one that exited
 0 without remaining is a success.
 
+A Boot or Switch clears the boot entries only under a loader that implements
+the boot loader interface (bead primary-6llk). Before it activates, Lojix
+reads on the node, over the route the activation takes, whether the
+`LoaderInfo` EFI variable exists, the check bootctl itself makes
+(`/sys/firmware/efi/efivars/LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f`).
+Where it does, the switch clears both entries as before, and a clear that fails
+fails the activation. Where it does not, the clears are skipped: a remote
+activation never runs them, and a same-host switch's script carries none. The
+activation's outcome says which (`BootEntryReconciliation`: `Cleared`,
+`SkippedWithoutLoaderInterface`, or `NotRequired` for every other action), and
+the daemon logs a skip: `lojix: <node> boots a loader that does not implement
+the boot loader interface (no LoaderInfo); its boot-entry clears are skipped`.
+A same-host switch on such a loader, as on ouranos, now ends Current and
+`Succeeded`. A read that fails, or prints neither answer, fails the activation
+before anything on the node changes.
+
 # 0.10.5 to 0.10.6
 
 A revision: the memory format is unchanged and the store stays readable;

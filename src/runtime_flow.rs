@@ -9,19 +9,19 @@
 
 pub use crate::runtime_model::{
     ActivateGenerationCommand, ActivatedGeneration, ActivationBackend, ActivationEffect,
-    ActivationProfile, BringUpTestVmCommand, BuildTarget, BuiltClosure, CheckBuilt, ClosureOrigin,
-    ClosurePath, ClusterName, CopiedClosure, CopyClosureCommand, DeploymentIdentifier,
-    DeploymentInputMode, DeploymentOutputSelector, DeploymentTransport, EffectFailure, EffectStage,
-    EvaluatedClosure, ExtraSubstituter, FlakeAttribute, FlakeAuthRequest, FlakeReference,
-    GarbageCollected, GenerationArtifact, GenerationIdentifier, GenerationSlot,
-    HermeticCheckCommand, HorizonMaterializationCommand, HostComposition, HostDeployAction,
-    IgnoredBuilder, MaterializationShape, MaterializedInputs, NixBuildCommand, NixBuilderSpec,
-    NixEvalCommand, NixStoreUri, NixSystem, NodeName, Operation, Outcome, PathInfoGcCommand,
-    PersistedFlakeInputOverride, ProposalSource, ResolvedFlake, SecretsInput, SourceRevisionPolicy,
-    SourceRevisionRecord, SshDestination, TargetStoreBuild, TearDownTestVmCommand,
-    TestExecutionProfile, TestMode, TestVmBroughtUp, TestVmHost, TestVmTornDown,
-    UserEnvironmentAction, UserEnvironmentActivationProfile, UserEnvironmentMaterialization,
-    UserName,
+    ActivationProfile, BootEntryReconciliation, BringUpTestVmCommand, BuildTarget, BuiltClosure,
+    CheckBuilt, ClosureOrigin, ClosurePath, ClusterName, CopiedClosure, CopyClosureCommand,
+    DeploymentIdentifier, DeploymentInputMode, DeploymentOutputSelector, DeploymentTransport,
+    EffectFailure, EffectStage, EvaluatedClosure, ExtraSubstituter, FlakeAttribute,
+    FlakeAuthRequest, FlakeReference, GarbageCollected, GenerationArtifact, GenerationIdentifier,
+    GenerationSlot, HermeticCheckCommand, HorizonMaterializationCommand, HostComposition,
+    HostDeployAction, IgnoredBuilder, MaterializationShape, MaterializedInputs, NixBuildCommand,
+    NixBuilderSpec, NixEvalCommand, NixStoreUri, NixSystem, NodeName, Operation, Outcome,
+    PathInfoGcCommand, PersistedFlakeInputOverride, ProposalSource, ResolvedFlake, SecretsInput,
+    SourceRevisionPolicy, SourceRevisionRecord, SshDestination, TargetStoreBuild,
+    TearDownTestVmCommand, TestExecutionProfile, TestMode, TestVmBroughtUp, TestVmHost,
+    TestVmTornDown, UserEnvironmentAction, UserEnvironmentActivationProfile,
+    UserEnvironmentMaterialization, UserName,
 };
 
 /// What a driven pipeline ends with: the privileged contract's own output,
@@ -111,7 +111,7 @@ mod tests {
     impl NexusEngine for EndlessPipeline {
         async fn attempt(&mut self, _operation: Operation) -> Outcome {
             self.stages_attempted += 1;
-            Outcome::DetachedActivationDispatched
+            Outcome::DetachedActivationDispatched(BootEntryReconciliation::NotRequired)
         }
 
         fn step_limit_reached(&self, _limit: PipelineStepLimit) -> PipelineOutput {
@@ -134,7 +134,11 @@ mod tests {
         let mut engine = EndlessPipeline {
             stages_attempted: 0,
         };
-        let output = engine.drive(Outcome::DetachedActivationDispatched).await;
+        let output = engine
+            .drive(Outcome::DetachedActivationDispatched(
+                BootEntryReconciliation::NotRequired,
+            ))
+            .await;
         assert_eq!(
             output,
             PipelineOutput::Refused(signal_lojix::StoreFailure("stopped after 32".into()))

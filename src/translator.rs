@@ -25,8 +25,9 @@ use crate::emission::{
     ConfigurationSwitch, DerivationCopy, DerivationEvaluation, Emittable, EvaluationFreshness,
     ExitStatus, FlakeMetadata, FlakeMetadataOutcome, FlakeMetadataQuery, GarbageCollection,
     GarbageOutcome, GcRootDirectory, HashOutcome, HostNameOutcome, InputHashing, JournalOutcome,
-    JournalText, LocalHomeActivation, LocalHomeProfile, MetadataFault, OsFault, PathOutcome,
-    PrintedPath, ProcessEnd, ProcessEnding, ProcessFailure, ProcessFault, ReadShortHostName,
+    JournalText, LoaderInterface, LoaderInterfaceOutcome, LoaderInterfaceQuery,
+    LocalHomeActivation, LocalHomeProfile, MetadataFault, OsFault, PathOutcome, PrintedPath,
+    ProcessEnd, ProcessEnding, ProcessFailure, ProcessFault, ReadShortHostName,
     RemoteHomeActivation, RemoteHomeLogin, RemoteHomeProfile, RetainedUnitDispatch, ServiceResult,
     ServiceResultReading, SignalEnd, SignalNumber, SriHash, Stderr, Stdout, SubscribeUnitNew,
     SwitchAction, TargetStoreBuild, TargetStoreRooting, TestVmBringUp, TestVmTearDown,
@@ -46,6 +47,17 @@ const UNIT_JOURNAL_LINES: usize = 200;
 /// generation only after that generation's activation has succeeded.
 const HOME_MANAGER_DRIVER_VERSION_FLAG: &str = "--driver-version";
 const HOME_MANAGER_DRIVER_VERSION: &str = "1";
+
+/// The EFI variable a boot loader implementing the boot loader interface sets
+/// at boot, `LoaderInfo` in the loader vendor namespace: bootctl refuses to
+/// set or clear an entry when it is absent ("Not booted with a supported boot
+/// loader."), and so the clears are asked only where it is present.
+const LOADER_INFO_VARIABLE: &str =
+    "/sys/firmware/efi/efivars/LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
+
+/// What the loader-interface read prints on the node, one word each.
+const LOADER_INTERFACE_IMPLEMENTED: &str = "implemented";
+const LOADER_INTERFACE_NOT_IMPLEMENTED: &str = "not-implemented";
 
 /// Awaiting one emission on a blocking thread. The translator is cloned onto
 /// the thread with the emission, and what the call observed comes back.
@@ -472,6 +484,18 @@ impl Commanded for ConfigurationSwitch {
     }
 }
 
+impl Commanded for LoaderInterfaceQuery {
+    /// Whether `LoaderInfo` exists on the node, read over the route the
+    /// activation takes and printed as one word, so a failed ssh is never
+    /// read as an absent variable.
+    fn command_line(&self) -> CommandLine {
+        self.ssh_destination.remote(format!(
+            "if [ -e {LOADER_INFO_VARIABLE} ]; then echo {LOADER_INTERFACE_IMPLEMENTED}; \
+             else echo {LOADER_INTERFACE_NOT_IMPLEMENTED}; fi"
+        ))
+    }
+}
+
 impl Commanded for BootEntryClearing {
     fn command_line(&self) -> CommandLine {
         self.ssh_destination.remote(
@@ -494,8 +518,9 @@ impl ActivationScript for TransientScript {
     /// `Current Entry`; after the candidate has generated its boot
     /// configuration, `NEW` is read from its generated `loader.conf`. Reboot 1
     /// lands NEW; reboot 2+ returns to OLD. `SelfSwitch`: set the system
-    /// profile, `switch-to-configuration switch`, then clear both EFI
-    /// overrides so the declarative `loader.conf` is the sole authority.
+    /// profile, `switch-to-configuration switch`, then, when the running
+    /// loader implements the boot loader interface, clear both EFI overrides
+    /// so the declarative `loader.conf` is the sole authority.
     /// `SelfTest`: `switch-to-configuration test`, the system profile left
     /// where it is.
     fn script(&self) -> String {
@@ -517,14 +542,18 @@ impl ActivationScript for TransientScript {
                  echo \"boot-once: oneshot=$NEW persistent-default=$OLD (=running generation)\"\n",
                 store = closure.0,
             ),
-            Self::SelfSwitch(closure) => format!(
+            Self::SelfSwitch(switch) => format!(
                 "export PATH=/run/current-system/sw/bin:/run/wrappers/bin:$PATH\n\
                  set -eu\n\
                  nix-env -p /nix/var/nix/profiles/system --set {store}\n\
                  {store}/bin/switch-to-configuration switch\n\
-                 bootctl set-default ''\n\
-                 bootctl set-oneshot ''\n",
-                store = closure.0,
+                 {clears}",
+                store = switch.closure_path.0,
+                clears = match switch.loader_interface {
+                    LoaderInterface::Implemented =>
+                        "bootctl set-default ''\nbootctl set-oneshot ''\n",
+                    LoaderInterface::NotImplemented => "",
+                },
             ),
             Self::SelfTest(closure) => format!(
                 "export PATH=/run/current-system/sw/bin:/run/wrappers/bin:$PATH\n\
@@ -821,6 +850,23 @@ impl Emittable<EffectExecution> for InputHashing {
         match translator.run(&self.command_line()) {
             Ok(printed) => HashOutcome::Hashed(SriHash(printed.first_line())),
             Err(failure) => HashOutcome::Failed(failure),
+        }
+    }
+}
+
+impl Emittable<EffectExecution> for LoaderInterfaceQuery {
+    fn emit(&self, translator: &EffectExecution) -> LoaderInterfaceOutcome {
+        match translator.run(&self.command_line()) {
+            Ok(printed) => match printed.first_line().as_str() {
+                LOADER_INTERFACE_IMPLEMENTED => {
+                    LoaderInterfaceOutcome::Read(LoaderInterface::Implemented)
+                }
+                LOADER_INTERFACE_NOT_IMPLEMENTED => {
+                    LoaderInterfaceOutcome::Read(LoaderInterface::NotImplemented)
+                }
+                _ => LoaderInterfaceOutcome::Unrecognized(Stdout(printed)),
+            },
+            Err(failure) => LoaderInterfaceOutcome::Failed(failure),
         }
     }
 }
