@@ -31,13 +31,13 @@ use memory_engine::{
     VersionedHistoryAcknowledgement, VersionedHistoryRetention, VersionedStoreName,
     VersioningPolicy,
 };
+use rkyv::Deserialize as RkyvDeserialize;
 use rkyv::api::high::HighDeserializer;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::rancor::{self, Strategy};
 use rkyv::validation::Validator;
 use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use crate::runtime_model::{
     AdmissionMarker, CommitSequence, ContainerLifecycleRecord, DatabaseMarker, DeployJob,
@@ -350,9 +350,6 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("configuration archive decode error: {0}")]
-    ConfigurationArchive(String),
-
     #[error("component argument error: {0}")]
     Argument(#[from] triad_runtime::ArgumentError),
 
@@ -367,9 +364,6 @@ pub enum Error {
 
     #[error("the store reset takes no arguments")]
     UnexpectedResetArguments,
-
-    #[error("configuration migration expects exactly a legacy archive and a new target path")]
-    ExpectedMigrationArguments,
 
     #[error("flag-style arguments are not part of component binaries: {0}")]
     FlagArgument(String),
@@ -523,70 +517,6 @@ impl<Arguments: IntoIterator<Item = OsString>> InlineDatomArguments for Argument
     }
 }
 
-/// Daemon configuration: the two authority-tiered socket paths and their unix
-/// permission modes. Decoded only from the single rkyv startup file the daemon
-/// binary receives. Mirrors the `cloud` `LegacyStartupConfiguration` shape.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq)]
-pub struct LegacyStartupConfiguration {
-    pub ordinary_socket_path: String,
-    pub ordinary_socket_mode: u32,
-    pub owner_socket_path: String,
-    pub owner_socket_mode: u32,
-    pub state_directory_path: String,
-    /// Exact configured durable Lojix store path. This is intentionally
-    /// independent from the state directory so the daemon and reset primitive
-    /// share one explicit target rather than deriving a `lojix.memory` basename.
-    pub store_path: String,
-    /// The node name of the host this daemon runs on. It is
-    /// retained as deployment identity, while every immutable generation is
-    /// evaluated and built locally, copied to its target, then activated there.
-    /// Decoded from the same rkyv startup file — not a flag, not a runtime
-    /// `Configure`.
-    pub daemon_host: String,
-    /// The test-op defaults the daemon fills into a `(Check …)` shorthand at
-    /// lowering (report 54). `None` when the daemon was started without a baked
-    /// fixture — the production posture: a bare `(Check …)`/`(Run …)` then
-    /// rejects with `NoTestDefaults` rather than resolving against a per-node
-    /// baked test cluster (the workspace deployment-independence discipline;
-    /// test fixtures live only in test code). Decoded from the same rkyv startup
-    /// file as the rest of the configuration — NOT a runtime `Configure` op, NOT
-    /// a flag, consistent with the daemons-take-binary-config-only override.
-    pub test_defaults: Option<TestDefaults>,
-}
-
-/// The config-default test-op selection a `(Check <node>)` shorthand expands
-/// into (report 54 decision D — cluster, host, and mode all default from
-/// config, so `(Check mercury)` is the routine form). `default_vm_host` is the
-/// host the test VM is brought up on when the request says `DefaultHost`;
-/// `default_mode` is the everyday dispatch mode (`Hermetic`). `TestMode` is the
-/// shared signal type, so the wire op, the durable record, and this config
-/// default all name one type.
-///
-/// `test_flake`, `test_nix_system`, and `test_output_selector` make the
-/// shorthand's hermetic execution profile fully explicit in startup
-/// configuration. `horizon_definition` is actualized by the configuration
-/// writer before the binary startup archive crosses into the daemon.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq)]
-pub struct TestDefaults {
-    pub cluster: String,
-    pub default_vm_host: String,
-    pub default_mode: TestMode,
-    pub test_flake: String,
-    pub test_nix_system: String,
-    pub test_output_selector: String,
-    pub horizon_definition: Option<horizon_lib::HorizonDefinition>,
-}
-
-/// The rkyv-stored test mode. A daemon-local mirror of the shared
-/// `signal-lojix` `TestMode`, so the binary startup configuration archives
-/// without depending on the wire crate's rkyv layout. Converts to/from the
-/// encoded Interface type at the structural adapter boundary.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TestMode {
-    Hermetic,
-    Live,
-}
-
 const DEFAULT_RUNTIME_DIRECTORY: &str = "/run/lojix";
 const DEFAULT_STATE_DIRECTORY: &str = "/var/lib/lojix";
 
@@ -700,87 +630,6 @@ impl LojixNexusConfigurable for NexusConfiguration {
         }
         Ok(())
     }
-}
-
-/// Capability to read and write the exact historical startup archive offline.
-pub trait LegacyConfigurationArchivable {
-    fn from_rkyv_file(path: &Path) -> Result<Self>
-    where
-        Self: Sized;
-    fn write_rkyv_file(&self, path: &Path) -> Result<()>;
-}
-
-impl LegacyConfigurationArchivable for LegacyStartupConfiguration {
-    fn from_rkyv_file(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path)?;
-        rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes)
-            .map_err(|error| Error::ConfigurationArchive(error.to_string()))
-    }
-
-    fn write_rkyv_file(&self, path: &Path) -> Result<()> {
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(self)
-            .map_err(|error| Error::ConfigurationArchive(error.to_string()))?;
-        std::fs::write(path, bytes)?;
-        Ok(())
-    }
-}
-
-impl From<&LegacyStartupConfiguration> for NexusConfiguration {
-    fn from(configuration: &LegacyStartupConfiguration) -> Self {
-        Self {
-            ordinary_socket_path: signal_lojix::OrdinarySocketPath(
-                configuration.ordinary_socket_path.clone(),
-            ),
-            ordinary_socket_mode: signal_lojix::OrdinarySocketMode(i64::from(
-                configuration.ordinary_socket_mode,
-            )),
-            owner_socket_path: signal_lojix::OwnerSocketPath(
-                configuration.owner_socket_path.clone(),
-            ),
-            owner_socket_mode: signal_lojix::OwnerSocketMode(i64::from(
-                configuration.owner_socket_mode,
-            )),
-            state_directory_path: signal_lojix::StateDirectoryPath(
-                configuration.state_directory_path.clone(),
-            ),
-            daemon_host: signal_lojix::DaemonHost(configuration.daemon_host.clone()),
-            test_defaults_choice: configuration.test_defaults.as_ref().map_or(
-                signal_lojix::TestDefaultsChoice::NoTestDefaults,
-                |defaults| {
-                    signal_lojix::TestDefaultsChoice::TestDefaults(signal_lojix::TestDefaults {
-                        cluster_name: signal_lojix::ClusterName(defaults.cluster.clone()),
-                        node_name: signal_lojix::NodeName(defaults.default_vm_host.clone()),
-                        test_mode: match defaults.default_mode {
-                            TestMode::Hermetic => signal_lojix::TestMode::Hermetic,
-                            TestMode::Live => signal_lojix::TestMode::Live,
-                        },
-                        flake_reference: signal_lojix::FlakeReference(defaults.test_flake.clone()),
-                        nix_system: signal_lojix::NixSystem(defaults.test_nix_system.clone()),
-                        deployment_output_selector: signal_lojix::DeploymentOutputSelector {
-                            flake_attribute: signal_lojix::FlakeAttribute(
-                                defaults.test_output_selector.clone(),
-                            ),
-                        },
-                        horizon_definition_option: defaults.horizon_definition.clone(),
-                    })
-                },
-            ),
-        }
-    }
-}
-
-/// Capability to add the Nexus configuration record to a copied legacy Memory.
-///
-/// The source is only read as bytes. All memory-engine discovery and mutation
-/// occurs on `target`, so an incompatible source cannot be changed by probing.
-pub trait LegacyConfigurationMigratable {
-    fn migrate_configuration_copy(
-        source: &Path,
-        target: &Path,
-        configuration: &LegacyStartupConfiguration,
-    ) -> Result<Self>
-    where
-        Self: Sized;
 }
 
 /// Capability to persist and transition the standard Nexus configuration.
@@ -1205,17 +1054,12 @@ pub trait NexusPersistable {
     fn open_unchecked(
         path: impl Into<PathBuf>,
         default_configuration: NexusConfiguration,
-        seed_existing_state: bool,
     ) -> Result<Self>
     where
         Self: Sized;
 
     /// Seed the configuration row when it is absent.
-    fn ensure_nexus_configuration(
-        &self,
-        default_configuration: NexusConfiguration,
-        seed_existing_state: bool,
-    ) -> Result<()>;
+    fn ensure_nexus_configuration(&self, default_configuration: NexusConfiguration) -> Result<()>;
 
     fn nexus_configuration_state(&self) -> Result<NexusConfigurationState>;
 
@@ -1773,14 +1617,13 @@ impl NexusPersistable for Store {
                 ))
             })?;
             drop(target);
-            let probe_store =
-                match Self::open_unchecked(&probe, default_configuration.clone(), false) {
-                    Ok(store) => store,
-                    Err(error) => {
-                        let _ = std::fs::remove_file(&probe);
-                        return Err(error);
-                    }
-                };
+            let probe_store = match Self::open_unchecked(&probe, default_configuration.clone()) {
+                Ok(store) => store,
+                Err(error) => {
+                    let _ = std::fs::remove_file(&probe);
+                    return Err(error);
+                }
+            };
             drop(probe_store);
             std::fs::remove_file(&probe).map_err(|error| {
                 Error::StoreMaintenance(format!(
@@ -1789,7 +1632,7 @@ impl NexusPersistable for Store {
                 ))
             })?;
         }
-        let store = Self::open_unchecked(path, default_configuration, false)?;
+        let store = Self::open_unchecked(path, default_configuration)?;
         for line in store.opening.report_lines() {
             eprintln!("lojix-nexus: {line}");
         }
@@ -1799,7 +1642,6 @@ impl NexusPersistable for Store {
     fn open_unchecked(
         path: impl Into<PathBuf>,
         default_configuration: NexusConfiguration,
-        seed_existing_state: bool,
     ) -> Result<Self> {
         let path = path.into();
         let mut database = MemoryDatabase::open(
@@ -1828,7 +1670,7 @@ impl NexusPersistable for Store {
         // reads a family whole; 0.10.6's set-aside rows are dropped.
         store.refuse_undecodable_rows()?;
         store.opening.dropped_quarantined_rows = store.drop_quarantined_rows()?;
-        store.ensure_nexus_configuration(default_configuration, seed_existing_state)?;
+        store.ensure_nexus_configuration(default_configuration)?;
         store.ensure_identifier_allocation()?;
         store.resume_compaction()?;
         store.validate_startup_compatibility()?;
@@ -1838,11 +1680,7 @@ impl NexusPersistable for Store {
         Ok(store)
     }
 
-    fn ensure_nexus_configuration(
-        &self,
-        default_configuration: NexusConfiguration,
-        seed_existing_state: bool,
-    ) -> Result<()> {
+    fn ensure_nexus_configuration(&self, default_configuration: NexusConfiguration) -> Result<()> {
         use nexus::Configurable as _;
 
         match self.records::<NexusConfigurationRecord>()?.as_slice() {
@@ -1857,9 +1695,9 @@ impl NexusPersistable for Store {
                     || !self.records::<IdentifierAllocation>()?.is_empty()
                     || !self.records::<DeploymentOutboxRecord>()?.is_empty()
                     || !self.records::<PendingTransitionIntent>()?.is_empty();
-                if legacy_state_exists && !seed_existing_state {
+                if legacy_state_exists {
                     return Err(Error::StoreMaintenance(
-                        "existing Lojix Memory has no Nexus configuration; migrate its legacy startup archive into a validated copy before opening it"
+                        "existing Lojix Memory holds state but no Nexus configuration; it predates the configuration family and is not opened"
                             .to_string(),
                     ));
                 }
@@ -3453,36 +3291,6 @@ impl TestRunLedger for Store {
                 .assert(Assertion::new(self.directory.test_runs, run))?;
         }
         Ok(())
-    }
-}
-
-impl LegacyConfigurationMigratable for Store {
-    fn migrate_configuration_copy(
-        source: &Path,
-        target: &Path,
-        legacy_configuration: &LegacyStartupConfiguration,
-    ) -> Result<Self> {
-        if Path::new(&legacy_configuration.store_path) != source {
-            return Err(Error::StoreMaintenance(
-                "legacy startup configuration does not identify the source Memory".to_string(),
-            ));
-        }
-        if target.exists() {
-            return Err(Error::StoreMaintenance(format!(
-                "migration target already exists: {}",
-                target.display()
-            )));
-        }
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::copy(source, target)?;
-        let desired_configuration = NexusConfiguration::from(legacy_configuration);
-        let migration = Self::open_unchecked(target, desired_configuration, true);
-        if migration.is_err() {
-            let _ = std::fs::remove_file(target);
-        }
-        migration
     }
 }
 

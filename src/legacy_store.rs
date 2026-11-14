@@ -135,7 +135,7 @@ impl LegacyStoreConverting for LegacyStoreConversion {
             Ok(LegacySemaStore::new(&copy.path).convert()?)
         })?;
         self.stage(LegacyConversionStage::VerifyingConvertedCopy, || {
-            let store = Store::open_unchecked(&copy.path, NexusConfiguration::built_in(), false)?;
+            let store = Store::open_unchecked(&copy.path, NexusConfiguration::built_in())?;
             for line in store.opening.report_lines() {
                 eprintln!("lojix-nexus: {line}");
             }

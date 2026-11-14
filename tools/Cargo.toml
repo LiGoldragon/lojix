@@ -6,10 +6,6 @@ rust-version = "1.89"
 publish = false
 
 [[bin]]
-name = "lojix-write-configuration"
-path = "src/lojix-write-configuration.rs"
-
-[[bin]]
 name = "lojix-inspect-store"
 path = "src/lojix-inspect-store.rs"
 
@@ -18,23 +14,15 @@ name = "lojix-reset-store"
 path = "src/lojix-reset-store.rs"
 
 [[bin]]
-name = "lojix-migrate-configuration"
-path = "src/lojix-migrate-configuration.rs"
-
-[[bin]]
 name = "lojix-bootstrap"
 path = "src/lojix-bootstrap.rs"
 
 [dependencies]
-datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eb792265a67b2c6865f9b8c9ed9d2e5ae5a7174c" }
-horizon-lib = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "182f5307962896e95a2a83c45f68785b1f7c84d3", package = "horizon-lib" }
 lojix = { path = "..", features = ["tools"] }
-thiserror = "2"
 
 [lints.rust]
 unsafe_code = "forbid"
 
 [dev-dependencies]
-protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3" }
 signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "17c23e2ef85afdb2834b546442d3020c204d14f9" }
 tempfile = "3"

@@ -56,11 +56,11 @@ manually start its dedicated reset unit:
 systemctl start lojix-reset-store.service
 ```
 
-The unit supplies its generated startup archive through
-`LOJIX_CONFIGURATION`; the binary takes no arguments, so it never accepts a
-store path, file, or flag form. The
-archive must be a regular non-symlink file and its configured store must be an
-existing, absolute, traversal-free regular non-symlink file. The reset is an
+The binary takes no arguments, so it never accepts a store path, file, or
+flag form: it resets the Nexus's own store, at the place the Nexus opens it
+(`lojix/lojix.memory` below `XDG_STATE_HOME` when set, otherwise
+`/var/lib/lojix/lojix.memory`). That store must be an existing, absolute,
+traversal-free regular non-symlink file. The reset is an
 opt-in destructive operation: a recognised v2, v3, or v4 Lojix catalog is
 removed and recreated as v5; it does not migrate jobs or history. An
 already-current v5 store returns `AlreadyCurrent` without deleting any data.
@@ -86,12 +86,6 @@ itself (same owner, mode 0600), converts the copy with memory-engine's
 A failed conversion removes the copy and stops startup with
 `LegacyStoreConversion`, naming the stage. Once `lojix.memory` exists it is
 the store, and `lojix.sema` beside it is ignored.
-
-`lojix-write-configuration` and the exact legacy startup archive remain only
-for an offline one-shot cutover. `lojix-migrate-configuration <archive>
-<new-store>` copies the archive-selected pre-Nexus v5 Memory, adds the desired
-configuration record to the copy, and validates it. It never opens or mutates
-the source Memory and is not a daemon compatibility path.
 
 `lojix-inspect-store` is read-only and likewise accepts exactly one inline
 `InspectStore` Datom object, `'{ <store-path> }'`, never a raw path, file, flag,

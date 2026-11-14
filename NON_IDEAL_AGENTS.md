@@ -54,7 +54,7 @@ The daemon has no default socket locations. Clients must receive both
 `LOJIX_ORDINARY_SOCKET` and `LOJIX_OWNER_SOCKET` from their environment or
 launch configuration. CriomOS configures those paths explicitly through
 `services.lojix`; it also supplies the service account, socket modes, state
-directory, exact store path, startup archive path, and daemon host. Enabling
+directory, exact store path, and daemon host. Enabling
 the service without those values is rejected at Nix
 evaluation time.
 
@@ -68,12 +68,11 @@ a test attribute from a host or node name.
 Schema v4 refuses older Lojix data. There is no migration or legacy-resume
 path. With `lojix-nexus` stopped, a privileged operator may manually start
 the dedicated `lojix-reset-store` unit. It invokes `lojix-reset-store` with
-no arguments, and supplies its generated startup archive as the
-service-owned `LOJIX_CONFIGURATION` environment value; it conflicts with the
-daemon.
+no arguments and conflicts with the daemon.
 
-The reset binary takes no arguments: never a raw path, file, or flag. Its archive and configured store must be regular,
-non-symlinked, absolute, and traversal-free. Only recognised pre-v4 Lojix
+The reset binary takes no arguments: never a raw path, file, or flag. It
+resets the Nexus's own store, at the place the Nexus opens it, which must be
+regular, non-symlinked, absolute, and traversal-free. Only recognised pre-v4 Lojix
 schemas are removed; v4 returns `AlreadyCurrent` without touching data. Only
 then are the three protocol sidecars mechanically derived. It does not select,
 follow, or modify a Spirit database. Do not run it as part of ordinary daemon

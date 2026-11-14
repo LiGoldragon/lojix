@@ -418,7 +418,7 @@ mod meta {
         ActivationFailed,
     }
 }
-use crate::{Error, LegacyStartupConfiguration, NexusConfiguration, Result, Store};
+use crate::{Error, NexusConfiguration, Result, Store};
 
 /// The lojix engine noun. Carries the durable `Store` (the four memory tables)
 /// and, while a deploy is in flight, the pipeline cursor that threads the
@@ -518,9 +518,9 @@ impl ProgramResolution for EffectExecution {
 
 /// The runtime projection of the config-default test selection. A daemon-side
 /// noun holding the cluster, default vm-host, and default mode a `(Check …)`
-/// fills in. Built once from [`crate::TestDefaults`] (the rkyv config shape)
-/// and shared across per-request engines, so the wire op, the durable record,
-/// and the config default all resolve through one type.
+/// fills in. Built once from the configuration's `TestDefaults` and shared
+/// across per-request engines, so the wire op, the durable record, and the
+/// config default all resolve through one type.
 #[derive(Debug, Clone)]
 pub struct TestDefaults {
     cluster: ordinary::ClusterName,
@@ -534,7 +534,7 @@ pub struct TestDefaults {
     test_nix_system: memory::NixSystem,
     test_output_selector: memory::DeploymentOutputSelector,
     /// The already-actualized Horizon definition used to validate `(OnHost h)`
-    /// and resolve `All`. The configuration writer owns authored-file input.
+    /// and resolve `All`, as the configuration carries it.
     horizon_definition: Option<HorizonDefinition>,
 }
 
@@ -679,25 +679,6 @@ impl TestLowering for TestDefaults {
         self.horizon_definition
             .clone()
             .map(ClusterProjection::from_definition)
-    }
-}
-
-impl From<&crate::TestDefaults> for TestDefaults {
-    fn from(defaults: &crate::TestDefaults) -> Self {
-        Self {
-            cluster: ordinary::ClusterName::new(defaults.cluster.clone()),
-            default_vm_host: ordinary::NodeName::new(defaults.default_vm_host.clone()),
-            default_mode: match defaults.default_mode {
-                crate::TestMode::Hermetic => ordinary::TestMode::Hermetic,
-                crate::TestMode::Live => ordinary::TestMode::Live,
-            },
-            test_flake: ordinary::FlakeReference::new(defaults.test_flake.clone()),
-            test_nix_system: memory::NixSystem::new(defaults.test_nix_system.clone()),
-            test_output_selector: memory::DeploymentOutputSelector::new(
-                memory::FlakeAttribute::new(defaults.test_output_selector.clone()),
-            ),
-            horizon_definition: defaults.horizon_definition.clone(),
-        }
     }
 }
 
@@ -1067,18 +1048,6 @@ impl From<&NexusConfiguration> for RuntimeConfiguration {
                     Some(TestDefaults::from(defaults))
                 }
             },
-        }
-    }
-}
-
-impl From<&LegacyStartupConfiguration> for RuntimeConfiguration {
-    fn from(configuration: &LegacyStartupConfiguration) -> Self {
-        Self {
-            generated_inputs_directory: PathBuf::from(&configuration.state_directory_path)
-                .join("generated-inputs"),
-            daemon_host: ordinary::NodeName::new(configuration.daemon_host.clone()),
-            effect_execution: EffectExecution::production(),
-            test_defaults: configuration.test_defaults.as_ref().map(TestDefaults::from),
         }
     }
 }

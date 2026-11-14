@@ -1,13 +1,12 @@
-//! Explicit, configuration-scoped reset support for the v5 Lojix store.
+//! Explicit reset support for the v5 Lojix store.
 //!
 //! v5 intentionally has no decoder or migration path for older layouts. A
 //! caller that has stopped the daemon may reconstruct a recognised pre-v5
-//! Lojix store with [`StoreResetCommand`]. The reset takes one inline Datom
-//! request with no path. It derives the path only from the generated startup
-//! archive named by the service-owned `LOJIX_CONFIGURATION` environment
-//! variable, then validates the durable Lojix family/schema identity before
-//! unlinking it and derives only its protocol sidecars from that validated
-//! primary.
+//! Lojix store with [`StoreResetCommand`]. The reset takes no input: its store
+//! is the Nexus's own, at the place the Nexus itself opens it
+//! (`lojix.memory` in its state directory). It validates the durable Lojix
+//! family/schema identity before unlinking it and derives only its protocol
+//! sidecars from that validated primary.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -24,8 +23,8 @@ use crate::runtime_model::{
     StoredTestRun,
 };
 use crate::{
-    DurableStore as _, Error, LegacyConfigurationArchivable as _, LegacyStartupConfiguration,
-    LojixRecord as _, OfflineCommand, Result, Store,
+    DurableStore as _, Error, LojixNexusConfigurable as _, LojixRecord as _, NexusConfiguration,
+    OfflineCommand, Result, Store,
 };
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__memory_engine_catalog");
@@ -34,9 +33,6 @@ const SCHEMA_VERSION_KEY: &str = "schema_version";
 const CURRENT_SCHEMA: u64 = 5;
 const RECOGNISED_SCHEMAS: &[u64] = &[2, 3, 4, CURRENT_SCHEMA];
 const RESETTABLE_SCHEMAS: &[u64] = &[2, 3, 4];
-/// The reset service receives this from the NixOS module. It is deliberately
-/// not inferred from a state directory or accepted as a CLI path.
-pub const CONFIGURATION_ENV: &str = "LOJIX_CONFIGURATION";
 /// These are protocol-owned suffixes from the retired v2/v3 migration path.
 /// They are only derived after the primary store has proved itself to be a
 /// recognised Lojix database.
@@ -84,22 +80,19 @@ impl std::fmt::Display for StoreResetOutcome {
 }
 
 /// One exact, version-aware Lojix store reset. It takes no input: no argument,
-/// raw path, configuration path, directory, glob, or request file. The archive
-/// supplied by the service environment owns the
-/// store selection. That configured primary must be an existing regular,
+/// raw path, directory, glob, or request file. The store is the one the Nexus
+/// opens, at its built-in place. That primary must be an existing regular,
 /// non-symlink file with a recognised Lojix catalog; a sibling Spirit database
 /// is never selected by name.
 pub struct StoreResetCommand {
-    configuration_path: PathBuf,
+    store_path: PathBuf,
 }
 
 impl OfflineCommand for StoreResetCommand {
     type Outcome = Result<StoreResetOutcome>;
 
     fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
-        let configuration_path = std::env::var_os(CONFIGURATION_ENV)
-            .ok_or_else(|| Error::MissingRuntimeConfiguration(CONFIGURATION_ENV.to_string()))?;
-        Self::from_arguments_with_configuration(arguments, configuration_path)
+        Self::for_store(arguments, NexusConfiguration::store_path())
     }
 
     fn run(&self) -> Result<StoreResetOutcome> {
@@ -110,36 +103,31 @@ impl OfflineCommand for StoreResetCommand {
 /// Bringing a recognised older store forward to the current schema by removing
 /// and recreating it.
 pub trait StoreResetting: Sized {
-    /// Construct the command with an explicit generated archive. This exists
-    /// for in-process tests; the executable reaches it exclusively through
-    /// [`CONFIGURATION_ENV`].
-    fn from_arguments_with_configuration(
+    /// Construct the command for an explicit store. This exists for
+    /// in-process tests; the executable resets the Nexus's own store.
+    fn for_store(
         arguments: impl IntoIterator<Item = OsString>,
-        configuration_path: impl Into<PathBuf>,
+        store_path: impl Into<PathBuf>,
     ) -> Result<Self>;
 
     fn reset(&self) -> Result<StoreResetOutcome>;
 }
 
 impl StoreResetting for StoreResetCommand {
-    fn from_arguments_with_configuration(
+    fn for_store(
         arguments: impl IntoIterator<Item = OsString>,
-        configuration_path: impl Into<PathBuf>,
+        store_path: impl Into<PathBuf>,
     ) -> Result<Self> {
         if arguments.into_iter().next().is_some() {
             return Err(Error::UnexpectedResetArguments);
         }
         Ok(Self {
-            configuration_path: configuration_path.into(),
+            store_path: store_path.into(),
         })
     }
 
     fn reset(&self) -> Result<StoreResetOutcome> {
-        let configuration_path = self
-            .configuration_path
-            .canonical_regular_file("configuration")?;
-        let configuration = LegacyStartupConfiguration::from_rkyv_file(&configuration_path)?;
-        let path = Path::new(&configuration.store_path).canonical_regular_file("store")?;
+        let path = self.store_path.canonical_regular_file("store")?;
         let schema = path.recognised_lojix_schema()?;
         if schema == CURRENT_SCHEMA {
             return Ok(StoreResetOutcome::AlreadyCurrent { path });
@@ -168,8 +156,7 @@ impl StoreResetting for StoreResetCommand {
     }
 }
 
-/// What the reset command asks of the two paths it is given: the generated
-/// configuration archive, and the store that archive names.
+/// What the reset command asks of the store path it resets.
 trait ResetSubject {
     /// The path as an exact absolute, traversal-free, existing regular
     /// non-symlink file, with its parent directory canonicalized. `subject`
@@ -446,29 +433,9 @@ impl StoreLayouts for LojixCatalog {
 mod tests {
     use super::*;
 
-    fn startup_archive(directory: &Path, store_path: &Path) -> PathBuf {
-        let archive = directory.join("lojix-startup.rkyv");
-        LegacyStartupConfiguration {
-            ordinary_socket_path: directory.join("ordinary.sock").display().to_string(),
-            ordinary_socket_mode: 0o660,
-            owner_socket_path: directory.join("owner.sock").display().to_string(),
-            owner_socket_mode: 0o600,
-            state_directory_path: directory.display().to_string(),
-            store_path: store_path.display().to_string(),
-            daemon_host: "fixture-daemon".to_string(),
-            test_defaults: None,
-        }
-        .write_rkyv_file(&archive)
-        .expect("write generated startup archive");
-        archive
-    }
-
-    fn reset_command(archive: &Path) -> StoreResetCommand {
-        StoreResetCommand::from_arguments_with_configuration(
-            Vec::<OsString>::new(),
-            archive.to_path_buf(),
-        )
-        .expect("exact reset command")
+    fn reset_command(store: &Path) -> StoreResetCommand {
+        StoreResetCommand::for_store(Vec::<OsString>::new(), store.to_path_buf())
+            .expect("exact reset command")
     }
 
     fn mark_pre_v5(path: &Path) {
@@ -488,7 +455,7 @@ mod tests {
     #[test]
     fn reset_cli_takes_no_arguments() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let archive = startup_archive(directory.path(), &directory.path().join("store.memory"));
+        let store = directory.path().join("store.memory");
         for arguments in [
             vec![OsString::from("{}")],
             vec![OsString::from("--help")],
@@ -501,22 +468,17 @@ mod tests {
             vec![OsString::from("{}"), OsString::from("extra")],
         ] {
             assert!(
-                StoreResetCommand::from_arguments_with_configuration(arguments, archive.clone())
-                    .is_err(),
+                StoreResetCommand::for_store(arguments, store.clone()).is_err(),
                 "reset takes no arguments"
             );
         }
     }
 
     #[test]
-    fn reset_requires_an_existing_generated_configuration_and_store() {
+    fn reset_requires_an_existing_store() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let missing_archive = directory.path().join("missing.rkyv");
-        assert!(reset_command(&missing_archive).run().is_err());
-
         let missing_store = directory.path().join("configured-lojix-store.db");
-        let archive = startup_archive(directory.path(), &missing_store);
-        let error = reset_command(&archive)
+        let error = reset_command(&missing_store)
             .run()
             .expect_err("an absent configured store must not be created by reset");
         assert!(error.to_string().contains("store"));
@@ -530,10 +492,9 @@ mod tests {
         let sidecar = path.sidecars().into_iter().next().expect("sidecar path");
         fs::write(&sidecar, "must survive with v5 primary").expect("sidecar witness");
         let before = fs::read(&path).expect("read v5 store before reset");
-        let archive = startup_archive(directory.path(), &path);
 
         assert_eq!(
-            reset_command(&archive).run().expect("current-store result"),
+            reset_command(&path).run().expect("current-store result"),
             StoreResetOutcome::AlreadyCurrent { path: path.clone() }
         );
         assert_eq!(fs::read(&path).expect("read v5 store after reset"), before);
@@ -551,8 +512,7 @@ mod tests {
         }
         let spirit = directory.path().join("spirit.memory");
         fs::write(&spirit, "must survive").expect("write Spirit witness");
-        let archive = startup_archive(directory.path(), &path);
-        let outcome = reset_command(&archive).run().expect("reset pre-v5 source");
+        let outcome = reset_command(&path).run().expect("reset pre-v5 source");
         assert!(matches!(outcome, StoreResetOutcome::Recreated { .. }));
         assert_eq!(
             redb::ReadOnlyDatabase::open(&path)
@@ -589,8 +549,7 @@ mod tests {
         drop(database);
         let before = fs::read(&spirit).expect("read Spirit witness before reset");
 
-        let archive = startup_archive(directory.path(), &spirit);
-        let error = reset_command(&archive)
+        let error = reset_command(&spirit)
             .run()
             .expect_err("unrecognised Spirit database must not be reset");
         assert!(error.to_string().contains("catalog"));
@@ -606,25 +565,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn reset_rejects_symlinked_configuration_and_store_before_deletion() {
+    fn reset_rejects_a_symlinked_store_before_deletion() {
         use std::os::unix::fs::symlink;
 
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("configured-lojix-store.db");
         drop(Store::open(&path).expect("create v5 store"));
-        let archive = startup_archive(directory.path(), &path);
-        let archive_link = directory.path().join("configuration-link.rkyv");
-        symlink(&archive, &archive_link).expect("configuration symlink");
-        assert!(reset_command(&archive_link).run().is_err());
-        assert!(
-            path.exists(),
-            "symlinked configuration cannot select a store"
-        );
-
         let store_link = directory.path().join("store-link.db");
         symlink(&path, &store_link).expect("store symlink");
-        let linked_archive = startup_archive(directory.path(), &store_link);
-        assert!(reset_command(&linked_archive).run().is_err());
+        assert!(reset_command(&store_link).run().is_err());
         assert!(path.exists(), "symlinked store referent is untouched");
     }
 }

@@ -10,7 +10,6 @@ use std::thread;
 use std::time::Duration;
 
 use lojix::daemon::NexusReadiness;
-use lojix::{LegacyConfigurationArchivable as _, LegacyStartupConfiguration};
 use signal::{ByteViewable, FrameBody, FrameCapacity, FrameReading, FrameWriting};
 use signal::{Restorable as _, Signalizable as _};
 
@@ -24,27 +23,6 @@ const READINESS_BACKSTOP: Duration = Duration::from_secs(300);
 
 fn text(value: &str) -> String {
     value.to_owned()
-}
-
-#[test]
-fn legacy_configuration_archive_remains_available_to_the_offline_migrator() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let path = directory.path().join("daemon-configuration.rkyv");
-    let configuration = LegacyStartupConfiguration {
-        ordinary_socket_path: directory.path().join("ordinary.sock").display().to_string(),
-        ordinary_socket_mode: 0o660,
-        owner_socket_path: directory.path().join("owner.sock").display().to_string(),
-        owner_socket_mode: 0o600,
-        state_directory_path: directory.path().join("state").display().to_string(),
-        store_path: directory.path().join("lojix.memory").display().to_string(),
-        daemon_host: "fixture-daemon".to_string(),
-        test_defaults: None,
-    };
-    configuration.write_rkyv_file(&path).expect("write archive");
-    assert_eq!(
-        LegacyStartupConfiguration::from_rkyv_file(&path).expect("decode archive"),
-        configuration
-    );
 }
 
 #[test]

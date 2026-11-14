@@ -90,10 +90,29 @@ known host:
 | `lojix-reset-store` | `ResetStore` | no argument |
 | `lojix-bootstrap` | `BootstrapRun.{ <id> <mode> }` | `{ <id> <mode> }` |
 | `lojix-bootstrap`, a Remote backend's policy | `{ <identity> <known-hosts> RequireKnownHost }` | `{ <identity> <known-hosts> }` |
-| `lojix-write-configuration` | `ConfigurationWriteRequest.{ … }` | `{ … }` |
+| `lojix-write-configuration` | `ConfigurationWriteRequest.{ … }` | retired |
+| `lojix-migrate-configuration` | `<archive> <new-store>` | retired |
 
-The fields inside each request are unchanged. CriomOS's `lojix-reset-store`
-service and its `lojix-write-configuration` request move with this pin.
+The fields inside each remaining request are unchanged.
+
+The legacy startup archive retires: the Nexus's configuration is held by its
+Memory, and nothing reads an archive any more. `lojix-write-configuration`,
+which wrote one, and `lojix-migrate-configuration`, which read one into a
+copied pre-Nexus store, are gone, with the archive's types
+(`LegacyStartupConfiguration` and its `TestDefaults` and `TestMode`) and the
+request `ConfigurationWriteRequest` in `ethos/ingress.ethos`.
+`lojix-reset-store` resets the Nexus's own store, at the place the Nexus opens
+it (`lojix/lojix.memory` below `XDG_STATE_HOME`, else
+`/var/lib/lojix/lojix.memory`), where it read the store's path from the archive
+named by `LOJIX_CONFIGURATION`. A store holding state but no configuration row,
+one older than the configuration family, is refused at open as before; this
+release no longer migrates it, and 0.10.6's migrator is the one that did.
+
+CriomOS moves with this pin. Its `lojix-reset-store` service runs
+`lojix-reset-store` with no argument, where it ran `lojix-reset-store
+ResetStore`, and loses its `ExecStartPre` writer, its `LOJIX_CONFIGURATION`
+variable and the `resetConfigurationPath` option behind them; its
+`lojix-nexus-service` check loses the writer's assertions and round trip.
 
 Inside the Nexus, every value whose shape a contract declares is the
 contract's generated type itself: the scalars, the markers, the

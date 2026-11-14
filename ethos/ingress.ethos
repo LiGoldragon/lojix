@@ -34,13 +34,6 @@ Library
   BootstrapSshIdentityFile.String
   BootstrapSshKnownHostsFile.String
   BootstrapSystemProfilePath.String
-  BootstrapBootEntriesDirectory.String
-  ConfigurationWriteRequest.{ WriterPath WriterMode WriterPath WriterMode WriterPath WriterPath WriterCluster WriterTestDefaultsChoice WriterPath }
-  WriterTestDefaultsChoice.[ NoTestDefaults TestDefaults.WriterTestDefaults ]
-  WriterTestDefaults.{ WriterCluster WriterCluster WriterTestMode WriterCluster WriterCluster WriterCluster WriterPath }
-  WriterTestMode.[ Hermetic Live ]
-  WriterPath.String
-  WriterMode.Integer
-  WriterCluster.String ]
+  BootstrapBootEntriesDirectory.String ]
 []
 []

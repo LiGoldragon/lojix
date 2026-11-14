@@ -112,7 +112,7 @@
           commonArguments
           // {
             inherit cargoArtifacts;
-            cargoExtraArgs = "-p lojix-offline-tools --bin lojix-write-configuration --bin lojix-inspect-store --bin lojix-reset-store --bin lojix-migrate-configuration";
+            cargoExtraArgs = "-p lojix-offline-tools --bin lojix-inspect-store --bin lojix-reset-store";
           }
         );
         bootstrapBinary = craneLib.buildPackage (
@@ -238,6 +238,17 @@
             // {
               inherit cargoArtifacts;
               cargoExtraArgs = "-p lojix --test failure_evidence --test failure_evidence_paths";
+            }
+          );
+
+          # The offline tools, process-level and in-process: the bootstrap
+          # pipeline against its suppressed executor, the store reset and
+          # inspection, and the Nexus configuration lifecycle on a fresh Memory.
+          offline-tools = craneLib.cargoTest (
+            commonArguments
+            // {
+              inherit cargoArtifacts;
+              cargoExtraArgs = "-p lojix-offline-tools";
             }
           );
 

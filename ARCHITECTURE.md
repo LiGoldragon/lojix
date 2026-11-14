@@ -254,9 +254,9 @@ the workspace actor-systems doctrine. No zero-state holders.
   the family keeps its 0.10.6 identity. `lojix-inspect-store` reports the
   set-aside rows the next open drops, the deploy-job rows it upgrades, and the
   rows that would refuse it. With the daemon stopped, the
-  manually started `lojix-reset-store` takes no arguments. Its
-  service-owned `LOJIX_CONFIGURATION` archive supplies the exact store path;
-  an existing archive and primary must be absolute, regular, and non-symlinked.
+  manually started `lojix-reset-store` takes no arguments. It resets the
+  Nexus's own store, at the place the Nexus opens it; that primary must exist
+  and be absolute, regular, and non-symlinked.
   A recognised v2/v3 Lojix catalog is removed and recreated as v4, while a v4
   catalog returns `AlreadyCurrent` without any data deletion. Protocol
   sidecars are derived only from a proven pre-v4 primary; the reset never
@@ -280,13 +280,6 @@ the workspace actor-systems doctrine. No zero-state holders.
 - The zero-argument Nexus discovers its stable Memory, loads persisted desired
   configuration, and binds ordinary and owner/meta Unix sockets. The owner/meta socket refuses any mode with
   "other" access and admits only same-uid/gid owner peers.
-- `lojix-write-configuration` is an offline migration input tool: it accepts
-  exactly one inline `ConfigurationWriteRequest` object, written `{ … }` (never a file, raw
-  path, or flag) and writes the rkyv signal file from the ordered socket/mode, state-directory,
-  daemon-host, test-default, and output-path request. Test defaults
-  include their exact Nix system and output selector. Production
-  writes `NoTestDefaults`; only `lojix-migrate-configuration` consumes the
-  resulting legacy archive while migrating a copied pre-Nexus store.
 - A deploy proposal source, when `DeploymentInputMode::Horizon` requires one,
   is an existing, direct, regular absolute canonical artifact named
   `horizon-definition.datom`, with no traversal, symlink, control, or credential-shaped

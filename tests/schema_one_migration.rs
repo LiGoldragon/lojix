@@ -4,84 +4,31 @@ use lojix::DurableStore as _;
 use lojix::{OfflineCommand as _, reconstruction::StoreResetting as _};
 use std::ffi::OsString;
 
+use lojix::Store;
 use lojix::reconstruction::StoreResetCommand;
-use lojix::{LegacyConfigurationArchivable as _, LegacyStartupConfiguration, Store};
 use redb::{Database, TableDefinition};
 
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__memory_meta");
 
-fn startup_archive(
-    directory: &std::path::Path,
-    store_path: &std::path::Path,
-) -> std::path::PathBuf {
-    let archive = directory.join("startup.rkyv");
-    LegacyStartupConfiguration {
-        ordinary_socket_path: directory.join("ordinary.sock").display().to_string(),
-        ordinary_socket_mode: 0o660,
-        owner_socket_path: directory.join("owner.sock").display().to_string(),
-        owner_socket_mode: 0o600,
-        state_directory_path: directory.display().to_string(),
-        store_path: store_path.display().to_string(),
-        daemon_host: "fixture-daemon".to_string(),
-        test_defaults: None,
-    }
-    .write_rkyv_file(&archive)
-    .expect("write startup archive");
-    archive
-}
-
-fn reset_command(archive: &std::path::Path) -> StoreResetCommand {
-    StoreResetCommand::from_arguments_with_configuration(
-        Vec::<OsString>::new(),
-        archive.to_path_buf(),
-    )
-    .expect("exact reset command")
+fn reset_command(store: &std::path::Path) -> StoreResetCommand {
+    StoreResetCommand::for_store(Vec::<OsString>::new(), store.to_path_buf())
+        .expect("exact reset command")
 }
 
 #[test]
 fn reset_takes_no_arguments() {
-    let archive = std::path::PathBuf::from("/missing/generated-startup.rkyv");
+    let store = std::path::PathBuf::from("/missing/lojix.memory");
+    assert!(StoreResetCommand::for_store(Vec::<OsString>::new(), store.clone()).is_ok());
+    assert!(StoreResetCommand::for_store([OsString::from("{}")], store.clone()).is_err());
+    assert!(StoreResetCommand::for_store([OsString::from("lojix.memory")], store.clone()).is_err());
     assert!(
-        StoreResetCommand::from_arguments_with_configuration(
-            Vec::<OsString>::new(),
-            archive.clone()
-        )
-        .is_ok()
+        StoreResetCommand::for_store([OsString::from("/tmp/spirit.memory")], store.clone())
+            .is_err()
     );
+    assert!(StoreResetCommand::for_store([OsString::from("-bad")], store.clone()).is_err());
     assert!(
-        StoreResetCommand::from_arguments_with_configuration(
-            [OsString::from("{}")],
-            archive.clone()
-        )
-        .is_err()
-    );
-    assert!(
-        StoreResetCommand::from_arguments_with_configuration(
-            [OsString::from("lojix.memory")],
-            archive.clone()
-        )
-        .is_err()
-    );
-    assert!(
-        StoreResetCommand::from_arguments_with_configuration(
-            [OsString::from("/tmp/spirit.memory")],
-            archive.clone()
-        )
-        .is_err()
-    );
-    assert!(
-        StoreResetCommand::from_arguments_with_configuration(
-            [OsString::from("-bad")],
-            archive.clone()
-        )
-        .is_err()
-    );
-    assert!(
-        StoreResetCommand::from_arguments_with_configuration(
-            [OsString::from("{}"), OsString::from("unexpected"),],
-            archive
-        )
-        .is_err()
+        StoreResetCommand::for_store([OsString::from("{}"), OsString::from("unexpected"),], store)
+            .is_err()
     );
 }
 
@@ -112,8 +59,7 @@ fn v5_refuses_the_v4_deploy_submission_layout_until_explicit_reset() {
         before,
         "startup probing must not mutate an incompatible store"
     );
-    let archive = startup_archive(directory.path(), &path);
-    reset_command(&archive)
+    reset_command(&path)
         .run()
         .expect("replace known Lojix schema");
     Store::open(&path).expect("fresh v5 store opens");

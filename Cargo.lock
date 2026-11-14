@@ -804,13 +804,9 @@ dependencies = [
 name = "lojix-offline-tools"
 version = "0.11.0"
 dependencies = [
- "datom-codec 0.32.3",
- "horizon-lib",
  "lojix",
- "protos 0.32.2",
  "signal-lojix",
  "tempfile",
- "thiserror",
 ]
 
 [[package]]
