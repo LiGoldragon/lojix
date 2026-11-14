@@ -539,11 +539,110 @@ pub enum UnitStateWatchOutcome {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct DirectoryPreparation {
+    pub directory_path: DirectoryPath,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct DirectoryEmptying {
+    pub directory_path: DirectoryPath,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct DirectoryPath(pub String);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct FileText(pub String);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct FileWrite {
+    pub file_path: FilePath,
+    pub file_text: FileText,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct FilePath(pub String);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct SourceFile(pub FilePath);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct DestinationFile(pub FilePath);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct FileCopy {
+    pub source_file: SourceFile,
+    pub destination_file: DestinationFile,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct DirectoryListing {
+    pub directory_path: DirectoryPath,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum FileOutcome {
+    Completed,
+    Failed(FileFault),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct FileFault(pub String);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum ListingOutcome {
+    Listed(std::vec::Vec<DirectoryEntry>),
+    Failed(FileFault),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct DirectoryEntry {
+    pub file_path: FilePath,
+    pub entry_kind: EntryKind,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum EntryKind {
+    RegularFile,
+    SymbolicLink,
+    Directory,
+    Other,
+    Unreadable(FileFault),
+    UndecodableName,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum SystemProfileOutcome {
+    Resolved(signal_lojix::ClosurePath),
+    Unresolved(FileFault),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct ReadShortHostName {}
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct SubscribeUnitNew {}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ReadSystemProfile {}
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
@@ -578,6 +677,12 @@ pub enum Emission {
     ReadUnitState(UnitStateQuery),
     AwaitUnitStateChange(UnitStateWatch),
     StopUnit(UnitStop),
+    PrepareDirectory(DirectoryPreparation),
+    EmptyDirectory(DirectoryEmptying),
+    WriteFile(FileWrite),
+    CopyFile(FileCopy),
+    ListDirectory(DirectoryListing),
+    ReadSystemProfile(ReadSystemProfile),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -613,6 +718,12 @@ pub enum Outcome {
     UnitStateRead(UnitState),
     UnitStateChangeAwaited(UnitStateWatchOutcome),
     UnitStopped(BusCallOutcome),
+    DirectoryPrepared(FileOutcome),
+    DirectoryEmptied(FileOutcome),
+    FileWritten(FileOutcome),
+    FileCopied(FileOutcome),
+    DirectoryListed(ListingOutcome),
+    SystemProfileRead(SystemProfileOutcome),
 }
 #[rustfmt::skip]
 pub trait Emitted {
@@ -741,4 +852,28 @@ impl Emitted for UnitStateWatch {
 #[rustfmt::skip]
 impl Emitted for UnitStop {
     type Outcome = BusCallOutcome;
+}
+#[rustfmt::skip]
+impl Emitted for DirectoryPreparation {
+    type Outcome = FileOutcome;
+}
+#[rustfmt::skip]
+impl Emitted for DirectoryEmptying {
+    type Outcome = FileOutcome;
+}
+#[rustfmt::skip]
+impl Emitted for FileWrite {
+    type Outcome = FileOutcome;
+}
+#[rustfmt::skip]
+impl Emitted for FileCopy {
+    type Outcome = FileOutcome;
+}
+#[rustfmt::skip]
+impl Emitted for DirectoryListing {
+    type Outcome = ListingOutcome;
+}
+#[rustfmt::skip]
+impl Emitted for ReadSystemProfile {
+    type Outcome = SystemProfileOutcome;
 }

@@ -3,9 +3,9 @@
 //!
 //! Each emission generated from `ethos/emission.ethos` names what is asked;
 //! here it becomes the call — a program and its argv under the
-//! [`EffectExecution`] that says where a program comes from, or a systemd
-//! D-Bus method on one [`SystemdBus`] session — and what came back becomes
-//! its typed outcome. `emit` is synchronous: an attempt awaits it on a
+//! [`EffectExecution`] that says where a program comes from, a file written,
+//! copied or read on the daemon's host, or a systemd D-Bus method on one
+//! [`SystemdBus`] session — and what came back becomes its typed outcome. `emit` is synchronous: an attempt awaits it on a
 //! blocking thread through [`Emitting::emitted`], so a build or an
 //! activation that runs for minutes holds a blocking thread and never a
 //! runtime worker.
@@ -35,7 +35,16 @@ use crate::emission::{
     UnitLookup, UnitLookupOutcome, UnitState, UnitStateQuery, UnitStateWatch,
     UnitStateWatchOutcome, UnitStop, WaitStatus,
 };
+use crate::emission::{
+    DirectoryEmptying, DirectoryEntry, DirectoryListing, DirectoryPreparation, EntryKind, FileCopy,
+    FileFault, FileOutcome, FilePath, FileWrite, ListingOutcome, ReadSystemProfile,
+    SystemProfileOutcome,
+};
 use crate::schema_runtime::{EffectExecution, ProgramResolution as _};
+
+/// The system profile a same-host switch sets before it switches; a settled
+/// self-switch reads back the closure it resolves to.
+const SYSTEM_PROFILE: &str = "/nix/var/nix/profiles/system";
 
 /// How many journal lines are read back for a transient unit an activation
 /// ran in. The durable bound on failure detail is 4096 bytes; this only has to
@@ -899,6 +908,114 @@ impl Emittable<EffectExecution> for GarbageCollection {
                     .count() as i64,
             )),
             Err(failure) => GarbageOutcome::Failed(failure),
+        }
+    }
+}
+
+/// A file emission's fault: the text the operating system reported.
+trait FileFaulting<Value> {
+    fn file_fault(self) -> Result<Value, FileFault>;
+}
+
+impl<Value> FileFaulting<Value> for std::io::Result<Value> {
+    fn file_fault(self) -> Result<Value, FileFault> {
+        self.map_err(|error| FileFault(error.to_string()))
+    }
+}
+
+/// A file emission whose outcome says only whether it was done.
+trait FileDoing {
+    fn done(&self) -> std::io::Result<()>;
+}
+
+impl FileDoing for DirectoryPreparation {
+    fn done(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.directory_path.0)
+    }
+}
+
+impl FileDoing for DirectoryEmptying {
+    /// Remove the directory, an absent one included, and create it empty.
+    fn done(&self) -> std::io::Result<()> {
+        match std::fs::remove_dir_all(&self.directory_path.0) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        std::fs::create_dir_all(&self.directory_path.0)
+    }
+}
+
+impl FileDoing for FileWrite {
+    fn done(&self) -> std::io::Result<()> {
+        std::fs::write(&self.file_path.0, &self.file_text.0)
+    }
+}
+
+impl FileDoing for FileCopy {
+    /// The bytes copied as they are, never read into the daemon's own
+    /// values.
+    fn done(&self) -> std::io::Result<()> {
+        std::fs::copy(&self.source_file.0.0, &self.destination_file.0.0).map(|_| ())
+    }
+}
+
+macro_rules! file_done_on {
+    ($($emission:ty),* $(,)?) => {$(
+        impl Emittable<EffectExecution> for $emission {
+            fn emit(&self, _translator: &EffectExecution) -> FileOutcome {
+                match self.done().file_fault() {
+                    Ok(()) => FileOutcome::Completed,
+                    Err(fault) => FileOutcome::Failed(fault),
+                }
+            }
+        }
+    )*};
+}
+
+file_done_on!(DirectoryPreparation, DirectoryEmptying, FileWrite, FileCopy);
+
+impl Emittable<EffectExecution> for DirectoryListing {
+    /// Every entry of the directory, each with what kind of file it is, read
+    /// without following a link; an entry whose kind cannot be read keeps the
+    /// fault, so only a caller that needs it fails on it, and an entry whose
+    /// name is not UTF-8 is said so, its path written lossily.
+    fn emit(&self, _translator: &EffectExecution) -> ListingOutcome {
+        let entries = match std::fs::read_dir(&self.directory_path.0).file_fault() {
+            Ok(entries) => entries,
+            Err(fault) => return ListingOutcome::Failed(fault),
+        };
+        let mut listed = Vec::new();
+        for entry in entries {
+            let path = match entry.file_fault() {
+                Ok(entry) => entry.path(),
+                Err(fault) => return ListingOutcome::Failed(fault),
+            };
+            let entry_kind = match (path.to_str(), std::fs::symlink_metadata(&path).file_fault()) {
+                (None, _) => EntryKind::UndecodableName,
+                (_, Ok(metadata)) if metadata.file_type().is_symlink() => EntryKind::SymbolicLink,
+                (_, Ok(metadata)) if metadata.file_type().is_file() => EntryKind::RegularFile,
+                (_, Ok(metadata)) if metadata.file_type().is_dir() => EntryKind::Directory,
+                (_, Ok(_)) => EntryKind::Other,
+                (_, Err(fault)) => EntryKind::Unreadable(fault),
+            };
+            listed.push(DirectoryEntry {
+                file_path: FilePath(path.to_string_lossy().into_owned()),
+                entry_kind,
+            });
+        }
+        ListingOutcome::Listed(listed)
+    }
+}
+
+impl Emittable<EffectExecution> for ReadSystemProfile {
+    /// The store path `/nix/var/nix/profiles/system` resolves to.
+    fn emit(&self, _translator: &EffectExecution) -> SystemProfileOutcome {
+        match std::fs::canonicalize(SYSTEM_PROFILE).file_fault() {
+            Ok(path) => SystemProfileOutcome::Resolved(signal_lojix::ClosurePath(
+                path.display().to_string(),
+            )),
+            Err(fault) => SystemProfileOutcome::Unresolved(fault),
         }
     }
 }

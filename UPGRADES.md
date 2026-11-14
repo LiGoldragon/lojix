@@ -187,6 +187,18 @@ A same-host switch on such a loader, as on ouranos, now ends Current and
 `Succeeded`. A read that fails, or prints neither answer, fails the activation
 before anything on the node changes.
 
+Every file the daemon writes, copies or reads outside its own Memory is an
+emission as well (`ethos/emission.ethos`): a Horizon materialization prepares
+its directories, writes each generated `flake.nix` and `horizon.json`, empties
+and refills the `secrets` input, lists the cluster secrets directory and copies
+each `.sops` file through `PrepareDirectory`, `WriteFile`, `EmptyDirectory`,
+`ListDirectory` and `CopyFile`, and a settled self-switch reads where
+`/nix/var/nix/profiles/system` points through `ReadSystemProfile`. The files,
+their bytes and the faults reported are as before. A `.sops` file whose name
+is not UTF-8 is refused as it was, now when the directory is listed, before a
+file is copied. `HOME` and `USER` are still read from the daemon's
+environment.
+
 # 0.10.5 to 0.10.6
 
 A revision: the memory format is unchanged and the store stays readable;

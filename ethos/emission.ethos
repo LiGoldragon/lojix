@@ -16,6 +16,12 @@
 ; a host switched under it is never asked to clear them, and a self-switch
 ; script carries no clears.
 ;
+; A file the daemon writes, copies or reads outside its own Memory is an
+; emission too: the generated flake inputs a Horizon materialization writes,
+; the cluster secrets it lists and copies, and the system profile a settled
+; self-switch reads back. Each is done on the daemon's own host, and its fault
+; is the text the operating system reported.
+;
 ; The process emissions run under the effect execution, which says where a
 ; program comes from; the D-Bus emissions run on one system-bus session that
 ; keeps the subscriptions a detached activation is watched through. An
@@ -58,7 +64,13 @@ Emission
   AwaitUnitNew.UnitArrival
   ReadUnitState.UnitStateQuery
   AwaitUnitStateChange.UnitStateWatch
-  StopUnit.UnitStop ]
+  StopUnit.UnitStop
+  PrepareDirectory.DirectoryPreparation
+  EmptyDirectory.DirectoryEmptying
+  WriteFile.FileWrite
+  CopyFile.FileCopy
+  ListDirectory.DirectoryListing
+  ReadSystemProfile ]
 
 [ FlakeMetadataRead.FlakeMetadataOutcome
   DerivationEvaluated.PathOutcome
@@ -89,7 +101,13 @@ Emission
   UnitNewAwaited.UnitArrivalOutcome
   UnitStateRead.UnitState
   UnitStateChangeAwaited.UnitStateWatchOutcome
-  UnitStopped.BusCallOutcome ]
+  UnitStopped.BusCallOutcome
+  DirectoryPrepared.FileOutcome
+  DirectoryEmptied.FileOutcome
+  FileWritten.FileOutcome
+  FileCopied.FileOutcome
+  DirectoryListed.ListingOutcome
+  SystemProfileRead.SystemProfileOutcome ]
 
 [ FlakeMetadataQuery.{ FlakeReference }
   DerivationEvaluation.{ FlakeReference DeploymentOutputSelector EvaluationFreshness Vector<PersistedFlakeInputOverride> }
@@ -166,4 +184,18 @@ Emission
                 Unrecognized.String ]
   ServiceResult.[ Success Resources Protocol Timeout ExitCode Signal CoreDump Watchdog
                   StartLimitHit OomKill ExecCondition Unrecognized.String ]
-  UnitStateWatchOutcome.[ Changed StreamEnded ] ]
+  UnitStateWatchOutcome.[ Changed StreamEnded ]
+
+  DirectoryPreparation.{ DirectoryPath }
+  DirectoryEmptying.{ DirectoryPath }
+  DirectoryPath.String
+  FileWrite.{ FilePath FileText.String }
+  FilePath.String
+  FileCopy.{ SourceFile.FilePath DestinationFile.FilePath }
+  DirectoryListing.{ DirectoryPath }
+  FileOutcome.[ Completed Failed.FileFault ]
+  FileFault.String
+  ListingOutcome.[ Listed.Vector<DirectoryEntry> Failed.FileFault ]
+  DirectoryEntry.{ FilePath EntryKind }
+  EntryKind.[ RegularFile SymbolicLink Directory Other Unreadable.FileFault UndecodableName ]
+  SystemProfileOutcome.[ Resolved.ClosurePath Unresolved.FileFault ] ]

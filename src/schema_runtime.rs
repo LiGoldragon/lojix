@@ -21,7 +21,6 @@ use crate::{
     IdentifierAllocating as _, NexusPersistable as _, TestRunLedger as _,
 };
 use crate::{HorizonArchitecture as _, SourceRevisionText as _};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -5478,7 +5477,7 @@ impl HorizonMaterializing for HorizonMaterialization {
             .horizon_definition
             .project(self.command.node_name.payload())?;
         let root = MaterializationRoot::new(self.configuration.materialization_root(&self.command));
-        root.prepare()?;
+        root.prepare(execution).await?;
         let secrets_source = ClusterSecretsDirectory::from_input(&self.command.secrets_input)?;
         MaterializedInputSet::new(
             root,
@@ -5504,9 +5503,55 @@ trait MaterializationLayout {
     where
         Self: Sized;
 
-    fn prepare(&self) -> Result<()>;
+    async fn prepare(&self, execution: &EffectExecution) -> Result<()>;
 
     fn input_directory(&self, name: GeneratedInputName) -> GeneratedInputDirectory;
+}
+
+/// A file emission's outcome as a materialization step: its fault is the I/O
+/// error the operating system reported.
+trait FileCompletion {
+    fn completed(self) -> Result<()>;
+}
+
+impl FileCompletion for emission::FileOutcome {
+    fn completed(self) -> Result<()> {
+        match self {
+            Self::Completed => Ok(()),
+            Self::Failed(fault) => Err(std::io::Error::other(fault.0).into()),
+        }
+    }
+}
+
+/// The file emissions a materialization makes, each named by the path it is
+/// made on.
+trait FileEmissions {
+    fn preparation(&self) -> emission::DirectoryPreparation;
+
+    fn emptying(&self) -> emission::DirectoryEmptying;
+
+    fn file_write(&self, name: &str, text: String) -> emission::FileWrite;
+}
+
+impl FileEmissions for Path {
+    fn preparation(&self) -> emission::DirectoryPreparation {
+        emission::DirectoryPreparation {
+            directory_path: emission::DirectoryPath(self.display().to_string()),
+        }
+    }
+
+    fn emptying(&self) -> emission::DirectoryEmptying {
+        emission::DirectoryEmptying {
+            directory_path: emission::DirectoryPath(self.display().to_string()),
+        }
+    }
+
+    fn file_write(&self, name: &str, text: String) -> emission::FileWrite {
+        emission::FileWrite {
+            file_path: emission::FilePath(self.join(name).display().to_string()),
+            file_text: emission::FileText(text),
+        }
+    }
 }
 
 impl MaterializationLayout for MaterializationRoot {
@@ -5514,9 +5559,8 @@ impl MaterializationLayout for MaterializationRoot {
         Self { path }
     }
 
-    fn prepare(&self) -> Result<()> {
-        fs::create_dir_all(&self.path)?;
-        Ok(())
+    async fn prepare(&self, execution: &EffectExecution) -> Result<()> {
+        execution.emitted(self.path.preparation()).await.completed()
     }
 
     fn input_directory(&self, name: GeneratedInputName) -> GeneratedInputDirectory {
@@ -5568,14 +5612,16 @@ impl InputSetWriting for MaterializedInputSet {
         inputs.push(
             self.root
                 .input_directory(GeneratedInputName::Horizon)
-                .write_horizon(&self.horizon)?
+                .write_horizon(execution, &self.horizon)
+                .await?
                 .to_override(GeneratedInputName::Horizon, execution)
                 .await?,
         );
         inputs.push(
             self.root
                 .input_directory(GeneratedInputName::System)
-                .write_system(&self.horizon.node.machine.architecture)?
+                .write_system(execution, &self.horizon.node.machine.architecture)
+                .await?
                 .to_override(GeneratedInputName::System, execution)
                 .await?,
         );
@@ -5583,7 +5629,8 @@ impl InputSetWriting for MaterializedInputSet {
             inputs.push(
                 self.root
                     .input_directory(GeneratedInputName::Deployment)
-                    .write_deployment(&deployment)?
+                    .write_deployment(execution, &deployment)
+                    .await?
                     .to_override(GeneratedInputName::Deployment, execution)
                     .await?,
             );
@@ -5591,7 +5638,8 @@ impl InputSetWriting for MaterializedInputSet {
         inputs.push(
             self.root
                 .input_directory(GeneratedInputName::Secrets)
-                .write_secrets(&self.secrets_source)?
+                .write_secrets(execution, &self.secrets_source)
+                .await?
                 .to_override(GeneratedInputName::Secrets, execution)
                 .await?,
         );
@@ -5612,13 +5660,21 @@ trait GeneratedInputWriting: Sized {
     where
         Self: Sized;
 
-    fn prepare(&self) -> Result<()>;
+    async fn prepare(&self, execution: &EffectExecution) -> Result<()>;
 
-    fn write_horizon(&self, horizon: &Horizon) -> Result<Self>;
+    /// Write one file of this input, by name.
+    async fn write_file(&self, execution: &EffectExecution, name: &str, text: String)
+    -> Result<()>;
 
-    fn write_system(&self, system: &str) -> Result<Self>;
+    async fn write_horizon(&self, execution: &EffectExecution, horizon: &Horizon) -> Result<Self>;
 
-    fn write_deployment(&self, deployment: &DeploymentInput) -> Result<Self>;
+    async fn write_system(&self, execution: &EffectExecution, system: &str) -> Result<Self>;
+
+    async fn write_deployment(
+        &self,
+        execution: &EffectExecution,
+        deployment: &DeploymentInput,
+    ) -> Result<Self>;
 
     /// Generate the per-deploy `secrets` override: copy each cluster sops file
     /// into this directory as opaque bytes and emit a self-contained flake
@@ -5632,12 +5688,16 @@ trait GeneratedInputWriting: Sized {
     /// stale ciphertext that would drift the narHash (audit fix). Two files that
     /// map to the same `sopsFiles` attribute name are a real conflict and return
     /// a typed `Error::SecretAttributeCollision`, never a silent last-writer-wins.
-    fn write_secrets(&self, secrets: &ClusterSecretsDirectory) -> Result<Self>;
+    async fn write_secrets(
+        &self,
+        execution: &EffectExecution,
+        secrets: &ClusterSecretsDirectory,
+    ) -> Result<Self>;
 
     /// Remove the generated directory (ignoring an absent one) and recreate it
     /// empty, so a regenerated `secrets` input contains exactly the current
     /// files with no stale leftovers from a prior deploy.
-    fn reset_directory(&self) -> Result<()>;
+    async fn reset_directory(&self, execution: &EffectExecution) -> Result<()>;
 
     async fn to_override(
         &self,
@@ -5651,48 +5711,75 @@ impl GeneratedInputWriting for GeneratedInputDirectory {
         Self { path }
     }
 
-    fn prepare(&self) -> Result<()> {
-        fs::create_dir_all(&self.path)?;
-        Ok(())
+    async fn prepare(&self, execution: &EffectExecution) -> Result<()> {
+        execution.emitted(self.path.preparation()).await.completed()
     }
 
-    fn write_horizon(&self, horizon: &Horizon) -> Result<Self> {
-        self.prepare()?;
-        fs::write(
-            self.path.join("horizon.json"),
+    async fn write_file(
+        &self,
+        execution: &EffectExecution,
+        name: &str,
+        text: String,
+    ) -> Result<()> {
+        execution
+            .emitted(self.path.file_write(name, text))
+            .await
+            .completed()
+    }
+
+    async fn write_horizon(&self, execution: &EffectExecution, horizon: &Horizon) -> Result<Self> {
+        self.prepare(execution).await?;
+        self.write_file(
+            execution,
+            "horizon.json",
             serde_json::to_string_pretty(horizon)?,
-        )?;
-        fs::write(
-            self.path.join("flake.nix"),
-            "{ outputs = _: { horizon = builtins.fromJSON (builtins.readFile ./horizon.json); }; }\n",
-        )?;
+        )
+        .await?;
+        self.write_file(
+            execution,
+            "flake.nix",
+            "{ outputs = _: { horizon = builtins.fromJSON (builtins.readFile ./horizon.json); }; }\n"
+                .to_string(),
+        )
+        .await?;
         Ok(self.clone())
     }
 
-    fn write_system(&self, system: &str) -> Result<Self> {
-        self.prepare()?;
+    async fn write_system(&self, execution: &EffectExecution, system: &str) -> Result<Self> {
+        self.prepare(execution).await?;
         let system = NixSystemName::from_horizon_architecture(system).ok_or_else(|| {
             Error::Invariant("Horizon architecture has no supported Nix system".to_string())
         })?;
-        fs::write(
-            self.path.join("flake.nix"),
+        self.write_file(
+            execution,
+            "flake.nix",
             format!(
                 "{{ outputs = _: {{ system = \"{}\"; }}; }}\n",
                 system.as_str()
             ),
-        )?;
+        )
+        .await?;
         Ok(self.clone())
     }
 
-    fn write_deployment(&self, deployment: &DeploymentInput) -> Result<Self> {
-        self.prepare()?;
-        fs::write(self.path.join("flake.nix"), deployment.flake_text())?;
+    async fn write_deployment(
+        &self,
+        execution: &EffectExecution,
+        deployment: &DeploymentInput,
+    ) -> Result<Self> {
+        self.prepare(execution).await?;
+        self.write_file(execution, "flake.nix", deployment.flake_text())
+            .await?;
         Ok(self.clone())
     }
 
-    fn write_secrets(&self, secrets: &ClusterSecretsDirectory) -> Result<Self> {
-        self.reset_directory()?;
-        let files = secrets.secret_files()?;
+    async fn write_secrets(
+        &self,
+        execution: &EffectExecution,
+        secrets: &ClusterSecretsDirectory,
+    ) -> Result<Self> {
+        self.reset_directory(execution).await?;
+        let files = secrets.secret_files(execution).await?;
         let mut entries = String::new();
         let mut attributes: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
@@ -5706,24 +5793,20 @@ impl GeneratedInputWriting for GeneratedInputDirectory {
                     second: file_name,
                 });
             }
-            file.copy_into(&self.path)?;
+            file.copy_into(execution, &self.path).await?;
             entries.push_str(&format!("    {attribute_name} = ./{file_name};\n"));
         }
-        fs::write(
-            self.path.join("flake.nix"),
+        self.write_file(
+            execution,
+            "flake.nix",
             format!("{{ outputs = _: {{ sopsFiles = {{\n{entries}  }}; }}; }}\n"),
-        )?;
+        )
+        .await?;
         Ok(self.clone())
     }
 
-    fn reset_directory(&self) -> Result<()> {
-        match fs::remove_dir_all(&self.path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        fs::create_dir_all(&self.path)?;
-        Ok(())
+    async fn reset_directory(&self, execution: &EffectExecution) -> Result<()> {
+        execution.emitted(self.path.emptying()).await.completed()
     }
 
     async fn to_override(
@@ -5832,7 +5915,7 @@ trait SecretsSource {
     /// The `*.sops` files in this directory, sorted by file name for a stable
     /// generated flake. An absent directory yields an empty list (bootstrap
     /// sources carry no cluster secrets); other read failures propagate.
-    fn secret_files(&self) -> Result<Vec<ClusterSecretFile>>;
+    async fn secret_files(&self, execution: &EffectExecution) -> Result<Vec<ClusterSecretFile>>;
 }
 
 impl SecretsSource for ClusterSecretsDirectory {
@@ -5857,22 +5940,43 @@ impl SecretsSource for ClusterSecretsDirectory {
         }
     }
 
-    fn secret_files(&self) -> Result<Vec<ClusterSecretFile>> {
+    async fn secret_files(&self, execution: &EffectExecution) -> Result<Vec<ClusterSecretFile>> {
         let Some(directory) = &self.path else {
             return Ok(Vec::new());
         };
+        let entries = match execution
+            .emitted(emission::DirectoryListing {
+                directory_path: emission::DirectoryPath(directory.display().to_string()),
+            })
+            .await
+        {
+            emission::ListingOutcome::Listed(entries) => entries,
+            emission::ListingOutcome::Failed(fault) => {
+                return Err(std::io::Error::other(fault.0).into());
+            }
+        };
         let mut files = Vec::new();
-        for entry in fs::read_dir(directory)? {
-            let path = entry?.path();
-            if path.extension().and_then(|extension| extension.to_str()) == Some("sops") {
-                let metadata = fs::symlink_metadata(&path)?;
-                if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        for entry in entries {
+            let path = PathBuf::from(entry.file_path.0);
+            if path.extension().and_then(|extension| extension.to_str()) != Some("sops") {
+                continue;
+            }
+            match entry.entry_kind {
+                emission::EntryKind::RegularFile => files.push(ClusterSecretFile::new(path)),
+                emission::EntryKind::UndecodableName => {
+                    return Err(crate::Error::SecretFileNameNotUtf8(path));
+                }
+                emission::EntryKind::Unreadable(fault) => {
+                    return Err(std::io::Error::other(fault.0).into());
+                }
+                emission::EntryKind::SymbolicLink
+                | emission::EntryKind::Directory
+                | emission::EntryKind::Other => {
                     return Err(Error::StoreMaintenance(format!(
                         "secret file must be a regular non-symlink file: {}",
                         path.display()
                     )));
                 }
-                files.push(ClusterSecretFile::new(path));
             }
         }
         files.sort_by(|left, right| left.sort_key().cmp(right.sort_key()));
@@ -5920,7 +6024,7 @@ trait SecretFileCopying {
     /// Copy the opaque ciphertext into the generated input directory so the
     /// flake is self-contained (its narHash covers the file). The contents are
     /// never read into the daemon.
-    fn copy_into(&self, directory: &Path) -> Result<()>;
+    async fn copy_into(&self, execution: &EffectExecution, directory: &Path) -> Result<()>;
 }
 
 impl SecretFileCopying for ClusterSecretFile {
@@ -5948,9 +6052,18 @@ impl SecretFileCopying for ClusterSecretFile {
             .ok_or_else(|| crate::Error::SecretFileNameNotUtf8(self.path.clone()))
     }
 
-    fn copy_into(&self, directory: &Path) -> Result<()> {
-        fs::copy(&self.path, directory.join(self.file_name()?))?;
-        Ok(())
+    async fn copy_into(&self, execution: &EffectExecution, directory: &Path) -> Result<()> {
+        execution
+            .emitted(emission::FileCopy {
+                source_file: emission::SourceFile(emission::FilePath(
+                    self.path.display().to_string(),
+                )),
+                destination_file: emission::DestinationFile(emission::FilePath(
+                    directory.join(self.file_name()?).display().to_string(),
+                )),
+            })
+            .await
+            .completed()
     }
 }
 
@@ -6961,16 +7074,17 @@ pub(crate) trait DetachedActivation {
 /// before it switches. `None` when it cannot be read.
 pub(crate) struct SystemProfile;
 
-/// Reading where the system profile points.
+/// Reading where the system profile points, as an emission.
 pub(crate) trait SystemProfileReading {
-    fn closure() -> Option<String>;
+    async fn closure(execution: &EffectExecution) -> Option<String>;
 }
 
 impl SystemProfileReading for SystemProfile {
-    fn closure() -> Option<String> {
-        fs::canonicalize("/nix/var/nix/profiles/system")
-            .ok()
-            .map(|path| path.display().to_string())
+    async fn closure(execution: &EffectExecution) -> Option<String> {
+        match execution.emitted(emission::ReadSystemProfile {}).await {
+            emission::SystemProfileOutcome::Resolved(closure) => Some(closure.0),
+            emission::SystemProfileOutcome::Unresolved(_) => None,
+        }
     }
 }
 
@@ -7150,7 +7264,7 @@ impl DetachedActivation for DetachedActivationUnit {
             terminal,
             store,
             deployment_identifier,
-            SystemProfile::closure().as_deref(),
+            SystemProfile::closure(execution).await.as_deref(),
         ) {
             self.clean().await;
         }
@@ -7580,6 +7694,7 @@ mod tests {
         ActivationScript as _, ArrivalMatching as _, CommandLine, Commanded as _,
         ProcessRunning as _, ShellArgument, ShellQuoting as _,
     };
+    use std::fs;
 
     /// The view the argv tests read an emission's command line through.
     trait InvocationView {
@@ -10053,12 +10168,70 @@ mod tests {
         );
     }
 
+    /// A materialization step awaited on its own runtime, its file
+    /// emissions made where the daemon would make them.
+    fn materialized<Value>(step: impl std::future::Future<Output = Value>) -> Value {
+        tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(step)
+    }
+
+    fn file_execution() -> EffectExecution {
+        EffectExecution::production()
+    }
+
+    #[test]
+    fn a_sops_file_whose_name_is_not_utf8_is_named_by_the_listing() {
+        use std::os::unix::ffi::OsStrExt;
+        let temporary = tempfile::tempdir().expect("temporary secrets root");
+        let secrets_directory = temporary.path().join("secrets");
+        fs::create_dir_all(&secrets_directory).expect("create secrets directory");
+        fs::write(
+            secrets_directory.join(std::ffi::OsStr::from_bytes(b"bad\xff.sops")),
+            b"opaque",
+        )
+        .expect("write sops file");
+        let input = memory::SecretsInput::SecretsDirectory(memory::SecretsDirectory::new(
+            secrets_directory.to_string_lossy().to_string(),
+        ));
+        let cluster = ClusterSecretsDirectory::from_input(&input).expect("directory is valid");
+        assert!(matches!(
+            materialized(cluster.secret_files(&file_execution())),
+            Err(crate::Error::SecretFileNameNotUtf8(_))
+        ));
+    }
+
+    #[test]
+    fn a_file_emission_carries_the_operating_systems_fault() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let missing = temporary.path().join("absent");
+        let outcome =
+            materialized(file_execution().emitted(missing.file_write("flake.nix", "{ }".into())));
+        let emission::FileOutcome::Failed(fault) = outcome else {
+            panic!("a write into an absent directory fails: {outcome:?}");
+        };
+        assert!(fault.0.contains("No such file or directory"), "{fault:?}");
+        let error = emission::FileOutcome::Failed(fault.clone())
+            .completed()
+            .expect_err("the fault is the step's error");
+        assert_eq!(error.to_string(), format!("io error: {}", fault.0));
+        assert_eq!(
+            materialized(file_execution().emitted(missing.preparation())),
+            emission::FileOutcome::Completed
+        );
+        assert!(missing.is_dir());
+    }
+
     #[test]
     fn no_secrets_is_explicit_and_yields_no_files() {
         let directory = ClusterSecretsDirectory::from_input(&memory::SecretsInput::NoSecrets)
             .expect("NoSecrets is accepted");
         assert!(directory.path.is_none());
-        assert!(directory.secret_files().expect("no files").is_empty());
+        assert!(
+            materialized(directory.secret_files(&file_execution()))
+                .expect("no files")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -10111,7 +10284,7 @@ mod tests {
         ));
         let cluster = ClusterSecretsDirectory::from_input(&input).expect("directory is valid");
         assert!(matches!(
-            cluster.secret_files(),
+            materialized(cluster.secret_files(&file_execution())),
             Err(Error::StoreMaintenance(_))
         ));
     }
@@ -10139,9 +10312,11 @@ mod tests {
             secrets_directory.to_string_lossy().to_string(),
         ));
         let cluster = ClusterSecretsDirectory::from_input(&input).expect("valid secrets directory");
-        GeneratedInputDirectory::new(generated.clone())
-            .write_secrets(&cluster)
-            .expect("write secrets input");
+        materialized(
+            GeneratedInputDirectory::new(generated.clone())
+                .write_secrets(&file_execution(), &cluster),
+        )
+        .expect("write secrets input");
 
         let flake = fs::read_to_string(generated.join("flake.nix")).expect("read flake");
         assert!(flake.contains("sopsFiles = {"), "{flake}");
@@ -10191,17 +10366,21 @@ mod tests {
             secrets_directory.to_string_lossy().to_string(),
         ));
         let cluster = ClusterSecretsDirectory::from_input(&input).expect("valid secrets directory");
-        GeneratedInputDirectory::new(generated.clone())
-            .write_secrets(&cluster)
-            .expect("first write");
+        materialized(
+            GeneratedInputDirectory::new(generated.clone())
+                .write_secrets(&file_execution(), &cluster),
+        )
+        .expect("first write");
         assert!(generated.join("alpha.sops").is_file());
         assert!(generated.join("beta.sops").is_file());
 
         // Drop beta from the cluster secrets and regenerate.
         fs::remove_file(secrets_directory.join("beta.sops")).expect("remove beta");
-        GeneratedInputDirectory::new(generated.clone())
-            .write_secrets(&cluster)
-            .expect("second write");
+        materialized(
+            GeneratedInputDirectory::new(generated.clone())
+                .write_secrets(&file_execution(), &cluster),
+        )
+        .expect("second write");
         assert!(generated.join("alpha.sops").is_file());
         assert!(
             !generated.join("beta.sops").exists(),
@@ -10267,9 +10446,11 @@ mod tests {
         let _ = fs::remove_dir_all(&generated);
         let cluster = ClusterSecretsDirectory::from_input(&memory::SecretsInput::NoSecrets)
             .expect("NoSecrets is accepted");
-        GeneratedInputDirectory::new(generated.clone())
-            .write_secrets(&cluster)
-            .expect("write empty secrets input");
+        materialized(
+            GeneratedInputDirectory::new(generated.clone())
+                .write_secrets(&file_execution(), &cluster),
+        )
+        .expect("write empty secrets input");
         let flake = fs::read_to_string(generated.join("flake.nix")).expect("read flake");
         assert!(flake.contains("sopsFiles = {"), "{flake}");
         // no entries between the braces
