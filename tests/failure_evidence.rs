@@ -20,10 +20,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use lojix::Store;
-use lojix::runtime_flow::{NexusEngine, OriginRoute};
 use lojix::runtime_model as meta;
 use lojix::runtime_model as ordinary;
 use lojix::runtime_model as memory;
+use lojix::schema_runtime::Operating as _;
 use lojix::schema_runtime::{RuntimeConfiguration, SchemaRuntime};
 
 mod common;
@@ -249,17 +249,11 @@ async fn the_event_log_carries_the_same_evidence_as_the_record() {
     let (mut engine, identifier, _commands) =
         failed_user_environment_activation(directory.path()).await;
 
-    let page = match engine
-        .observe_memory_read(
-            OriginRoute::new(0),
-            memory::MemoryReadInput::ReadEventLog(ordinary::EventLogRange {
-                first_event_log_position: ordinary::EventLogPosition::new(0),
-                second_event_log_position: ordinary::EventLogPosition::new(i64::MAX),
-            }),
-        )
-        .await
-    {
-        memory::MemoryReadOutput::EventLogRead(page) => page,
+    let page = match engine.operate(memory::Operation::ReadEventLog(ordinary::EventLogRange {
+        first_event_log_position: ordinary::EventLogPosition::new(0),
+        second_event_log_position: ordinary::EventLogPosition::new(i64::MAX),
+    })) {
+        memory::Outcome::EventLogRead(page) => page,
         other => panic!("expected an event-log page, got {other:?}"),
     };
 
@@ -291,16 +285,10 @@ async fn a_by_deployment_query_answers_with_that_deployment() {
     let (mut engine, identifier, _commands) =
         failed_user_environment_activation(directory.path()).await;
 
-    let listing = match engine
-        .observe_memory_read(
-            OriginRoute::new(0),
-            memory::MemoryReadInput::QueryGenerations(ordinary::Selection::ByDeployment(
-                ordinary::DeploymentLookup::new(identifier),
-            )),
-        )
-        .await
-    {
-        memory::MemoryReadOutput::GenerationsQueried(listing) => listing,
+    let listing = match engine.operate(memory::Operation::QueryGenerations(
+        ordinary::Selection::ByDeployment(ordinary::DeploymentLookup::new(identifier)),
+    )) {
+        memory::Outcome::GenerationsQueried(listing) => listing,
         other => panic!("expected a generation listing, got {other:?}"),
     };
 
@@ -414,16 +402,10 @@ async fn a_by_deployment_query_answers_with_the_generation_it_produced() {
         .expect("an accepted deployment has its identifier");
     engine.drive_submitted_deploy().await;
 
-    let listing = match engine
-        .observe_memory_read(
-            OriginRoute::new(0),
-            memory::MemoryReadInput::QueryGenerations(ordinary::Selection::ByDeployment(
-                ordinary::DeploymentLookup::new(identifier),
-            )),
-        )
-        .await
-    {
-        memory::MemoryReadOutput::GenerationsQueried(listing) => listing,
+    let listing = match engine.operate(memory::Operation::QueryGenerations(
+        ordinary::Selection::ByDeployment(ordinary::DeploymentLookup::new(identifier)),
+    )) {
+        memory::Outcome::GenerationsQueried(listing) => listing,
         other => panic!("expected a generation listing, got {other:?}"),
     };
 

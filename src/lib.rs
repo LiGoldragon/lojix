@@ -79,6 +79,7 @@ mod inspected_text;
 pub mod inspection;
 pub mod legacy_store;
 pub mod memory;
+pub mod operation;
 pub mod quarantine;
 #[cfg(feature = "tools")]
 pub mod reconstruction;

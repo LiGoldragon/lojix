@@ -1,21 +1,18 @@
-//! Hand-implemented `SchemaRuntime` noun — the single data-bearing type that
-//! implements the handwritten `nexus::NexusEngine` decision boundary.
+//! Hand-implemented `SchemaRuntime` noun — the engine a peer's input is
+//! answered through and an admitted deploy or test pipeline is driven by.
 //!
-//! `decide` is the routing brain (port plan §4.2): ordinary reads route to
-//! `MemoryRead`, ordinary subscription verbs reply with the token handshake, and
-//! meta mutations route to `MemoryWrite`. A meta `Deploy` opens the effect
-//! pipeline (port plan §4.3): the write completion drives a chain of
-//! `RunEffect` continuations — resolve flake auth, eval, build, copy, activate
-//! — recording a phase transition between stages and finally replying
-//! `DeployAccepted`. `run_effect` does real `nix` IO through `tokio::process::Command`
-//! so actor-native request tasks await child processes directly instead of
-//! routing Nexus execution through a blocking-pool bridge.
+//! `Operating::operate` applies one generated `Operation` to the store and
+//! answers its `Outcome`. A deploy pipeline is a chain of effects — resolve
+//! the flake, materialize Horizon inputs, eval, build, copy, activate — with a
+//! phase recorded between stages; `NexusEngine::decide` picks the next action
+//! from the last step's result and `NexusEngine::drive` carries it out until
+//! the pipeline finishes. `run_effect` does real `nix` IO through
+//! `tokio::process::Command`.
 
 use crate::inspected_text::{
     CredentialBearing, InspectedText, NixStorePath, OfferedPath, PathAdmission, PercentEncodedText,
     StoreItemShape,
 };
-use crate::runtime_flow::{Routable, Routed};
 use crate::{CommitMarking as _, Named as _, Payload};
 use crate::{
     DeploymentLedger as _, DurableStore as _, EventHistory as _, GenerationLedger as _,
@@ -35,7 +32,7 @@ use zbus::proxy::{Builder as ProxyBuilder, CacheProperties, SignalStream};
 use zbus::zvariant::OwnedObjectPath;
 use zbus::{Connection, Proxy};
 
-use crate::runtime_flow::{self as nexus, NexusEngine};
+use crate::runtime_flow::{self as nexus, NexusEngine as _};
 use crate::runtime_model as memory;
 
 /// A local activation-login noun. Horizon projects users as public strings;
@@ -3047,7 +3044,7 @@ trait ReadMiss {
     fn read_missed(commit_sequence: i64, reason: memory::RejectionReason) -> Self;
 }
 
-impl ReadMiss for memory::MemoryReadOutput {
+impl ReadMiss for memory::Outcome {
     fn read_missed(commit_sequence: i64, reason: memory::RejectionReason) -> Self {
         Self::ReadMissed(memory::RejectionReport {
             rejection_reason: reason,
@@ -3198,18 +3195,13 @@ impl RuntimeCore for SchemaRuntime {
                 nexus::NexusAction::Finish(output) => {
                     return output;
                 }
-                nexus::NexusAction::CommandMemoryWrite(input) => {
-                    let output = self.apply_memory(input);
-                    action = self.decide_write_completion(output);
+                nexus::NexusAction::Operate(operation) => {
+                    let outcome = self.operate(operation);
+                    action = self.decide_outcome(outcome);
                 }
                 nexus::NexusAction::CommandEffect(command) => {
                     let result = self.run_effect(command).await;
                     action = self.decide_test_effect_completion(result);
-                }
-                _ => {
-                    return meta::Output::TestRejected(
-                        self.test_rejection(meta::TestRejectionReason::InternalError),
-                    );
                 }
             }
         }
@@ -3235,7 +3227,7 @@ pub(crate) trait PipelineDeciding {
 
     fn test_rejection(&self, reason: meta::TestRejectionReason) -> meta::RejectedTest;
 
-    fn decide_write_completion(&mut self, output: memory::MemoryWriteOutput) -> nexus::NexusAction;
+    fn decide_outcome(&mut self, output: memory::Outcome) -> nexus::NexusAction;
 
     /// Route a test effect's result to the next test step (Unit 2b). The
     /// hermetic check is a single effect: a built check records `Passed` with
@@ -3339,46 +3331,53 @@ impl PipelineDeciding for SchemaRuntime {
         }
     }
 
-    fn decide_write_completion(&mut self, output: memory::MemoryWriteOutput) -> nexus::NexusAction {
+    fn decide_outcome(&mut self, output: memory::Outcome) -> nexus::NexusAction {
         match output {
-            memory::MemoryWriteOutput::DeploySubmitted(accepted) => {
-                self.begin_deploy_pipeline(accepted)
-            }
-            memory::MemoryWriteOutput::PhaseRecorded(_) => self.advance_after_phase(),
-            memory::MemoryWriteOutput::GenerationActivated(_) => match self.active_deploy.clone() {
+            memory::Outcome::DeploySubmitted(accepted) => self.begin_deploy_pipeline(accepted),
+            memory::Outcome::PhaseRecorded(_) => self.advance_after_phase(),
+            memory::Outcome::GenerationActivated(_) => match self.active_deploy.clone() {
                 Some(pipeline) => self.finish_deploy_pipeline(&pipeline),
                 None => nexus::NexusAction::from(self.refuse_deploy(
                     memory::DeployRefusalReason::NoCorrelatedDeployment,
                     &"an activation committed with no correlated cursor",
                 )),
             },
-            memory::MemoryWriteOutput::ContainerRecorded(_) => self.advance_after_phase(),
-            memory::MemoryWriteOutput::TestRunRecorded(accepted) => {
+            memory::Outcome::ContainerRecorded(_) => self.advance_after_phase(),
+            memory::Outcome::TestRunRecorded(accepted) => {
                 self.active_operation = None;
                 nexus::NexusAction::from(meta::Output::Tested(accepted))
             }
-            memory::MemoryWriteOutput::WriteRejected(report) => self.reject_active_pipeline(report),
-            memory::MemoryWriteOutput::StoreRefused(detail) => {
+            memory::Outcome::WriteRejected(report) => self.reject_active_pipeline(report),
+            memory::Outcome::StoreRefused(detail) => {
                 self.active_operation = None;
-                nexus::NexusAction::from(meta::Output::Refused(memory::StoreFailure(detail)))
+                nexus::NexusAction::from(meta::Output::Refused(detail))
             }
             // Configuration, pin, unpin and retire are answered where the
             // input arrives, and no pipeline makes those writes; one reaching
             // a pipeline has no deployment to name.
-            unasked @ (memory::MemoryWriteOutput::OrdinaryConfigured(_)
-            | memory::MemoryWriteOutput::MetaConfigured(_)
-            | memory::MemoryWriteOutput::ConfigurationReversed(_)
-            | memory::MemoryWriteOutput::OrdinaryConfigurationRejected(_)
-            | memory::MemoryWriteOutput::MetaConfigurationRejected(_)
-            | memory::MemoryWriteOutput::GenerationPinned(_)
-            | memory::MemoryWriteOutput::GenerationUnpinned(_)
-            | memory::MemoryWriteOutput::GenerationRetired(_)) => {
+            unasked @ (memory::Outcome::OrdinaryConfigured(_)
+            | memory::Outcome::MetaConfigured(_)
+            | memory::Outcome::ConfigurationReversed(_)
+            | memory::Outcome::OrdinaryConfigurationRejected(_)
+            | memory::Outcome::MetaConfigurationRejected(_)
+            | memory::Outcome::GenerationPinned(_)
+            | memory::Outcome::GenerationUnpinned(_)
+            | memory::Outcome::GenerationRetired(_)) => {
                 self.active_operation = None;
                 nexus::NexusAction::from(self.refuse_deploy(
                     memory::DeployRefusalReason::NoCorrelatedDeployment,
                     &format!("a pipeline received a write it never makes: {unasked:?}"),
                 ))
             }
+            // A read is answered where its input arrives; no pipeline reads,
+            // so a read completing on one has no deployment to name.
+            unasked @ (memory::Outcome::GenerationsQueried(_)
+            | memory::Outcome::EventLogRead(_)
+            | memory::Outcome::TestRunsQueried(_)
+            | memory::Outcome::ReadMissed(_)) => nexus::NexusAction::from(self.refuse_deploy(
+                memory::DeployRefusalReason::NoCorrelatedDeployment,
+                &format!("a pipeline received a read it never makes: {unasked:?}"),
+            )),
         }
     }
 
@@ -3821,10 +3820,10 @@ impl DeployDriving for SchemaRuntime {
         self.active_operation = Some(MetaOperation::Deploy);
         let rejected_request = request.clone();
         match self.record_deploy_submitted(request) {
-            memory::MemoryWriteOutput::DeploySubmitted(accepted) => {
+            memory::Outcome::DeploySubmitted(accepted) => {
                 DeploySubmissionOutcome::Accepted(accepted)
             }
-            memory::MemoryWriteOutput::WriteRejected(report) => {
+            memory::Outcome::WriteRejected(report) => {
                 self.active_operation = None;
                 self.active_deploy = None;
                 self.reject_submission(rejected_request, (report.rejection_reason).deploy_reason())
@@ -4029,9 +4028,9 @@ impl DeployDriving for SchemaRuntime {
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError),
                 };
             }
-            memory::DeployResumeStage::ResolveFlakeAuth => nexus::NexusWork::MemoryWriteCompleted(
-                memory::MemoryWriteOutput::DeploySubmitted(accepted),
-            ),
+            memory::DeployResumeStage::ResolveFlakeAuth => {
+                nexus::NexusWork::Operated(memory::Outcome::DeploySubmitted(accepted))
+            }
             memory::DeployResumeStage::MaterializeHorizon => {
                 let Some(revision) = pipeline.source_revision.clone() else {
                     return self
@@ -4047,9 +4046,7 @@ impl DeployDriving for SchemaRuntime {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
-                nexus::NexusWork::MemoryWriteCompleted(memory::MemoryWriteOutput::PhaseRecorded(
-                    receipt,
-                ))
+                nexus::NexusWork::Operated(memory::Outcome::PhaseRecorded(receipt))
             }
             memory::DeployResumeStage::NixBuild => {
                 let Some(closure_path) = pipeline.closure_path.clone() else {
@@ -4079,16 +4076,10 @@ impl DeployDriving for SchemaRuntime {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
-                nexus::NexusWork::MemoryWriteCompleted(memory::MemoryWriteOutput::PhaseRecorded(
-                    receipt,
-                ))
+                nexus::NexusWork::Operated(memory::Outcome::PhaseRecorded(receipt))
             }
-        }
-        .with_origin_route(nexus::OriginRoute::new(0));
-        match self.execute(work).await.into_root() {
-            nexus::NexusAction::Finish(output) => output,
-            _ => self.deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError),
-        }
+        };
+        self.drive(work).await
     }
 
     fn begin_deploy_pipeline(&mut self, accepted: meta::DeployHandle) -> nexus::NexusAction {
@@ -4189,9 +4180,7 @@ impl DeployDriving for SchemaRuntime {
                     }
                 };
                 self.set_stage(DeployStage::ActivatedRecorded);
-                nexus::NexusAction::CommandMemoryWrite(
-                    memory::MemoryWriteInput::RecordGenerationActivated(commit),
-                )
+                nexus::NexusAction::Operate(memory::Operation::RecordGenerationActivated(commit))
             }
             DeployStage::ActivatedRecorded => self.finish_deploy_pipeline(&pipeline),
         }
@@ -4329,9 +4318,7 @@ impl DeployDriving for SchemaRuntime {
             }
         };
         let event = pipeline.phase_event(phase, ordinary::EventLogPosition::new(position));
-        nexus::NexusAction::CommandMemoryWrite(memory::MemoryWriteInput::RecordPhaseTransition(
-            event,
-        ))
+        nexus::NexusAction::Operate(memory::Operation::RecordPhaseTransition(event))
     }
 
     fn persist_job_phase(&mut self, phase: memory::DeployJobPhase) {
@@ -4490,7 +4477,7 @@ impl TestDriving for SchemaRuntime {
             ordinary::TestRunIdentifier::new(self.store.next_test_run_identifier().unwrap_or(1));
         let mut pipeline = TestPipeline::accepted(run.clone(), identifier);
         match self.record_test_run(run.pending_record(identifier)) {
-            memory::MemoryWriteOutput::TestRunRecorded(accepted) => {
+            memory::Outcome::TestRunRecorded(accepted) => {
                 // The terminal outcome carries the acceptance marker, as a
                 // deploy's does; the cursor stays set for the executor, which
                 // runs the real dispatch and rewrites the row to its outcome.
@@ -4498,7 +4485,7 @@ impl TestDriving for SchemaRuntime {
                 self.active_test = Some(pipeline);
                 TestSubmissionOutcome::Accepted(accepted)
             }
-            memory::MemoryWriteOutput::WriteRejected(report) => {
+            memory::Outcome::WriteRejected(report) => {
                 TestSubmissionOutcome::Rejected(meta::RejectedTest {
                     test_rejection_reason: (report.rejection_reason).test_reason(),
                     database_marker: report.database_marker,
@@ -4552,7 +4539,7 @@ impl TestDriving for SchemaRuntime {
         self.active_operation = None;
         self.active_test = None;
         match output {
-            memory::MemoryWriteOutput::TestRunRecorded(accepted) => {
+            memory::Outcome::TestRunRecorded(accepted) => {
                 nexus::NexusAction::from(meta::Output::Tested(accepted))
             }
             _ => nexus::NexusAction::from(meta::Output::TestRejected(
@@ -4594,56 +4581,84 @@ impl TestDriving for SchemaRuntime {
     }
 }
 
-/// Applying one decided write to the durable store. Every arm answers with a
-/// typed outcome — a receipt or a rejection — and nothing here decides what to
-/// do next.
-pub(crate) trait MemoryApplying {
-    fn apply_memory(&mut self, input: memory::MemoryWriteInput) -> memory::MemoryWriteOutput;
+/// Applying one operation, generated from `ethos/operation.ethos`, to the
+/// durable store: each write and each read answers with the outcome it came
+/// to, and nothing here decides what to do next. This is the engine's own
+/// behaviour over the generated operation, written by hand beside it.
+pub trait Operating {
+    fn operate(&mut self, operation: memory::Operation) -> memory::Outcome;
+}
 
+impl Operating for SchemaRuntime {
+    fn operate(&mut self, operation: memory::Operation) -> memory::Outcome {
+        match operation {
+            memory::Operation::OrdinaryConfigure(configuration) => {
+                self.apply_ordinary_configuration(configuration)
+            }
+            memory::Operation::MetaConfigure(configuration) => {
+                self.apply_meta_configuration(configuration)
+            }
+            memory::Operation::ReverseConfiguration => self.reverse_meta_configuration(),
+            memory::Operation::RecordDeploySubmitted(submission) => {
+                self.record_deploy_submitted(submission)
+            }
+            memory::Operation::RecordPhaseTransition(event) => self.record_phase_transition(event),
+            memory::Operation::RecordGenerationActivated(commit) => {
+                self.record_generation_activated(commit)
+            }
+            memory::Operation::PinGeneration(request) => self.pin_generation(request),
+            memory::Operation::UnpinGeneration(request) => self.unpin_generation(request),
+            memory::Operation::RetireGeneration(request) => self.retire_generation(request),
+            memory::Operation::RecordContainerTransition(transition) => {
+                self.record_container_transition(transition)
+            }
+            memory::Operation::RecordTestRun(record) => self.record_test_run(record),
+            memory::Operation::QueryGenerations(selection) => self.query_generations(selection),
+            memory::Operation::ReadEventLog(range) => self.read_event_log(range),
+            memory::Operation::QueryTestRuns(lookup) => self.query_test_runs(lookup),
+        }
+    }
+}
+
+/// The writes among the operations, each against the durable store.
+pub(crate) trait MemoryApplying {
     fn apply_ordinary_configuration(
         &self,
         configuration: crate::NexusConfiguration,
-    ) -> memory::MemoryWriteOutput;
+    ) -> memory::Outcome;
 
-    fn apply_meta_configuration(
-        &self,
-        configuration: crate::NexusConfiguration,
-    ) -> memory::MemoryWriteOutput;
+    fn apply_meta_configuration(&self, configuration: crate::NexusConfiguration)
+    -> memory::Outcome;
 
-    fn reverse_meta_configuration(&self) -> memory::MemoryWriteOutput;
+    fn reverse_meta_configuration(&self) -> memory::Outcome;
 
     /// Persist one accepted test-run row (phase Submitted / outcome Pending)
     /// and reply the `AcceptedTest` handle. Mirrors `record_deploy_submitted`:
     /// the row is durable from acceptance, so a `(Query (ByTestRun …))` reads
     /// it immediately and a restarted daemon reconciles the in-flight test
     /// (Unit 2b). Unit 2a writes exactly this Pending row — no faked pass.
-    fn record_test_run(&mut self, record: ordinary::TestRunRecord) -> memory::MemoryWriteOutput;
+    fn record_test_run(&mut self, record: ordinary::TestRunRecord) -> memory::Outcome;
 
     fn record_deploy_submitted(
         &mut self,
         submission: memory::ActualizedDeploySubmission,
-    ) -> memory::MemoryWriteOutput;
+    ) -> memory::Outcome;
 
-    fn record_phase_transition(
-        &mut self,
-        event: ordinary::DeploymentPhaseEvent,
-    ) -> memory::MemoryWriteOutput;
+    fn record_phase_transition(&mut self, event: ordinary::DeploymentPhaseEvent)
+    -> memory::Outcome;
 
-    fn record_generation_activated(
-        &mut self,
-        commit: memory::ActivationCommit,
-    ) -> memory::MemoryWriteOutput;
+    fn record_generation_activated(&mut self, commit: memory::ActivationCommit) -> memory::Outcome;
 
-    fn pin_generation(&mut self, request: meta::PinRequest) -> memory::MemoryWriteOutput;
+    fn pin_generation(&mut self, request: meta::PinRequest) -> memory::Outcome;
 
-    fn unpin_generation(&mut self, request: meta::UnpinRequest) -> memory::MemoryWriteOutput;
+    fn unpin_generation(&mut self, request: meta::UnpinRequest) -> memory::Outcome;
 
-    fn retire_generation(&mut self, request: meta::RetireRequest) -> memory::MemoryWriteOutput;
+    fn retire_generation(&mut self, request: meta::RetireRequest) -> memory::Outcome;
 
     fn record_container_transition(
         &mut self,
         transition: memory::ContainerTransition,
-    ) -> memory::MemoryWriteOutput;
+    ) -> memory::Outcome;
 
     /// Build a write-rejection at a known commit sequence. The caller passes
     /// the sequence it already read under the store lock — this method never
@@ -4654,50 +4669,19 @@ pub(crate) trait MemoryApplying {
     /// vocabulary of whatever operation was in flight. Reading the commit
     /// sequence is best-effort: the store that just refused a write may
     /// equally refuse to report its sequence.
-    fn reject_durable_write(&self, cause: &dyn std::fmt::Display) -> memory::MemoryWriteOutput;
+    fn reject_durable_write(&self, cause: &dyn std::fmt::Display) -> memory::Outcome;
 
-    fn write_rejected(
-        commit_sequence: i64,
-        reason: memory::RejectionReason,
-    ) -> memory::MemoryWriteOutput;
+    fn write_rejected(commit_sequence: i64, reason: memory::RejectionReason) -> memory::Outcome;
 }
 
 impl MemoryApplying for SchemaRuntime {
-    fn apply_memory(&mut self, input: memory::MemoryWriteInput) -> memory::MemoryWriteOutput {
-        match input {
-            memory::MemoryWriteInput::OrdinaryConfigure(configuration) => {
-                self.apply_ordinary_configuration(configuration)
-            }
-            memory::MemoryWriteInput::MetaConfigure(configuration) => {
-                self.apply_meta_configuration(configuration)
-            }
-            memory::MemoryWriteInput::ReverseConfiguration => self.reverse_meta_configuration(),
-            memory::MemoryWriteInput::RecordDeploySubmitted(submission) => {
-                self.record_deploy_submitted(submission)
-            }
-            memory::MemoryWriteInput::RecordPhaseTransition(event) => {
-                self.record_phase_transition(event)
-            }
-            memory::MemoryWriteInput::RecordGenerationActivated(commit) => {
-                self.record_generation_activated(commit)
-            }
-            memory::MemoryWriteInput::PinGeneration(request) => self.pin_generation(request),
-            memory::MemoryWriteInput::UnpinGeneration(request) => self.unpin_generation(request),
-            memory::MemoryWriteInput::RetireGeneration(request) => self.retire_generation(request),
-            memory::MemoryWriteInput::RecordContainerTransition(transition) => {
-                self.record_container_transition(transition)
-            }
-            memory::MemoryWriteInput::RecordTestRun(record) => self.record_test_run(record),
-        }
-    }
-
     fn apply_ordinary_configuration(
         &self,
         configuration: crate::NexusConfiguration,
-    ) -> memory::MemoryWriteOutput {
+    ) -> memory::Outcome {
         match self.store.ordinary_configure(configuration) {
-            Ok(state) => memory::MemoryWriteOutput::OrdinaryConfigured(state.receipt()),
-            Err(error) => memory::MemoryWriteOutput::OrdinaryConfigurationRejected(
+            Ok(state) => memory::Outcome::OrdinaryConfigured(state.receipt()),
+            Err(error) => memory::Outcome::OrdinaryConfigurationRejected(
                 memory::ConfigurationRejection::from(error),
             ),
         }
@@ -4706,32 +4690,32 @@ impl MemoryApplying for SchemaRuntime {
     fn apply_meta_configuration(
         &self,
         configuration: crate::NexusConfiguration,
-    ) -> memory::MemoryWriteOutput {
+    ) -> memory::Outcome {
         match self.store.meta_configure(configuration) {
-            Ok(state) => memory::MemoryWriteOutput::MetaConfigured(state.receipt()),
-            Err(error) => memory::MemoryWriteOutput::MetaConfigurationRejected(
+            Ok(state) => memory::Outcome::MetaConfigured(state.receipt()),
+            Err(error) => memory::Outcome::MetaConfigurationRejected(
                 memory::ConfigurationRejection::from(error),
             ),
         }
     }
 
-    fn reverse_meta_configuration(&self) -> memory::MemoryWriteOutput {
+    fn reverse_meta_configuration(&self) -> memory::Outcome {
         match self.store.reverse_meta_configuration() {
-            Ok(state) => memory::MemoryWriteOutput::ConfigurationReversed(state.receipt()),
-            Err(error) => memory::MemoryWriteOutput::MetaConfigurationRejected(
+            Ok(state) => memory::Outcome::ConfigurationReversed(state.receipt()),
+            Err(error) => memory::Outcome::MetaConfigurationRejected(
                 memory::ConfigurationRejection::from(error),
             ),
         }
     }
 
-    fn record_test_run(&mut self, record: ordinary::TestRunRecord) -> memory::MemoryWriteOutput {
+    fn record_test_run(&mut self, record: ordinary::TestRunRecord) -> memory::Outcome {
         let identifier = record.test_run_identifier;
         match self
             .store
             .upsert_test_run(memory::StoredTestRun::from(record))
             .and_then(|()| self.store.commit_sequence())
         {
-            Ok(commit_sequence) => memory::MemoryWriteOutput::TestRunRecorded(meta::AcceptedTest {
+            Ok(commit_sequence) => memory::Outcome::TestRunRecorded(meta::AcceptedTest {
                 test_run_identifier: identifier,
                 database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
             }),
@@ -4742,7 +4726,7 @@ impl MemoryApplying for SchemaRuntime {
     fn record_deploy_submitted(
         &mut self,
         submission: memory::ActualizedDeploySubmission,
-    ) -> memory::MemoryWriteOutput {
+    ) -> memory::Outcome {
         // Identifier reservation, correlation-record creation, and the
         // restart cursor share one durable commit.  The public admission
         // marker is bound only afterwards from that commit's durable log.
@@ -4783,7 +4767,7 @@ impl MemoryApplying for SchemaRuntime {
         // journalled, and locally acknowledged.  Do not synthesize a second
         // Submitted event here.
         self.active_deploy = Some(pipeline);
-        memory::MemoryWriteOutput::DeploySubmitted(meta::DeployHandle {
+        memory::Outcome::DeploySubmitted(meta::DeployHandle {
             deployment_identifier,
             database_marker: accepted_marker,
         })
@@ -4792,7 +4776,7 @@ impl MemoryApplying for SchemaRuntime {
     fn record_phase_transition(
         &mut self,
         mut event: ordinary::DeploymentPhaseEvent,
-    ) -> memory::MemoryWriteOutput {
+    ) -> memory::Outcome {
         let recorded_phase = event.deployment_phase.clone();
         let event_log_position = event.event_log_position;
         let Some(pipeline) = self.active_deploy.as_ref() else {
@@ -4817,16 +4801,13 @@ impl MemoryApplying for SchemaRuntime {
                 if let Some(pipeline) = self.active_deploy.as_mut() {
                     pipeline.phase_receipt = Some(receipt.clone());
                 }
-                memory::MemoryWriteOutput::PhaseRecorded(receipt)
+                memory::Outcome::PhaseRecorded(receipt)
             }
             Err(error) => self.reject_durable_write(&error),
         }
     }
 
-    fn record_generation_activated(
-        &mut self,
-        commit: memory::ActivationCommit,
-    ) -> memory::MemoryWriteOutput {
+    fn record_generation_activated(&mut self, commit: memory::ActivationCommit) -> memory::Outcome {
         let Some(pipeline) = self.active_deploy.clone() else {
             return self.reject_durable_write(
                 &"a generation activation arrived with no correlated cursor",
@@ -4869,7 +4850,7 @@ impl MemoryApplying for SchemaRuntime {
                     memory::DeployJobPhase::Activated,
                     memory::DeployResumeStage::FinishDeployment,
                 );
-                memory::MemoryWriteOutput::GenerationActivated(memory::AppliedActivation {
+                memory::Outcome::GenerationActivated(memory::AppliedActivation {
                     generation_identifier: commit.generation_identifier,
                     generation_slot: commit.generation_slot,
                     database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
@@ -4879,13 +4860,13 @@ impl MemoryApplying for SchemaRuntime {
         }
     }
 
-    fn pin_generation(&mut self, request: meta::PinRequest) -> memory::MemoryWriteOutput {
+    fn pin_generation(&mut self, request: meta::PinRequest) -> memory::Outcome {
         let roots = match self.store.records::<crate::runtime_model::GcRoot>() {
             Ok(roots) => roots,
             Err(error) => {
-                return memory::MemoryWriteOutput::StoreRefused(format!(
+                return memory::Outcome::StoreRefused(memory::StoreFailure(format!(
                     "read durable gc roots for pin request: {error}"
-                ));
+                )));
             }
         };
         let current_sequence = self.current_commit_sequence();
@@ -4913,26 +4894,26 @@ impl MemoryApplying for SchemaRuntime {
             .mutate_gc_root(root)
             .and_then(|()| self.store.commit_sequence());
         match committed {
-            Ok(commit_sequence) => memory::MemoryWriteOutput::GenerationPinned(meta::AppliedPin {
+            Ok(commit_sequence) => memory::Outcome::GenerationPinned(meta::AppliedPin {
                 generation_identifier: request.generation_identifier,
                 pin_label: request.pin_label,
                 first_generation_slot: from_slot,
                 second_generation_slot: ordinary::GenerationSlot::Pinned,
                 database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
             }),
-            Err(error) => memory::MemoryWriteOutput::StoreRefused(format!(
+            Err(error) => memory::Outcome::StoreRefused(memory::StoreFailure(format!(
                 "persist generation pin transition: {error}"
-            )),
+            ))),
         }
     }
 
-    fn unpin_generation(&mut self, request: meta::UnpinRequest) -> memory::MemoryWriteOutput {
+    fn unpin_generation(&mut self, request: meta::UnpinRequest) -> memory::Outcome {
         let roots = match self.store.records::<crate::runtime_model::GcRoot>() {
             Ok(roots) => roots,
             Err(error) => {
-                return memory::MemoryWriteOutput::StoreRefused(format!(
+                return memory::Outcome::StoreRefused(memory::StoreFailure(format!(
                     "read durable gc roots for unpin request: {error}"
-                ));
+                )));
             }
         };
         let current_sequence = self.current_commit_sequence();
@@ -4955,28 +4936,26 @@ impl MemoryApplying for SchemaRuntime {
             .mutate_gc_root(root)
             .and_then(|()| self.store.commit_sequence());
         match committed {
-            Ok(commit_sequence) => {
-                memory::MemoryWriteOutput::GenerationUnpinned(meta::AppliedUnpin {
-                    generation_identifier,
-                    pin_label: request.pin_label,
-                    first_generation_slot: from_slot,
-                    second_generation_slot: ordinary::GenerationSlot::Recent,
-                    database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
-                })
-            }
-            Err(error) => memory::MemoryWriteOutput::StoreRefused(format!(
+            Ok(commit_sequence) => memory::Outcome::GenerationUnpinned(meta::AppliedUnpin {
+                generation_identifier,
+                pin_label: request.pin_label,
+                first_generation_slot: from_slot,
+                second_generation_slot: ordinary::GenerationSlot::Recent,
+                database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
+            }),
+            Err(error) => memory::Outcome::StoreRefused(memory::StoreFailure(format!(
                 "persist generation unpin transition: {error}"
-            )),
+            ))),
         }
     }
 
-    fn retire_generation(&mut self, request: meta::RetireRequest) -> memory::MemoryWriteOutput {
+    fn retire_generation(&mut self, request: meta::RetireRequest) -> memory::Outcome {
         let roots = match self.store.records::<crate::runtime_model::GcRoot>() {
             Ok(roots) => roots,
             Err(error) => {
-                return memory::MemoryWriteOutput::StoreRefused(format!(
+                return memory::Outcome::StoreRefused(memory::StoreFailure(format!(
                     "read durable gc roots for retire request: {error}"
-                ));
+                )));
             }
         };
         let current_sequence = self.current_commit_sequence();
@@ -5001,23 +4980,21 @@ impl MemoryApplying for SchemaRuntime {
             .retract_gc_root(*request.generation_identifier.payload())
             .and_then(|()| self.store.commit_sequence());
         match committed {
-            Ok(commit_sequence) => {
-                memory::MemoryWriteOutput::GenerationRetired(meta::AppliedRetire {
-                    generation_identifier: request.generation_identifier,
-                    generation_slot: root.generation_slot,
-                    database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
-                })
-            }
-            Err(error) => memory::MemoryWriteOutput::StoreRefused(format!(
+            Ok(commit_sequence) => memory::Outcome::GenerationRetired(meta::AppliedRetire {
+                generation_identifier: request.generation_identifier,
+                generation_slot: root.generation_slot,
+                database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
+            }),
+            Err(error) => memory::Outcome::StoreRefused(memory::StoreFailure(format!(
                 "persist generation retirement: {error}"
-            )),
+            ))),
         }
     }
 
     fn record_container_transition(
         &mut self,
         transition: memory::ContainerTransition,
-    ) -> memory::MemoryWriteOutput {
+    ) -> memory::Outcome {
         let recorded = self
             .store
             .allocate_event_log_position()
@@ -5040,7 +5017,7 @@ impl MemoryApplying for SchemaRuntime {
             });
         match recorded {
             Ok((event_log_position, commit_sequence)) => {
-                memory::MemoryWriteOutput::ContainerRecorded(memory::ContainerReceipt {
+                memory::Outcome::ContainerRecorded(memory::ContainerReceipt {
                     event_log_position: ordinary::EventLogPosition::new(event_log_position),
                     database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
                 })
@@ -5049,7 +5026,7 @@ impl MemoryApplying for SchemaRuntime {
         }
     }
 
-    fn reject_durable_write(&self, cause: &dyn std::fmt::Display) -> memory::MemoryWriteOutput {
+    fn reject_durable_write(&self, cause: &dyn std::fmt::Display) -> memory::Outcome {
         eprintln!("lojix durable write rejected: {cause}");
         Self::write_rejected(
             self.store.commit_sequence().unwrap_or(0),
@@ -5057,57 +5034,42 @@ impl MemoryApplying for SchemaRuntime {
         )
     }
 
-    fn write_rejected(
-        commit_sequence: i64,
-        reason: memory::RejectionReason,
-    ) -> memory::MemoryWriteOutput {
-        memory::MemoryWriteOutput::WriteRejected(memory::RejectionReport {
+    fn write_rejected(commit_sequence: i64, reason: memory::RejectionReason) -> memory::Outcome {
+        memory::Outcome::WriteRejected(memory::RejectionReport {
             rejection_reason: reason,
             database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
         })
     }
 }
 
-/// Answering one decided read from the durable store, projected into the
-/// public vocabulary the asker speaks.
+/// The reads among the operations, each answered from the durable store and
+/// projected into the public vocabulary the asker speaks.
 pub(crate) trait MemoryObserving {
-    fn observe_memory(&self, input: memory::MemoryReadInput) -> memory::MemoryReadOutput;
-
     /// Answer a `(ByTestRun …)` query from the durable test-run table (report
     /// 54 §5.3). Filters by cluster + node, and by run identifier when the
     /// lookup names one (`None` returns every run for that node). The matching
     /// rows are returned newest-first by run identifier so the routine
     /// `(Check …)` reader sees its latest run first.
-    fn query_test_runs(&self, lookup: ordinary::TestRunLookup) -> memory::MemoryReadOutput;
+    fn query_test_runs(&self, lookup: ordinary::TestRunLookup) -> memory::Outcome;
 
-    fn query_generations(&self, selection: ordinary::Selection) -> memory::MemoryReadOutput;
+    fn query_generations(&self, selection: ordinary::Selection) -> memory::Outcome;
 
     fn project_generation(
         live: &memory::LiveGeneration,
         deployment_records: &[memory::DeploymentRecord],
     ) -> ordinary::Generation;
 
-    fn read_event_log(&self, range: ordinary::EventLogRange) -> memory::MemoryReadOutput;
+    fn read_event_log(&self, range: ordinary::EventLogRange) -> memory::Outcome;
 }
 
 impl MemoryObserving for SchemaRuntime {
-    fn observe_memory(&self, input: memory::MemoryReadInput) -> memory::MemoryReadOutput {
-        match input {
-            memory::MemoryReadInput::QueryGenerations(selection) => {
-                self.query_generations(selection)
-            }
-            memory::MemoryReadInput::ReadEventLog(range) => self.read_event_log(range),
-            memory::MemoryReadInput::QueryTestRuns(lookup) => self.query_test_runs(lookup),
-        }
-    }
-
-    fn query_test_runs(&self, lookup: ordinary::TestRunLookup) -> memory::MemoryReadOutput {
+    fn query_test_runs(&self, lookup: ordinary::TestRunLookup) -> memory::Outcome {
         let runs = match self.store.records::<crate::runtime_model::StoredTestRun>() {
             Ok(runs) => runs,
             Err(error) => {
-                return memory::MemoryReadOutput::StoreRefused(format!(
+                return memory::Outcome::StoreRefused(memory::StoreFailure(format!(
                     "read durable test runs: {error}"
-                ));
+                )));
             }
         };
         let commit_sequence = self.current_commit_sequence();
@@ -5120,7 +5082,7 @@ impl MemoryObserving for SchemaRuntime {
                 .cmp(&left.test_run_record.test_run_identifier)
         });
         // A closure path is shown only when it is a canonical store item root.
-        memory::MemoryReadOutput::TestRunsQueried(ordinary::TestRunListing {
+        memory::Outcome::TestRunsQueried(ordinary::TestRunListing {
             test_run_record_vector: matching
                 .into_iter()
                 .map(ordinary::TestRunRecord::from)
@@ -5135,16 +5097,16 @@ impl MemoryObserving for SchemaRuntime {
         })
     }
 
-    fn query_generations(&self, selection: ordinary::Selection) -> memory::MemoryReadOutput {
+    fn query_generations(&self, selection: ordinary::Selection) -> memory::Outcome {
         let matching = self
             .store
             .matching_live_generations(|live| selection.matches_generation(live));
         let live_generations = match matching {
             Ok(live_generations) => live_generations,
             Err(error) => {
-                return memory::MemoryReadOutput::StoreRefused(format!(
+                return memory::Outcome::StoreRefused(memory::StoreFailure(format!(
                     "read durable generations: {error}"
-                ));
+                )));
             }
         };
         let commit_sequence = self.current_commit_sequence();
@@ -5155,16 +5117,16 @@ impl MemoryObserving for SchemaRuntime {
                     .filter(|record| selection.matches_deployment_record(record))
                     .collect(),
                 Err(error) => {
-                    return memory::MemoryReadOutput::StoreRefused(format!(
+                    return memory::Outcome::StoreRefused(memory::StoreFailure(format!(
                         "read durable deployment records: {error}"
-                    ));
+                    )));
                 }
             };
         let generations: Vec<ordinary::Generation> = live_generations
             .iter()
             .map(|generation| Self::project_generation(generation, &deployment_records))
             .collect();
-        memory::MemoryReadOutput::GenerationsQueried(ordinary::GenerationListing {
+        memory::Outcome::GenerationsQueried(ordinary::GenerationListing {
             generation_vector: generations,
             deployment_record_vector: deployment_records,
             database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
@@ -5200,14 +5162,14 @@ impl MemoryObserving for SchemaRuntime {
         }
     }
 
-    fn read_event_log(&self, range: ordinary::EventLogRange) -> memory::MemoryReadOutput {
+    fn read_event_log(&self, range: ordinary::EventLogRange) -> memory::Outcome {
         let entries = match self.store.event_log_in_range(
             *range.first_event_log_position.payload(),
             *range.second_event_log_position.payload(),
         ) {
             Ok(entries) => entries,
             Err(_) => {
-                return memory::MemoryReadOutput::read_missed(
+                return memory::Outcome::read_missed(
                     self.current_commit_sequence(),
                     memory::RejectionReason::EventLogPositionOutOfRange,
                 );
@@ -5223,7 +5185,7 @@ impl MemoryObserving for SchemaRuntime {
                 memory::LoggedEvent::Container(_) => {}
             }
         }
-        memory::MemoryReadOutput::EventLogRead(memory::EventLogPage {
+        memory::Outcome::EventLogRead(memory::EventLogPage {
             deployment_phase_event_vector: deployment_events,
             cache_retention_transition_event_vector: retention_events,
             database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
@@ -8268,22 +8230,6 @@ impl Effect for NixCommand {
 }
 
 impl nexus::NexusEngine for SchemaRuntime {
-    async fn apply_memory_write(
-        &mut self,
-        _origin_route: nexus::OriginRoute,
-        input: memory::MemoryWriteInput,
-    ) -> memory::MemoryWriteOutput {
-        self.apply_memory(input)
-    }
-
-    async fn observe_memory_read(
-        &mut self,
-        _origin_route: nexus::OriginRoute,
-        input: memory::MemoryReadInput,
-    ) -> memory::MemoryReadOutput {
-        self.observe_memory(input)
-    }
-
     async fn run_effect(&mut self, input: nexus::EffectCommand) -> nexus::EffectResult {
         match input {
             nexus::EffectCommand::ResolveFlakeAuth(request) => {
@@ -8309,35 +8255,18 @@ impl nexus::NexusEngine for SchemaRuntime {
         }
     }
 
-    fn budget_exhausted_reply(
-        &self,
-        _exhausted: triad_runtime::ContinuationExhausted,
-    ) -> nexus::PipelineOutput {
+    fn step_limit_reached(&self, _limit: nexus::PipelineStepLimit) -> nexus::PipelineOutput {
         self.refuse_deploy(
             memory::DeployRefusalReason::ContinuationBudgetExhausted,
             &"the Nexus runner exhausted its continuation budget",
         )
     }
 
-    fn decide(
-        &mut self,
-        input: nexus::nexus::Nexus<nexus::nexus::Work>,
-    ) -> nexus::nexus::Nexus<nexus::nexus::Action> {
-        let origin_route = input.origin_route();
-        let action = match input.into_root() {
-            // A read is answered where its input arrives; no pipeline reads
-            // through the runner, so a read completing on one has no
-            // deployment to name.
-            nexus::NexusWork::MemoryReadCompleted(output) => {
-                nexus::NexusAction::from(self.refuse_deploy(
-                    memory::DeployRefusalReason::NoCorrelatedDeployment,
-                    &format!("a pipeline received a read it never makes: {output:?}"),
-                ))
-            }
-            nexus::NexusWork::MemoryWriteCompleted(output) => self.decide_write_completion(output),
+    fn decide(&mut self, input: nexus::NexusWork) -> nexus::NexusAction {
+        match input {
+            nexus::NexusWork::Operated(outcome) => self.decide_outcome(outcome),
             nexus::NexusWork::EffectCompleted(result) => self.decide_effect_completion(result),
-        };
-        action.with_origin_route(origin_route)
+        }
     }
 }
 
@@ -8500,7 +8429,7 @@ mod tests {
         assert!(matches!(
             engine
                 .record_deploy_submitted(host_submission(ordinary::HostDeployAction::ActivateNow)),
-            memory::MemoryWriteOutput::DeploySubmitted(_)
+            memory::Outcome::DeploySubmitted(_)
         ));
         engine.set_stage(DeployStage::BuildingRecorded);
 
@@ -8777,7 +8706,7 @@ mod tests {
         let mut engine = SchemaRuntime::new();
         assert!(matches!(
             engine.record_deploy_submitted(host_submission(ordinary::HostDeployAction::Evaluate)),
-            memory::MemoryWriteOutput::DeploySubmitted(_)
+            memory::Outcome::DeploySubmitted(_)
         ));
         let mut source = source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord);
         source.resolved_revision = memory::ResolvedRevision("sha256-unproven-nar-hash".to_string());
@@ -8809,7 +8738,7 @@ mod tests {
         let mut evaluated = SchemaRuntime::new();
         assert!(matches!(
             evaluated.record_deploy_submitted(host_submission(ordinary::HostDeployAction::Realize)),
-            memory::MemoryWriteOutput::DeploySubmitted(_)
+            memory::Outcome::DeploySubmitted(_)
         ));
         match evaluated.decide_effect_completion(nexus::EffectResult::ClosureEvaluated(
             nexus::EvaluatedClosure {
@@ -8833,7 +8762,7 @@ mod tests {
         let mut built = SchemaRuntime::new();
         assert!(matches!(
             built.record_deploy_submitted(host_submission(ordinary::HostDeployAction::ActivateNow)),
-            memory::MemoryWriteOutput::DeploySubmitted(_)
+            memory::Outcome::DeploySubmitted(_)
         ));
         match built.decide_effect_completion(nexus::EffectResult::ClosureBuilt(
             nexus::BuiltClosure {
@@ -8953,7 +8882,7 @@ mod tests {
         let accepted = match before_crash
             .record_deploy_submitted(host_submission(ordinary::HostDeployAction::Evaluate))
         {
-            memory::MemoryWriteOutput::DeploySubmitted(accepted) => accepted,
+            memory::Outcome::DeploySubmitted(accepted) => accepted,
             other => panic!("expected accepted deploy, got {other:?}"),
         };
         before_crash.set_resolved_flake(
@@ -9039,7 +8968,7 @@ mod tests {
         assert!(matches!(
             engine
                 .record_deploy_submitted(host_submission(ordinary::HostDeployAction::ActivateNow)),
-            memory::MemoryWriteOutput::DeploySubmitted(_)
+            memory::Outcome::DeploySubmitted(_)
         ));
         engine.set_resolved_flake(
             resolved_flake(ordinary::SourceRevisionPolicy::ResolveAndRecord),
@@ -9071,7 +9000,7 @@ mod tests {
                 pipeline.phase_event(phase, ordinary::EventLogPosition::new(position))
             };
             let receipt = match engine.record_phase_transition(event) {
-                memory::MemoryWriteOutput::PhaseRecorded(receipt) => receipt,
+                memory::Outcome::PhaseRecorded(receipt) => receipt,
                 other => panic!("expected phase receipt, got {other:?}"),
             };
             let mut job = store
@@ -9118,7 +9047,7 @@ mod tests {
         assert!(matches!(
             engine
                 .record_deploy_submitted(host_submission(ordinary::HostDeployAction::ActivateNow)),
-            memory::MemoryWriteOutput::DeploySubmitted(_)
+            memory::Outcome::DeploySubmitted(_)
         ));
         let mut pipeline = engine.active_deploy.clone().expect("accepted pipeline");
         let source_revision = source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord);
@@ -9134,13 +9063,13 @@ mod tests {
         assert_eq!(event.deployment_identifier, pipeline.deployment_identifier);
         assert!(matches!(
             engine.record_phase_transition(event),
-            memory::MemoryWriteOutput::PhaseRecorded(_)
+            memory::Outcome::PhaseRecorded(_)
         ));
         match engine.read_event_log(ordinary::EventLogRange {
             first_event_log_position: ordinary::EventLogPosition::new(1),
             second_event_log_position: ordinary::EventLogPosition::new(2),
         }) {
-            memory::MemoryReadOutput::EventLogRead(page) => assert_eq!(
+            memory::Outcome::EventLogRead(page) => assert_eq!(
                 page.deployment_phase_event_vector
                     .first()
                     .expect("deployment event")
@@ -9153,14 +9082,14 @@ mod tests {
         let commit = pipeline.activation_commit().expect("activation commit");
         assert!(matches!(
             engine.record_generation_activated(commit),
-            memory::MemoryWriteOutput::GenerationActivated(_)
+            memory::Outcome::GenerationActivated(_)
         ));
         match engine.query_generations(ordinary::Selection::ByNode(ordinary::NodeSelector {
             cluster_name: cluster(),
             node_name: node(),
             generation_artifact_option: None,
         })) {
-            memory::MemoryReadOutput::GenerationsQueried(listing) => assert_eq!(
+            memory::Outcome::GenerationsQueried(listing) => assert_eq!(
                 listing
                     .generation_vector
                     .first()

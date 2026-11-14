@@ -194,9 +194,12 @@ src/
   quarantine.rs         # the retired quarantine family, emptied at open
   answering.rs          # the generated Answering capabilities of both
                         # contracts over the store; admission of jobs
-  runtime_model.rs      # the engine's operation plane; contract and stored
-                        # types re-exported from where they are generated
-  runtime_flow.rs       # hand-written pipeline effects, work, and runner logic
+  operation.rs          # generated from ethos/operation.ethos: the Memory
+                        # operations and the outcomes they come to
+  runtime_model.rs      # contract, stored and operation types re-exported
+                        # from where they are generated
+  runtime_flow.rs       # hand-written pipeline effects, work, and the
+                        # pipeline runner (NexusEngine::drive)
   schema_runtime.rs     # async hand-written pipeline engine
 nexus/src/main.rs             # Datom-free daemon entry
 clients/ordinary/src/main.rs  # ordinary CLI entry

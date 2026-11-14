@@ -119,6 +119,15 @@ reserved at admission and freed when the pipeline ends. The replies are the
 same. A store that fails while a test is refused for capacity now answers
 `Refused.«…»`, where the daemon used to stop the test executor.
 
+The engine's operations on its Memory, its eleven writes and three reads, and
+the outcomes they come to, are generated from `ethos/operation.ethos` into
+`src/operation.rs`, which `build.rs` holds equal to fresh generation. One
+`Operation` and one `Outcome` replace the hand-written read and write
+enumerations; a store failure under either is the contract's `StoreFailure`.
+A deploy pipeline is driven by Lojix's own runner, at most 32 steps as before,
+in place of `triad-runtime`'s; triad-runtime now serves the two sockets
+alone. Nothing a peer sees changes.
+
 # 0.10.5 to 0.10.6
 
 A revision: the memory format is unchanged and the store stays readable;

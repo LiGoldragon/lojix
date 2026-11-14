@@ -25,13 +25,10 @@ use signal_lojix::{
 
 use crate::daemon::{JobExecutors, JobLaunching as _};
 use crate::deployment_watch::WatchesDeployments as _;
-use crate::runtime_model::{
-    MemoryReadInput, MemoryReadOutput, MemoryWriteInput, MemoryWriteOutput,
-};
+use crate::runtime_model::{Operation, Outcome};
 use crate::schema_runtime::{
-    DeployDriving as _, DeploySubmissionOutcome, MemoryApplying as _, MemoryObserving as _,
-    RejectionVocabulary as _, RuntimeConfiguration, RuntimeCore as _, SchemaRuntime,
-    TestDriving as _, TestSubmissionOutcome,
+    DeployDriving as _, DeploySubmissionOutcome, Operating as _, RejectionVocabulary as _,
+    RuntimeConfiguration, RuntimeCore as _, SchemaRuntime, TestDriving as _, TestSubmissionOutcome,
 };
 use crate::{CommitMarking as _, DurableStore as _, Store};
 
@@ -77,18 +74,18 @@ impl Answers for Answerer {
 /// A contract's output for an input its store could not carry out:
 /// `Refused`, in the store's own words.
 pub trait RefusedByStore {
-    fn refused_by_store(failure: String) -> Self;
+    fn refused_by_store(failure: StoreFailure) -> Self;
 }
 
 impl RefusedByStore for OrdinaryOutput {
-    fn refused_by_store(failure: String) -> Self {
-        Self::Refused(StoreFailure(failure))
+    fn refused_by_store(failure: StoreFailure) -> Self {
+        Self::Refused(failure)
     }
 }
 
 impl RefusedByStore for MetaOutput {
-    fn refused_by_store(failure: String) -> Self {
-        Self::Refused(StoreFailure(failure))
+    fn refused_by_store(failure: StoreFailure) -> Self {
+        Self::Refused(failure)
     }
 }
 
@@ -100,7 +97,9 @@ trait Unasked {
 
 impl<Outcome: std::fmt::Debug> Unasked for Outcome {
     fn unasked<Output: RefusedByStore>(&self, operation: &str) -> Output {
-        Output::refused_by_store(format!("the store answered {operation} with {self:?}"))
+        Output::refused_by_store(StoreFailure(format!(
+            "the store answered {operation} with {self:?}"
+        )))
     }
 }
 
@@ -109,18 +108,14 @@ impl signal_lojix::Answering for Answerer {
         &self,
         lojix_nexus_configuration: &LojixNexusConfiguration,
     ) -> Result<ConfigurationReceipt, OrdinaryOutput> {
-        match self
-            .engine()
-            .apply_memory(MemoryWriteInput::OrdinaryConfigure(
-                lojix_nexus_configuration.clone(),
-            )) {
-            MemoryWriteOutput::OrdinaryConfigured(receipt) => Ok(receipt),
-            MemoryWriteOutput::OrdinaryConfigurationRejected(rejection) => {
+        match self.engine().operate(Operation::OrdinaryConfigure(
+            lojix_nexus_configuration.clone(),
+        )) {
+            Outcome::OrdinaryConfigured(receipt) => Ok(receipt),
+            Outcome::OrdinaryConfigurationRejected(rejection) => {
                 Err(OrdinaryOutput::ConfigurationRejected(rejection))
             }
-            MemoryWriteOutput::StoreRefused(failure) => {
-                Err(OrdinaryOutput::refused_by_store(failure))
-            }
+            Outcome::StoreRefused(failure) => Err(OrdinaryOutput::refused_by_store(failure)),
             other => Err(other.unasked("an ordinary Configure")),
         }
     }
@@ -154,9 +149,9 @@ impl signal_lojix::Answering for Answerer {
     fn query(&self, selection: &Selection) -> Result<GenerationListing, OrdinaryOutput> {
         match self
             .engine()
-            .observe_memory(MemoryReadInput::QueryGenerations(selection.clone()))
+            .operate(Operation::QueryGenerations(selection.clone()))
         {
-            MemoryReadOutput::GenerationsQueried(listing) => Ok(listing),
+            Outcome::GenerationsQueried(listing) => Ok(listing),
             other => Err(other.answered_as_query("a Query")),
         }
     }
@@ -167,9 +162,9 @@ impl signal_lojix::Answering for Answerer {
     ) -> Result<EventLogPage, OrdinaryOutput> {
         match self
             .engine()
-            .observe_memory(MemoryReadInput::ReadEventLog(event_log_range.clone()))
+            .operate(Operation::ReadEventLog(event_log_range.clone()))
         {
-            MemoryReadOutput::EventLogRead(page) => Ok(page),
+            Outcome::EventLogRead(page) => Ok(page),
             other => Err(other.answered_as_query("a QueryDeploymentEvents")),
         }
     }
@@ -180,9 +175,9 @@ impl signal_lojix::Answering for Answerer {
     ) -> Result<TestRunListing, OrdinaryOutput> {
         match self
             .engine()
-            .observe_memory(MemoryReadInput::QueryTestRuns(test_run_lookup.clone()))
+            .operate(Operation::QueryTestRuns(test_run_lookup.clone()))
         {
-            MemoryReadOutput::TestRunsQueried(listing) => Ok(listing),
+            Outcome::TestRunsQueried(listing) => Ok(listing),
             other => Err(other.answered_as_query("a QueryTestRuns")),
         }
     }
@@ -218,7 +213,7 @@ trait QueryMissing {
     fn answered_as_query(self, operation: &str) -> OrdinaryOutput;
 }
 
-impl QueryMissing for MemoryReadOutput {
+impl QueryMissing for Outcome {
     fn answered_as_query(self, operation: &str) -> OrdinaryOutput {
         match self {
             Self::ReadMissed(report) => OrdinaryOutput::QueryRejected(RejectedQuery {
@@ -236,28 +231,26 @@ impl meta_signal_lojix::Answering for Answerer {
         &self,
         lojix_nexus_configuration: &LojixNexusConfiguration,
     ) -> Result<ConfigurationReceipt, MetaOutput> {
-        match self.engine().apply_memory(MemoryWriteInput::MetaConfigure(
-            lojix_nexus_configuration.clone(),
-        )) {
-            MemoryWriteOutput::MetaConfigured(receipt) => Ok(receipt),
-            MemoryWriteOutput::MetaConfigurationRejected(rejection) => {
+        match self
+            .engine()
+            .operate(Operation::MetaConfigure(lojix_nexus_configuration.clone()))
+        {
+            Outcome::MetaConfigured(receipt) => Ok(receipt),
+            Outcome::MetaConfigurationRejected(rejection) => {
                 Err(MetaOutput::ConfigurationRejected(rejection))
             }
-            MemoryWriteOutput::StoreRefused(failure) => Err(MetaOutput::refused_by_store(failure)),
+            Outcome::StoreRefused(failure) => Err(MetaOutput::refused_by_store(failure)),
             other => Err(other.unasked("a privileged Configure")),
         }
     }
 
     fn reverse_configuration(&self) -> Result<ConfigurationReceipt, MetaOutput> {
-        match self
-            .engine()
-            .apply_memory(MemoryWriteInput::ReverseConfiguration)
-        {
-            MemoryWriteOutput::ConfigurationReversed(receipt) => Ok(receipt),
-            MemoryWriteOutput::MetaConfigurationRejected(rejection) => {
+        match self.engine().operate(Operation::ReverseConfiguration) {
+            Outcome::ConfigurationReversed(receipt) => Ok(receipt),
+            Outcome::MetaConfigurationRejected(rejection) => {
                 Err(MetaOutput::ConfigurationRejected(rejection))
             }
-            MemoryWriteOutput::StoreRefused(failure) => Err(MetaOutput::refused_by_store(failure)),
+            Outcome::StoreRefused(failure) => Err(MetaOutput::refused_by_store(failure)),
             other => Err(other.unasked("a ReverseConfiguration")),
         }
     }
@@ -265,16 +258,16 @@ impl meta_signal_lojix::Answering for Answerer {
     fn retire(&self, retire_request: &RetireRequest) -> Result<AppliedRetire, MetaOutput> {
         match self
             .engine()
-            .apply_memory(MemoryWriteInput::RetireGeneration(retire_request.clone()))
+            .operate(Operation::RetireGeneration(retire_request.clone()))
         {
-            MemoryWriteOutput::GenerationRetired(applied) => Ok(applied),
-            MemoryWriteOutput::WriteRejected(report) => Err(MetaOutput::RetireRejected(
+            Outcome::GenerationRetired(applied) => Ok(applied),
+            Outcome::WriteRejected(report) => Err(MetaOutput::RetireRejected(
                 meta_signal_lojix::RejectedRetire {
                     retire_rejection_reason: report.rejection_reason.retire_reason(),
                     database_marker: report.database_marker,
                 },
             )),
-            MemoryWriteOutput::StoreRefused(failure) => Err(MetaOutput::refused_by_store(failure)),
+            Outcome::StoreRefused(failure) => Err(MetaOutput::refused_by_store(failure)),
             other => Err(other.unasked("a Retire")),
         }
     }
@@ -282,16 +275,16 @@ impl meta_signal_lojix::Answering for Answerer {
     fn pin(&self, pin_request: &PinRequest) -> Result<AppliedPin, MetaOutput> {
         match self
             .engine()
-            .apply_memory(MemoryWriteInput::PinGeneration(pin_request.clone()))
+            .operate(Operation::PinGeneration(pin_request.clone()))
         {
-            MemoryWriteOutput::GenerationPinned(applied) => Ok(applied),
-            MemoryWriteOutput::WriteRejected(report) => {
+            Outcome::GenerationPinned(applied) => Ok(applied),
+            Outcome::WriteRejected(report) => {
                 Err(MetaOutput::PinRejected(meta_signal_lojix::RejectedPin {
                     pin_rejection_reason: report.rejection_reason.pin_reason(),
                     database_marker: report.database_marker,
                 }))
             }
-            MemoryWriteOutput::StoreRefused(failure) => Err(MetaOutput::refused_by_store(failure)),
+            Outcome::StoreRefused(failure) => Err(MetaOutput::refused_by_store(failure)),
             other => Err(other.unasked("a Pin")),
         }
     }
@@ -336,9 +329,9 @@ impl meta_signal_lojix::Answering for Answerer {
                         database_marker: signal_lojix::DatabaseMarker::at_commit(commit_sequence),
                     }))
                 }
-                Err(error) => Err(MetaOutput::refused_by_store(format!(
+                Err(error) => Err(MetaOutput::refused_by_store(StoreFailure(format!(
                     "read durable state marker for test rejection: {error}"
-                ))),
+                )))),
             };
         };
         match engine.submit_test(test_request.clone()) {
@@ -353,16 +346,16 @@ impl meta_signal_lojix::Answering for Answerer {
     fn unpin(&self, unpin_request: &UnpinRequest) -> Result<AppliedUnpin, MetaOutput> {
         match self
             .engine()
-            .apply_memory(MemoryWriteInput::UnpinGeneration(unpin_request.clone()))
+            .operate(Operation::UnpinGeneration(unpin_request.clone()))
         {
-            MemoryWriteOutput::GenerationUnpinned(applied) => Ok(applied),
-            MemoryWriteOutput::WriteRejected(report) => Err(MetaOutput::UnpinRejected(
+            Outcome::GenerationUnpinned(applied) => Ok(applied),
+            Outcome::WriteRejected(report) => Err(MetaOutput::UnpinRejected(
                 meta_signal_lojix::RejectedUnpin {
                     unpin_rejection_reason: report.rejection_reason.unpin_reason(),
                     database_marker: report.database_marker,
                 },
             )),
-            MemoryWriteOutput::StoreRefused(failure) => Err(MetaOutput::refused_by_store(failure)),
+            Outcome::StoreRefused(failure) => Err(MetaOutput::refused_by_store(failure)),
             other => Err(other.unasked("an Unpin")),
         }
     }
@@ -385,21 +378,21 @@ mod tests {
 
     #[test]
     fn a_store_failure_is_answered_refused_in_the_store_s_words_on_either_socket() {
-        let failure = String::from("read durable generations: the file is gone");
+        let failure = StoreFailure(String::from("read durable generations: the file is gone"));
         assert_eq!(
             OrdinaryOutput::refused_by_store(failure.clone()),
-            OrdinaryOutput::Refused(StoreFailure(failure.clone()))
+            OrdinaryOutput::Refused(failure.clone())
         );
         assert_eq!(
             MetaOutput::refused_by_store(failure.clone()),
-            MetaOutput::Refused(StoreFailure(failure))
+            MetaOutput::Refused(failure)
         );
     }
 
     #[test]
     fn a_missed_read_is_the_query_s_rejection_and_a_failed_store_is_refused() {
         let marker = signal_lojix::DatabaseMarker::at_commit(7);
-        let missed = MemoryReadOutput::ReadMissed(crate::runtime_model::RejectionReport {
+        let missed = Outcome::ReadMissed(crate::runtime_model::RejectionReport {
             rejection_reason: crate::runtime_model::RejectionReason::EventLogPositionOutOfRange,
             database_marker: marker.clone(),
         });
@@ -411,7 +404,8 @@ mod tests {
             })
         );
         assert_eq!(
-            MemoryReadOutput::StoreRefused("the file is gone".into()).answered_as_query("a Query"),
+            Outcome::StoreRefused(StoreFailure("the file is gone".into()))
+                .answered_as_query("a Query"),
             OrdinaryOutput::Refused(StoreFailure("the file is gone".into()))
         );
     }

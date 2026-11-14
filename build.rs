@@ -1,6 +1,7 @@
-//! The offline tools' requests and the Nexus's Memory are generated from
-//! ethos/ingress.ethos and ethos/memory.ethos by ethos-zero; the committed
-//! Rust must equal fresh generation.
+//! The offline tools' requests, the Nexus's Memory and its operations are
+//! generated from ethos/ingress.ethos, ethos/memory.ethos and
+//! ethos/operation.ethos by ethos-zero; the committed Rust must equal fresh
+//! generation.
 
 use ethos_zero::{Actualizing, File, Generating, Potential};
 
@@ -9,6 +10,7 @@ fn main() {
     for (source_path, generated_path) in [
         ("ethos/ingress.ethos", "src/ingress.rs"),
         ("ethos/memory.ethos", "src/memory.rs"),
+        ("ethos/operation.ethos", "src/operation.rs"),
     ] {
         println!("cargo:rerun-if-changed={source_path}");
         println!("cargo:rerun-if-changed={generated_path}");

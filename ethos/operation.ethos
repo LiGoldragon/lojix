@@ -1,0 +1,65 @@
+; What the Lojix Nexus does to its Memory: eleven writes and three reads,
+; each one operation, and the outcome each comes to. A peer's input is
+; answered through its contract's dispatch, which applies the operation it
+; needs; a deploy or test pipeline applies the writes its stages record.
+;
+; The operations follow the running code: the writes first, in the order
+; they were declared, then the reads. The outcomes name what each operation
+; came to; the configuration rejections, a write the store rejected, a read
+; that missed, and a store that failed under either stand after them. The
+; behaviour that applies each operation is hand-written beside it, in
+; schema_runtime.rs.
+Operation
+
+[ signal_lojix:[ LojixNexusConfiguration DeploymentPhaseEvent TestRunRecord Selection
+                 EventLogRange TestRunLookup ConfigurationReceipt ConfigurationRejection
+                 GenerationListing EventLogPage TestRunListing StoreFailure DatabaseMarker
+                 GenerationIdentifier ClusterName NodeName DeploymentEnvironment GenerationSlot
+                 ClosurePath EventLogPosition ]
+  meta_signal_lojix:[ ActualizedDeploySubmission PinRequest UnpinRequest RetireRequest
+                      DeployHandle AppliedPin AppliedUnpin AppliedRetire AcceptedTest ]
+  :crate:memory:[ PhaseReceipt SourceRevisionRecord ContainerName ContainerState ] ]
+
+[ OrdinaryConfigure.LojixNexusConfiguration
+  MetaConfigure.LojixNexusConfiguration
+  ReverseConfiguration
+  RecordDeploySubmitted.ActualizedDeploySubmission
+  RecordPhaseTransition.DeploymentPhaseEvent
+  RecordGenerationActivated.ActivationCommit
+  PinGeneration.PinRequest
+  UnpinGeneration.UnpinRequest
+  RetireGeneration.RetireRequest
+  RecordContainerTransition.ContainerTransition
+  RecordTestRun.TestRunRecord
+  QueryGenerations.Selection
+  ReadEventLog.EventLogRange
+  QueryTestRuns.TestRunLookup ]
+
+[ OrdinaryConfigured.ConfigurationReceipt
+  MetaConfigured.ConfigurationReceipt
+  ConfigurationReversed.ConfigurationReceipt
+  OrdinaryConfigurationRejected.ConfigurationRejection
+  MetaConfigurationRejected.ConfigurationRejection
+  DeploySubmitted.DeployHandle
+  PhaseRecorded.PhaseReceipt
+  GenerationActivated.AppliedActivation
+  GenerationPinned.AppliedPin
+  GenerationUnpinned.AppliedUnpin
+  GenerationRetired.AppliedRetire
+  ContainerRecorded.ContainerReceipt
+  TestRunRecorded.AcceptedTest
+  GenerationsQueried.GenerationListing
+  EventLogRead.EventLogPage
+  TestRunsQueried.TestRunListing
+  WriteRejected.RejectionReport
+  ReadMissed.RejectionReport
+  StoreRefused.StoreFailure ]
+
+[ ActivationCommit.{ GenerationIdentifier ClusterName NodeName DeploymentEnvironment GenerationSlot ClosurePath SourceRevisionRecord }
+  ContainerTransition.{ ClusterName NodeName ContainerName ContainerState }
+  AppliedActivation.{ GenerationIdentifier GenerationSlot DatabaseMarker }
+  ContainerReceipt.{ EventLogPosition DatabaseMarker }
+  RejectionReport.{ RejectionReason DatabaseMarker }
+  RejectionReason.[ GenerationUnknown NodeUnknown ClusterUnknown PlanNotApproved PinLabelInUse
+                    PinLabelUnknown GenerationActive GenerationPinned EventLogPositionOutOfRange
+                    ProposalSourceUnreachable DurableWriteFailed ] ]

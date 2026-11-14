@@ -1,11 +1,12 @@
 //! The nouns the Lojix runtime decides with.
 //!
 //! Every value whose shape a contract declares is the generated contract type
-//! itself, and every record the store keeps is generated from
-//! `ethos/memory.ethos` into `crate::memory`; both are re-exported here under
-//! the names the runtime has always used. What stays declared here is the
-//! engine's own operation plane: its memory reads and writes and their
-//! outcomes, which `operation.ethos` is to generate.
+//! itself; every record the store keeps is generated from `ethos/memory.ethos`
+//! into `crate::memory`; and every operation the engine applies to its Memory,
+//! with the outcome it comes to, is generated from `ethos/operation.ethos`
+//! into `crate::operation`. All three are re-exported here under the names the
+//! runtime reads them by. What stays here is the one capability the runtime
+//! reads a carried value through, and the conversions into stored records.
 
 pub use crate::memory::{
     BootOnceUnit, ContainerLifecycleRecord, ContainerName, ContainerState, DeployJob,
@@ -16,6 +17,10 @@ pub use crate::memory::{
     PendingTransitionIntent, PersistedFlakeInputOverride, PersistedFlakeInputReference,
     PhaseReceipt, RequestedReference, ResolvedReference, ResolvedRevision, SourceRevisionRecord,
     StoredDeploymentRecord, StoredTestRun, TransitionIntentState, TransitionOrdinal,
+};
+pub use crate::operation::{
+    ActivationCommit, AppliedActivation, ContainerReceipt, ContainerTransition, Operation, Outcome,
+    RejectionReason, RejectionReport,
 };
 pub use meta_signal_lojix::{
     AcceptedTest, ActualizedDeploySubmission, AppliedPin, AppliedRetire, AppliedUnpin,
@@ -140,104 +145,3 @@ impl From<TestRunRecord> for StoredTestRun {
         Self { test_run_record }
     }
 }
-
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum MemoryReadInput {
-    QueryGenerations(Selection),
-    ReadEventLog(EventLogRange),
-    QueryTestRuns(TestRunLookup),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum MemoryReadOutput {
-    GenerationsQueried(GenerationListing),
-    EventLogRead(EventLogPage),
-    TestRunsQueried(TestRunListing),
-    ReadMissed(RejectionReport),
-    /// The store failed under the read; the text names the failure.
-    StoreRefused(String),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub enum MemoryWriteInput {
-    OrdinaryConfigure(crate::NexusConfiguration),
-    MetaConfigure(crate::NexusConfiguration),
-    ReverseConfiguration,
-    RecordDeploySubmitted(ActualizedDeploySubmission),
-    RecordPhaseTransition(DeploymentPhaseEvent),
-    RecordGenerationActivated(ActivationCommit),
-    PinGeneration(PinRequest),
-    UnpinGeneration(UnpinRequest),
-    RetireGeneration(RetireRequest),
-    RecordContainerTransition(ContainerTransition),
-    RecordTestRun(TestRunRecord),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ActivationCommit {
-    pub generation_identifier: GenerationIdentifier,
-    pub cluster_name: ClusterName,
-    pub node_name: NodeName,
-    pub deployment_environment: DeploymentEnvironment,
-    pub generation_slot: GenerationSlot,
-    pub closure_path: ClosurePath,
-    pub source_revision_record: SourceRevisionRecord,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ContainerTransition {
-    pub cluster_name: ClusterName,
-    pub node_name: NodeName,
-    pub container_name: ContainerName,
-    pub container_state: ContainerState,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub enum MemoryWriteOutput {
-    OrdinaryConfigured(ConfigurationReceipt),
-    MetaConfigured(ConfigurationReceipt),
-    ConfigurationReversed(ConfigurationReceipt),
-    OrdinaryConfigurationRejected(ConfigurationRejection),
-    MetaConfigurationRejected(ConfigurationRejection),
-    DeploySubmitted(DeployHandle),
-    PhaseRecorded(PhaseReceipt),
-    GenerationActivated(AppliedActivation),
-    GenerationPinned(AppliedPin),
-    GenerationUnpinned(AppliedUnpin),
-    GenerationRetired(AppliedRetire),
-    ContainerRecorded(ContainerReceipt),
-    TestRunRecorded(AcceptedTest),
-    WriteRejected(RejectionReport),
-    /// The store failed under the write; the text names the failure.
-    StoreRefused(String),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct AppliedActivation {
-    pub generation_identifier: GenerationIdentifier,
-    pub generation_slot: GenerationSlot,
-    pub database_marker: DatabaseMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ContainerReceipt {
-    pub event_log_position: EventLogPosition,
-    pub database_marker: DatabaseMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RejectionReport {
-    pub rejection_reason: RejectionReason,
-    pub database_marker: DatabaseMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum RejectionReason {
-    GenerationUnknown,
-    NodeUnknown,
-    ClusterUnknown,
-    PlanNotApproved,
-    PinLabelInUse,
-    PinLabelUnknown,
-    GenerationActive,
-    GenerationPinned,
-    EventLogPositionOutOfRange,
-    ProposalSourceUnreachable,
-    /// The durable write itself failed, so no record was produced.
-    DurableWriteFailed,
-}
-impl triad_runtime::MemoryWriteInput for MemoryWriteInput {}
-impl triad_runtime::MemoryWriteOutput for MemoryWriteOutput {}
-impl triad_runtime::MemoryReadInput for MemoryReadInput {}
-impl triad_runtime::MemoryReadOutput for MemoryReadOutput {}

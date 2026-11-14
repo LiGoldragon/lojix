@@ -9,9 +9,8 @@ use crate::Payload;
 pub use crate::runtime_model::{
     ActivationEffect, ClosurePath, ClusterName, DeploymentIdentifier, FlakeReference,
     GenerationArtifact, GenerationIdentifier, GenerationSlot, HostComposition, HostDeployAction,
-    MemoryReadInput, MemoryReadOutput, MemoryWriteInput, MemoryWriteOutput, NodeName,
-    ProposalSource, SecretsInput, SourceRevisionPolicy, SourceRevisionRecord, TestMode,
-    UserEnvironmentAction, UserName,
+    NodeName, Operation, Outcome, ProposalSource, SecretsInput, SourceRevisionPolicy,
+    SourceRevisionRecord, TestMode, UserEnvironmentAction, UserName,
 };
 
 /// What a driven pipeline ends with: the privileged contract's own output,
@@ -350,35 +349,23 @@ pub enum EffectResult {
     TestVmStopped(TestVmTornDown),
     EffectFailed(EffectFailure),
 }
+/// What a pipeline step came back with: an operation's outcome, or an
+/// effect's result.
 #[derive(Clone, Debug, PartialEq)]
 pub enum NexusWork {
-    MemoryReadCompleted(MemoryReadOutput),
-    MemoryWriteCompleted(MemoryWriteOutput),
+    Operated(Outcome),
     EffectCompleted(EffectResult),
 }
+
+/// What a pipeline decides to do next.
 #[derive(Clone, Debug, PartialEq)]
 pub enum NexusAction {
-    CommandMemoryRead(MemoryReadInput),
-    CommandMemoryWrite(MemoryWriteInput),
+    Operate(Operation),
     CommandEffect(EffectCommand),
     /// The pipeline has reached its end; what it ends with is evidence for
     /// the journal and tests.
     Finish(PipelineOutput),
-    Continue(NexusWork),
 }
-
-/// A value that knows which connection it belongs to once it is told. Work
-/// arriving from a socket and the action answering it are the same kind of
-/// thing in this respect: neither carries its route, and both are tagged with
-/// one before the runner sees them.
-pub trait Routable: Sized {
-    fn with_origin_route(self, origin_route: OriginRoute) -> Nexus<Self> {
-        Nexus::new(origin_route, self)
-    }
-}
-
-impl Routable for NexusWork {}
-impl Routable for NexusAction {}
 
 impl From<SourceRevisionRecord> for EffectResult {
     fn from(value: SourceRevisionRecord) -> Self {
@@ -404,194 +391,109 @@ impl From<BuiltClosure> for EffectResult {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OriginRoute(u64);
+/// How many steps one pipeline may take before it is refused: every
+/// operation and every effect is one step. A deploy takes about a dozen; the
+/// limit bounds a decision that never reaches its end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PipelineStepLimit(u32);
 
-impl crate::Payload for OriginRoute {
-    type Carried = u64;
-
-    fn new(payload: u64) -> Self {
-        Self(payload)
-    }
-
-    fn payload(&self) -> &u64 {
-        &self.0
-    }
-
-    fn into_payload(self) -> u64 {
-        self.0
+impl Default for PipelineStepLimit {
+    fn default() -> Self {
+        Self(32)
     }
 }
 
-/// A root value carried together with the connection it came from. The pair is
-/// what the runner routes on; the root alone has no address.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Nexus<Root> {
-    pub origin_route: OriginRoute,
-    pub root: Root,
-}
-
-pub trait Routed {
-    type Root;
-
-    fn new(origin_route: OriginRoute, root: Self::Root) -> Self;
-
-    fn origin_route(&self) -> OriginRoute;
-
-    fn into_root(self) -> Self::Root;
-}
-
-impl<Root> Routed for Nexus<Root> {
-    type Root = Root;
-
-    fn new(origin_route: OriginRoute, root: Root) -> Self {
-        Self { origin_route, root }
+/// Driving one admitted pipeline from the work it resumes at to its end:
+/// decide the next action from the last step's result, carry it out, and
+/// repeat until the decision is to finish or the step limit is spent.
+///
+/// Exception: `async fn` in a public trait. It is implemented by one type,
+/// never used behind `dyn`, and its futures are awaited where the concrete
+/// engine is known, so there is no `Send` bound for a caller to name.
+#[allow(async_fn_in_trait)]
+pub trait NexusEngine: crate::schema_runtime::Operating {
+    fn step_limit(&self) -> PipelineStepLimit {
+        PipelineStepLimit::default()
     }
 
-    fn origin_route(&self) -> OriginRoute {
-        self.origin_route.clone()
-    }
+    async fn run_effect(&mut self, input: EffectCommand) -> EffectResult;
 
-    fn into_root(self) -> Root {
-        self.root
-    }
-}
+    /// The pipeline's answer when its step limit is spent.
+    fn step_limit_reached(&self, limit: PipelineStepLimit) -> PipelineOutput;
 
-#[allow(clippy::module_inception)]
-pub mod nexus {
-    pub type Work = super::NexusWork;
-    pub type Action = super::NexusAction;
-    pub type Nexus<Root> = super::Nexus<Root>;
-}
+    fn decide(&mut self, input: NexusWork) -> NexusAction;
 
-impl triad_runtime::NexusWork for NexusWork {}
-impl triad_runtime::NexusEffectCommand for EffectCommand {}
-impl triad_runtime::NexusEffectResult for EffectResult {}
-
-pub type NexusRunnerNextStep = triad_runtime::NextStep<
-    PipelineOutput,
-    MemoryWriteInput,
-    MemoryReadInput,
-    EffectCommand,
-    NexusWork,
->;
-
-impl triad_runtime::NexusAction for NexusAction {
-    type Reply = PipelineOutput;
-    type MemoryWrite = MemoryWriteInput;
-    type MemoryRead = MemoryReadInput;
-    type Effect = EffectCommand;
-    type Work = NexusWork;
-
-    fn into_next_step(self) -> NexusRunnerNextStep {
-        match self {
-            Self::CommandMemoryWrite(input) => triad_runtime::NextStep::MemoryWrite(input),
-            Self::CommandMemoryRead(input) => triad_runtime::NextStep::MemoryRead(input),
-            Self::Finish(output) => triad_runtime::NextStep::Reply(output),
-            Self::CommandEffect(effect) => triad_runtime::NextStep::RunEffect(effect),
-            Self::Continue(work) => triad_runtime::NextStep::Continue(work),
-        }
-    }
-}
-
-pub trait NexusEngine: Send {
-    fn continuation_limit(&self) -> triad_runtime::ContinuationLimit {
-        triad_runtime::ContinuationLimit::default()
-    }
-
-    fn apply_memory_write(
-        &mut self,
-        origin_route: OriginRoute,
-        input: MemoryWriteInput,
-    ) -> impl std::future::Future<Output = MemoryWriteOutput> + Send + '_;
-
-    fn observe_memory_read(
-        &mut self,
-        origin_route: OriginRoute,
-        input: MemoryReadInput,
-    ) -> impl std::future::Future<Output = MemoryReadOutput> + Send + '_;
-
-    fn run_effect(
-        &mut self,
-        input: EffectCommand,
-    ) -> impl std::future::Future<Output = EffectResult> + Send + '_;
-
-    fn budget_exhausted_reply(
-        &self,
-        exhausted: triad_runtime::ContinuationExhausted,
-    ) -> PipelineOutput;
-
-    fn decide(&mut self, input: Nexus<NexusWork>) -> Nexus<NexusAction>;
-
-    fn execute(
-        &mut self,
-        input: Nexus<NexusWork>,
-    ) -> impl std::future::Future<Output = Nexus<NexusAction>> + Send + '_
-    where
-        Self: Sized,
-    {
-        async move {
-            let origin_route = input.origin_route();
-            let first_work = input.into_root();
-            let runner = triad_runtime::Runner::new(self.continuation_limit());
-            let mut adapter = NexusRunnerAdapter {
-                engine: self,
-                origin_route: origin_route.clone(),
+    async fn drive(&mut self, first_work: NexusWork) -> PipelineOutput {
+        let limit = self.step_limit();
+        let mut taken = 0;
+        let mut work = first_work;
+        loop {
+            let action = self.decide(work);
+            if !matches!(action, NexusAction::Finish(_)) {
+                if taken >= limit.0 {
+                    return self.step_limit_reached(limit);
+                }
+                taken += 1;
+            }
+            work = match action {
+                NexusAction::Finish(output) => return output,
+                NexusAction::Operate(operation) => NexusWork::Operated(self.operate(operation)),
+                NexusAction::CommandEffect(effect) => {
+                    NexusWork::EffectCompleted(self.run_effect(effect).await)
+                }
             };
-            let reply = runner.drive(&mut adapter, first_work).await;
-            NexusAction::Finish(reply).with_origin_route(origin_route)
         }
     }
 }
 
-struct NexusRunnerAdapter<'engine, Engine> {
-    engine: &'engine mut Engine,
-    origin_route: OriginRoute,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl<Engine: NexusEngine> triad_runtime::RunnerEngines for NexusRunnerAdapter<'_, Engine> {
-    type Reply = PipelineOutput;
-    type MemoryWrite = MemoryWriteInput;
-    type MemoryRead = MemoryReadInput;
-    type Effect = EffectCommand;
-    type Work = NexusWork;
-
-    fn decide_next_step(
-        &mut self,
-        work: Self::Work,
-    ) -> triad_runtime::runner::RunnerNextStep<Self> {
-        let action = self
-            .engine
-            .decide(work.with_origin_route(self.origin_route.clone()))
-            .into_root();
-        triad_runtime::NexusAction::into_next_step(action)
+    /// An engine whose every decision is one more effect: the runner must
+    /// stop it at the step limit and answer with the limit's refusal.
+    struct EndlessPipeline {
+        effects_run: u32,
     }
 
-    async fn apply_memory_write(&mut self, write: Self::MemoryWrite) -> Self::Work {
-        let output = self
-            .engine
-            .apply_memory_write(self.origin_route.clone(), write)
+    impl crate::schema_runtime::Operating for EndlessPipeline {
+        fn operate(&mut self, operation: Operation) -> Outcome {
+            panic!("the endless pipeline makes no operation, got {operation:?}")
+        }
+    }
+
+    impl NexusEngine for EndlessPipeline {
+        async fn run_effect(&mut self, _input: EffectCommand) -> EffectResult {
+            self.effects_run += 1;
+            EffectResult::DetachedTestActivationDispatched
+        }
+
+        fn step_limit_reached(&self, _limit: PipelineStepLimit) -> PipelineOutput {
+            PipelineOutput::Refused(signal_lojix::StoreFailure(format!(
+                "stopped after {}",
+                self.effects_run
+            )))
+        }
+
+        fn decide(&mut self, _input: NexusWork) -> NexusAction {
+            NexusAction::CommandEffect(EffectCommand::PathInfoGc(PathInfoGcCommand {
+                cluster_name: ClusterName::new("cluster".into()),
+                node_name: NodeName::new("node".into()),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pipeline_that_never_finishes_is_stopped_at_its_step_limit() {
+        let mut engine = EndlessPipeline { effects_run: 0 };
+        let output = engine
+            .drive(NexusWork::EffectCompleted(
+                EffectResult::DetachedTestActivationDispatched,
+            ))
             .await;
-        NexusWork::MemoryWriteCompleted(output)
-    }
-
-    async fn observe_memory_read(&mut self, read: Self::MemoryRead) -> Self::Work {
-        let output = self
-            .engine
-            .observe_memory_read(self.origin_route.clone(), read)
-            .await;
-        NexusWork::MemoryReadCompleted(output)
-    }
-
-    async fn run_effect(&mut self, effect: Self::Effect) -> Self::Work {
-        let output = self.engine.run_effect(effect).await;
-        NexusWork::EffectCompleted(output)
-    }
-
-    fn budget_exhausted_reply(
-        &self,
-        exhausted: triad_runtime::ContinuationExhausted,
-    ) -> Self::Reply {
-        self.engine.budget_exhausted_reply(exhausted)
+        assert_eq!(
+            output,
+            PipelineOutput::Refused(signal_lojix::StoreFailure("stopped after 32".into()))
+        );
     }
 }

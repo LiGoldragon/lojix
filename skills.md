@@ -71,8 +71,8 @@ these):
 ## Status (2026-08-04)
 
 - The actor-native daemon socket shell is implemented at the repo root.
-- The handwritten Nexus runner and effect hooks are async;
-  the daemon awaits `NexusEngine::execute` directly and does not wrap
+- The handwritten pipeline runner and effect hooks are async;
+  a job actor awaits `NexusEngine::drive` directly and does not wrap
   engine execution in `spawn_blocking`.
 - Production host and user-environment deploy requests enter the
   materialization path; activating actions enter the copy/activate

@@ -18,7 +18,6 @@
 //! cannot.
 
 use lojix::Payload as _;
-use lojix::runtime_flow::{Routable as _, Routed as _};
 use lojix::schema_runtime::DaemonRuntime as _;
 use lojix::schema_runtime::{DeployDriving as _, RuntimeCore as _};
 use lojix::{DeploymentLedger as _, DurableStore as _};
@@ -29,7 +28,7 @@ use std::sync::Arc;
 
 use lojix::Store;
 use lojix::runtime_flow as nexus;
-use lojix::runtime_flow::{NexusEngine, OriginRoute};
+use lojix::runtime_flow::NexusEngine as _;
 use lojix::runtime_model as meta;
 use lojix::runtime_model as ordinary;
 use lojix::schema_runtime::{RuntimeConfiguration, SchemaRuntime};
@@ -261,13 +260,9 @@ async fn an_effect_completion_with_no_deployment_behind_it_is_refused() {
                 detail_truncated: ordinary::DetailTruncated(false),
             },
         },
-    ))
-    .with_origin_route(OriginRoute::new(0));
+    ));
 
-    let output = match engine.execute(work).await.into_root() {
-        nexus::NexusAction::Finish(output) => output,
-        other => panic!("the runner must always terminate with a reply, got {other:?}"),
-    };
+    let output = engine.drive(work).await;
 
     assert_eq!(
         refusal(&output).deploy_refusal_reason,
