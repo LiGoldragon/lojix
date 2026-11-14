@@ -143,7 +143,7 @@ fn admission_job() -> ordinary::DeployJob {
             "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         ),
         flake_reference_option: None,
-        resolved_revision: None,
+        resolved_revision_option: None,
         deployment_transport: transport(
             "ssh-ng://fixture-copy.invalid",
             "fixture-login@fixture-activate.invalid",
@@ -154,12 +154,12 @@ fn admission_job() -> ordinary::DeployJob {
         ),
         activation_backend: ordinary::ActivationBackend::NixosSystemdBootV1,
         nix_builder_spec_option: None,
-        boot_once_unit: None,
+        boot_once_unit_option: None,
         generation_slot_option: None,
         persisted_flake_input_override_vector: Vec::new(),
         deploy_resume_stage: ordinary::DeployResumeStage::ResolveFlakeAuth,
         phase_receipt_option: None,
-        deploy_submission_option: None,
+        actualized_deploy_submission_option: None,
     }
 }
 

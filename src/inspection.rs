@@ -13,13 +13,13 @@ use std::path::PathBuf;
 use datom_codec::{Actualizing, Potential};
 use memory_engine::TableRegistration;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
-use rkyv::Deserialize as RkyvDeserialize;
 use rkyv::api::high::HighDeserializer;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::rancor::{self, Strategy};
 use rkyv::validation::Validator;
 use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
+use rkyv::{Archive, Deserialize as RkyvDeserialize};
 
 use crate::quarantine::QuarantinedRow;
 use crate::runtime_model::{
@@ -27,6 +27,7 @@ use crate::runtime_model::{
     IdentifierAllocation, LiveGeneration, PendingTransitionIntent, StoredDeploymentRecord,
     StoredTestRun,
 };
+use crate::upgrade::EarlierDeployJob;
 use crate::{Error, InlineDatomArguments as _, LojixRecord, OfflineCommand, Result, ingress};
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__memory_engine_catalog");
@@ -155,12 +156,12 @@ pub struct StoreInspection {
 pub trait InspectedTables {
     fn table_named(&self, name: &str) -> Option<&TableInspection>;
 
-    /// How many rows the Nexus has set aside because they no longer decode.
-    /// A store the Nexus has not yet opened under this schema has none.
+    /// How many rows lojix 0.10.6 set aside because they no longer decoded;
+    /// the next open drops them.
     fn quarantined_row_count(&self) -> usize;
 
-    /// How many rows would be set aside the next time the Nexus opens the
-    /// store: the rows the current schema does not read, across every family.
+    /// How many rows no family of this Lojix reads, across every family; a
+    /// store holding any is refused at its next open.
     fn undecodable_row_count(&self) -> usize;
 }
 
@@ -315,9 +316,14 @@ pub enum TableInspectionStatus {
     ReadFailed {
         message: String,
     },
-    /// Some rows do not decode under the current schema; the Nexus sets
-    /// them aside when it next opens the store. `message` is the first
-    /// failure's decode error.
+    /// Every row is in the layout the Nexus upgrades when it next opens the
+    /// store.
+    AwaitingUpgrade {
+        row_count: usize,
+    },
+    /// Some rows do not decode under the current schema; the Nexus refuses
+    /// the store when it next opens it. `message` is the first failure's
+    /// decode error.
     DecodeFailed {
         undecodable_row_count: usize,
         row_count: usize,
@@ -331,6 +337,9 @@ impl std::fmt::Display for TableInspectionStatus {
             Self::Missing => write!(formatter, "missing"),
             Self::Empty => write!(formatter, "empty row_count=0"),
             Self::Readable { row_count } => write!(formatter, "readable row_count={row_count}"),
+            Self::AwaitingUpgrade { row_count } => {
+                write!(formatter, "upgrades-on-open row_count={row_count}")
+            }
             Self::ReadFailed { message } => write!(formatter, "read-failed [{message}]"),
             Self::DecodeFailed {
                 undecodable_row_count,
@@ -467,7 +476,7 @@ impl InspectionReader for StoreTableReader<'_> {
             self.inspect::<GcRoot>(),
             self.inspect::<EventLogEntry>(),
             self.inspect::<ContainerLifecycleRecord>(),
-            self.inspect::<DeployJob>(),
+            self.inspect_deploy_jobs(),
             self.inspect::<StoredTestRun>(),
             self.inspect::<StoredDeploymentRecord>(),
             self.inspect::<IdentifierAllocation>(),
@@ -489,9 +498,17 @@ trait FamilyInspecting {
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >;
 
-    fn inspect_rows<Record: LojixRecord>(&self, registered: bool) -> TableInspectionStatus
+    /// The deploy-job family, read as its current record or, when every row
+    /// is still 0.10.6's, as the layout the next open upgrades.
+    fn inspect_deploy_jobs(&self) -> TableInspection;
+
+    fn inspect_rows<Decoded: Archive>(
+        &self,
+        table: &str,
+        registered: bool,
+    ) -> TableInspectionStatus
     where
-        Record::Archived: RkyvDeserialize<Record, HighDeserializer<rancor::Error>>
+        Decoded::Archived: RkyvDeserialize<Decoded, HighDeserializer<rancor::Error>>
             + for<'validation> CheckBytes<
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >;
@@ -509,13 +526,37 @@ impl FamilyInspecting for StoreTableReader<'_> {
         TableInspection {
             name: Record::TABLE,
             role: Record::ROLE,
-            status: self.inspect_rows::<Record>(registered),
+            status: self.inspect_rows::<Record>(Record::TABLE, registered),
         }
     }
 
-    fn inspect_rows<Record: LojixRecord>(&self, registered: bool) -> TableInspectionStatus
+    fn inspect_deploy_jobs(&self) -> TableInspection {
+        let current = self.inspect::<DeployJob>();
+        let TableInspectionStatus::DecodeFailed {
+            undecodable_row_count,
+            row_count,
+            ..
+        } = current.status
+        else {
+            return current;
+        };
+        let registered = self.registered_tables.contains(DeployJob::TABLE);
+        match self.inspect_rows::<EarlierDeployJob>(DeployJob::TABLE, registered) {
+            TableInspectionStatus::Readable { row_count: earlier }
+                if undecodable_row_count == row_count && earlier == row_count =>
+            {
+                TableInspection {
+                    status: TableInspectionStatus::AwaitingUpgrade { row_count },
+                    ..current
+                }
+            }
+            _ => current,
+        }
+    }
+
+    fn inspect_rows<Decoded: Archive>(&self, table: &str, registered: bool) -> TableInspectionStatus
     where
-        Record::Archived: RkyvDeserialize<Record, HighDeserializer<rancor::Error>>
+        Decoded::Archived: RkyvDeserialize<Decoded, HighDeserializer<rancor::Error>>
             + for<'validation> CheckBytes<
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >,
@@ -528,21 +569,20 @@ impl FamilyInspecting for StoreTableReader<'_> {
                 };
             }
         };
-        let table =
-            match transaction.open_table(TableDefinition::<String, &[u8]>::new(Record::TABLE)) {
-                Ok(table) => table,
-                Err(redb::TableError::TableDoesNotExist(_)) if registered => {
-                    return TableInspectionStatus::Empty;
-                }
-                Err(redb::TableError::TableDoesNotExist(_)) => {
-                    return TableInspectionStatus::Missing;
-                }
-                Err(error) => {
-                    return TableInspectionStatus::ReadFailed {
-                        message: error.to_string(),
-                    };
-                }
-            };
+        let table = match transaction.open_table(TableDefinition::<String, &[u8]>::new(table)) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) if registered => {
+                return TableInspectionStatus::Empty;
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                return TableInspectionStatus::Missing;
+            }
+            Err(error) => {
+                return TableInspectionStatus::ReadFailed {
+                    message: error.to_string(),
+                };
+            }
+        };
         if table.is_empty().unwrap_or(false) {
             return TableInspectionStatus::Empty;
         }
@@ -567,7 +607,7 @@ impl FamilyInspecting for StoreTableReader<'_> {
                 }
             };
             row_count += 1;
-            if let Err(error) = rkyv::from_bytes::<Record, rancor::Error>(value.value()) {
+            if let Err(error) = rkyv::from_bytes::<Decoded, rancor::Error>(value.value()) {
                 undecodable_row_count += 1;
                 first_failure.get_or_insert_with(|| error.to_string());
             }

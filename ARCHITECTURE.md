@@ -187,8 +187,11 @@ src/
   daemon.rs             # actor-native two-socket daemon shell
   client.rs             # thin CLI socket exchange
   bootstrap.rs          # daemon-free explicit resumable v5 bootstrap pipeline
-  runtime_model.rs      # Lojix's own stored and operational nouns; the
-                        # contract types it re-exports are the generated ones
+  memory.rs             # generated from ethos/memory.ethos: the stored records
+  upgrade.rs            # the deploy-job family's upgrade from its 0.10.6 layout
+  quarantine.rs         # the retired quarantine family, emptied at open
+  runtime_model.rs      # the engine's decision-plane nouns; contract and
+                        # stored types re-exported from where they are generated
   adapters.rs           # the contract-to-engine seam, only where shapes differ
   runtime_flow.rs       # hand-written Nexus effects, work, and runner logic
   schema_runtime.rs     # async hand-written Nexus decision engine
@@ -203,8 +206,8 @@ the workspace actor-systems doctrine. No zero-state holders.
 
 ## 4 · Storage and wire
 
-- **Storage:** Lojix's own records, and the contracts' generated types they
-  hold, in MEMORY tables over a durable `memory-engine`
+- **Storage:** Lojix's generated records, and the contracts' generated types
+  they hold, in MEMORY tables over a durable `memory-engine`
   store — one exact configured absolute file shared by daemon startup and the
   reset service. The ten
   record families (live set, gc-roots, event log, container lifecycle,
@@ -223,18 +226,21 @@ the workspace actor-systems doctrine. No zero-state holders.
   advances to a later effect before acknowledgement. Retention can compact an
   acknowledged event and outbox together, while the acknowledged intent keeps
   restart from reconstructing or re-delivering that historical transition.
-  The one store migration is the conversion of a sema-engine `lojix.sema`
-  into `lojix.memory` on a copy at startup, leaving `lojix.sema` untouched as
-  the rollback store; there is no legacy resume path. A row that no longer decodes
-  under the current schema — a deploy job or the Nexus configuration archived
-  with an earlier `HorizonDefinition` layout — is not served and does not stop
-  the Nexus: each open reads every family row by row and moves each such row,
-  with its retraction in one commit, into the `quarantined-row` family
-  (table, key, original bytes, decode error), logging
-  `lojix-nexus: RowQuarantined.{ <table> <key> «<error>» }`. A quarantined
-  configuration row is rebuilt from the Nexus's built-in configuration and
-  logged `NexusConfigurationRebuilt`. `lojix-inspect-store` reports both the
-  quarantined rows and the rows the next open will set aside. With the daemon stopped, the
+  The store's records are generated from `ethos/memory.ethos` into
+  `src/memory.rs`, which `build.rs` holds equal to fresh generation; table
+  names, family names, schema hashes, keys and upgrades stay hand-written. A
+  record the contracts declare is held whole inside a record of Lojix's own.
+  The store is upgraded, never accommodated. The conversion of a sema-engine
+  `lojix.sema` into `lojix.memory` runs on a copy at startup, leaving
+  `lojix.sema` untouched as the rollback store. The deploy-job family is
+  upgraded on open from its 0.10.6 layout (`src/upgrade.rs`), logged
+  `lojix-nexus: FamilyUpgraded.{ deploy-job <rows> }`. A row no record reads
+  refuses the store, named by table and key, before anything is served. The
+  rows 0.10.6 set aside in the `quarantined-row` family are dropped at open,
+  each logged `lojix-nexus: QuarantinedRowDropped.{ <table> <key> «<error>» }`;
+  the family keeps its 0.10.6 identity. `lojix-inspect-store` reports the
+  set-aside rows the next open drops, the deploy-job rows it upgrades, and the
+  rows that would refuse it. With the daemon stopped, the
   manually started `lojix-reset-store` accepts only the inline empty `ResetStore` struct, `{}`. Its
   service-owned `LOJIX_CONFIGURATION` archive supplies the exact store path;
   an existing archive and primary must be absolute, regular, and non-symlinked.

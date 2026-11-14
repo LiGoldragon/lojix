@@ -9,20 +9,19 @@
 //! deploys its own host. The file is not regenerated: after the Horizon bump,
 //! regenerating it would write the new layout and prove nothing.
 //!
-//! This crate now carries the Horizon 0.13 layout. The same store opens, the
-//! inspector counts `deploy-job 1` as undecodable before the open, the open
-//! quarantines it, and the store still serves.
+//! This crate carries a later Horizon layout, and a store is upgraded, never
+//! accommodated: no record of this Lojix reads the Horizon 0.12 row, so the
+//! open is refused, naming the row's table and key, and the file is left as
+//! it was. The inspector counts `deploy-job 1` as undecodable.
 
-use lojix::DurableStore as _;
 use lojix::inspection::{InspectedTables as _, StoreInspecting as _, StoreInspector};
-use lojix::quarantine::{OpenedStore as _, RowQuarantine as _};
-use lojix::{DeploymentLedger as _, Store};
+use lojix::{DurableStore as _, Error, Store};
 use tempfile::TempDir;
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/lojix-v5-horizon-0.12-deploy-job.memory");
 
 #[test]
-fn a_horizon_0_12_deploy_job_row_is_quarantined_under_the_horizon_0_13_layout() {
+fn a_horizon_0_12_deploy_job_row_refuses_the_store_and_leaves_it_untouched() {
     let directory = TempDir::new().expect("tempdir");
     let path = directory.path().join("lojix.memory");
     std::fs::write(&path, FIXTURE).expect("copy fixture store");
@@ -31,32 +30,23 @@ fn a_horizon_0_12_deploy_job_row_is_quarantined_under_the_horizon_0_13_layout() 
     assert_eq!(
         before.undecodable_row_count(),
         1,
-        "the inspector must count the Horizon 0.12 row the open will set aside:\n{before}"
+        "the inspector counts the Horizon 0.12 row the open refuses:\n{before}"
     );
 
-    let store = Store::open(&path).expect("the store still opens across the Horizon bump");
-
-    let opening = store.opening();
-    assert_eq!(opening.quarantined_rows.len(), 1, "{opening:?}");
-    let row = &opening.quarantined_rows[0];
-    assert_eq!(row.table, "deploy-job");
-    assert_eq!(row.key, "1");
-    assert!(!row.archive.is_empty());
-    assert!(!row.decode_error.is_empty());
-    assert!(!opening.configuration_rebuilt, "{opening:?}");
+    let error = Store::open(&path).expect_err("a row no layout reads refuses the store");
+    match &error {
+        Error::UndecodableRow { table, key, .. } => {
+            assert_eq!(
+                (table.as_str(), key.as_str()),
+                ("deploy-job", "1"),
+                "{error}"
+            )
+        }
+        other => panic!("expected the deploy-job row to refuse the store, got {other}"),
+    }
     assert_eq!(
-        store.quarantined_rows().expect("persisted quarantine"),
-        opening.quarantined_rows
-    );
-    assert!(
-        store.deploy_jobs().expect("deploy jobs read").is_empty(),
-        "a Horizon 0.12 deploy-job row is never served"
-    );
-    drop(store);
-
-    let reopened = Store::open(&path).expect("reopen after quarantine");
-    assert!(
-        reopened.opening().quarantined_rows.is_empty(),
-        "a second open sets nothing aside"
+        std::fs::read(&path).expect("read the refused store"),
+        FIXTURE,
+        "a refused open leaves the store byte for byte"
     );
 }

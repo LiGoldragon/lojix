@@ -1,10 +1,46 @@
 # Upgrades
 
-# 0.10.6 to 0.10.7
+# 0.10.6 to 0.11.0
 
-A revision: the memory format is unchanged and the store stays readable;
-nothing stored is touched. The contracts move onto ethos-zero 28, in one wire
-break, and clients and daemon move together:
+A store format change, and a wire break; 0.10.7 was never released, and what
+it carried is part of this entry. Every crate of the workspace is 0.11.0.
+
+## The store
+
+Lojix's Memory is generated from `ethos/memory.ethos` by ethos-zero 29.0.0
+(f23eacf338a90ce4a6dea011554724fa6488fcc9) into `src/memory.rs`, which
+`build.rs` holds equal to fresh generation ("src/memory.rs is stale;
+regenerate it from ethos/memory.ethos"). A deployment record, a test run and
+a deploy job's submission are each the contract's own type, held whole inside
+a record of Lojix's own. Every family but one archives as 0.10.6 wrote it
+(`tests/memory_representation.rs`, both ways against the 0.10.6 records frozen
+in `tests/frozen/v0_10_6.rs`), and the schema version stays 5.
+
+The deploy job moves. 0.10.6 kept its submission as Lojix's own copy, with the
+Horizon definition inside the deployment; it is now the meta contract's
+`ActualizedDeploySubmission`, the definition beside it. The family's schema
+hash moves from `[5; 32]` to `[14; 32]`, and the first open upgrades every row
+in one write, logging `lojix-nexus: FamilyUpgraded.{ deploy-job <rows> }`
+(`src/upgrade.rs`; `tests/fixtures/lojix-0.10.6-deploy-jobs.memory`, written by
+0.10.6, is upgraded in `tests/store_fixture_rows.rs`).
+
+The quarantine retires: a store is upgraded, never accommodated. A row that no
+record reads refuses the store at open, named by its table and key, and the
+store is left as it was. The rows 0.10.6 set aside in the `quarantined-row`
+family are dropped by the first open, each logged
+`lojix-nexus: QuarantinedRowDropped.{ <table> <key> «<error>» }`; the family
+keeps its identity. A store holding a deploy job archived in the Horizon 0.12
+layout, and so a converted Lojix 8.1.0 store holding one, is refused.
+
+Rolling back to 0.10.6 onto a store this release has opened is refused at
+0.10.6's own startup: it registers the deploy-job family under `[5; 32]`, and
+the store now holds it under `[14; 32]`. The rollback is the copy of
+`lojix.memory` taken before this release first opened it.
+
+## The contracts
+
+The contracts move onto ethos-zero 28, in one wire break, and clients and
+daemon move together:
 
 - `signal-lojix` 0.11.0 (bd5d250f6923c85ee785f0e9bb4b4b8320a67c11) to 0.12.0
   (8a776198db368c7f5d39e1615c3d3d319fc2cf5d);

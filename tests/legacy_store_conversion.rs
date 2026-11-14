@@ -14,13 +14,12 @@
 //! that opens and serves the records the 8.1.0 store held, and `lojix.sema`
 //! stays byte for byte as it was, the store 8.1.0 reads on a rollback.
 
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use lojix::legacy_store::{
     LegacyConversionStage, LegacyStoreConversion, LegacyStoreConverting as _,
 };
-use lojix::quarantine::RowQuarantine as _;
+use lojix::quarantine::OpenedStore as _;
 use lojix::{DurableStore as _, Error, LojixNexusConfigurable as _, NexusConfiguration};
 use lojix::{EventHistory as _, EventLogRetention, NexusPersistable as _, Store};
 use memory_engine::{
@@ -48,73 +47,14 @@ fn directory_names(directory: &Path) -> Vec<String> {
 }
 
 #[test]
-fn a_lojix_8_1_0_store_opens_through_the_nexus_startup_path() {
-    let directory = TempDir::new().expect("tempdir");
-    let state = directory.path().join("lojix");
-    std::fs::create_dir_all(&state).expect("state directory");
-    let legacy = state.join("lojix.sema");
-    std::fs::write(&legacy, LOJIX_8_1_0_STORE).expect("copy the 8.1.0 store");
-
-    let path = NexusConfiguration::discover_default_store_path(state.clone())
-        .expect("the Nexus converts the legacy store");
-    assert_eq!(path, state.join("lojix.memory"));
-    assert_eq!(
-        std::fs::read(&legacy).expect("read lojix.sema"),
+fn a_lojix_8_1_0_store_holding_a_horizon_0_12_deploy_job_is_refused_and_left_untouched() {
+    // The 8.1.0 store's one in-flight deploy job was archived in the Horizon
+    // 0.12 layout. A store is upgraded, never accommodated, and no upgrade
+    // reads that layout, so the converted copy does not open and nothing is
+    // installed; lojix.sema stays the store 8.1.0 reads.
+    assert_conversion_fails_untouched(
         LOJIX_8_1_0_STORE,
-        "lojix.sema stays byte for byte as the rollback store"
-    );
-    assert_eq!(
-        std::fs::metadata(&path)
-            .expect("converted store metadata")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
-    assert_eq!(
-        directory_names(&state),
-        ["lojix.memory", "lojix.sema"],
-        "no conversion copy is left behind"
-    );
-
-    let store = Store::open_with_default_configuration(&path, NexusConfiguration::built_in())
-        .expect("the converted store opens as Memory");
-
-    let desired = store
-        .nexus_configuration_state()
-        .expect("configuration row reads back")
-        .desired_configuration;
-    assert_eq!(desired.daemon_host.0, "localhost");
-    assert_eq!(desired.state_directory_path.0, "/var/lib/lojix");
-    assert_eq!(
-        desired.ordinary_socket_path.0,
-        "/run/user/1001/lojix/ordinary.sock"
-    );
-    assert_eq!(
-        desired.owner_socket_path.0,
-        "/run/user/1001/lojix/meta.sock"
-    );
-
-    // The in-flight deploy job was archived in the Horizon 0.12 layout; it is
-    // read back as the quarantined row holding its original bytes.
-    let quarantined = store.quarantined_rows().expect("quarantine reads back");
-    let deploy_job = quarantined
-        .iter()
-        .find(|row| row.table == "deploy-job" && row.key == "1")
-        .expect("the 8.1.0 deploy-job row is carried over");
-    assert!(!deploy_job.archive.is_empty());
-    assert!(
-        store.commit_sequence().expect("commit sequence") > 0,
-        "the converted store resumes its commit history"
-    );
-    drop(store);
-
-    let again = NexusConfiguration::discover_default_store_path(state.clone())
-        .expect("the next start opens lojix.memory");
-    assert_eq!(again, path);
-    assert_eq!(
-        std::fs::read(&legacy).expect("read lojix.sema"),
-        LOJIX_8_1_0_STORE
+        LegacyConversionStage::VerifyingConvertedCopy,
     );
 }
 
@@ -174,36 +114,26 @@ fn a_truncated_legacy_store_fails_conversion_and_is_left_untouched() {
 }
 
 #[test]
-fn a_store_copied_while_its_writer_holds_it_open_converts() {
+fn a_store_copied_while_its_writer_holds_it_open_is_repaired_before_it_is_verified() {
     let directory = TempDir::new().expect("tempdir");
     let writer_path = directory.path().join("writer.sema");
     std::fs::write(&writer_path, LOJIX_8_1_0_STORE).expect("write the 8.1.0 store");
-    let state = directory.path().join("lojix");
-    std::fs::create_dir_all(&state).expect("state directory");
-    let legacy = state.join("lojix.sema");
 
     // The writer holds the store open read-write, as the deployed Nexus does,
     // while the copy is taken: the copy carries redb's needs-repair flag.
     let writer = redb::Database::open(&writer_path).expect("the writer opens the store");
-    std::fs::copy(&writer_path, &legacy).expect("copy the store under its writer");
+    let copied = directory.path().join("copied.sema");
+    std::fs::copy(&writer_path, &copied).expect("copy the store under its writer");
     assert!(
-        redb::ReadOnlyDatabase::open(&legacy).is_err(),
+        redb::ReadOnlyDatabase::open(&copied).is_err(),
         "the copy needs repair, so a read-only open refuses it"
     );
     drop(writer);
-    let legacy_bytes = std::fs::read(&legacy).expect("read the copied lojix.sema");
+    let copied_bytes = std::fs::read(&copied).expect("read the copied store");
 
-    let path = NexusConfiguration::discover_default_store_path(state.clone())
-        .expect("the conversion repairs its copy and converts it");
-    assert_eq!(path, state.join("lojix.memory"));
-    assert_eq!(
-        std::fs::read(&legacy).expect("reread lojix.sema"),
-        legacy_bytes,
-        "lojix.sema stays byte for byte as it was"
-    );
-    assert_eq!(directory_names(&state), ["lojix.memory", "lojix.sema"]);
-    Store::open_with_default_configuration(&path, NexusConfiguration::built_in())
-        .expect("the converted store opens");
+    // The conversion repairs its own copy and converts it; verification then
+    // meets the Horizon 0.12 deploy job, as it does for a closed store.
+    assert_conversion_fails_untouched(&copied_bytes, LegacyConversionStage::VerifyingConvertedCopy);
 }
 
 /// Acceptance on a copy of a deployed store: `LOJIX_LEGACY_STORE_ACCEPTANCE`
@@ -249,9 +179,9 @@ fn a_copied_deployed_store_converts_opens_folds_and_compacts() {
     let store = Store::open_with_default_configuration(&current, NexusConfiguration::built_in())
         .expect("the converted store opens the normal way");
     println!(
-        "opened: commit sequence {} quarantined rows {}",
+        "opened: commit sequence {} dropped set-aside rows {}",
         store.commit_sequence().expect("commit sequence"),
-        store.quarantined_rows().expect("quarantine reads").len()
+        store.opening().dropped_quarantined_rows.len()
     );
     let retired = store
         .compact_event_history(EventLogRetention::default())

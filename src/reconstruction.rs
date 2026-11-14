@@ -361,7 +361,13 @@ impl LojixStoreDatabase for redb::ReadOnlyDatabase {
         }
         let LojixCatalog(recognised) = LojixCatalog::recognised();
         let LojixCatalog(core) = LojixCatalog::core();
-        if actual.is_empty() || !core.is_subset(&actual) || !actual.is_subset(&recognised) {
+        let carries_deploy_jobs = actual.contains(&DeployJob::family_identity())
+            || actual.contains(&LojixCatalog::earlier_deploy_job());
+        if actual.is_empty()
+            || !core.is_subset(&actual)
+            || !carries_deploy_jobs
+            || !actual.is_subset(&recognised)
+        {
             return Err(Error::StoreMaintenance(format!(
                 "reset store catalog is not a recognised Lojix family/schema layout for schema {version}; refusing removal"
             )));
@@ -403,8 +409,12 @@ impl<const COUNT: usize> From<[(&str, &str, [u8; 32]); COUNT]> for LojixCatalog 
 
 /// The two layouts a reset source is compared against.
 trait StoreLayouts {
-    /// The six families every recognised Lojix store must carry.
+    /// The five families every recognised Lojix store must carry beside its
+    /// deploy-job family, which it carries in one of its two layouts.
     fn core() -> Self;
+
+    /// The deploy-job family as lojix 0.10.6 and earlier registered it.
+    fn earlier_deploy_job() -> StoreFamilyIdentity;
 
     /// Every family a recognised Lojix store may carry — the core six plus the
     /// deployment correlation families and v3's retired quarantine family.
@@ -412,13 +422,20 @@ trait StoreLayouts {
 }
 
 impl StoreLayouts for LojixCatalog {
+    fn earlier_deploy_job() -> StoreFamilyIdentity {
+        (
+            DeployJob::TABLE.to_string(),
+            DeployJob::FAMILY.to_string(),
+            [5; 32],
+        )
+    }
+
     fn core() -> Self {
         Self(BTreeSet::from([
             LiveGeneration::family_identity(),
             GcRoot::family_identity(),
             EventLogEntry::family_identity(),
             ContainerLifecycleRecord::family_identity(),
-            DeployJob::family_identity(),
             StoredTestRun::family_identity(),
         ]))
     }
@@ -426,6 +443,8 @@ impl StoreLayouts for LojixCatalog {
     fn recognised() -> Self {
         let Self(mut identities) = Self::core();
         identities.extend([
+            DeployJob::family_identity(),
+            LojixCatalog::earlier_deploy_job(),
             StoredDeploymentRecord::family_identity(),
             IdentifierAllocation::family_identity(),
             DeploymentOutboxRecord::family_identity(),

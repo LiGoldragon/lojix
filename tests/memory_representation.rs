@@ -15,6 +15,8 @@ mod frozen;
 
 use lojix::Payload as _;
 use lojix::runtime_model as current;
+use lojix::upgrade as earlier;
+use memory_engine::{Decision, UpgradeFrom as _};
 
 /// Archive both values, compare the bytes, and read each side's bytes as the
 /// other side's type.
@@ -117,9 +119,13 @@ fn frozen_failure() -> frozen::DeploymentTerminal {
 fn source_revision() -> current::SourceRevisionRecord {
     current::SourceRevisionRecord {
         source_revision_policy: current::SourceRevisionPolicy::ResolveAndRecord,
-        requested_ref: current::FlakeReference("github:owner/repo?ref=main".into()),
-        resolved_ref: current::FlakeReference(format!("github:owner/repo?rev={REVISION}")),
-        string: REVISION.into(),
+        requested_reference: current::RequestedReference(current::FlakeReference(
+            "github:owner/repo?ref=main".into(),
+        )),
+        resolved_reference: current::ResolvedReference(current::FlakeReference(format!(
+            "github:owner/repo?rev={REVISION}"
+        ))),
+        resolved_revision: current::ResolvedRevision(REVISION.into()),
     }
 }
 fn frozen_source_revision() -> frozen::SourceRevisionRecord {
@@ -173,8 +179,8 @@ fn frozen_transport() -> frozen::DeploymentTransport {
     }
 }
 
-fn host_submission() -> current::DeploySubmission {
-    current::DeploySubmission::Host(current::HostDeployment {
+fn earlier_host_submission() -> earlier::EarlierDeploySubmission {
+    earlier::EarlierDeploySubmission::Host(earlier::EarlierHostDeployment {
         cluster_name: current::ClusterName("goldragon".into()),
         node_name: current::NodeName("ouranos".into()),
         host_composition: current::HostComposition::BaseHost,
@@ -226,8 +232,8 @@ fn frozen_host_submission() -> frozen::DeploySubmission {
     })
 }
 
-fn user_submission() -> current::DeploySubmission {
-    current::DeploySubmission::UserEnvironment(current::UserEnvironmentDeployment {
+fn earlier_user_submission() -> earlier::EarlierDeploySubmission {
+    earlier::EarlierDeploySubmission::UserEnvironment(earlier::EarlierUserEnvironmentDeployment {
         cluster_name: current::ClusterName("goldragon".into()),
         node_name: current::NodeName("ouranos".into()),
         user_name: current::UserName("li".into()),
@@ -539,9 +545,9 @@ fn a_container_record_archives_as_0_10_6_wrote_it() {
 }
 
 #[test]
-fn a_deploy_job_archives_as_0_10_6_wrote_it() {
+fn the_earlier_deploy_job_the_upgrade_reads_is_0_10_6_s_layout() {
     let full = both_ways!(
-        current::DeployJob {
+        earlier::EarlierDeployJob {
             deployment_identifier: current::DeploymentIdentifier(579),
             generation_identifier: current::GenerationIdentifier(578),
             cluster_name: current::ClusterName("goldragon".into()),
@@ -563,9 +569,9 @@ fn a_deploy_job_archives_as_0_10_6_wrote_it() {
             nix_builder_spec_option: Some(current::NixBuilderSpec("ssh-ng://prometheus".into())),
             boot_once_unit: Some("lojix-boot-once-579.service".into()),
             generation_slot_option: Some(current::GenerationSlot::BootPending),
-            persisted_flake_input_override_vector: vec![current::PersistedFlakeInputOverride {
+            persisted_flake_input_override_vector: vec![earlier::EarlierFlakeInputOverride {
                 string: "horizon".into(),
-                persisted_flake_input_reference: current::PersistedFlakeInputReference {
+                persisted_flake_input_reference: earlier::EarlierFlakeInputReference {
                     url: "path:/var/lib/lojix/generated-inputs/horizon".into(),
                     nix_archive_hash: "sha256-AAAA".into(),
                 },
@@ -575,7 +581,7 @@ fn a_deploy_job_archives_as_0_10_6_wrote_it() {
                 event_log_position: current::EventLogPosition(2017),
                 database_marker: marker(13970),
             }),
-            deploy_submission_option: Some(host_submission()),
+            deploy_submission_option: Some(earlier_host_submission()),
         },
         frozen::DeployJob {
             deployment_identifier: frozen::DeploymentIdentifier(579),
@@ -613,7 +619,7 @@ fn a_deploy_job_archives_as_0_10_6_wrote_it() {
             }),
             optional_deploy_submission: Some(frozen_host_submission()),
         },
-        current::DeployJob,
+        earlier::EarlierDeployJob,
         frozen::DeployJob
     );
     assert!(
@@ -621,7 +627,7 @@ fn a_deploy_job_archives_as_0_10_6_wrote_it() {
         "the Horizon definition is carried: {full} bytes"
     );
     both_ways!(
-        current::DeployJob {
+        earlier::EarlierDeployJob {
             deployment_identifier: current::DeploymentIdentifier(580),
             generation_identifier: current::GenerationIdentifier(579),
             cluster_name: current::ClusterName("goldragon".into()),
@@ -644,7 +650,7 @@ fn a_deploy_job_archives_as_0_10_6_wrote_it() {
             persisted_flake_input_override_vector: Vec::new(),
             deploy_resume_stage: current::DeployResumeStage::ResolveFlakeAuth,
             phase_receipt_option: None,
-            deploy_submission_option: Some(user_submission()),
+            deploy_submission_option: Some(earlier_user_submission()),
         },
         frozen::DeployJob {
             deployment_identifier: frozen::DeploymentIdentifier(580),
@@ -671,7 +677,7 @@ fn a_deploy_job_archives_as_0_10_6_wrote_it() {
             optional_phase_receipt: None,
             optional_deploy_submission: Some(frozen_user_submission()),
         },
-        current::DeployJob,
+        earlier::EarlierDeployJob,
         frozen::DeployJob
     );
 }
@@ -680,14 +686,16 @@ fn a_deploy_job_archives_as_0_10_6_wrote_it() {
 fn a_test_run_archives_as_0_10_6_wrote_it() {
     both_ways!(
         current::StoredTestRun {
-            test_run_identifier: current::TestRunIdentifier(12),
-            cluster_name: current::ClusterName("goldragon".into()),
-            node: current::NodeName("beacon".into()),
-            host: current::NodeName("atlas".into()),
-            test_mode: current::TestMode::Live,
-            test_run_phase: current::TestRunPhase::Failed,
-            test_outcome: current::TestOutcome::Failed(current::FailureStage::Assert),
-            closure_path_option: Some(current::ClosurePath(CLOSURE.into())),
+            test_run_record: current::TestRunRecord {
+                test_run_identifier: current::TestRunIdentifier(12),
+                cluster_name: current::ClusterName("goldragon".into()),
+                first_node_name: current::NodeName("beacon".into()),
+                second_node_name: current::NodeName("atlas".into()),
+                test_mode: current::TestMode::Live,
+                test_run_phase: current::TestRunPhase::Failed,
+                test_outcome: current::TestOutcome::Failed(current::FailureStage::Assert),
+                closure_path_option: Some(current::ClosurePath(CLOSURE.into())),
+            },
         },
         frozen::StoredTestRun {
             test_run_identifier: frozen::TestRunIdentifier(12),
@@ -762,9 +770,9 @@ fn a_deployment_record_is_held_whole_and_archives_as_0_10_6_wrote_it() {
 fn the_identifier_allocation_archives_as_0_10_6_wrote_it() {
     both_ways!(
         current::IdentifierAllocation {
-            next_deployment_identifier: 579,
-            next_generation_identifier: 578,
-            next_event_log_position: 2019,
+            next_deployment_identifier: current::NextDeploymentIdentifier(579),
+            next_generation_identifier: current::NextGenerationIdentifier(578),
+            next_event_log_position: current::NextEventLogPosition(2019),
         },
         frozen::IdentifierAllocation {
             next_deployment_identifier: 579,
@@ -830,4 +838,145 @@ fn an_outbox_row_and_a_transition_intent_archive_as_0_10_6_wrote_them() {
         current::PendingTransitionIntent,
         frozen::PendingTransitionIntent
     );
+}
+
+/// The 0.10.6 host deployment as the contract now carries it.
+fn contract_host_submission() -> meta_signal_lojix::ActualizedDeploySubmission {
+    meta_signal_lojix::ActualizedDeploySubmission {
+        deploy_submission: meta_signal_lojix::DeploySubmission::Host(
+            meta_signal_lojix::HostDeployment {
+                cluster_name: current::ClusterName("goldragon".into()),
+                node_name: current::NodeName("ouranos".into()),
+                host_composition: current::HostComposition::BaseHost,
+                proposal_source: current::ProposalSource("/home/li/goldragon".into()),
+                secrets_input: current::SecretsInput::SecretsDirectory(current::SecretsDirectory(
+                    "/home/li/goldragon/secrets".into(),
+                )),
+                flake_reference: current::FlakeReference("github:LiGoldragon/CriomOS".into()),
+                deployment_transport: transport(),
+                deployment_input_mode: current::DeploymentInputMode::Horizon,
+                deployment_output_selector: current::DeploymentOutputSelector {
+                    flake_attribute: current::FlakeAttribute("nixosConfigurations.ouranos".into()),
+                },
+                activation_backend: current::ActivationBackend::NixosSystemdBootV1,
+                host_deploy_action: current::HostDeployAction::ScheduleBootOnce,
+                source_revision_policy: current::SourceRevisionPolicy::ResolveAndRecord,
+                nix_builder_spec_option: Some(current::NixBuilderSpec(
+                    "ssh-ng://prometheus".into(),
+                )),
+                extra_substituter_vector: vec![current::ExtraSubstituter {
+                    first_string: "https://cache.example".into(),
+                    second_string: "cache.example-1:key".into(),
+                }],
+            },
+        ),
+        horizon_definition_option: Some(common::hosted_pair()),
+    }
+}
+
+#[test]
+fn the_upgrade_moves_a_0_10_6_deploy_job_s_horizon_definition_beside_its_deployment() {
+    let frozen_job = frozen::DeployJob {
+        deployment_identifier: frozen::DeploymentIdentifier(579),
+        generation_identifier: frozen::GenerationIdentifier(578),
+        cluster_name: frozen::ClusterName("goldragon".into()),
+        node_name: frozen::NodeName("ouranos".into()),
+        deploy_job_phase: frozen::DeployJobPhase::Activating,
+        optional_closure_path: Some(frozen::ClosurePath(CLOSURE.into())),
+        source_revision_policy: frozen::SourceRevisionPolicy::ResolveAndRecord,
+        flake_reference: frozen::FlakeReference("github:LiGoldragon/CriomOS".into()),
+        optional_flake_reference: None,
+        resolved_revision: Some(REVISION.into()),
+        deployment_transport: frozen_transport(),
+        deployment_input_mode: frozen::DeploymentInputMode::Horizon,
+        deployment_output_selector: frozen::DeploymentOutputSelector(frozen::FlakeAttribute(
+            "nixosConfigurations.ouranos".into(),
+        )),
+        activation_backend: frozen::ActivationBackend::NixosSystemdBootV1,
+        optional_nix_builder_spec: None,
+        boot_once_unit: Some("lojix-boot-once-579.service".into()),
+        optional_generation_slot: None,
+        persisted_flake_input_override_vector: vec![frozen::PersistedFlakeInputOverride {
+            string: "horizon".into(),
+            persisted_flake_input_reference: frozen::PersistedFlakeInputReference {
+                url: "path:/var/lib/lojix/generated-inputs/horizon".into(),
+                nix_archive_hash: "sha256-AAAA".into(),
+            },
+        }],
+        deploy_resume_stage: frozen::DeployResumeStage::ActivateGeneration,
+        optional_phase_receipt: None,
+        optional_deploy_submission: Some(frozen_host_submission()),
+    };
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&frozen_job).expect("archive 0.10.6");
+    let earlier_job = rkyv::from_bytes::<earlier::EarlierDeployJob, rkyv::rancor::Error>(&bytes)
+        .expect("the upgrade reads the 0.10.6 row");
+    let upgraded = match current::DeployJob::upgrade_from(earlier_job) {
+        Decision::Ready(upgraded) => upgraded,
+        Decision::Refused(never) => match never {},
+    };
+    let expected = current::DeployJob {
+        deployment_identifier: current::DeploymentIdentifier(579),
+        generation_identifier: current::GenerationIdentifier(578),
+        cluster_name: current::ClusterName("goldragon".into()),
+        node_name: current::NodeName("ouranos".into()),
+        deploy_job_phase: current::DeployJobPhase::Activating,
+        closure_path_option: Some(current::ClosurePath(CLOSURE.into())),
+        source_revision_policy: current::SourceRevisionPolicy::ResolveAndRecord,
+        flake_reference: current::FlakeReference("github:LiGoldragon/CriomOS".into()),
+        flake_reference_option: None,
+        resolved_revision_option: Some(current::ResolvedRevision(REVISION.into())),
+        deployment_transport: transport(),
+        deployment_input_mode: current::DeploymentInputMode::Horizon,
+        deployment_output_selector: current::DeploymentOutputSelector {
+            flake_attribute: current::FlakeAttribute("nixosConfigurations.ouranos".into()),
+        },
+        activation_backend: current::ActivationBackend::NixosSystemdBootV1,
+        nix_builder_spec_option: None,
+        boot_once_unit_option: Some(current::BootOnceUnit("lojix-boot-once-579.service".into())),
+        generation_slot_option: None,
+        persisted_flake_input_override_vector: vec![current::PersistedFlakeInputOverride {
+            flake_input_name: current::FlakeInputName("horizon".into()),
+            persisted_flake_input_reference: current::PersistedFlakeInputReference {
+                flake_input_url: current::FlakeInputUrl(
+                    "path:/var/lib/lojix/generated-inputs/horizon".into(),
+                ),
+                nix_archive_hash: current::NixArchiveHash("sha256-AAAA".into()),
+            },
+        }],
+        deploy_resume_stage: current::DeployResumeStage::ActivateGeneration,
+        phase_receipt_option: None,
+        actualized_deploy_submission_option: Some(contract_host_submission()),
+    };
+    assert_eq!(upgraded, expected);
+    let again = rkyv::to_bytes::<rkyv::rancor::Error>(&upgraded).expect("archive upgraded");
+    assert_eq!(
+        rkyv::from_bytes::<current::DeployJob, rkyv::rancor::Error>(&again)
+            .expect("the upgraded row reads back"),
+        expected
+    );
+    assert!(
+        rkyv::from_bytes::<current::DeployJob, rkyv::rancor::Error>(&bytes).is_err(),
+        "a 0.10.6 row is not read as the current deploy job without its upgrade"
+    );
+}
+
+#[test]
+fn the_configuration_record_archives_as_0_10_6_wrote_it() {
+    use nexus::Configurable as _;
+    for closed in [false, true] {
+        let mut state = nexus::ConfigurationState::from_default(
+            <lojix::NexusConfiguration as lojix::LojixNexusConfigurable>::built_in(),
+        );
+        if closed {
+            state.meta_configure(
+                <lojix::NexusConfiguration as lojix::LojixNexusConfigurable>::built_in(),
+            );
+        }
+        both_ways!(
+            current::NexusConfigurationRecord::from(state.clone()),
+            frozen::NexusConfigurationRecord { state },
+            current::NexusConfigurationRecord,
+            frozen::NexusConfigurationRecord
+        );
+    }
 }

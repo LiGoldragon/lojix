@@ -1,0 +1,59 @@
+; What the Lojix Nexus remembers: one Memory store holding the generations
+; it keeps live and their GC roots, the event log of phase, cache-retention
+; and container events, the deploy jobs still in flight, the test runs, the
+; deployment records, the identifiers the next admission takes, the outbox
+; of phase events and the transition intents behind them, and the Nexus's
+; configuration.
+;
+; A record the contracts already declare is held whole inside a record of
+; Lojix's own: a deployment record, a test run, and a deploy job's
+; submission as the meta contract carries it, its Horizon definition
+; beside it. The configuration record holds the standard Nexus
+; configuration state position for position: the desired configuration and
+; whether the meta Configure has happened, each as the contract names it.
+; It is not nexus's ConfigurationState itself because that type has no
+; Datom form, and this library still compiles its records with one for the
+; offline tools.
+;
+; Every record archives to the bytes lojix 0.10.6 wrote for it, except the
+; deploy job, whose submission moved from Lojix's own copy, with the Horizon
+; definition inside each deployment, to the contract's; its family is
+; upgraded once on open. Table names, family names, schema hashes, keys and
+; the upgrade itself stay hand-written in Rust.
+Memory
+
+[ signal_lojix:[ ActivationBackend ActivationEffect CacheRetentionTransitionEvent ClosurePath
+                 ClusterName DatabaseMarker DeploymentEnvironment DeploymentIdentifier
+                 DeploymentInputMode DeploymentOutputSelector DeploymentPhase
+                 DeploymentPhaseEvent DeploymentRecord DeploymentTerminal DeploymentTransport
+                 EventLogPosition FlakeReference GenerationArtifact GenerationIdentifier
+                 GenerationSlot ImmutableRevision LojixNexusConfiguration
+                 MetaConfigureOccurred NixBuilderSpec NodeName PinLabel SourceRevisionPolicy TestRunRecord TransitionMarker ]
+  meta_signal_lojix:[ ActualizedDeploySubmission ] ]
+
+[ LiveGeneration.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName DeploymentEnvironment GenerationArtifact ActivationEffect GenerationSlot ClosurePath SourceRevisionRecord }
+  SourceRevisionRecord.{ SourceRevisionPolicy RequestedReference.FlakeReference ResolvedReference.FlakeReference ResolvedRevision }
+  ResolvedRevision.String
+  GcRoot.{ GenerationIdentifier ClusterName NodeName GenerationSlot ClosurePath Option<PinLabel> }
+  EventLogEntry.{ EventLogPosition LoggedEvent }
+  LoggedEvent.[ Deployment.DeploymentPhaseEvent CacheRetention.CacheRetentionTransitionEvent Container.ContainerLifecycleRecord ]
+  ContainerLifecycleRecord.{ ClusterName NodeName ContainerName ContainerState EventLogPosition }
+  ContainerName.String
+  ContainerState.[ Starting Started Stopping Stopped Failed ]
+  DeployJob.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName DeployJobPhase Option<ClosurePath> SourceRevisionPolicy FlakeReference Option<FlakeReference> Option<ResolvedRevision> DeploymentTransport DeploymentInputMode DeploymentOutputSelector ActivationBackend Option<NixBuilderSpec> Option<BootOnceUnit> Option<GenerationSlot> Vector<PersistedFlakeInputOverride> DeployResumeStage Option<PhaseReceipt> Option<ActualizedDeploySubmission> }
+  DeployJobPhase.[ Submitted Building Built Copying Activating Activated Failed ]
+  BootOnceUnit.String
+  PersistedFlakeInputOverride.{ FlakeInputName.String PersistedFlakeInputReference }
+  PersistedFlakeInputReference.{ FlakeInputUrl.String NixArchiveHash.String }
+  DeployResumeStage.[ ResolveFlakeAuth MaterializeHorizon RecordBuilding NixEval NixBuild CopyClosure ActivateGeneration RecordGenerationActivated FinishDeployment ]
+  PhaseReceipt.{ EventLogPosition DatabaseMarker }
+  StoredTestRun.{ TestRunRecord }
+  StoredDeploymentRecord.{ DeploymentRecord }
+  IdentifierAllocation.{ NextDeploymentIdentifier.Integer NextGenerationIdentifier.Integer NextEventLogPosition.Integer }
+  DeploymentOutboxRecord.{ DeploymentIdentifier TransitionMarker DeploymentPhaseEvent OutboxDeliveryState OutboxRetryCount }
+  OutboxDeliveryState.[ Pending Dispatched Acknowledged ]
+  OutboxRetryCount.Integer
+  PendingTransitionIntent.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName DeploymentPhase EventLogPosition Option<ImmutableRevision> Option<DeploymentTerminal> TransitionOrdinal Option<TransitionMarker> TransitionIntentState }
+  TransitionOrdinal.Integer
+  TransitionIntentState.[ Pending Bound Appended Acknowledged ]
+  NexusConfigurationRecord.{ LojixNexusConfiguration MetaConfigureOccurred } ]

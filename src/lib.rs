@@ -18,7 +18,7 @@
 use crate::deployment_watch::WatchesDeployments as _;
 use crate::inspected_text::{NixStorePath, StoreItemShape};
 use crate::legacy_store::LegacyStoreConverting as _;
-use crate::quarantine::{OpeningReport as _, RowQuarantine as _};
+use crate::quarantine::{OpeningReport as _, QuarantineRetirement as _};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -43,9 +43,9 @@ use crate::runtime_model::{
     AdmissionMarker, CommitSequence, ContainerLifecycleRecord, DatabaseMarker, DeployJob,
     DeploymentOutboxRecord, DeploymentPhase, DeploymentRecord, DeploymentRequestIdentity,
     DeploymentTerminal, EventLogEntry, GcRoot, IdentifierAllocation, ImmutableRevision,
-    LiveGeneration, OutboxDeliveryState, OutboxRetryCount, PendingTransitionIntent, StateDigest,
-    StoredDeploymentRecord, StoredTestRun, TerminalMarker, TransitionIntentState, TransitionMarker,
-    TransitionOrdinal,
+    LiveGeneration, NexusConfigurationRecord, OutboxDeliveryState, OutboxRetryCount,
+    PendingTransitionIntent, StateDigest, StoredDeploymentRecord, StoredTestRun, TerminalMarker,
+    TransitionIntentState, TransitionMarker, TransitionOrdinal,
 };
 
 /// A named wrapper around exactly one carried value. The wrapper exists to give
@@ -78,12 +78,14 @@ mod inspected_text;
 #[cfg(feature = "tools")]
 pub mod inspection;
 pub mod legacy_store;
+pub mod memory;
 pub mod quarantine;
 #[cfg(feature = "tools")]
 pub mod reconstruction;
 pub mod runtime_flow;
 pub mod runtime_model;
 pub mod schema_runtime;
+pub mod upgrade;
 
 /// An offline lojix tool: a request read from the process's one inline Datom
 /// argument, and the thing it then does. The daemon is not involved and no
@@ -262,7 +264,9 @@ impl LojixRecord for ContainerLifecycleRecord {
 impl LojixRecord for DeployJob {
     const TABLE: &'static str = "deploy-job";
     const FAMILY: &'static str = "DeployJobFamily";
-    const SCHEMA_HASH: [u8; 32] = [5; 32];
+    /// 0.10.6 registered `[5; 32]`; the submission's move to the contract's
+    /// own type is an upgrade, `crate::upgrade`.
+    const SCHEMA_HASH: [u8; 32] = [14; 32];
     const ROLE: &'static str = "in-flight deploy job rows";
 
     fn table(directory: &LojixDirectory) -> TableReference<Self> {
@@ -442,6 +446,26 @@ pub enum Error {
         stage: String,
         #[source]
         source: Box<memory_engine::Error>,
+    },
+
+    #[error(
+        "lojix store at {path:?} holds a {table} row under key {key} that no record of this Lojix reads ({error}); a store is upgraded, never accommodated, so daemon startup stopped before serving requests"
+    )]
+    UndecodableRow {
+        path: PathBuf,
+        table: String,
+        key: String,
+        error: String,
+    },
+
+    #[error(
+        "lojix store at {path:?} could not upgrade its {table} family ({phase}: {cause}); nothing past that phase was written, and daemon startup stopped before serving requests"
+    )]
+    FamilyUpgrade {
+        path: PathBuf,
+        table: String,
+        phase: String,
+        cause: String,
     },
 
     #[error("horizon projection error: {0}")]
@@ -865,17 +889,21 @@ pub struct LojixDirectory {
 /// The one place that says which families a lojix store holds. Registration is
 /// idempotent, so building the directory doubles as the resume.
 trait LojixTables: Sized {
-    fn register(database: &mut MemoryDatabase, path: &Path) -> Result<Self>;
+    /// Register every family, upgrading the deploy-job family when it still
+    /// holds its 0.10.6 layout; answers the directory and, when it upgraded,
+    /// how many rows the upgrade carried.
+    fn register(database: &mut MemoryDatabase, path: &Path) -> Result<(Self, Option<usize>)>;
 }
 
 impl LojixTables for LojixDirectory {
-    fn register(database: &mut MemoryDatabase, path: &Path) -> Result<Self> {
-        Ok(Self {
+    fn register(database: &mut MemoryDatabase, path: &Path) -> Result<(Self, Option<usize>)> {
+        let (deploy_jobs, upgraded_deploy_jobs) = DeployJob::register_upgrading(database, path)?;
+        let directory = Self {
             live_set: LiveGeneration::register(database, path)?,
             gc_roots: GcRoot::register(database, path)?,
             event_log: EventLogEntry::register(database, path)?,
             containers: ContainerLifecycleRecord::register(database, path)?,
-            deploy_jobs: DeployJob::register(database, path)?,
+            deploy_jobs,
             test_runs: StoredTestRun::register(database, path)?,
             deployment_records: StoredDeploymentRecord::register(database, path)?,
             identifier_allocation: IdentifierAllocation::register(database, path)?,
@@ -883,13 +911,60 @@ impl LojixTables for LojixDirectory {
             pending_transition_intents: PendingTransitionIntent::register(database, path)?,
             nexus_configuration: NexusConfigurationRecord::register(database, path)?,
             quarantined_rows: quarantine::QuarantinedRow::register(database, path)?,
-        })
+        };
+        Ok((directory, upgraded_deploy_jobs))
     }
 }
 
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Clone, Debug, PartialEq)]
-pub struct NexusConfigurationRecord {
-    pub state: NexusConfigurationState,
+/// Registering the deploy-job family across its one upgrade.
+trait DeployJobRegistration {
+    fn register_upgrading(
+        database: &mut MemoryDatabase,
+        path: &Path,
+    ) -> Result<(TableReference<DeployJob>, Option<usize>)>;
+}
+
+impl DeployJobRegistration for DeployJob {
+    fn register_upgrading(
+        database: &mut MemoryDatabase,
+        path: &Path,
+    ) -> Result<(TableReference<DeployJob>, Option<usize>)> {
+        use memory_engine::{MemoryUpgrades as _, UpgradeOutcome};
+        let descriptor = Self::descriptor().with_predecessor::<upgrade::EarlierDeployJob>();
+        match database.upgrade_table::<upgrade::EarlierDeployJob, DeployJob>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => Ok((receipt.table(), Some(receipt.rows()))),
+            UpgradeOutcome::AlreadyCurrent(table) => Ok((table, None)),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure) => Err(Error::FamilyUpgrade {
+                path: path.to_path_buf(),
+                table: Self::TABLE.to_string(),
+                phase: format!("{:?}", failure.phase()),
+                cause: failure.cause().to_string(),
+            }),
+        }
+    }
+}
+
+/// The configuration record holds the standard Nexus configuration state
+/// position for position.
+impl From<NexusConfigurationState> for NexusConfigurationRecord {
+    fn from(state: NexusConfigurationState) -> Self {
+        Self {
+            lojix_nexus_configuration: state.desired_configuration,
+            meta_configure_occurred: signal_lojix::MetaConfigureOccurred(
+                state.meta_configure_occurred,
+            ),
+        }
+    }
+}
+
+impl From<NexusConfigurationRecord> for NexusConfigurationState {
+    fn from(record: NexusConfigurationRecord) -> Self {
+        Self {
+            desired_configuration: record.lojix_nexus_configuration,
+            meta_configure_occurred: record.meta_configure_occurred.0,
+        }
+    }
 }
 
 impl FamilyDirectory for LojixDirectory {
@@ -1129,13 +1204,12 @@ pub trait NexusPersistable {
     where
         Self: Sized;
 
-    /// Seed the configuration row when it is absent. Answers true when the
-    /// row was rebuilt because the stored one had been quarantined.
+    /// Seed the configuration row when it is absent.
     fn ensure_nexus_configuration(
         &self,
         default_configuration: NexusConfiguration,
         seed_existing_state: bool,
-    ) -> Result<bool>;
+    ) -> Result<()>;
 
     fn nexus_configuration_state(&self) -> Result<NexusConfigurationState>;
 
@@ -1733,7 +1807,7 @@ impl NexusPersistable for Store {
             stage: "opening memory-engine".to_string(),
             source: Box::new(source),
         })?;
-        let directory = LojixDirectory::register(&mut database, &path)?;
+        let (directory, upgraded_deploy_jobs) = LojixDirectory::register(&mut database, &path)?;
         let mut store = Self {
             database,
             directory,
@@ -1743,11 +1817,12 @@ impl NexusPersistable for Store {
             deployment_watchers: deployment_watch::DeploymentWatchers::default(),
             opening: quarantine::StoreOpening::default(),
         };
-        // Rows the current schema does not read are set aside before anything
-        // reads a family whole, so no such row can refuse the store.
-        store.opening.quarantined_rows = store.quarantine_undecodable_rows()?;
-        store.opening.configuration_rebuilt =
-            store.ensure_nexus_configuration(default_configuration, seed_existing_state)?;
+        store.opening.upgraded_deploy_jobs = upgraded_deploy_jobs;
+        // A row no family reads refuses the store by name before anything
+        // reads a family whole; 0.10.6's set-aside rows are dropped.
+        store.refuse_undecodable_rows()?;
+        store.opening.dropped_quarantined_rows = store.drop_quarantined_rows()?;
+        store.ensure_nexus_configuration(default_configuration, seed_existing_state)?;
         store.ensure_identifier_allocation()?;
         store.resume_compaction()?;
         store.validate_startup_compatibility()?;
@@ -1761,20 +1836,11 @@ impl NexusPersistable for Store {
         &self,
         default_configuration: NexusConfiguration,
         seed_existing_state: bool,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         use nexus::Configurable as _;
 
         match self.records::<NexusConfigurationRecord>()?.as_slice() {
             [] => {
-                // A configuration row set aside because it no longer decodes is
-                // rebuilt from the configuration this Nexus seeds a fresh store
-                // with. The Nexus reads no startup archive, so its built-in
-                // configuration is the one source it has; the set-aside bytes
-                // stay in quarantine for an operator to read.
-                let configuration_quarantined = self
-                    .quarantined_rows()?
-                    .iter()
-                    .any(|row| row.table == NexusConfigurationRecord::TABLE);
                 let legacy_state_exists = !self.records::<LiveGeneration>()?.is_empty()
                     || !self.records::<GcRoot>()?.is_empty()
                     || !self.records::<EventLogEntry>()?.is_empty()
@@ -1785,7 +1851,7 @@ impl NexusPersistable for Store {
                     || !self.records::<IdentifierAllocation>()?.is_empty()
                     || !self.records::<DeploymentOutboxRecord>()?.is_empty()
                     || !self.records::<PendingTransitionIntent>()?.is_empty();
-                if legacy_state_exists && !seed_existing_state && !configuration_quarantined {
+                if legacy_state_exists && !seed_existing_state {
                     return Err(Error::StoreMaintenance(
                         "existing Lojix Memory has no Nexus configuration; migrate its legacy startup archive into a validated copy before opening it"
                             .to_string(),
@@ -1794,13 +1860,13 @@ impl NexusPersistable for Store {
                 default_configuration.validate()?;
                 self.database.assert(Assertion::new(
                     self.directory.nexus_configuration,
-                    NexusConfigurationRecord {
-                        state: NexusConfigurationState::from_default(default_configuration),
-                    },
+                    NexusConfigurationRecord::from(NexusConfigurationState::from_default(
+                        default_configuration,
+                    )),
                 ))?;
-                Ok(configuration_quarantined)
+                Ok(())
             }
-            [_] => Ok(false),
+            [_] => Ok(()),
             _ => Err(Error::StoreMaintenance(
                 "nexus configuration table contains more than one row".to_string(),
             )),
@@ -1809,7 +1875,7 @@ impl NexusPersistable for Store {
 
     fn nexus_configuration_state(&self) -> Result<NexusConfigurationState> {
         match self.records::<NexusConfigurationRecord>()?.as_slice() {
-            [record] => Ok(record.state.clone()),
+            [record] => Ok(NexusConfigurationState::from(record.clone())),
             [] => Err(Error::StoreMaintenance(
                 "nexus configuration row is missing after store initialization".to_string(),
             )),
@@ -1832,9 +1898,7 @@ impl NexusPersistable for Store {
             .map_err(|_| Error::OrdinaryConfigureClosed)?;
         self.database.mutate(Mutation::new(
             self.directory.nexus_configuration,
-            NexusConfigurationRecord {
-                state: state.clone(),
-            },
+            NexusConfigurationRecord::from(state.clone()),
         ))?;
         Ok(state)
     }
@@ -1847,9 +1911,7 @@ impl NexusPersistable for Store {
         state.meta_configure(configuration);
         self.database.mutate(Mutation::new(
             self.directory.nexus_configuration,
-            NexusConfigurationRecord {
-                state: state.clone(),
-            },
+            NexusConfigurationRecord::from(state.clone()),
         ))?;
         Ok(state)
     }
@@ -1861,9 +1923,7 @@ impl NexusPersistable for Store {
         state.meta_reverse();
         self.database.mutate(Mutation::new(
             self.directory.nexus_configuration,
-            NexusConfigurationRecord {
-                state: state.clone(),
-            },
+            NexusConfigurationRecord::from(state.clone()),
         ))?;
         Ok(state)
     }
@@ -1912,9 +1972,15 @@ impl IdentifierAllocating for Store {
         self.database.assert(Assertion::new(
             self.directory.identifier_allocation,
             IdentifierAllocation {
-                next_deployment_identifier,
-                next_generation_identifier,
-                next_event_log_position,
+                next_deployment_identifier: crate::runtime_model::NextDeploymentIdentifier(
+                    next_deployment_identifier,
+                ),
+                next_generation_identifier: crate::runtime_model::NextGenerationIdentifier(
+                    next_generation_identifier,
+                ),
+                next_event_log_position: crate::runtime_model::NextEventLogPosition(
+                    next_event_log_position,
+                ),
             },
         ))?;
         Ok(())
@@ -1934,28 +2000,34 @@ impl IdentifierAllocating for Store {
     }
 
     fn next_generation_identifier(&self) -> Result<i64> {
-        Ok(self.identifier_allocation()?.next_generation_identifier)
+        Ok(self.identifier_allocation()?.next_generation_identifier.0)
     }
 
     fn next_deployment_identifier(&self) -> Result<i64> {
-        Ok(self.identifier_allocation()?.next_deployment_identifier)
+        Ok(self.identifier_allocation()?.next_deployment_identifier.0)
     }
 
     fn next_event_log_position(&self) -> Result<i64> {
-        Ok(self.identifier_allocation()?.next_event_log_position)
+        Ok(self.identifier_allocation()?.next_event_log_position.0)
     }
 
     fn allocate_event_log_position(&self) -> Result<i64> {
         let _write = self.lock_write()?;
         let allocation = self.identifier_allocation()?;
-        let position = allocation.next_event_log_position;
+        let position = allocation.next_event_log_position.0;
         self.database
             .commit_atomic(self.database.begin_atomic_commit().mutate(
                 self.directory.identifier_allocation,
                 IdentifierAllocation {
-                    next_deployment_identifier: allocation.next_deployment_identifier,
-                    next_generation_identifier: allocation.next_generation_identifier,
-                    next_event_log_position: (position).next_identifier()?,
+                    next_deployment_identifier: crate::runtime_model::NextDeploymentIdentifier(
+                        allocation.next_deployment_identifier.0,
+                    ),
+                    next_generation_identifier: crate::runtime_model::NextGenerationIdentifier(
+                        allocation.next_generation_identifier.0,
+                    ),
+                    next_event_log_position: crate::runtime_model::NextEventLogPosition(
+                        (position).next_identifier()?,
+                    ),
                 },
             ))?;
         Ok(position)
@@ -1965,7 +2037,7 @@ impl IdentifierAllocating for Store {
         Ok(self
             .records::<StoredTestRun>()?
             .iter()
-            .map(|run| *run.test_run_identifier.payload())
+            .map(|run| *run.test_run_record.test_run_identifier.payload())
             .max()
             .map(|maximum| maximum + 1)
             .unwrap_or(1))
@@ -2483,13 +2555,19 @@ impl EventHistory for Store {
                 .database
                 .begin_atomic_commit()
                 .assert(self.directory.event_log, entry);
-            if position >= allocation.next_event_log_position {
+            if position >= allocation.next_event_log_position.0 {
                 commit = commit.mutate(
                     self.directory.identifier_allocation,
                     IdentifierAllocation {
-                        next_deployment_identifier: allocation.next_deployment_identifier,
-                        next_generation_identifier: allocation.next_generation_identifier,
-                        next_event_log_position: (position).next_identifier()?,
+                        next_deployment_identifier: crate::runtime_model::NextDeploymentIdentifier(
+                            allocation.next_deployment_identifier.0,
+                        ),
+                        next_generation_identifier: crate::runtime_model::NextGenerationIdentifier(
+                            allocation.next_generation_identifier.0,
+                        ),
+                        next_event_log_position: crate::runtime_model::NextEventLogPosition(
+                            (position).next_identifier()?,
+                        ),
                     },
                 );
             }
@@ -2607,10 +2685,10 @@ impl DeploymentLedger for Store {
         let allocation = self.identifier_allocation()?;
         let record = DeploymentRecord {
             deployment_identifier: crate::runtime_model::DeploymentIdentifier::new(
-                allocation.next_deployment_identifier,
+                allocation.next_deployment_identifier.0,
             ),
             generation_identifier: crate::runtime_model::GenerationIdentifier::new(
-                allocation.next_generation_identifier,
+                allocation.next_generation_identifier.0,
             ),
             deployment_request_identity,
             admission_marker_option: None,
@@ -2625,7 +2703,7 @@ impl DeploymentLedger for Store {
             node_name: record.deployment_request_identity.node_name.clone(),
             deployment_phase: crate::runtime_model::DeploymentPhase::Submitted,
             event_log_position: crate::runtime_model::EventLogPosition::new(
-                allocation.next_event_log_position,
+                allocation.next_event_log_position.0,
             ),
             immutable_revision_option: record
                 .deployment_request_identity
@@ -2654,12 +2732,15 @@ impl DeploymentLedger for Store {
                 .mutate(
                     self.directory.identifier_allocation,
                     IdentifierAllocation {
-                        next_deployment_identifier: (allocation.next_deployment_identifier)
-                            .next_identifier()?,
-                        next_generation_identifier: (allocation.next_generation_identifier)
-                            .next_identifier()?,
-                        next_event_log_position: (allocation.next_event_log_position)
-                            .next_identifier()?,
+                        next_deployment_identifier: crate::runtime_model::NextDeploymentIdentifier(
+                            (allocation.next_deployment_identifier.0).next_identifier()?,
+                        ),
+                        next_generation_identifier: crate::runtime_model::NextGenerationIdentifier(
+                            (allocation.next_generation_identifier.0).next_identifier()?,
+                        ),
+                        next_event_log_position: crate::runtime_model::NextEventLogPosition(
+                            (allocation.next_event_log_position.0).next_identifier()?,
+                        ),
                     },
                 )
                 .assert(
@@ -2741,7 +2822,7 @@ impl DeploymentLedger for Store {
             node_name: record.deployment_request_identity.node_name.clone(),
             deployment_phase,
             event_log_position: crate::runtime_model::EventLogPosition::new(
-                allocation.next_event_log_position,
+                allocation.next_event_log_position.0,
             ),
             immutable_revision_option: record
                 .deployment_request_identity
@@ -2758,10 +2839,15 @@ impl DeploymentLedger for Store {
             .mutate(
                 self.directory.identifier_allocation,
                 IdentifierAllocation {
-                    next_deployment_identifier: allocation.next_deployment_identifier,
-                    next_generation_identifier: allocation.next_generation_identifier,
-                    next_event_log_position: (allocation.next_event_log_position)
-                        .next_identifier()?,
+                    next_deployment_identifier: crate::runtime_model::NextDeploymentIdentifier(
+                        allocation.next_deployment_identifier.0,
+                    ),
+                    next_generation_identifier: crate::runtime_model::NextGenerationIdentifier(
+                        allocation.next_generation_identifier.0,
+                    ),
+                    next_event_log_position: crate::runtime_model::NextEventLogPosition(
+                        (allocation.next_event_log_position.0).next_identifier()?,
+                    ),
                 },
             )
             .mutate(
@@ -2814,10 +2900,10 @@ impl DeploymentLedger for Store {
         let allocation = self.identifier_allocation()?;
         let record = DeploymentRecord {
             deployment_identifier: crate::runtime_model::DeploymentIdentifier::new(
-                allocation.next_deployment_identifier,
+                allocation.next_deployment_identifier.0,
             ),
             generation_identifier: crate::runtime_model::GenerationIdentifier::new(
-                allocation.next_generation_identifier,
+                allocation.next_generation_identifier.0,
             ),
             deployment_request_identity,
             admission_marker_option: None,
@@ -2832,7 +2918,7 @@ impl DeploymentLedger for Store {
             node_name: record.deployment_request_identity.node_name.clone(),
             deployment_phase: deployment_terminal.deployment_phase(),
             event_log_position: crate::runtime_model::EventLogPosition::new(
-                allocation.next_event_log_position,
+                allocation.next_event_log_position.0,
             ),
             immutable_revision_option: record
                 .deployment_request_identity
@@ -2849,12 +2935,15 @@ impl DeploymentLedger for Store {
                 .mutate(
                     self.directory.identifier_allocation,
                     IdentifierAllocation {
-                        next_deployment_identifier: (allocation.next_deployment_identifier)
-                            .next_identifier()?,
-                        next_generation_identifier: (allocation.next_generation_identifier)
-                            .next_identifier()?,
-                        next_event_log_position: (allocation.next_event_log_position)
-                            .next_identifier()?,
+                        next_deployment_identifier: crate::runtime_model::NextDeploymentIdentifier(
+                            (allocation.next_deployment_identifier.0).next_identifier()?,
+                        ),
+                        next_generation_identifier: crate::runtime_model::NextGenerationIdentifier(
+                            (allocation.next_generation_identifier.0).next_identifier()?,
+                        ),
+                        next_event_log_position: crate::runtime_model::NextEventLogPosition(
+                            (allocation.next_event_log_position.0).next_identifier()?,
+                        ),
                     },
                 )
                 .assert(
@@ -3221,13 +3310,21 @@ impl GenerationLedger for Store {
                 .mutate(
                     self.directory.identifier_allocation,
                     IdentifierAllocation {
-                        next_deployment_identifier: allocation
-                            .next_deployment_identifier
-                            .max((deployment_identifier).next_identifier()?),
-                        next_generation_identifier: allocation
-                            .next_generation_identifier
-                            .max((generation_identifier).next_identifier()?),
-                        next_event_log_position: allocation.next_event_log_position,
+                        next_deployment_identifier: crate::runtime_model::NextDeploymentIdentifier(
+                            allocation
+                                .next_deployment_identifier
+                                .0
+                                .max((deployment_identifier).next_identifier()?),
+                        ),
+                        next_generation_identifier: crate::runtime_model::NextGenerationIdentifier(
+                            allocation
+                                .next_generation_identifier
+                                .0
+                                .max((generation_identifier).next_identifier()?),
+                        ),
+                        next_event_log_position: crate::runtime_model::NextEventLogPosition(
+                            allocation.next_event_log_position.0,
+                        ),
                     },
                 ),
         )?;
@@ -3275,13 +3372,21 @@ impl GenerationLedger for Store {
             .mutate(
                 self.directory.identifier_allocation,
                 IdentifierAllocation {
-                    next_deployment_identifier: allocation
-                        .next_deployment_identifier
-                        .max((deployment_identifier).next_identifier()?),
-                    next_generation_identifier: allocation
-                        .next_generation_identifier
-                        .max((generation_identifier).next_identifier()?),
-                    next_event_log_position: allocation.next_event_log_position,
+                    next_deployment_identifier: crate::runtime_model::NextDeploymentIdentifier(
+                        allocation
+                            .next_deployment_identifier
+                            .0
+                            .max((deployment_identifier).next_identifier()?),
+                    ),
+                    next_generation_identifier: crate::runtime_model::NextGenerationIdentifier(
+                        allocation
+                            .next_generation_identifier
+                            .0
+                            .max((generation_identifier).next_identifier()?),
+                    ),
+                    next_event_log_position: crate::runtime_model::NextEventLogPosition(
+                        allocation.next_event_log_position.0,
+                    ),
                 },
             );
         for mut existing in self.records::<LiveGeneration>()? {
@@ -3329,11 +3434,11 @@ impl GenerationLedger for Store {
 impl TestRunLedger for Store {
     fn upsert_test_run(&self, run: StoredTestRun) -> Result<()> {
         let _write = self.lock_write()?;
-        let key = *run.test_run_identifier.payload();
+        let key = *run.test_run_record.test_run_identifier.payload();
         let present = self
             .records::<StoredTestRun>()?
             .iter()
-            .any(|existing| *existing.test_run_identifier.payload() == key);
+            .any(|existing| *existing.test_run_record.test_run_identifier.payload() == key);
         if present {
             self.database
                 .mutate(Mutation::new(self.directory.test_runs, run))?;
@@ -3436,7 +3541,12 @@ impl EngineRecord for IdentifierAllocation {
 
 impl EngineRecord for StoredTestRun {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.test_run_identifier.payload().to_string())
+        RecordKey::new(
+            self.test_run_record
+                .test_run_identifier
+                .payload()
+                .to_string(),
+        )
     }
 }
 
@@ -3521,7 +3631,7 @@ mod transition_intent_tests {
                 "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             ),
             flake_reference_option: None,
-            resolved_revision: None,
+            resolved_revision_option: None,
             deployment_transport: ordinary::DeploymentTransport {
                 nix_store_uri: ordinary::NixStoreUri::new("ssh-ng://fixture-copy.invalid".into()),
                 ssh_destination: ordinary::SshDestination::new(
@@ -3534,12 +3644,12 @@ mod transition_intent_tests {
             ),
             activation_backend: ordinary::ActivationBackend::NixosSystemdBootV1,
             nix_builder_spec_option: None,
-            boot_once_unit: None,
+            boot_once_unit_option: None,
             generation_slot_option: None,
             persisted_flake_input_override_vector: Vec::new(),
             deploy_resume_stage: ordinary::DeployResumeStage::ResolveFlakeAuth,
             phase_receipt_option: None,
-            deploy_submission_option: None,
+            actualized_deploy_submission_option: None,
         }
     }
 

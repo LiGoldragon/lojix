@@ -166,11 +166,11 @@ fn zero_argument_daemon_persists_lifecycle_and_uses_desired_sockets_on_restart()
 }
 
 /// The Nexus over a live-shaped store whose deploy-job row and configuration
-/// row were archived in a layout the current schema cannot read: it starts,
-/// sets both aside, logs each by table and key, rebuilds its configuration from
-/// its built-in one, and answers a Query.
+/// row were archived in a layout no record of it reads: a store is upgraded,
+/// never accommodated, so it refuses to start, names the first such row by
+/// table and key, binds no socket, and leaves the store as it was.
 #[test]
-fn nexus_over_undecodable_rows_quarantines_them_and_answers_a_query() {
+fn nexus_over_undecodable_rows_refuses_to_start_and_names_the_row() {
     let directory = tempfile::tempdir().expect("temporary isolation roots");
     let runtime_root = directory.path().join("runtime");
     let state_root = directory.path().join("state");
@@ -200,45 +200,29 @@ fn nexus_over_undecodable_rows_quarantines_them_and_answers_a_query() {
     }
     transaction.commit().expect("commit undecodable rows");
     drop(database);
+    let before = fs::read(&store).expect("read the store before startup");
 
-    let mut daemon = start_daemon(&runtime_root, &state_root);
-    let ordinary_socket = runtime_root.join("lojix").join("ordinary.sock");
+    let output = Command::new(env!("CARGO_BIN_EXE_lojix-nexus"))
+        .env("XDG_RUNTIME_DIR", &runtime_root)
+        .env("XDG_STATE_HOME", &state_root)
+        .output()
+        .expect("run lojix-nexus over undecodable rows");
+    assert!(!output.status.success(), "{}", output_text(&output));
+    let text = output_text(&output);
+    assert!(
+        text.contains("holds a deploy-job row under key 19"),
+        "the refusal names the row:\n{text}"
+    );
+    assert!(
+        !text.contains(<lojix::NexusConfiguration as NexusReadiness>::READY),
+        "{text}"
+    );
+    assert!(!runtime_root.join("lojix").join("ordinary.sock").exists());
     assert_eq!(
-        announced_readiness(&mut daemon, "start over undecodable rows"),
-        vec![
-            ordinary_socket.display().to_string(),
-            runtime_root
-                .join("lojix")
-                .join("meta.sock")
-                .display()
-                .to_string(),
-        ],
-        "the rebuilt configuration is the Nexus's built-in one"
+        fs::read(&store).expect("read the store after the refused start"),
+        before,
+        "a refused start leaves the store byte for byte"
     );
-    let reply = ordinary_exchange(
-        &ordinary_socket,
-        signal_lojix::Input::Query(signal_lojix::Selection::ByNode(
-            signal_lojix::NodeSelector {
-                cluster_name: signal_lojix::ClusterName(text("fixture-cluster")),
-                node_name: signal_lojix::NodeName(text("fixture-node")),
-                generation_artifact_option: None,
-            },
-        )),
-    );
-    assert!(matches!(reply, signal_lojix::Output::Queried(_)));
-    let output = stopped_daemon_output(daemon, "daemon over undecodable rows");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    for line in [
-        "lojix-nexus: RowQuarantined.{ deploy-job 19 «",
-        "lojix-nexus: RowQuarantined.{ nexus-configuration desired «",
-        "lojix-nexus: NexusConfigurationRebuilt.{ nexus-configuration BuiltIn }",
-    ] {
-        assert_eq!(
-            stderr.matches(line).count(),
-            1,
-            "expected exactly one {line:?} in the Nexus log:\n{stderr}"
-        );
-    }
 }
 
 fn configuration(

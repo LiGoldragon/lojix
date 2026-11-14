@@ -746,7 +746,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lojix"
-version = "0.10.7"
+version = "0.11.0"
 dependencies = [
  "datom-codec 0.32.3",
  "ethos-zero 29.0.0",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "lojix-client"
-version = "0.10.7"
+version = "0.11.0"
 dependencies = [
  "datom-codec 0.32.3",
  "lojix",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "lojix-nexus"
-version = "0.10.7"
+version = "0.11.0"
 dependencies = [
  "datom-codec 0.32.3",
  "horizon-lib",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "lojix-offline-tools"
-version = "0.10.7"
+version = "0.11.0"
 dependencies = [
  "datom-codec 0.32.3",
  "horizon-lib",
@@ -853,7 +853,7 @@ dependencies = [
 
 [[package]]
 name = "meta-lojix-client"
-version = "0.10.7"
+version = "0.11.0"
 dependencies = [
  "datom-codec 0.32.3",
  "horizon-lib",

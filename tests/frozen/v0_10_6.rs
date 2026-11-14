@@ -509,3 +509,7 @@ pub struct StoredTestRun {
     pub test_outcome: TestOutcome,
     pub optional_closure_path: Option<ClosurePath>,
 }
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
+pub struct NexusConfigurationRecord {
+    pub state: nexus::ConfigurationState<signal_lojix::LojixNexusConfiguration>,
+}

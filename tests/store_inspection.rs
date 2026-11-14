@@ -35,11 +35,15 @@ fn activation(generation_identifier: i64) -> (LiveGeneration, GcRoot) {
             closure_path: closure.clone(),
             source_revision_record: ordinary::SourceRevisionRecord {
                 source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
-                requested_ref: ordinary::FlakeReference::new("github:owner/repo/main".into()),
-                resolved_ref: ordinary::FlakeReference::new(
+                requested_reference: ordinary::RequestedReference(ordinary::FlakeReference::new(
+                    "github:owner/repo/main".into(),
+                )),
+                resolved_reference: ordinary::ResolvedReference(ordinary::FlakeReference::new(
                     "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                )),
+                resolved_revision: ordinary::ResolvedRevision(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
                 ),
-                string: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             },
         },
         GcRoot {

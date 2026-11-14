@@ -1,30 +1,28 @@
-//! Rows that no longer decode under the current schema are moved aside when
-//! the store opens, never served and never allowed to stop the Nexus.
+//! The retired quarantine, and the refusal that replaces it.
 //!
-//! A schema change in a type a stored row carries — a `HorizonDefinition`
-//! inside a deploy-job submission or the Nexus configuration's test defaults —
-//! leaves rows archived in the earlier layout. Reading such a row as the
-//! current type fails, and before this module one such row refused the whole
-//! store at startup. Now each row of every family is read by itself; a row
-//! that decodes stays where it is, and any other row is moved, in one atomic
-//! commit with its retraction, into the `quarantined-row` family, which keeps
-//! its table, its stored key, its original archive bytes and the decode error.
-//! Nothing carries an earlier layout forward: a quarantined row is kept only
-//! as evidence, and the Nexus serves what remains.
+//! Lojix 0.10.6 moved a row it could not decode into the `quarantined-row`
+//! family, keeping its bytes and its decode error, and served what remained.
+//! Memory is upgraded, never accommodated: a layout change carries its
+//! upgrade, so nothing is set aside any more. A row that no family reads
+//! refuses the store, naming its table, its key and why it did not decode.
+//!
+//! The `quarantined-row` family keeps its 0.10.6 identity, so the store
+//! stays one 0.10.6 opens, and every open empties it in one commit,
+//! reporting each row it drops as `QuarantinedRowDropped.{ <table> <key>
+//! «<error>» }`. Its record is the frozen 0.10.6 layout, hand-written,
+//! because it holds raw bytes no Ethos type carries.
 
-use memory_engine::{EngineRecord, QueryPlan, RecordKey, TableName, TableReference};
+use memory_engine::{EngineRecord, QueryPlan, RecordKey, TableReference};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use crate::runtime_model::{
     ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, EventLogEntry, GcRoot,
-    IdentifierAllocation, LiveGeneration, PendingTransitionIntent, StoredDeploymentRecord,
-    StoredTestRun,
+    IdentifierAllocation, LiveGeneration, NexusConfigurationRecord, PendingTransitionIntent,
+    StoredDeploymentRecord, StoredTestRun,
 };
-use crate::{LojixDirectory, LojixRecord, NexusConfigurationRecord, Result, Store};
+use crate::{Error, LojixDirectory, LojixRecord, Result, Store};
 
-/// One stored row moved out of its family because it did not decode under the
-/// current schema. It is evidence, not state: nothing reads it back as the
-/// record it once was.
+/// One row 0.10.6 set aside because it did not decode, as 0.10.6 wrote it.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct QuarantinedRow {
     /// The family table the row was found in, such as `deploy-job`.
@@ -35,7 +33,7 @@ pub struct QuarantinedRow {
     pub quarantine_number: u64,
     /// The row's original archive bytes, unchanged.
     pub archive: Vec<u8>,
-    /// Why the current schema did not read it.
+    /// Why 0.10.6 did not read it.
     pub decode_error: String,
 }
 
@@ -52,38 +50,31 @@ impl LojixRecord for QuarantinedRow {
     const TABLE: &'static str = "quarantined-row";
     const FAMILY: &'static str = "QuarantinedRowFamily";
     const SCHEMA_HASH: [u8; 32] = [13; 32];
-    const ROLE: &'static str = "rows set aside because they no longer decode";
+    const ROLE: &'static str = "rows 0.10.6 set aside, dropped at the next open";
 
     fn table(directory: &LojixDirectory) -> TableReference<Self> {
         directory.quarantined_rows
     }
 }
 
-/// The line the Nexus logs for each row it set aside while opening.
+/// The line the Nexus logs for each set-aside row its open dropped.
 impl std::fmt::Display for QuarantinedRow {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "RowQuarantined.{{ {} {} «{}» }}",
+            "QuarantinedRowDropped.{{ {} {} «{}» }}",
             self.table, self.key, self.decode_error
         )
     }
 }
 
-/// A family row named to the engine only so that a row no schema reads can be
-/// retracted. Its archive is empty, so it checks against any bytes; it is
-/// never asserted and never read for content. An exception to typed rows,
-/// taken only for moving such a row aside.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct UnreadRow;
-
-/// What opening a store did beyond resuming it: the rows it set aside, and
-/// whether it had to rebuild the Nexus configuration row because the stored
-/// one was among them.
+/// What opening a store did beyond resuming it: the deploy-job rows it
+/// upgraded, when the family was still in its 0.10.6 layout, and the
+/// set-aside rows it dropped.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoreOpening {
-    pub quarantined_rows: Vec<QuarantinedRow>,
-    pub configuration_rebuilt: bool,
+    pub upgraded_deploy_jobs: Option<usize>,
+    pub dropped_quarantined_rows: Vec<QuarantinedRow>,
 }
 
 /// What the open that produced a store did beyond resuming it.
@@ -105,29 +96,34 @@ pub trait OpeningReport {
 impl OpeningReport for StoreOpening {
     fn report_lines(&self) -> Vec<String> {
         let mut lines: Vec<String> = self
-            .quarantined_rows
+            .upgraded_deploy_jobs
             .iter()
-            .map(ToString::to_string)
+            .map(|rows| format!("FamilyUpgraded.{{ {} {rows} }}", DeployJob::TABLE))
             .collect();
-        if self.configuration_rebuilt {
-            lines.push(format!(
-                "NexusConfigurationRebuilt.{{ {} BuiltIn }}",
-                NexusConfigurationRecord::TABLE
-            ));
-        }
+        lines.extend(
+            self.dropped_quarantined_rows
+                .iter()
+                .map(ToString::to_string),
+        );
         lines
     }
 }
 
-/// Setting aside, at open, every stored row the current schema does not read.
-pub trait RowQuarantine {
-    /// Read every row of every family by itself and move each one that does
-    /// not decode into the quarantine family. Answers with the rows this call
-    /// moved; a store with none answers empty and writes nothing.
-    fn quarantine_undecodable_rows(&self) -> Result<Vec<QuarantinedRow>>;
+/// Emptying the retired quarantine and refusing what no family reads.
+pub trait QuarantineRetirement {
+    /// Retract every row of the quarantine family in one commit, answering
+    /// the rows dropped; a store with none answers empty and writes nothing.
+    fn drop_quarantined_rows(&self) -> Result<Vec<QuarantinedRow>>;
+
+    /// Every set-aside row the family still holds.
+    fn quarantined_rows(&self) -> Result<Vec<QuarantinedRow>>;
+
+    /// Read every row of every family by itself; the first that does not
+    /// decode refuses the store, named by its table and key.
+    fn refuse_undecodable_rows(&self) -> Result<()>;
 
     /// The same, for one family.
-    fn quarantine_undecodable<Record: LojixRecord>(&self) -> Result<Vec<QuarantinedRow>>
+    fn refuse_undecodable<Record: LojixRecord>(&self) -> Result<()>
     where
         Record::Archived: RkyvDeserialize<Record, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
             + for<'validation> rkyv::bytecheck::CheckBytes<
@@ -141,33 +137,50 @@ pub trait RowQuarantine {
             >;
 
     /// Every row of one table as its stored key and archive bytes, read
-    /// through the engine's read-only storage reader. Reading the archive
-    /// undecoded is an exception taken only here: it is how a row that no
-    /// schema reads is found and kept whole.
+    /// through the engine's read-only storage reader, so a row no record
+    /// reads is still found and named.
     fn stored_archives(&self, table: &'static str) -> Result<Vec<(String, Vec<u8>)>>;
-
-    /// Every row set aside so far, by this open and earlier ones.
-    fn quarantined_rows(&self) -> Result<Vec<QuarantinedRow>>;
 }
 
-impl RowQuarantine for Store {
-    fn quarantine_undecodable_rows(&self) -> Result<Vec<QuarantinedRow>> {
-        let mut moved = Vec::new();
-        moved.extend(self.quarantine_undecodable::<LiveGeneration>()?);
-        moved.extend(self.quarantine_undecodable::<GcRoot>()?);
-        moved.extend(self.quarantine_undecodable::<EventLogEntry>()?);
-        moved.extend(self.quarantine_undecodable::<ContainerLifecycleRecord>()?);
-        moved.extend(self.quarantine_undecodable::<DeployJob>()?);
-        moved.extend(self.quarantine_undecodable::<StoredTestRun>()?);
-        moved.extend(self.quarantine_undecodable::<StoredDeploymentRecord>()?);
-        moved.extend(self.quarantine_undecodable::<IdentifierAllocation>()?);
-        moved.extend(self.quarantine_undecodable::<DeploymentOutboxRecord>()?);
-        moved.extend(self.quarantine_undecodable::<PendingTransitionIntent>()?);
-        moved.extend(self.quarantine_undecodable::<NexusConfigurationRecord>()?);
-        Ok(moved)
+impl QuarantineRetirement for Store {
+    fn drop_quarantined_rows(&self) -> Result<Vec<QuarantinedRow>> {
+        let rows = self.quarantined_rows()?;
+        if rows.is_empty() {
+            return Ok(rows);
+        }
+        let commit = rows
+            .iter()
+            .fold(self.database.begin_atomic_commit(), |commit, row| {
+                commit.retract(self.directory.quarantined_rows, row.record_key())
+            });
+        self.database.commit_atomic(commit)?;
+        Ok(rows)
     }
 
-    fn quarantine_undecodable<Record: LojixRecord>(&self) -> Result<Vec<QuarantinedRow>>
+    fn quarantined_rows(&self) -> Result<Vec<QuarantinedRow>> {
+        Ok(self
+            .database
+            .match_records(QueryPlan::all(self.directory.quarantined_rows))?
+            .records()
+            .to_vec())
+    }
+
+    fn refuse_undecodable_rows(&self) -> Result<()> {
+        self.refuse_undecodable::<LiveGeneration>()?;
+        self.refuse_undecodable::<GcRoot>()?;
+        self.refuse_undecodable::<EventLogEntry>()?;
+        self.refuse_undecodable::<ContainerLifecycleRecord>()?;
+        self.refuse_undecodable::<DeployJob>()?;
+        self.refuse_undecodable::<StoredTestRun>()?;
+        self.refuse_undecodable::<StoredDeploymentRecord>()?;
+        self.refuse_undecodable::<IdentifierAllocation>()?;
+        self.refuse_undecodable::<DeploymentOutboxRecord>()?;
+        self.refuse_undecodable::<PendingTransitionIntent>()?;
+        self.refuse_undecodable::<NexusConfigurationRecord>()?;
+        self.refuse_undecodable::<QuarantinedRow>()
+    }
+
+    fn refuse_undecodable<Record: LojixRecord>(&self) -> Result<()>
     where
         Record::Archived: RkyvDeserialize<Record, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
             + for<'validation> rkyv::bytecheck::CheckBytes<
@@ -180,35 +193,17 @@ impl RowQuarantine for Store {
                 >,
             >,
     {
-        let mut moved = Vec::new();
         for (key, archive) in self.stored_archives(Record::TABLE)? {
-            let Err(decode_error) = rkyv::from_bytes::<Record, rkyv::rancor::Error>(&archive)
-            else {
-                continue;
-            };
-            let quarantine_number = self
-                .quarantined_rows()?
-                .iter()
-                .filter(|row| row.table == Record::TABLE && row.key == key)
-                .count() as u64
-                + 1;
-            let row = QuarantinedRow {
-                table: Record::TABLE.to_string(),
-                key: key.clone(),
-                quarantine_number,
-                archive,
-                decode_error: decode_error.to_string(),
-            };
-            let unread = TableReference::<UnreadRow>::new(TableName::new(Record::TABLE));
-            self.database.commit_atomic(
-                self.database
-                    .begin_atomic_commit()
-                    .retract(unread, RecordKey::new(key))
-                    .assert(self.directory.quarantined_rows, row.clone()),
-            )?;
-            moved.push(row);
+            if let Err(error) = rkyv::from_bytes::<Record, rkyv::rancor::Error>(&archive) {
+                return Err(Error::UndecodableRow {
+                    path: self.path.clone(),
+                    table: Record::TABLE.to_string(),
+                    key,
+                    error: error.to_string(),
+                });
+            }
         }
-        Ok(moved)
+        Ok(())
     }
 
     fn stored_archives(&self, table: &'static str) -> Result<Vec<(String, Vec<u8>)>> {
@@ -230,13 +225,5 @@ impl RowQuarantine for Store {
                 Ok(rows)
             })
             .map_err(memory_engine::Error::from)?)
-    }
-
-    fn quarantined_rows(&self) -> Result<Vec<QuarantinedRow>> {
-        Ok(self
-            .database
-            .match_records(QueryPlan::all(self.directory.quarantined_rows))?
-            .records()
-            .to_vec())
     }
 }

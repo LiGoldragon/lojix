@@ -274,14 +274,25 @@ async fn home_transport_is_local_build_then_copy_activate_and_profile_with_exact
         ordinary::SourceRevisionPolicy::RequireImmutable
     );
     assert_eq!(
-        generation.source_revision_record.requested_ref.payload(),
+        generation
+            .source_revision_record
+            .requested_reference
+            .0
+            .payload(),
         FLAKE
     );
     assert_eq!(
-        generation.source_revision_record.resolved_ref.payload(),
+        generation
+            .source_revision_record
+            .resolved_reference
+            .0
+            .payload(),
         FLAKE
     );
-    assert_eq!(generation.source_revision_record.string, REVISION);
+    assert_eq!(
+        generation.source_revision_record.resolved_revision.0,
+        REVISION
+    );
     assert_eq!(
         generation.generation_slot,
         ordinary::GenerationSlot::Current

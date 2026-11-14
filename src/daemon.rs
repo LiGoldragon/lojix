@@ -1171,7 +1171,9 @@ mod tests {
             flake_reference_option: Some(ordinary::FlakeReference::new(format!(
                 "github:LiGoldragon/CriomOS?rev={REVISION}"
             ))),
-            resolved_revision: Some(REVISION.to_string()),
+            resolved_revision_option: Some(crate::runtime_model::ResolvedRevision(
+                REVISION.to_string(),
+            )),
             deployment_transport: memory::DeploymentTransport {
                 nix_store_uri: memory::NixStoreUri::new("ssh-ng://fixture-copy.invalid".into()),
                 ssh_destination: memory::SshDestination::new("root@fixture-daemon.invalid".into()),
@@ -1184,12 +1186,14 @@ mod tests {
             ),
             activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
             nix_builder_spec_option: None,
-            boot_once_unit: None,
+            boot_once_unit_option: None,
             generation_slot_option: Some(ordinary::GenerationSlot::Current),
             persisted_flake_input_override_vector: Vec::new(),
             deploy_resume_stage: memory::DeployResumeStage::ResolveFlakeAuth,
             phase_receipt_option: None,
-            deploy_submission_option: Some(self_switch_submission()),
+            actualized_deploy_submission_option: Some(
+                meta_signal_lojix::ActualizedDeploySubmission::from(self_switch_submission()),
+            ),
         }
     }
 

@@ -1,11 +1,12 @@
-//! The three store fixtures read row for row as they were written.
+//! The store fixtures read row for row as they were written.
 //!
 //! Every row of every family is read from the file undecoded, decoded as the
-//! family's current record, and archived again; the new archive must be the
-//! stored bytes exactly. A row that reads back to its own bytes was read
-//! whole, with nothing dropped and nothing moved. Each fixture is checked as
-//! it lies in the repository and again after the Nexus's own open path has
-//! run over a copy of it.
+//! family's current record (a deploy job also as the 0.10.6 layout its
+//! upgrade reads), and archived again; the new archive must be the stored
+//! bytes exactly. A row that reads back to its own bytes was read whole, with
+//! nothing dropped and nothing moved. Each fixture is checked as it lies in
+//! the repository and again after the Nexus's own open path has run over a
+//! copy of it, or been refused.
 //!
 //! Each check also prints one line per family, `table rows=N read=N
 //! digest=<sha256 of every key and stored archive>`, so the same listing
@@ -13,16 +14,18 @@
 
 use std::path::Path;
 
+use lojix::quarantine::OpenedStore as _;
 use lojix::quarantine::QuarantinedRow;
 use lojix::runtime_model::{
     ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, EventLogEntry, GcRoot,
-    IdentifierAllocation, LiveGeneration, PendingTransitionIntent, StoredDeploymentRecord,
-    StoredTestRun,
+    IdentifierAllocation, LiveGeneration, NexusConfigurationRecord, PendingTransitionIntent,
+    StoredDeploymentRecord, StoredTestRun,
 };
+use lojix::upgrade::EarlierDeployJob;
 use lojix::{
-    DurableStore as _, LojixNexusConfigurable as _, LojixRecord, NexusConfiguration,
-    NexusConfigurationRecord, NexusPersistable as _, Store,
+    DeploymentLedger as _, DurableStore as _, Error, LojixNexusConfigurable as _, LojixRecord,
 };
+use lojix::{NexusConfiguration, Store};
 use redb::{ReadableDatabase as _, ReadableTable as _, TableHandle as _};
 use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
@@ -31,14 +34,28 @@ use tempfile::TempDir;
 /// bytes: `None` when it does not decode, `Some(equal)` when it does.
 type Family = (&'static str, fn(&[u8]) -> Option<bool>);
 
+macro_rules! reads_back {
+    ($record:ty, $bytes:expr) => {
+        rkyv::from_bytes::<$record, rkyv::rancor::Error>($bytes)
+            .ok()
+            .and_then(|value| rkyv::to_bytes::<rkyv::rancor::Error>(&value).ok())
+            .map(|again| again.as_slice() == $bytes)
+    };
+}
+
 macro_rules! family {
     ($record:ty) => {
         (
             <$record as LojixRecord>::TABLE,
+            (|bytes: &[u8]| -> Option<bool> { reads_back!($record, bytes) })
+                as fn(&[u8]) -> Option<bool>,
+        )
+    };
+    ($record:ty, $earlier:ty) => {
+        (
+            <$record as LojixRecord>::TABLE,
             (|bytes: &[u8]| -> Option<bool> {
-                let value = rkyv::from_bytes::<$record, rkyv::rancor::Error>(bytes).ok()?;
-                let again = rkyv::to_bytes::<rkyv::rancor::Error>(&value).ok()?;
-                Some(again.as_slice() == bytes)
+                reads_back!($record, bytes).or_else(|| reads_back!($earlier, bytes))
             }) as fn(&[u8]) -> Option<bool>,
         )
     };
@@ -50,7 +67,7 @@ fn families() -> Vec<Family> {
         family!(GcRoot),
         family!(EventLogEntry),
         family!(ContainerLifecycleRecord),
-        family!(DeployJob),
+        family!(DeployJob, EarlierDeployJob),
         family!(StoredTestRun),
         family!(StoredDeploymentRecord),
         family!(IdentifierAllocation),
@@ -155,7 +172,7 @@ fn the_pre_nexus_v5_fixture_reads_row_for_row() {
 }
 
 #[test]
-fn the_horizon_0_12_fixture_reads_row_for_row_before_and_after_its_open() {
+fn the_horizon_0_12_fixture_is_refused_and_reads_as_it_was_written() {
     let bytes = include_bytes!("fixtures/lojix-v5-horizon-0.12-deploy-job.memory");
     let directory = TempDir::new().expect("tempdir");
     let path = copied(&directory, "lojix.memory", bytes);
@@ -165,30 +182,86 @@ fn the_horizon_0_12_fixture_reads_row_for_row_before_and_after_its_open() {
         [("deploy-job", "1".to_string())],
         "only the Horizon 0.12 deploy job is unread"
     );
-    drop(Store::open(&path).expect("the Nexus opens the fixture"));
-    let after = read_rows("horizon-0.12 after open", &path);
-    assert!(undecodable(&after).is_empty(), "{after:#?}");
+    let error = Store::open(&path).expect_err("no upgrade reads a Horizon 0.12 deploy job");
+    assert!(
+        matches!(&error, Error::UndecodableRow { table, key, .. } if table == "deploy-job" && key == "1"),
+        "{error}"
+    );
+    let after = read_rows("horizon-0.12 after its refused open", &path);
+    assert_eq!(after, before, "a refused open writes no row");
 }
 
 #[test]
-fn the_lojix_8_1_0_fixture_reads_row_for_row_after_its_conversion() {
+fn the_lojix_8_1_0_fixture_is_refused_at_conversion() {
     let bytes = include_bytes!("fixtures/lojix-8.1.0-store.sema");
     let directory = TempDir::new().expect("tempdir");
     let state = directory.path().join("lojix");
     std::fs::create_dir_all(&state).expect("state directory");
     std::fs::write(state.join("lojix.sema"), bytes).expect("copy fixture");
-    let path = NexusConfiguration::discover_default_store_path(state)
-        .expect("the Nexus converts the 8.1.0 store");
-    // The conversion opens the store it writes, so the Horizon 0.12 deploy
-    // job is already set aside by then.
-    let converted = read_rows("8.1.0 converted", &path);
-    assert!(undecodable(&converted).is_empty(), "{converted:#?}");
-    drop(
-        Store::open_with_default_configuration(&path, NexusConfiguration::built_in())
-            .expect("the converted store opens"),
+    let error = NexusConfiguration::discover_default_store_path(state.clone())
+        .expect_err("the converted copy holds the Horizon 0.12 deploy job");
+    assert!(
+        matches!(&error, Error::LegacyStoreConversion { .. }),
+        "{error}"
     );
-    let after = read_rows("8.1.0 after open", &path);
-    assert_eq!(after, converted, "a second open changes no row");
+    assert!(!state.join("lojix.memory").exists(), "nothing is installed");
+}
+
+#[test]
+fn the_lojix_0_10_6_deploy_jobs_upgrade_on_open_and_every_other_row_reads_as_written() {
+    let bytes = include_bytes!("fixtures/lojix-0.10.6-deploy-jobs.memory");
+    let directory = TempDir::new().expect("tempdir");
+    let path = copied(&directory, "lojix.memory", bytes);
+    let before = read_rows("0.10.6 deploy jobs as written", &path);
+    assert!(undecodable(&before).is_empty(), "{before:#?}");
+    assert_eq!(
+        before
+            .iter()
+            .find(|reading| reading.table == "deploy-job")
+            .map(|reading| reading.rows),
+        Some(2)
+    );
+
+    let store = Store::open(&path).expect("the Nexus opens and upgrades the fixture");
+    assert_eq!(store.opening().upgraded_deploy_jobs, Some(2));
+    let jobs = store.deploy_jobs().expect("the upgraded jobs read");
+    let submissions: Vec<_> = jobs
+        .iter()
+        .map(|job| {
+            let submission = job
+                .actualized_deploy_submission_option
+                .as_ref()
+                .expect("an admitted job carries its submission");
+            (
+                job.deployment_identifier.0,
+                matches!(
+                    submission.deploy_submission,
+                    meta_signal_lojix::DeploySubmission::Host(_)
+                ),
+                submission.horizon_definition_option.is_some(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        submissions,
+        [(1, true, true), (2, false, false)],
+        "the Host deploy keeps its Horizon definition beside it; the Direct user deploy has none"
+    );
+    drop(store);
+
+    let after = read_rows("0.10.6 deploy jobs after open", &path);
+    assert!(undecodable(&after).is_empty(), "{after:#?}");
+    for (written, opened) in before.iter().zip(&after) {
+        if written.table != "deploy-job" {
+            assert_eq!(opened, written, "only the deploy-job family moves");
+        }
+    }
+    let again = Store::open(&path).expect("reopen");
+    assert_eq!(
+        again.opening().upgraded_deploy_jobs,
+        None,
+        "the upgrade runs once"
+    );
 }
 
 /// The same reading over a store named by `LOJIX_STORE_COPY`, for a copy of a

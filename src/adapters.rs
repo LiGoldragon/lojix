@@ -42,31 +42,29 @@ impl Lowerable<memory::Selection> for ordinary::Selection {
 
 /// The contract carries the Horizon definition beside the deployment; the
 /// runtime submission carries it inside, where the engine reads it.
-impl Lowerable<memory::DeploySubmission> for owner::ActualizedDeploySubmission {
-    fn lower(self) -> Result<memory::DeploySubmission, WireShapeError> {
-        let horizon_definition_option = self.horizon_definition_option;
-        Ok(match self.deploy_submission {
-            owner::DeploySubmission::Host(host) => {
-                memory::DeploySubmission::Host(memory::HostDeployment {
-                    cluster_name: host.cluster_name,
-                    node_name: host.node_name,
-                    host_composition: host.host_composition,
-                    proposal_source: host.proposal_source,
-                    secrets_input: host.secrets_input,
-                    flake_reference: host.flake_reference,
-                    deployment_transport: host.deployment_transport,
-                    deployment_input_mode: host.deployment_input_mode,
-                    horizon_definition_option,
-                    deployment_output_selector: host.deployment_output_selector,
-                    activation_backend: host.activation_backend,
-                    host_deploy_action: host.host_deploy_action,
-                    source_revision_policy: host.source_revision_policy,
-                    nix_builder_spec_option: host.nix_builder_spec_option,
-                    extra_substituter_vector: host.extra_substituter_vector,
-                })
-            }
+impl From<owner::ActualizedDeploySubmission> for memory::DeploySubmission {
+    fn from(actualized: owner::ActualizedDeploySubmission) -> Self {
+        let horizon_definition_option = actualized.horizon_definition_option;
+        match actualized.deploy_submission {
+            owner::DeploySubmission::Host(host) => Self::Host(memory::HostDeployment {
+                cluster_name: host.cluster_name,
+                node_name: host.node_name,
+                host_composition: host.host_composition,
+                proposal_source: host.proposal_source,
+                secrets_input: host.secrets_input,
+                flake_reference: host.flake_reference,
+                deployment_transport: host.deployment_transport,
+                deployment_input_mode: host.deployment_input_mode,
+                horizon_definition_option,
+                deployment_output_selector: host.deployment_output_selector,
+                activation_backend: host.activation_backend,
+                host_deploy_action: host.host_deploy_action,
+                source_revision_policy: host.source_revision_policy,
+                nix_builder_spec_option: host.nix_builder_spec_option,
+                extra_substituter_vector: host.extra_substituter_vector,
+            }),
             owner::DeploySubmission::UserEnvironment(user) => {
-                memory::DeploySubmission::UserEnvironment(memory::UserEnvironmentDeployment {
+                Self::UserEnvironment(memory::UserEnvironmentDeployment {
                     cluster_name: user.cluster_name,
                     node_name: user.node_name,
                     user_name: user.user_name,
@@ -84,7 +82,56 @@ impl Lowerable<memory::DeploySubmission> for owner::ActualizedDeploySubmission {
                     extra_substituter_vector: user.extra_substituter_vector,
                 })
             }
-        })
+        }
+    }
+}
+
+/// The runtime submission as the contract carries it, which is how a deploy
+/// job stores it.
+impl From<memory::DeploySubmission> for owner::ActualizedDeploySubmission {
+    fn from(submission: memory::DeploySubmission) -> Self {
+        match submission {
+            memory::DeploySubmission::Host(host) => Self {
+                horizon_definition_option: host.horizon_definition_option,
+                deploy_submission: owner::DeploySubmission::Host(owner::HostDeployment {
+                    cluster_name: host.cluster_name,
+                    node_name: host.node_name,
+                    host_composition: host.host_composition,
+                    proposal_source: host.proposal_source,
+                    secrets_input: host.secrets_input,
+                    flake_reference: host.flake_reference,
+                    deployment_transport: host.deployment_transport,
+                    deployment_input_mode: host.deployment_input_mode,
+                    deployment_output_selector: host.deployment_output_selector,
+                    activation_backend: host.activation_backend,
+                    host_deploy_action: host.host_deploy_action,
+                    source_revision_policy: host.source_revision_policy,
+                    nix_builder_spec_option: host.nix_builder_spec_option,
+                    extra_substituter_vector: host.extra_substituter_vector,
+                }),
+            },
+            memory::DeploySubmission::UserEnvironment(user) => Self {
+                horizon_definition_option: user.horizon_definition_option,
+                deploy_submission: owner::DeploySubmission::UserEnvironment(
+                    owner::UserEnvironmentDeployment {
+                        cluster_name: user.cluster_name,
+                        node_name: user.node_name,
+                        user_name: user.user_name,
+                        proposal_source: user.proposal_source,
+                        secrets_input: user.secrets_input,
+                        flake_reference: user.flake_reference,
+                        deployment_transport: user.deployment_transport,
+                        deployment_input_mode: user.deployment_input_mode,
+                        deployment_output_selector: user.deployment_output_selector,
+                        activation_backend: user.activation_backend,
+                        user_environment_action: user.user_environment_action,
+                        source_revision_policy: user.source_revision_policy,
+                        nix_builder_spec_option: user.nix_builder_spec_option,
+                        extra_substituter_vector: user.extra_substituter_vector,
+                    },
+                ),
+            },
+        }
     }
 }
 
@@ -123,31 +170,19 @@ impl Raisable<ordinary::GenerationListing> for memory::GenerationListing {
 }
 /// A test run's closure path is shown on the ordinary socket only when it is
 /// a canonical store item root.
-impl Raisable<ordinary::TestRunRecord> for memory::TestRunRecord {
-    fn raise(self) -> Result<ordinary::TestRunRecord, WireShapeError> {
-        let closure_path_option = self
-            .closure_path_option
-            .filter(|path| NixStorePath::from(path.payload().as_str()).is_canonical_item_root());
-        Ok(ordinary::TestRunRecord {
-            test_run_identifier: self.test_run_identifier,
-            cluster_name: self.cluster_name,
-            first_node_name: self.node,
-            second_node_name: self.host,
-            test_mode: self.test_mode,
-            test_run_phase: self.test_run_phase,
-            test_outcome: self.test_outcome,
-            closure_path_option,
-        })
-    }
-}
 impl Raisable<ordinary::TestRunListing> for memory::TestRunListing {
     fn raise(self) -> Result<ordinary::TestRunListing, WireShapeError> {
         Ok(ordinary::TestRunListing {
             test_run_record_vector: self
                 .test_run_record_vector
                 .into_iter()
-                .map(Raisable::raise)
-                .collect::<Result<_, _>>()?,
+                .map(|record| ordinary::TestRunRecord {
+                    closure_path_option: record.closure_path_option.filter(|path| {
+                        NixStorePath::from(path.payload().as_str()).is_canonical_item_root()
+                    }),
+                    ..record
+                })
+                .collect(),
             database_marker: self.database_marker,
         })
     }
@@ -178,7 +213,7 @@ impl Lowerable<memory::MetaIngress> for owner::Input {
             owner::Input::ReverseConfiguration => memory::MetaIngress::ReverseConfiguration,
             owner::Input::Retire(value) => memory::MetaIngress::Retire(value),
             owner::Input::Pin(value) => memory::MetaIngress::Pin(value),
-            owner::Input::Deploy(value) => memory::MetaIngress::Deploy(value.lower()?),
+            owner::Input::Deploy(value) => memory::MetaIngress::Deploy(value.into()),
             owner::Input::Test(value) => memory::MetaIngress::Test(value),
             owner::Input::Unpin(value) => memory::MetaIngress::Unpin(value),
         })

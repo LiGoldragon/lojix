@@ -769,8 +769,8 @@ impl TestRunCommands for ResolvedTestRun {
         ordinary::TestRunRecord {
             test_run_identifier: identifier,
             cluster_name: self.cluster.clone(),
-            node: self.node.clone(),
-            host: self.host.clone(),
+            first_node_name: self.node.clone(),
+            second_node_name: self.host.clone(),
             test_mode: self.profile.test_mode.clone(),
             test_run_phase: ordinary::TestRunPhase::Submitted,
             test_outcome: ordinary::TestOutcome::Pending,
@@ -917,8 +917,8 @@ impl TestCursor for TestPipeline {
         ordinary::TestRunRecord {
             test_run_identifier: self.identifier,
             cluster_name: self.run.cluster.clone(),
-            node: self.run.node.clone(),
-            host: self.run.host.clone(),
+            first_node_name: self.run.node.clone(),
+            second_node_name: self.run.host.clone(),
             test_mode: self.run.profile.test_mode.clone(),
             test_run_phase: phase,
             test_outcome: outcome,
@@ -1760,9 +1760,9 @@ impl FlakeMetadataReading for NixFlakeMetadata {
             .unwrap_or_else(|| requested_ref.clone());
         ordinary::SourceRevisionRecord {
             source_revision_policy: policy,
-            requested_ref,
-            resolved_ref,
-            string: self.resolved_revision(),
+            requested_reference: memory::RequestedReference(requested_ref),
+            resolved_reference: memory::ResolvedReference(resolved_ref),
+            resolved_revision: memory::ResolvedRevision(self.resolved_revision()),
         }
     }
 
@@ -2225,9 +2225,9 @@ impl DeployCursor for DeployPipeline {
             .clone()
             .unwrap_or_else(|| ordinary::SourceRevisionRecord {
                 source_revision_policy: self.source_revision_policy.clone(),
-                requested_ref: self.requested_flake.clone(),
-                resolved_ref: self.flake.clone(),
-                string: String::new(),
+                requested_reference: memory::RequestedReference(self.requested_flake.clone()),
+                resolved_reference: memory::ResolvedReference(self.flake.clone()),
+                resolved_revision: memory::ResolvedRevision(String::new()),
             })
     }
 
@@ -2259,7 +2259,7 @@ impl DeployCursor for DeployPipeline {
             immutable_revision_option: self
                 .source_revision
                 .as_ref()
-                .and_then(|record| record.string.immutable_revision()),
+                .and_then(|record| record.resolved_revision.0.immutable_revision()),
             deployment_terminal_option: None,
         }
     }
@@ -2295,35 +2295,41 @@ impl DeployCursor for DeployPipeline {
             flake_reference_option: self
                 .source_revision
                 .as_ref()
-                .map(|source_revision| source_revision.resolved_ref.clone()),
-            resolved_revision: self
+                .map(|source_revision| source_revision.resolved_reference.0.clone()),
+            resolved_revision_option: self
                 .source_revision
                 .as_ref()
-                .map(|source_revision| source_revision.string.clone()),
+                .map(|source_revision| source_revision.resolved_revision.clone()),
             deployment_transport: self.deployment_transport.clone(),
             deployment_input_mode: self.deployment_input_mode.clone(),
             deployment_output_selector: self.deployment_output_selector.clone(),
             activation_backend: self.activation_backend.clone(),
             nix_builder_spec_option: self.builder.clone(),
-            boot_once_unit: self.boot_once_unit(),
+            boot_once_unit_option: self.boot_once_unit().map(memory::BootOnceUnit),
             generation_slot_option: self.activation_slot.clone(),
             persisted_flake_input_override_vector: self
                 .input_overrides
                 .iter()
                 .map(|override_value| memory::PersistedFlakeInputOverride {
-                    string: override_value.string.clone(),
+                    flake_input_name: memory::FlakeInputName(override_value.string.clone()),
                     persisted_flake_input_reference: memory::PersistedFlakeInputReference {
-                        url: override_value.flake_input_reference.url.clone(),
-                        nix_archive_hash: override_value
-                            .flake_input_reference
-                            .nix_archive_hash
-                            .clone(),
+                        flake_input_url: memory::FlakeInputUrl(
+                            override_value.flake_input_reference.url.clone(),
+                        ),
+                        nix_archive_hash: memory::NixArchiveHash(
+                            override_value
+                                .flake_input_reference
+                                .nix_archive_hash
+                                .clone(),
+                        ),
                     },
                 })
                 .collect(),
-            deploy_resume_stage: self.resume_stage,
+            deploy_resume_stage: self.resume_stage.clone(),
             phase_receipt_option: self.phase_receipt.clone(),
-            deploy_submission_option: Some(self.submission.clone()),
+            actualized_deploy_submission_option: Some(
+                meta_signal_lojix::ActualizedDeploySubmission::from(self.submission.clone()),
+            ),
         }
     }
 }
@@ -2411,8 +2417,12 @@ impl DeployJobResuming for memory::DeployJob {
         &self,
         daemon_host: &ordinary::NodeName,
     ) -> Option<DetachedActivationUnit> {
-        let host = match self.deploy_submission_option.as_ref() {
-            Some(memory::DeploySubmission::Host(host))
+        let host = match self
+            .actualized_deploy_submission_option
+            .as_ref()
+            .map(|submission| &submission.deploy_submission)
+        {
+            Some(meta_signal_lojix::DeploySubmission::Host(host))
                 if host.host_deploy_action == ordinary::HostDeployAction::TestActivation
                     && host.activation_backend == memory::ActivationBackend::NixosSystemdBootV1 =>
             {
@@ -2446,7 +2456,7 @@ impl DeployJobResuming for memory::DeployJob {
     fn resumption(&self) -> DeployJobResumption {
         match self.deploy_job_phase {
             memory::DeployJobPhase::Activating => DeployJobResumption::PollActivationUnit {
-                unit: self.boot_once_unit.clone(),
+                unit: self.boot_once_unit_option.clone().map(|unit| unit.0),
             },
             memory::DeployJobPhase::Submitted
             | memory::DeployJobPhase::Building
@@ -2471,12 +2481,16 @@ impl DeployJobResuming for memory::DeployJob {
         }
         let source_revision_record = ordinary::SourceRevisionRecord {
             source_revision_policy: self.source_revision_policy.clone(),
-            requested_ref: self.flake_reference.clone(),
-            resolved_ref: self
-                .flake_reference_option
+            requested_reference: memory::RequestedReference(self.flake_reference.clone()),
+            resolved_reference: memory::ResolvedReference(
+                self.flake_reference_option
+                    .clone()
+                    .unwrap_or_else(|| self.flake_reference.clone()),
+            ),
+            resolved_revision: self
+                .resolved_revision_option
                 .clone()
-                .unwrap_or_else(|| self.flake_reference.clone()),
-            string: self.resolved_revision.clone().unwrap_or_default(),
+                .unwrap_or_else(|| memory::ResolvedRevision(String::new())),
         };
         let generation = memory::LiveGeneration {
             deployment_identifier: self.deployment_identifier,
@@ -2507,46 +2521,20 @@ impl DeployJobResuming for memory::DeployJob {
     fn is_persisted_host_activate_now(&self) -> bool {
         self.activation_backend == memory::ActivationBackend::NixosSystemdBootV1
             && matches!(
-                self.deploy_submission_option.as_ref(),
-                Some(memory::DeploySubmission::Host(host))
+                self.actualized_deploy_submission_option
+                    .as_ref()
+                    .map(|submission| &submission.deploy_submission),
+                Some(meta_signal_lojix::DeploySubmission::Host(host))
                     if host.host_deploy_action == ordinary::HostDeployAction::ActivateNow
                         && host.activation_backend == memory::ActivationBackend::NixosSystemdBootV1
             )
     }
 }
 
-impl From<ordinary::TestRunRecord> for memory::StoredTestRun {
-    /// Project the wire test-run record onto the lojix-local durable row. The
-    /// two carry identical fields (the LiveGeneration/Generation split): the
-    /// daemon writes the durable row, the query reads it back as the wire shape.
-    fn from(record: ordinary::TestRunRecord) -> Self {
-        Self {
-            test_run_identifier: record.test_run_identifier,
-            cluster_name: record.cluster_name,
-            node: record.node,
-            host: record.host,
-            test_mode: record.test_mode,
-            test_run_phase: record.test_run_phase,
-            test_outcome: record.test_outcome,
-            closure_path_option: record.closure_path_option,
-        }
-    }
-}
-
 impl From<memory::StoredTestRun> for ordinary::TestRunRecord {
-    /// Project the durable row back onto the wire record for the
-    /// `(ByTestRun …)` query reply.
+    /// The durable row holds the contract's record whole.
     fn from(run: memory::StoredTestRun) -> Self {
-        Self {
-            test_run_identifier: run.test_run_identifier,
-            cluster_name: run.cluster_name,
-            node: run.node,
-            host: run.host,
-            test_mode: run.test_mode,
-            test_run_phase: run.test_run_phase,
-            test_outcome: run.test_outcome,
-            closure_path_option: run.closure_path_option,
-        }
+        run.test_run_record
     }
 }
 
@@ -2813,8 +2801,9 @@ trait TestRunSelecting {
 impl TestRunSelecting for ordinary::TestRunLookup {
     fn matches(&self, run: &memory::StoredTestRun) -> bool {
         let lookup = self;
+        let run = &run.test_run_record;
         lookup.cluster_name == run.cluster_name
-            && lookup.node_name == run.node
+            && lookup.node_name == run.first_node_name
             && lookup
                 .test_run_identifier_option
                 .as_ref()
@@ -4121,7 +4110,11 @@ impl DeployDriving for SchemaRuntime {
 
     fn resume_deploy_job(&mut self, job: memory::DeployJob) -> Result<bool> {
         let persisted_phase = job.deploy_job_phase;
-        let Some(submission) = job.deploy_submission_option.clone() else {
+        let Some(submission) = job
+            .actualized_deploy_submission_option
+            .clone()
+            .map(memory::DeploySubmission::from)
+        else {
             return Ok(false);
         };
         if job
@@ -4188,12 +4181,17 @@ impl DeployDriving for SchemaRuntime {
             .persisted_flake_input_override_vector
             .iter()
             .map(|override_value| nexus::FlakeInputOverride {
-                string: override_value.string.clone(),
+                string: override_value.flake_input_name.0.clone(),
                 flake_input_reference: nexus::FlakeInputReference {
-                    url: override_value.persisted_flake_input_reference.url.clone(),
+                    url: override_value
+                        .persisted_flake_input_reference
+                        .flake_input_url
+                        .0
+                        .clone(),
                     nix_archive_hash: override_value
                         .persisted_flake_input_reference
                         .nix_archive_hash
+                        .0
                         .clone(),
                 },
             })
@@ -4264,13 +4262,16 @@ impl DeployDriving for SchemaRuntime {
             job.flake_reference_option
                 .clone()
                 .map(|resolved_ref| ordinary::SourceRevisionRecord {
-                    source_revision_policy: job.source_revision_policy,
-                    requested_ref: job.flake_reference.clone(),
-                    resolved_ref,
-                    string: job.resolved_revision.clone().unwrap_or_default(),
+                    source_revision_policy: job.source_revision_policy.clone(),
+                    requested_reference: memory::RequestedReference(job.flake_reference.clone()),
+                    resolved_reference: memory::ResolvedReference(resolved_ref),
+                    resolved_revision: job
+                        .resolved_revision_option
+                        .clone()
+                        .unwrap_or_else(|| memory::ResolvedRevision(String::new())),
                 });
         if let Some(source_revision) = pipeline.source_revision.as_ref() {
-            pipeline.flake = source_revision.resolved_ref.clone();
+            pipeline.flake = source_revision.resolved_reference.0.clone();
         }
         self.active_operation = Some(MetaOperation::Deploy);
         self.active_deploy = Some(pipeline);
@@ -4534,7 +4535,8 @@ impl DeployDriving for SchemaRuntime {
         resume_stage: memory::DeployResumeStage,
     ) -> bool {
         let source_revision = resolved.into_payload();
-        let Some(immutable_revision) = source_revision.string.immutable_revision() else {
+        let Some(immutable_revision) = source_revision.resolved_revision.0.immutable_revision()
+        else {
             return false;
         };
         let mut snapshot = None;
@@ -4543,7 +4545,7 @@ impl DeployDriving for SchemaRuntime {
                 pipeline.source_revision_policy,
                 meta::SourceRevisionPolicy::ResolveAndRecord
             ) {
-                pipeline.flake = source_revision.resolved_ref.clone();
+                pipeline.flake = source_revision.resolved_reference.0.clone();
             }
             pipeline.source_revision = Some(source_revision);
             pipeline.resume_stage = resume_stage;
@@ -4610,7 +4612,7 @@ impl DeployDriving for SchemaRuntime {
         let resume_stage = self
             .active_deploy
             .as_ref()
-            .map(|pipeline| pipeline.resume_stage)
+            .map(|pipeline| pipeline.resume_stage.clone())
             .unwrap_or(memory::DeployResumeStage::FinishDeployment);
         self.persist_job_cursor(phase, resume_stage);
     }
@@ -5383,9 +5385,9 @@ impl MemoryObserving for SchemaRuntime {
             runs.into_iter().filter(|run| lookup.matches(run)).collect();
         matching.sort_by(|left, right| {
             right
+                .test_run_record
                 .test_run_identifier
-                .payload()
-                .cmp(left.test_run_identifier.payload())
+                .cmp(&left.test_run_record.test_run_identifier)
         });
         memory::MemoryReadOutput::TestRunsQueried(ordinary::TestRunListing {
             test_run_record_vector: matching
@@ -8655,11 +8657,15 @@ mod tests {
     fn source_revision(policy: ordinary::SourceRevisionPolicy) -> ordinary::SourceRevisionRecord {
         ordinary::SourceRevisionRecord {
             source_revision_policy: policy,
-            requested_ref: ordinary::FlakeReference::new("github:owner/repo/main".into()),
-            resolved_ref: ordinary::FlakeReference::new(
+            requested_reference: memory::RequestedReference(ordinary::FlakeReference::new(
+                "github:owner/repo/main".into(),
+            )),
+            resolved_reference: memory::ResolvedReference(ordinary::FlakeReference::new(
                 "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            )),
+            resolved_revision: memory::ResolvedRevision(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             ),
-            string: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         }
     }
 
@@ -8993,24 +8999,27 @@ mod tests {
         let pipeline = engine.active_deploy.as_ref().expect("pipeline");
         assert_eq!(
             pipeline.flake,
-            source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord).resolved_ref
+            source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord)
+                .resolved_reference
+                .0
         );
         assert_eq!(
             pipeline
                 .source_revision
                 .as_ref()
                 .expect("source revision")
-                .requested_ref,
+                .requested_reference
+                .0,
             ordinary::FlakeReference::new("github:owner/repo/main".into())
         );
         let command = pipeline.nix_eval_command(&daemon_host());
         assert_eq!(
-            command.source_revision_record.string,
+            command.source_revision_record.resolved_revision.0,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         assert_eq!(
             command.flake_reference,
-            command.source_revision_record.resolved_ref
+            command.source_revision_record.resolved_reference.0
         );
     }
 
@@ -9022,7 +9031,7 @@ mod tests {
             memory::MemoryWriteOutput::DeploySubmitted(_)
         ));
         let mut source = source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord);
-        source.string = "sha256-unproven-nar-hash".to_string();
+        source.resolved_revision = memory::ResolvedRevision("sha256-unproven-nar-hash".to_string());
         match engine.decide_effect_completion(nexus::EffectResult::FlakeResolved(
             nexus::ResolvedFlake::new(source),
         )) {
@@ -9107,7 +9116,7 @@ mod tests {
     fn phase_projection_never_labels_nix_metadata_as_an_immutable_revision() {
         let mut pipeline = host_pipeline(ordinary::HostDeployAction::Evaluate);
         let mut source = source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord);
-        source.string = "sha256-unproven-nar-hash".to_string();
+        source.resolved_revision = memory::ResolvedRevision("sha256-unproven-nar-hash".to_string());
         pipeline.source_revision = Some(source);
         assert!(
             pipeline
@@ -9227,7 +9236,11 @@ mod tests {
         );
         assert_eq!(
             persisted.flake_reference_option,
-            Some(source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord).resolved_ref)
+            Some(
+                source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord)
+                    .resolved_reference
+                    .0
+            )
         );
         drop(before_crash);
         drop(store);
@@ -9251,14 +9264,17 @@ mod tests {
         );
         assert_eq!(
             pipeline.flake,
-            source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord).resolved_ref
+            source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord)
+                .resolved_reference
+                .0
         );
         assert_eq!(
             pipeline
                 .source_revision
                 .as_ref()
                 .expect("exact durable source revision")
-                .string,
+                .resolved_revision
+                .0,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         assert_eq!(pipeline.input_overrides.len(), 1);
@@ -9906,20 +9922,24 @@ mod tests {
                 "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567"
                     .to_string(),
             )),
-            resolved_revision: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            resolved_revision_option: Some(crate::runtime_model::ResolvedRevision(
+                "0123456789abcdef0123456789abcdef01234567".to_string(),
+            )),
             deployment_transport: fixture_transport(),
             deployment_input_mode: memory::DeploymentInputMode::Direct,
             deployment_output_selector: fixture_output_selector(),
             activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
             nix_builder_spec_option: None,
-            boot_once_unit: None,
+            boot_once_unit_option: None,
             generation_slot_option: None,
             persisted_flake_input_override_vector: Vec::new(),
             deploy_resume_stage: memory::DeployResumeStage::ResolveFlakeAuth,
             phase_receipt_option: None,
-            deploy_submission_option: Some(host_submission(
-                ordinary::HostDeployAction::ActivateNow,
-            )),
+            actualized_deploy_submission_option: Some(
+                meta_signal_lojix::ActualizedDeploySubmission::from(host_submission(
+                    ordinary::HostDeployAction::ActivateNow,
+                )),
+            ),
         }
     }
 
@@ -9961,7 +9981,7 @@ mod tests {
             "/nix/store/aaaaaaaa-system"
         );
         assert_eq!(
-            generation.source_revision_record.string,
+            generation.source_revision_record.resolved_revision.0,
             "0123456789abcdef0123456789abcdef01234567"
         );
         assert_eq!(root.generation_slot, ordinary::GenerationSlot::Current);
@@ -10002,8 +10022,10 @@ mod tests {
         // leave an Activating row behind if the daemon restarts for another
         // reason, but it never runs the detached self-switch protocol.
         let mut job = interrupted_self_switch_job(Some("/nix/store/aaaaaaaa-system"));
-        job.deploy_submission_option =
-            Some(host_submission(ordinary::HostDeployAction::SetBootProfile));
+        job.actualized_deploy_submission_option =
+            Some(meta_signal_lojix::ActualizedDeploySubmission::from(
+                host_submission(ordinary::HostDeployAction::SetBootProfile),
+            ));
         assert!(
             job.self_switch_activation_record(Some("/nix/store/aaaaaaaa-system"))
                 .is_none()
@@ -10016,7 +10038,9 @@ mod tests {
         // coincidental closure string, but no user submission owns the host
         // system profile. It must remain for normal S5 reconciliation.
         let mut job = interrupted_self_switch_job(Some("/nix/store/aaaaaaaa-system"));
-        job.deploy_submission_option = Some(user_submission());
+        job.actualized_deploy_submission_option = Some(
+            meta_signal_lojix::ActualizedDeploySubmission::from(user_submission()),
+        );
         assert!(
             job.self_switch_activation_record(Some("/nix/store/aaaaaaaa-system"))
                 .is_none()
