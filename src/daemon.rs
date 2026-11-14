@@ -143,11 +143,19 @@ pub trait Runnable {
 }
 
 impl Runnable for Daemon {
+    /// Serve until termination, then leave without waiting for an emission
+    /// still on its blocking thread. A build, an activation or a wait on PID 1
+    /// may outlast the daemon — a same-host activation restarts it — so the
+    /// runtime is shut down in the background: the process exits as the async
+    /// tasks those threads replaced were dropped, and a child process the
+    /// emission started keeps running, as before.
     fn run(self) -> Result<()> {
-        tokio::runtime::Builder::new_multi_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .build()?
-            .block_on(run_daemon(self))
+            .build()?;
+        let served = runtime.block_on(run_daemon(self));
+        runtime.shutdown_background();
+        served
     }
 }
 

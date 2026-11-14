@@ -138,7 +138,9 @@ is watched through. `src/translator.rs` holds the words of each call. Its
 on a blocking thread the stage awaits. Every argv is the one the code before
 the emissions ran (`tests/fixtures/emission-argv.txt` was written by that
 code, at 23f88f2, and is compared emission by emission), and the processes
-inherit the same environment. A process whose output could not be collected is now reported
+inherit the same environment. A daemon told to stop exits without waiting
+for an emission still on its blocking thread, as it dropped the async tasks
+before; a child process that emission started keeps running. A process whose output could not be collected is now reported
 "failed while waiting for <program>" where a failed stream read had its own
 sentence.
 
