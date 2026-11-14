@@ -71,7 +71,7 @@ clients/meta/Cargo.toml:
   [[bin]] name = "lojix-meta"      # privileged CLI client
 tools/Cargo.toml:
   [[bin]] name = "lojix-bootstrap" # daemon-free, explicit bootstrap
-  # configuration, inspection, migration, and reset tools live here too
+  # the inspection and reset tools live here too
 ```
 
 The library half (`lojix`) holds the shared types, the daemon's
@@ -140,8 +140,12 @@ line until the daemon closes the connection.
   not a daemon client. It accepts exactly one inline private `BootstrapRun`
   Datom object, written as the struct itself, `{ … }`. The request explicitly supplies input mode, builder, optional
   hermetic test, local-or-remote BootOnce backend, journal parent, GC-root
-  path, and terminal-evidence path. It creates a private v5 journal and
-  configuration beneath that journal parent. The journal binds a request hash,
+  path, and terminal-evidence path. The request is the generated
+  `ingress::BootstrapRun` itself; admission checks every field before any
+  effect. It creates a private journal beneath that journal parent, one
+  `BootstrapJournal` record generated from `ethos/bootstrap_journal.ethos`,
+  and every process it starts is an emission of
+  `ethos/bootstrap_emission.ethos`. The journal binds a request fingerprint,
   immutable flake reference, closure, root receipt, and ordered intent/receipt/
   outcome records; an interrupted invocation reconciles the exact next stage.
   Remote BootOnce launches a deterministic target transient systemd unit with
@@ -190,7 +194,13 @@ src/
   lib.rs                # shared state, configuration, error type
   daemon.rs             # actor-native two-socket daemon shell
   client.rs             # thin CLI socket exchange
-  bootstrap.rs          # daemon-free explicit resumable v5 bootstrap pipeline
+  bootstrap.rs          # daemon-free explicit resumable bootstrap pipeline
+  bootstrap_journal.rs  # generated from ethos/bootstrap_journal.ethos: the
+                        # bootstrap journal and its terminal evidence
+  bootstrap_emission.rs # generated from ethos/bootstrap_emission.ethos:
+                        # every process a bootstrap run starts
+  bootstrap_translator.rs # the words of each bootstrap process: argv,
+                        # environment, the boot-once script
   memory.rs             # generated from ethos/memory.ethos: the stored records
   upgrade.rs            # the deploy-job family's upgrade from its 0.10.6 layout
   quarantine.rs         # the retired quarantine family, emptied at open

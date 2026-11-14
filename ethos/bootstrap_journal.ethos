@@ -1,0 +1,44 @@
+; What one lojix-bootstrap run remembers, and the one record it leaves
+; behind. The journal is private to the run: a directory below the
+; request's journal parent, named by the request's fingerprint, holding
+; the journal record. Each stage is journalled as an intent before its
+; effect is issued, a receipt once the effect has returned, and an outcome,
+; so a resumed run reads what was done rather than doing it again. The
+; record also holds what the stages produced (the resolved flake
+; reference, the materialized flake inputs, the built closure and the
+; GC root bound to it), the identity of the journal directory and of the
+; GC root as the file system reported them, and the terminal status once
+; the run has one.
+;
+; The terminal evidence is the record a run leaves at the caller's
+; evidence path: the fingerprint that binds it to its request, the mode,
+; the status, and each stage's outcome. It carries no route, path, flake
+; reference or process output.
+;
+; A fingerprint is the lowercase hexadecimal SHA-256 of the request's
+; archive. Every record is written whole, as one archive, by the
+; bootstrap; nothing else reads it.
+Memory
+
+[ signal_lojix:[ ClosurePath ]
+  :crate:memory:[ PersistedFlakeInputOverride ] ]
+
+[ BootstrapJournal.{ JournalSchemaVersion RequestFingerprint BootstrapEvidenceMode
+                     JournalDirectory.FileIdentity ResolvedFlakeReference Option<ClosurePath>
+                     Option<GcRootReceipt> Option<MaterializedInputs>
+                     Option<BootstrapEvidenceStatus> Vector<JournalEvent> }
+  JournalSchemaVersion.Integer
+  RequestFingerprint.String
+  BootstrapEvidenceMode.[ BuildOnly BootOnce ]
+  FileIdentity.{ FileDevice.Integer FileInode.Integer }
+  ResolvedFlakeReference.String
+  GcRootReceipt.{ ClosurePath FileIdentity }
+  MaterializedInputs.Vector<PersistedFlakeInputOverride>
+  BootstrapEvidenceStatus.[ Succeeded Failed ]
+  JournalEvent.{ BootstrapStage JournalEventKind EventSucceeded.Boolean }
+  BootstrapStage.[ JournalCreated Materialized Tested Built GcRooted Copied BootOnceScheduled
+                   BootOnceActivated TerminalEvidenceWritten ]
+  JournalEventKind.[ Intent Receipt Outcome ]
+  BootstrapTerminalEvidence.{ JournalSchemaVersion RequestFingerprint BootstrapEvidenceMode
+                              BootstrapEvidenceStatus Vector<BootstrapEffectEvidence> }
+  BootstrapEffectEvidence.{ BootstrapStage EffectSucceeded.Boolean } ]

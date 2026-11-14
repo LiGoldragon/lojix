@@ -1,3 +1,8 @@
+; What the offline tools are asked, each request the inline Datom object its
+; tool takes: lojix-inspect-store a store path, and lojix-bootstrap a whole
+; run, its input, builder, optional hermetic test, boot-once backend and
+; output paths. The bootstrap reads the request as it arrived; nothing
+; restates it.
 Library
 []
 [ InspectStore.{ String }

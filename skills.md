@@ -13,8 +13,8 @@ what remains is implementation and validation.
 The library half (`lojix`) holds shared types, handwritten
 Nexus/MEMORY runtime code, the actor-native socket shell, and
 request/reply plumbing. The three runtime/client binaries are thin entry
-points; migration, inspection, reset, configuration writing, and bootstrap
-remain explicit offline tools in their own package.
+points; inspection, reset, and bootstrap remain explicit offline tools in their
+own package.
 
 ## Required reading when implementation starts
 

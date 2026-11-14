@@ -69,6 +69,12 @@ pub type NexusConfigurationState = nexus::ConfigurationState<NexusConfiguration>
 pub mod answering;
 #[cfg(feature = "tools")]
 pub mod bootstrap;
+#[cfg(feature = "tools")]
+pub mod bootstrap_emission;
+#[cfg(feature = "tools")]
+pub mod bootstrap_journal;
+#[cfg(feature = "tools")]
+mod bootstrap_translator;
 pub mod client;
 pub mod daemon;
 pub mod deployment_watch;

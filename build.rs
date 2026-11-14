@@ -1,7 +1,9 @@
 //! The offline tools' requests, the Nexus's Memory, its operations and its
-//! emissions are generated from ethos/ingress.ethos, ethos/memory.ethos,
-//! ethos/operation.ethos and ethos/emission.ethos by ethos-zero; the committed
-//! Rust must equal fresh generation.
+//! emissions, and the bootstrap's journal and emissions, are generated from
+//! ethos/ingress.ethos, ethos/memory.ethos, ethos/operation.ethos,
+//! ethos/emission.ethos, ethos/bootstrap_journal.ethos and
+//! ethos/bootstrap_emission.ethos by ethos-zero; the committed Rust must equal
+//! fresh generation.
 
 use ethos_zero::{Actualizing, File, Generating, Potential};
 
@@ -12,6 +14,11 @@ fn main() {
         ("ethos/memory.ethos", "src/memory.rs"),
         ("ethos/operation.ethos", "src/operation.rs"),
         ("ethos/emission.ethos", "src/emission.rs"),
+        ("ethos/bootstrap_journal.ethos", "src/bootstrap_journal.rs"),
+        (
+            "ethos/bootstrap_emission.ethos",
+            "src/bootstrap_emission.rs",
+        ),
     ] {
         println!("cargo:rerun-if-changed={source_path}");
         println!("cargo:rerun-if-changed={generated_path}");

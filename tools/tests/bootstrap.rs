@@ -9,20 +9,26 @@ use std::path::Path;
 use std::process::Command;
 
 use lojix::bootstrap::{
-    BootstrapActivationBackend, BootstrapBootOnce, BootstrapBuildOnly, BootstrapBuilder,
-    BootstrapCommand, BootstrapCrashInjector, BootstrapCrashPoint, BootstrapDirectInput,
-    BootstrapEffectStage, BootstrapExecutor, BootstrapGcRootPath, BootstrapHermeticTest,
-    BootstrapInvocation as _, BootstrapJournalParent, BootstrapLocalBootstrapV1, BootstrapMode,
-    BootstrapNixStoreUri, BootstrapNixSystem, BootstrapOutputSelector,
-    BootstrapRemoteNixosSystemdBootV1, BootstrapRequestId, BootstrapRun, BootstrapSshDestination,
-    BootstrapSshIdentityFile, BootstrapSshKnownHostsFile, BootstrapSshPolicy,
-    BootstrapStrictHostKeyMode, BootstrapSystemProfilePath, BootstrapTerminalEvidencePath,
-    BootstrapTestPlan,
+    BootstrapCommand, BootstrapCrashInjector, BootstrapCrashPoint, BootstrapExecutor,
+    BootstrapInvocation as _, BootstrapRun,
+};
+use lojix::bootstrap_journal::BootstrapEvidenceStatus;
+use lojix::emission::{ExitStatus, ProcessEnd, ProcessEnding, ProcessFailure, ProcessFault};
+use lojix::ingress::{
+    BootstrapActivationBackend, BootstrapBootEntriesDirectory, BootstrapBootOnce,
+    BootstrapBuildOnly, BootstrapBuilder, BootstrapBuilderSpec, BootstrapDirectInput,
+    BootstrapFlakeReference, BootstrapGcRootPath, BootstrapHermeticTest, BootstrapInput,
+    BootstrapJournalParent, BootstrapLocalBootstrapV1, BootstrapMode, BootstrapNixStoreUri,
+    BootstrapNixSystem, BootstrapOutputSelector, BootstrapRemoteNixosSystemdBootV1,
+    BootstrapRequestId, BootstrapSshDestination, BootstrapSshIdentityFile,
+    BootstrapSshKnownHostsFile, BootstrapSshPolicy, BootstrapSystemProfilePath,
+    BootstrapTerminalEvidencePath, BootstrapTestPlan,
 };
 
 const FLAKE: &str = "github:fixture-owner/fixture-flake/0123456789abcdef0123456789abcdef01234567";
 const DERIVATION: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-fixture.drv";
 const CLOSURE: &str = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-fixture-system";
+const JOURNAL_PREFIX: &str = ".lojix-bootstrap-v6-";
 
 #[derive(Default)]
 struct SuppressedExecutor {
@@ -54,13 +60,26 @@ impl SuppressedExecutor {
             })
             .count()
     }
+
+    fn failure(command: &BootstrapCommand) -> ProcessFailure {
+        ProcessFailure {
+            command_program: signal_lojix::CommandProgram(command.program.clone()),
+            command_argument_vector: command
+                .arguments
+                .iter()
+                .map(|argument| signal_lojix::CommandArgument(argument.clone()))
+                .collect(),
+            process_fault: ProcessFault::Ended(ProcessEnding {
+                process_end: ProcessEnd::Exited(ExitStatus(1)),
+                stdout: lojix::emission::Stdout(String::new()),
+                stderr: lojix::emission::Stderr("suppressed failure".to_string()),
+            }),
+        }
+    }
 }
 
 impl BootstrapExecutor for SuppressedExecutor {
-    fn run(
-        &mut self,
-        command: BootstrapCommand,
-    ) -> Result<String, lojix::bootstrap::BootstrapError> {
+    fn run(&mut self, command: &BootstrapCommand) -> Result<String, ProcessFailure> {
         let should_fail = self.fail_program == Some(command.program.as_str())
             && command
                 .arguments
@@ -68,9 +87,7 @@ impl BootstrapExecutor for SuppressedExecutor {
                 .is_some_and(|value| self.fail_subcommand == Some(value));
         self.commands.push(command.clone());
         if should_fail {
-            return Err(lojix::bootstrap::BootstrapError::Effect(
-                BootstrapEffectStage::Built,
-            ));
+            return Err(Self::failure(command));
         }
         match (
             command.program.as_str(),
@@ -140,11 +157,11 @@ impl BootstrapCrashInjector for CrashOnce {
     }
 }
 
-fn direct_input() -> lojix::bootstrap::BootstrapInput {
-    lojix::bootstrap::BootstrapInput::Direct(BootstrapDirectInput {
-        flake_reference: lojix::bootstrap::BootstrapFlakeReference(FLAKE.to_string()),
-        nix_system: BootstrapNixSystem("x86_64-linux".to_string()),
-        output_selector: BootstrapOutputSelector(
+fn direct_input() -> BootstrapInput {
+    BootstrapInput::Direct(BootstrapDirectInput {
+        bootstrap_flake_reference: BootstrapFlakeReference(FLAKE.to_string()),
+        bootstrap_nix_system: BootstrapNixSystem("x86_64-linux".to_string()),
+        bootstrap_output_selector: BootstrapOutputSelector(
             "nixosConfigurations.target.config.system.build.toplevel".to_string(),
         ),
     })
@@ -172,13 +189,13 @@ fn private(directory: &Path) {
 fn build_only(directory: &Path) -> BootstrapRun {
     let (journal_parent, gc_root_path, terminal_evidence_path) = paths(directory);
     BootstrapRun {
-        request_id: BootstrapRequestId("fixture-build-only".to_string()),
-        mode: BootstrapMode::BuildOnly(BootstrapBuildOnly {
-            input: direct_input(),
-            builder: BootstrapBuilder::NoBuilder,
-            journal_parent,
-            gc_root_path,
-            terminal_evidence_path,
+        bootstrap_request_id: BootstrapRequestId("fixture-build-only".to_string()),
+        bootstrap_mode: BootstrapMode::BuildOnly(BootstrapBuildOnly {
+            bootstrap_input: direct_input(),
+            bootstrap_builder: BootstrapBuilder::NoBuilder,
+            bootstrap_journal_parent: journal_parent,
+            bootstrap_gc_root_path: gc_root_path,
+            bootstrap_terminal_evidence_path: terminal_evidence_path,
         }),
     }
 }
@@ -186,24 +203,24 @@ fn build_only(directory: &Path) -> BootstrapRun {
 fn local_boot_once(directory: &Path) -> BootstrapRun {
     let (journal_parent, gc_root_path, terminal_evidence_path) = paths(directory);
     BootstrapRun {
-        request_id: BootstrapRequestId("fixture-local".to_string()),
-        mode: BootstrapMode::BootOnce(BootstrapBootOnce {
-            input: direct_input(),
-            builder: BootstrapBuilder::NoBuilder,
-            test_plan: BootstrapTestPlan::NoTest,
-            activation_backend: BootstrapActivationBackend::LocalBootstrapV1(
+        bootstrap_request_id: BootstrapRequestId("fixture-local".to_string()),
+        bootstrap_mode: BootstrapMode::BootOnce(BootstrapBootOnce {
+            bootstrap_input: direct_input(),
+            bootstrap_builder: BootstrapBuilder::NoBuilder,
+            bootstrap_test_plan: BootstrapTestPlan::NoTest,
+            bootstrap_activation_backend: BootstrapActivationBackend::LocalBootstrapV1(
                 BootstrapLocalBootstrapV1 {
-                    system_profile_path: BootstrapSystemProfilePath(
+                    bootstrap_system_profile_path: BootstrapSystemProfilePath(
                         directory.join("system-profile").display().to_string(),
                     ),
-                    boot_entries_directory: lojix::bootstrap::BootstrapBootEntriesDirectory(
+                    bootstrap_boot_entries_directory: BootstrapBootEntriesDirectory(
                         directory.display().to_string(),
                     ),
                 },
             ),
-            journal_parent,
-            gc_root_path,
-            terminal_evidence_path,
+            bootstrap_journal_parent: journal_parent,
+            bootstrap_gc_root_path: gc_root_path,
+            bootstrap_terminal_evidence_path: terminal_evidence_path,
         }),
     }
 }
@@ -218,45 +235,44 @@ fn remote_boot_once(directory: &Path) -> BootstrapRun {
     fs::set_permissions(&known_hosts_file, fs::Permissions::from_mode(0o600))
         .expect("known-hosts mode");
     BootstrapRun {
-        request_id: BootstrapRequestId("fixture-remote".to_string()),
-        mode: BootstrapMode::BootOnce(BootstrapBootOnce {
-            input: direct_input(),
-            builder: BootstrapBuilder::NixBuilder(lojix::bootstrap::BootstrapBuilderSpec(
+        bootstrap_request_id: BootstrapRequestId("fixture-remote".to_string()),
+        bootstrap_mode: BootstrapMode::BootOnce(BootstrapBootOnce {
+            bootstrap_input: direct_input(),
+            bootstrap_builder: BootstrapBuilder::NixBuilder(BootstrapBuilderSpec(
                 "ssh-ng://builder.invalid x86_64-linux - 4 1 - - -".to_string(),
             )),
-            test_plan: BootstrapTestPlan::RunHermeticTest(BootstrapHermeticTest {
-                flake_reference: lojix::bootstrap::BootstrapFlakeReference(FLAKE.to_string()),
-                nix_system: BootstrapNixSystem("x86_64-linux".to_string()),
-                output_selector: BootstrapOutputSelector("checks.bootstrap".to_string()),
+            bootstrap_test_plan: BootstrapTestPlan::RunHermeticTest(BootstrapHermeticTest {
+                bootstrap_flake_reference: BootstrapFlakeReference(FLAKE.to_string()),
+                bootstrap_nix_system: BootstrapNixSystem("x86_64-linux".to_string()),
+                bootstrap_output_selector: BootstrapOutputSelector("checks.bootstrap".to_string()),
             }),
-            activation_backend: BootstrapActivationBackend::RemoteNixosSystemdBootV1(
+            bootstrap_activation_backend: BootstrapActivationBackend::RemoteNixosSystemdBootV1(
                 BootstrapRemoteNixosSystemdBootV1 {
-                    nix_store_uri: BootstrapNixStoreUri(
+                    bootstrap_nix_store_uri: BootstrapNixStoreUri(
                         "ssh-ng://root@activate.invalid:2222".to_string(),
                     ),
-                    ssh_destination: BootstrapSshDestination(
+                    bootstrap_ssh_destination: BootstrapSshDestination(
                         "root@activate.invalid:2222".to_string(),
                     ),
-                    ssh_policy: BootstrapSshPolicy {
-                        identity_file: BootstrapSshIdentityFile(
+                    bootstrap_ssh_policy: BootstrapSshPolicy {
+                        bootstrap_ssh_identity_file: BootstrapSshIdentityFile(
                             identity_file.display().to_string(),
                         ),
-                        known_hosts_file: BootstrapSshKnownHostsFile(
+                        bootstrap_ssh_known_hosts_file: BootstrapSshKnownHostsFile(
                             known_hosts_file.display().to_string(),
                         ),
-                        strict_host_key_mode: BootstrapStrictHostKeyMode::RequireKnownHost,
                     },
-                    system_profile_path: BootstrapSystemProfilePath(
+                    bootstrap_system_profile_path: BootstrapSystemProfilePath(
                         "/nix/var/nix/profiles/system".to_string(),
                     ),
-                    boot_entries_directory: lojix::bootstrap::BootstrapBootEntriesDirectory(
+                    bootstrap_boot_entries_directory: BootstrapBootEntriesDirectory(
                         "/boot/loader/entries".to_string(),
                     ),
                 },
             ),
-            journal_parent,
-            gc_root_path,
-            terminal_evidence_path,
+            bootstrap_journal_parent: journal_parent,
+            bootstrap_gc_root_path: gc_root_path,
+            bootstrap_terminal_evidence_path: terminal_evidence_path,
         }),
     }
 }
@@ -266,10 +282,10 @@ fn build_only_has_no_transport_or_activation_body() {
     let directory = tempfile::tempdir().expect("tempdir");
     private(directory.path());
     let mut executor = SuppressedExecutor::default();
-    let terminal = build_only(directory.path())
+    let status = build_only(directory.path())
         .run_with_executor(&mut executor)
         .expect("build only");
-    assert_eq!(terminal.status, "Succeeded");
+    assert_eq!(status, BootstrapEvidenceStatus::Succeeded);
     assert_eq!(executor.count("nix-store", "--add-root"), 1);
     assert!(executor.commands.iter().all(|command| {
         !command.program.ends_with("/ssh")
@@ -538,17 +554,19 @@ fn nonprivate_ssh_policy_files_are_rejected_before_any_effect() {
     let directory = tempfile::tempdir().expect("tempdir");
     private(directory.path());
     let mut request = remote_boot_once(directory.path());
-    let BootstrapMode::BootOnce(boot) = &mut request.mode else {
+    let BootstrapMode::BootOnce(boot) = &mut request.bootstrap_mode else {
         unreachable!()
     };
-    let BootstrapActivationBackend::RemoteNixosSystemdBootV1(remote) = &mut boot.activation_backend
+    let BootstrapActivationBackend::RemoteNixosSystemdBootV1(remote) =
+        &mut boot.bootstrap_activation_backend
     else {
         unreachable!()
     };
     let bad_identity = directory.path().join("bad-identity");
     fs::write(&bad_identity, "bad").expect("identity");
     fs::set_permissions(&bad_identity, fs::Permissions::from_mode(0o644)).expect("mode");
-    remote.ssh_policy.identity_file = BootstrapSshIdentityFile(bad_identity.display().to_string());
+    remote.bootstrap_ssh_policy.bootstrap_ssh_identity_file =
+        BootstrapSshIdentityFile(bad_identity.display().to_string());
     let mut executor = SuppressedExecutor::default();
     assert!(request.run_with_executor(&mut executor).is_err());
     assert!(executor.commands.is_empty());
@@ -559,13 +577,13 @@ fn mutable_flakes_and_ambiguous_transport_fail_before_effects() {
     let directory = tempfile::tempdir().expect("tempdir");
     private(directory.path());
     let mut mutable = build_only(directory.path());
-    let BootstrapMode::BuildOnly(build) = &mut mutable.mode else {
+    let BootstrapMode::BuildOnly(build) = &mut mutable.bootstrap_mode else {
         unreachable!()
     };
-    let lojix::bootstrap::BootstrapInput::Direct(direct) = &mut build.input else {
+    let BootstrapInput::Direct(direct) = &mut build.bootstrap_input else {
         unreachable!()
     };
-    direct.flake_reference.0 =
+    direct.bootstrap_flake_reference.0 =
         "github:fixture-owner/fixture-flake?rev=0123456789abcdef0123456789abcdef01234567"
             .to_string();
     let mut executor = SuppressedExecutor::default();
@@ -573,14 +591,15 @@ fn mutable_flakes_and_ambiguous_transport_fail_before_effects() {
     assert!(executor.commands.is_empty());
 
     let mut mismatched = remote_boot_once(directory.path());
-    let BootstrapMode::BootOnce(boot) = &mut mismatched.mode else {
+    let BootstrapMode::BootOnce(boot) = &mut mismatched.bootstrap_mode else {
         unreachable!()
     };
-    let BootstrapActivationBackend::RemoteNixosSystemdBootV1(remote) = &mut boot.activation_backend
+    let BootstrapActivationBackend::RemoteNixosSystemdBootV1(remote) =
+        &mut boot.bootstrap_activation_backend
     else {
         unreachable!()
     };
-    remote.ssh_destination.0 = "root@other.invalid:2222".to_string();
+    remote.bootstrap_ssh_destination.0 = "root@other.invalid:2222".to_string();
     let mut executor = SuppressedExecutor::default();
     assert!(mismatched.run_with_executor(&mut executor).is_err());
     assert!(executor.commands.is_empty());
@@ -605,16 +624,16 @@ fn transport_identity_rejection_table_never_reaches_a_body() {
         let directory = tempfile::tempdir().expect("tempdir");
         private(directory.path());
         let mut request = remote_boot_once(directory.path());
-        let BootstrapMode::BootOnce(boot) = &mut request.mode else {
+        let BootstrapMode::BootOnce(boot) = &mut request.bootstrap_mode else {
             unreachable!()
         };
         let BootstrapActivationBackend::RemoteNixosSystemdBootV1(remote) =
-            &mut boot.activation_backend
+            &mut boot.bootstrap_activation_backend
         else {
             unreachable!()
         };
-        remote.nix_store_uri.0 = store_uri.to_string();
-        remote.ssh_destination.0 = destination.to_string();
+        remote.bootstrap_nix_store_uri.0 = store_uri.to_string();
+        remote.bootstrap_ssh_destination.0 = destination.to_string();
         let mut executor = SuppressedExecutor::default();
         assert!(
             request.run_with_executor(&mut executor).is_err(),
@@ -657,10 +676,10 @@ fn failed_effect_writes_private_terminal_evidence_before_cleanup() {
         fail_subcommand: Some("build"),
         ..Default::default()
     };
-    let terminal = build_only(directory.path())
+    let status = build_only(directory.path())
         .run_with_executor(&mut executor)
         .expect("failure becomes durable terminal evidence");
-    assert_eq!(terminal.status, "Failed");
+    assert_eq!(status, BootstrapEvidenceStatus::Failed);
     let artifact = fs::symlink_metadata(directory.path().join("terminal.rkyv")).expect("evidence");
     assert_eq!(artifact.permissions().mode() & 0o777, 0o600);
     assert!(
@@ -670,7 +689,7 @@ fn failed_effect_writes_private_terminal_evidence_before_cleanup() {
                 .expect("entry")
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".lojix-bootstrap-v5-")),
+                .starts_with(JOURNAL_PREFIX)),
         "finalized private journal is retained safely"
     );
 }
@@ -693,7 +712,7 @@ fn substituted_journal_child_is_never_cleaned_recursively() {
         .map(|entry| entry.expect("entry").path())
         .find(|path| {
             path.file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(".lojix-bootstrap-v5-"))
+                .is_some_and(|name| name.to_string_lossy().starts_with(JOURNAL_PREFIX))
         })
         .expect("journal child");
     let displaced = directory.path().join("displaced-journal");
@@ -731,7 +750,7 @@ fn cli_remains_exactly_one_inline_object() {
         directory.path().join("root").display(),
         directory.path().join("evidence").display(),
     ))]).expect("one inline request");
-    assert!(matches!(parsed.mode, BootstrapMode::BuildOnly(_)));
+    assert!(matches!(parsed.bootstrap_mode, BootstrapMode::BuildOnly(_)));
     assert!(
         !Command::new(env!("CARGO_BIN_EXE_lojix-bootstrap"))
             .arg("--help")

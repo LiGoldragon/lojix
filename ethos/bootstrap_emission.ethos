@@ -1,0 +1,69 @@
+; What lojix-bootstrap sends into the world: every process a bootstrap run
+; starts, each one emission, and the outcome its translator observed. As in
+; ethos/emission.ethos, a command line is a type: an emission names what is
+; asked, and the translator, in src/bootstrap_translator.rs, is the one place
+; that holds the words of the call, its program, argv and environment.
+;
+; A run evaluates and builds its closure on this machine, under the
+; builders the request names; builds the hermetic check a boot-once plan
+; carries; hashes each flake input it materialized from a Horizon
+; definition; and roots the built closure below the run's own journal.
+; A remote run copies the closure to its node unless the node holds it
+; already, and reaches the node only through the private ssh configuration
+; it wrote, under the identity the request names. A boot-once is a
+; transient unit, scheduled on the node or on this machine, whose state is
+; read by its name; its script is the translator's.
+;
+; A process that ends in failure is reported with its program, argv and
+; how it ended; the bootstrap keeps that out of its terminal evidence.
+Emission
+
+[ signal_lojix:[ ClosurePath ]
+  :crate:memory:[ PersistedFlakeInputOverride ]
+  :crate:ingress:[ BootstrapFlakeReference BootstrapNixSystem BootstrapOutputSelector
+                   BootstrapBuilderSpec BootstrapNixStoreUri ]
+  :crate:emission:[ CallOutcome HashOutcome ProcessFailure UnitName ] ]
+
+[ EvaluateBootstrapDerivation.BootstrapEvaluation
+  BuildBootstrapDerivation.BootstrapBuild
+  BuildBootstrapCheck.BootstrapCheckBuild
+  HashGeneratedInput.GeneratedInputHashing
+  RootBootstrapClosure.BootstrapRooting
+  ReadRemoteClosure.RemoteClosureQuery
+  CopyBootstrapClosure.BootstrapCopy
+  ReadBootOnceUnit.BootOnceUnitQuery
+  DispatchBootOnceUnit.BootOnceDispatch ]
+
+[ BootstrapDerivationEvaluated.PrintedPathOutcome
+  BootstrapDerivationBuilt.PrintedPathOutcome
+  BootstrapCheckBuilt.CallOutcome
+  GeneratedInputHashed.HashOutcome
+  BootstrapClosureRooted.CallOutcome
+  RemoteClosureRead.ClosurePresenceOutcome
+  BootstrapClosureCopied.CallOutcome
+  BootOnceUnitRead.BootOnceUnitOutcome
+  BootOnceUnitDispatched.CallOutcome ]
+
+[ BootstrapEvaluation.{ BootstrapNixSystem Vector<PersistedFlakeInputOverride>
+                        BootstrapFlakeReference BootstrapOutputSelector }
+  BootstrapBuild.{ BootstrapNixSystem Option<BootstrapBuilderSpec> DerivationPath }
+  DerivationPath.String
+  BootstrapCheckBuild.{ BootstrapNixSystem BootstrapFlakeReference BootstrapOutputSelector }
+  GeneratedInputHashing.{ GeneratedInputDirectory.String }
+  BootstrapRooting.{ RootStagingPath.String ClosurePath }
+  RemoteClosureQuery.{ SshRoute ClosurePath }
+  SshRoute.{ SshConfigPath SshIdentity }
+  SshConfigPath.String
+  SshIdentity.{ SshUser.String SshHost.String Option<SshPort> }
+  SshPort.Integer
+  BootstrapCopy.{ BootstrapNixStoreUri SshConfigPath ClosurePath }
+  BootOnceUnitQuery.{ BootOnceRoute UnitName }
+  BootOnceRoute.[ Remote.SshRoute Local ]
+  BootOnceDispatch.{ BootOnceRoute BootOnceScript }
+  BootOnceScript.{ UnitName ClosurePath SystemProfilePath.String BootEntriesDirectory.String }
+
+  PrintedPathOutcome.[ Printed.PrintedStorePath Unprinted Failed.ProcessFailure ]
+  PrintedStorePath.String
+  ClosurePresenceOutcome.[ Present Absent Failed.ProcessFailure ]
+  BootOnceUnitOutcome.[ Read.BootOnceUnitState Failed.ProcessFailure ]
+  BootOnceUnitState.[ NotFound Ready Waiting Failed ] ]

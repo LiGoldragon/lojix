@@ -52,6 +52,7 @@
             || (craneLib.filterCargoSources path type)
             || (type == "regular" && baseNameOf path == "horizon-definition.datom")
             || (type == "regular" && baseNameOf path == "emission-argv.txt")
+            || (type == "regular" && baseNameOf path == "bootstrap-argv.txt")
             || (type == "regular" && pkgs.lib.hasSuffix ".ethos" path)
             || (type == "regular" && pkgs.lib.hasSuffix ".memory" path)
             || (type == "regular" && pkgs.lib.hasSuffix ".sema" path)

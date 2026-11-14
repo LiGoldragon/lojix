@@ -114,6 +114,31 @@ ResetStore`, and loses its `ExecStartPre` writer, its `LOJIX_CONFIGURATION`
 variable and the `resetConfigurationPath` option behind them; its
 `lojix-nexus-service` check loses the writer's assertions and round trip.
 
+`lojix-bootstrap` reads its request as `ethos/ingress.ethos` generates it,
+with no copy of its own, and admits every field before any effect as it did.
+Its journal is a `BootstrapJournal` record and its terminal evidence a
+`BootstrapTerminalEvidence`, both generated from `ethos/bootstrap_journal.ethos`;
+a journal's stages and the evidence's stages are one `BootstrapStage`. Every
+process it starts is an emission of `ethos/bootstrap_emission.ethos`, worded
+in `src/bootstrap_translator.rs`; each runs the argv it ran before
+(`tools/tests/bootstrap_argv.rs`, against the argv af392ec ran). Three things
+a caller can see change:
+
+- The request's fingerprint is the SHA-256 of its archive, where it was of its
+  Rust debug text, written as lowercase hexadecimal. A journal directory is
+  `.lojix-bootstrap-v6-<fingerprint>`, holding `bootstrap-v6.rkyv`, where it
+  was `.lojix-bootstrap-v5-<hash>` holding `bootstrap-v5.rkyv`, and a
+  boot-once unit's name follows the new fingerprint. A run interrupted under
+  an earlier release is not resumed by this one; it is resumed by the release
+  that started it. No such journal was live on ouranos or zeus on 2026-11-14:
+  ouranos held seventeen, each finalized with its evidence written, and zeus
+  none.
+- The terminal evidence carries the fingerprint as text, and a stage outcome
+  as `BootstrapEffectEvidence`; evidence written by an earlier release does not
+  bind a run of this one.
+- The journal no longer creates an empty `lojix-v5.memory` store beside its
+  record; nothing read it.
+
 Inside the Nexus, every value whose shape a contract declares is the
 contract's generated type itself: the scalars, the markers, the
 enumerations, and the records that agree with the contract field for field.
