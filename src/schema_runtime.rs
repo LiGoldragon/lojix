@@ -7474,7 +7474,17 @@ struct UserEnvironmentActivation {
 trait UserEnvironmentActivating {
     fn local_profile_emission(&self, home: &Path) -> emission::LocalHomeProfile;
 
-    fn local_activate_emission(&self) -> emission::LocalHomeActivation;
+    fn local_activate_emission(
+        &self,
+        user_identifier: emission::UserIdentifier,
+    ) -> emission::LocalHomeActivation;
+
+    /// The target user's identifier, read on the daemon's node, which names
+    /// the runtime directory its service manager is reached through.
+    async fn target_user_identifier(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<emission::UserIdentifier, StageFailure>;
 
     fn remote_profile_emission(&self) -> std::result::Result<emission::RemoteHomeProfile, String>;
 
@@ -7530,9 +7540,35 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
         }
     }
 
-    fn local_activate_emission(&self) -> emission::LocalHomeActivation {
+    fn local_activate_emission(
+        &self,
+        user_identifier: emission::UserIdentifier,
+    ) -> emission::LocalHomeActivation {
         emission::LocalHomeActivation {
             closure_path: self.closure_path.clone(),
+            user_identifier,
+        }
+    }
+
+    async fn target_user_identifier(
+        &self,
+        execution: &EffectExecution,
+    ) -> std::result::Result<emission::UserIdentifier, StageFailure> {
+        match execution
+            .emitted(emission::UserIdentifierQuery {
+                user_name: ordinary::UserName::new(self.user.as_str().to_string()),
+            })
+            .await
+        {
+            emission::UserIdentifierOutcome::Identified(identifier) => Ok(identifier),
+            emission::UserIdentifierOutcome::Unrecognized(printed) => {
+                Err(StageFailure::from(format!(
+                    "id printed no user identifier for {}: {}",
+                    self.user.as_str(),
+                    printed.0.trim()
+                )))
+            }
+            emission::UserIdentifierOutcome::Failed(failure) => Err(failure.into()),
         }
     }
 
@@ -7599,8 +7635,9 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
                 .await
                 .completed();
         }
+        let user_identifier = self.target_user_identifier(execution).await?;
         execution
-            .emitted(self.local_activate_emission())
+            .emitted(self.local_activate_emission(user_identifier))
             .await
             .completed()
     }
@@ -7803,7 +7840,8 @@ mod tests {
         }
 
         fn local_activate_invocation(&self) -> CommandLine {
-            self.local_activate_emission().command_line()
+            self.local_activate_emission(emission::UserIdentifier(1000))
+                .command_line()
         }
 
         fn remote_profile_invocation(&self) -> std::result::Result<CommandLine, String> {
@@ -10029,10 +10067,14 @@ mod tests {
             "li@fixture.invalid",
         );
         let invocation = activation.local_activate_invocation();
-        assert_eq!(invocation.program, "/run/current-system/sw/bin/systemd-run");
+        assert_eq!(invocation.program, "env");
         assert_eq!(
             invocation.arguments,
             vec![
+                "-u",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "XDG_RUNTIME_DIR=/run/user/1000",
+                "/run/current-system/sw/bin/systemd-run",
                 "--user",
                 "--wait",
                 "--pipe",
@@ -10065,6 +10107,9 @@ mod tests {
             assert!(command.contains("/run/current-system/sw/bin/systemd-run"));
             assert!(command.contains("--setenv=TMPDIR=/tmp"));
             assert!(!command.contains("DRY_RUN"));
+            // A remote login has its own session: only the local activation
+            // names the user's runtime directory.
+            assert!(!command.contains("XDG_RUNTIME_DIR"));
         }
     }
 
@@ -11078,10 +11123,14 @@ mod tests {
 
     #[test]
     fn every_emission_runs_the_argv_23f88f2_ran_for_the_same_inputs() {
-        // One line moves from what 23f88f2 ran, and only as named here: the
-        // same-host self-switch is dispatched with its receipt retained, as
-        // the self-test is, rather than waited on and collected (bead
-        // primary-6llk). Its script is unchanged.
+        // Two lines move from what 23f88f2 ran, and only as named here:
+        // - the same-host self-switch is dispatched with its receipt
+        //   retained, as the self-test is, rather than waited on and
+        //   collected (bead primary-6llk); its script is unchanged;
+        // - the local user-environment activation runs `systemd-run --user`
+        //   under `env`, which removes an inherited session bus address and
+        //   names the target user's runtime directory (bead primary-nwgd);
+        //   the systemd-run words are unchanged.
         let recorded: String = include_str!("../tests/fixtures/emission-argv.txt")
             .lines()
             .map(|line| {
@@ -11089,6 +11138,12 @@ mod tests {
                     line.replacen(
                         "--collect --wait --service-type=oneshot /bin/sh",
                         "--no-block --service-type=oneshot --remain-after-exit /bin/sh",
+                        1,
+                    )
+                } else if line.starts_with("user local-activate\t") {
+                    line.replacen(
+                        "\t\"/run/current-system/sw/bin/systemd-run\"\t[",
+                        "\t\"env\"\t[\"-u\", \"DBUS_SESSION_BUS_ADDRESS\", \"XDG_RUNTIME_DIR=/run/user/1000\", \"/run/current-system/sw/bin/systemd-run\", ",
                         1,
                     )
                 } else {
@@ -11248,5 +11303,17 @@ mod tests {
             body(&with_clears).replacen(clears, "", 1)
         );
         assert!(!body(&without_clears).contains("bootctl"));
+    }
+
+    #[test]
+    fn the_target_user_identifier_read_is_a_named_addition() {
+        // bead primary-nwgd: the local activation names the target user's
+        // runtime directory from that user's identifier, read with `id`.
+        let read = emission::UserIdentifierQuery {
+            user_name: ordinary::UserName::new("li".into()),
+        }
+        .command_line();
+        assert_eq!(read.program, "id");
+        assert_eq!(read.arguments, vec!["-u".to_string(), "li".into()]);
     }
 }

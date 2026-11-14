@@ -22,6 +22,11 @@
 ; self-switch reads back. Each is done on the daemon's own host, and its fault
 ; is the text the operating system reported.
 ;
+; A user environment activated on the daemon's own node runs in the target
+; user's own service manager, named by that user's runtime directory, which
+; is read from the user's identifier: the daemon reads nothing about the
+; user's session from its own environment.
+;
 ; The process emissions run under the effect execution, which says where a
 ; program comes from; the D-Bus emissions run on one system-bus session that
 ; keeps the subscriptions a detached activation is watched through. An
@@ -56,6 +61,7 @@ Emission
   SetRemoteHomeProfile.RemoteHomeProfile
   ActivateRemoteHome.RemoteHomeActivation
   ReadShortHostName
+  ReadUserIdentifier.UserIdentifierQuery
   CollectGarbage.GarbageCollection
   BringUpTestVm.TestVmBringUp
   TearDownTestVm.TestVmTearDown
@@ -93,6 +99,7 @@ Emission
   RemoteHomeProfileSet.CallOutcome
   RemoteHomeActivated.CallOutcome
   ShortHostNameRead.HostNameOutcome
+  UserIdentifierRead.UserIdentifierOutcome
   GarbageCollected.GarbageOutcome
   TestVmBroughtUp.CallOutcome
   TestVmTornDown.CallOutcome
@@ -135,7 +142,9 @@ Emission
   RetainedUnitDispatch.{ SshDestination UnitName TransientScript }
   UnitJournalQuery.{ SshDestination UnitName }
   LocalHomeProfile.{ HomeDirectory.String ClosurePath }
-  LocalHomeActivation.{ ClosurePath }
+  LocalHomeActivation.{ ClosurePath UserIdentifier }
+  UserIdentifierQuery.{ UserName }
+  UserIdentifier.Integer
   RemoteHomeProfile.{ SshDestination RemoteHomeLogin ClosurePath }
   RemoteHomeActivation.{ SshDestination RemoteHomeLogin ClosurePath }
   RemoteHomeLogin.[ AsTargetUser MediatedFor.UserName ]
@@ -162,6 +171,7 @@ Emission
   LoaderInterfaceOutcome.[ Read.LoaderInterface Unrecognized.Stdout Failed.ProcessFailure ]
   JournalText.String
   HostNameOutcome.[ Named.NodeName Failed.ProcessFailure ]
+  UserIdentifierOutcome.[ Identified.UserIdentifier Unrecognized.Stdout Failed.ProcessFailure ]
   GarbageOutcome.[ Collected.CollectedPaths Failed.ProcessFailure ]
   CollectedPaths.Integer
   ProcessFailure.{ CommandProgram Vector<CommandArgument> ProcessFault }

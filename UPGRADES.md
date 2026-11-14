@@ -199,6 +199,19 @@ is not UTF-8 is refused as it was, now when the directory is listed, before a
 file is copied. `HOME` and `USER` are still read from the daemon's
 environment.
 
+A user environment activated on the daemon's own node runs in the target
+user's own service manager (bead primary-nwgd). The daemon, a system service,
+inherits neither `DBUS_SESSION_BUS_ADDRESS` nor `XDG_RUNTIME_DIR`, so its bare
+`systemd-run --user` failed before the profile was set (ouranos deployment
+591). It now reads the user's identifier (`id -u <user>`, the emission
+`ReadUserIdentifier`) and runs `env -u DBUS_SESSION_BUS_ADDRESS
+XDG_RUNTIME_DIR=/run/user/<uid> /run/current-system/sw/bin/systemd-run --user …`,
+the systemd-run words unchanged. `systemd-run --machine=<user>@.host --user`
+is refused to an unprivileged daemon on systemd 262 ("Failed to connect to
+system scope bus via machine transport: Permission denied"), so the runtime
+directory is named instead. The user must have a running manager, as for any
+`--user` unit. A remote activation is unchanged.
+
 # 0.10.5 to 0.10.6
 
 A revision: the memory format is unchanged and the store stays readable;

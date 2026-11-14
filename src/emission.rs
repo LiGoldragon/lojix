@@ -207,7 +207,18 @@ pub struct LocalHomeProfile {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct LocalHomeActivation {
     pub closure_path: signal_lojix::ClosurePath,
+    pub user_identifier: UserIdentifier,
 }
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct UserIdentifierQuery {
+    pub user_name: signal_lojix::UserName,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct UserIdentifier(pub i64);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
@@ -369,6 +380,14 @@ pub struct JournalText(pub String);
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum HostNameOutcome {
     Named(signal_lojix::NodeName),
+    Failed(ProcessFailure),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum UserIdentifierOutcome {
+    Identified(UserIdentifier),
+    Unrecognized(Stdout),
     Failed(ProcessFailure),
 }
 #[rustfmt::skip]
@@ -668,6 +687,7 @@ pub enum Emission {
     SetRemoteHomeProfile(RemoteHomeProfile),
     ActivateRemoteHome(RemoteHomeActivation),
     ReadShortHostName(ReadShortHostName),
+    ReadUserIdentifier(UserIdentifierQuery),
     CollectGarbage(GarbageCollection),
     BringUpTestVm(TestVmBringUp),
     TearDownTestVm(TestVmTearDown),
@@ -709,6 +729,7 @@ pub enum Outcome {
     RemoteHomeProfileSet(CallOutcome),
     RemoteHomeActivated(CallOutcome),
     ShortHostNameRead(HostNameOutcome),
+    UserIdentifierRead(UserIdentifierOutcome),
     GarbageCollected(GarbageOutcome),
     TestVmBroughtUp(CallOutcome),
     TestVmTornDown(CallOutcome),
@@ -816,6 +837,10 @@ impl Emitted for RemoteHomeActivation {
 #[rustfmt::skip]
 impl Emitted for ReadShortHostName {
     type Outcome = HostNameOutcome;
+}
+#[rustfmt::skip]
+impl Emitted for UserIdentifierQuery {
+    type Outcome = UserIdentifierOutcome;
 }
 #[rustfmt::skip]
 impl Emitted for GarbageCollection {

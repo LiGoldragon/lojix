@@ -38,9 +38,13 @@ use crate::emission::{
 use crate::emission::{
     DirectoryEmptying, DirectoryEntry, DirectoryListing, DirectoryPreparation, EntryKind, FileCopy,
     FileFault, FileOutcome, FilePath, FileWrite, ListingOutcome, ReadSystemProfile,
-    SystemProfileOutcome,
+    SystemProfileOutcome, UserIdentifier, UserIdentifierOutcome, UserIdentifierQuery,
 };
 use crate::schema_runtime::{EffectExecution, ProgramResolution as _};
+
+/// Where systemd keeps each user's runtime directory, `/run/user/<uid>`: the
+/// user's own service manager and session bus are reached through it.
+const USER_RUNTIME_ROOT: &str = "/run/user";
 
 /// The system profile a same-host switch sets before it switches; a settled
 /// self-switch reads back the closure it resolves to.
@@ -631,10 +635,15 @@ impl Commanded for LocalHomeProfile {
     }
 }
 
-impl Commanded for LocalHomeActivation {
-    /// Home Manager's activation in a private transient user service, waited
-    /// on, its output piped back.
-    fn command_line(&self) -> CommandLine {
+/// Home Manager's activation in a private transient user service, waited on,
+/// its output piped back: the words both the local and the remote activation
+/// run.
+trait HomeManagerRun {
+    fn home_manager_run(&self) -> CommandLine;
+}
+
+impl HomeManagerRun for signal_lojix::ClosurePath {
+    fn home_manager_run(&self) -> CommandLine {
         CommandLine {
             program: "/run/current-system/sw/bin/systemd-run".into(),
             arguments: vec![
@@ -648,10 +657,45 @@ impl Commanded for LocalHomeActivation {
                 "--property=PrivateTmp=yes".into(),
                 "--setenv=TMPDIR=/tmp".into(),
                 "--".into(),
-                format!("{}/activate", self.closure_path.0),
+                format!("{}/activate", self.0),
                 HOME_MANAGER_DRIVER_VERSION_FLAG.into(),
                 HOME_MANAGER_DRIVER_VERSION.into(),
             ],
+        }
+    }
+}
+
+impl Commanded for LocalHomeActivation {
+    /// The activation on the daemon's own node, in the target user's own
+    /// service manager: its runtime directory is named from the user's
+    /// identifier and an inherited session bus address is removed, so
+    /// `systemd-run --user` reaches that manager whatever the daemon's own
+    /// environment holds.
+    fn command_line(&self) -> CommandLine {
+        let run = self.closure_path.home_manager_run();
+        CommandLine {
+            program: "env".into(),
+            arguments: [
+                "-u".to_string(),
+                "DBUS_SESSION_BUS_ADDRESS".into(),
+                format!(
+                    "XDG_RUNTIME_DIR={USER_RUNTIME_ROOT}/{}",
+                    self.user_identifier.0
+                ),
+                run.program,
+            ]
+            .into_iter()
+            .chain(run.arguments)
+            .collect(),
+        }
+    }
+}
+
+impl Commanded for UserIdentifierQuery {
+    fn command_line(&self) -> CommandLine {
+        CommandLine {
+            program: "id".into(),
+            arguments: vec!["-u".into(), self.user_name.0.clone()],
         }
     }
 }
@@ -691,10 +735,7 @@ impl Commanded for RemoteHomeProfile {
 
 impl Commanded for RemoteHomeActivation {
     fn command_line(&self) -> CommandLine {
-        let local = LocalHomeActivation {
-            closure_path: self.closure_path.clone(),
-        }
-        .command_line();
+        let local = self.closure_path.home_manager_run();
         let body = std::iter::once(local.program)
             .chain(local.arguments)
             .map(|argument| ShellArgument(&argument).to_command_text())
@@ -894,6 +935,18 @@ impl Emittable<EffectExecution> for ReadShortHostName {
         match translator.run(&self.command_line()) {
             Ok(printed) => HostNameOutcome::Named(signal_lojix::NodeName(printed.trim().into())),
             Err(failure) => HostNameOutcome::Failed(failure),
+        }
+    }
+}
+
+impl Emittable<EffectExecution> for UserIdentifierQuery {
+    fn emit(&self, translator: &EffectExecution) -> UserIdentifierOutcome {
+        match translator.run(&self.command_line()) {
+            Ok(printed) => match printed.first_line().parse::<i64>() {
+                Ok(identifier) => UserIdentifierOutcome::Identified(UserIdentifier(identifier)),
+                Err(_) => UserIdentifierOutcome::Unrecognized(Stdout(printed)),
+            },
+            Err(failure) => UserIdentifierOutcome::Failed(failure),
         }
     }
 }

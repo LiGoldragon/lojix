@@ -644,6 +644,118 @@
                 machine.log(machine.succeed("journalctl -u lojix.service --no-pager"))
               '';
             };
+
+          # The system daemon, running as the user it deploys for, activates
+          # that user's environment on its own node (bead primary-nwgd). A
+          # system service inherits neither DBUS_SESSION_BUS_ADDRESS nor
+          # XDG_RUNTIME_DIR, so a bare `systemd-run --user` from it fails, as
+          # ouranos deployment 591 did; the activation names the logged-in
+          # user's runtime directory from the user's identifier and runs in
+          # that user's own manager. Nix and the Home Manager generation are
+          # the fake boundaries.
+          local-user-environment-activation =
+            let
+              package = self.packages.${system}.default;
+              generation = pkgs.writeTextFile {
+                name = "lojix-fixture-home-generation";
+                destination = "/activate";
+                executable = true;
+                text = ''
+                  #!${pkgs.runtimeShell}
+                  {
+                    printf 'uid=%s\n' "$(${pkgs.coreutils}/bin/id -u)"
+                    printf 'arguments=%s\n' "$*"
+                    ${pkgs.coreutils}/bin/cat /proc/self/cgroup
+                  } > "$HOME/lojix-activation"
+                '';
+              };
+              fake-nix = pkgs.writeShellScriptBin "nix" ''
+                printf '%s\n' "$@" >> /tmp/lojix-fake-nix-argv
+                case "$1" in
+                  flake) printf '%s\n' '{"url":"github:fixture-owner/fixture-flake?ref=main","locked":{"rev":"0123456789abcdef0123456789abcdef01234567"}}' ;;
+                  eval) printf '%s\n' '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-lojix-home-candidate.drv' ;;
+                  build) printf '%s\n' '${generation}' ;;
+                  copy) exit 0 ;;
+                  *) exit 89 ;;
+                esac
+              '';
+            in
+            pkgs.testers.nixosTest {
+              name = "lojix-local-user-environment-activation";
+              nodes.machine = { ... }: {
+                networking.hostName = "atlas";
+                users.users.alice = {
+                  isNormalUser = true;
+                  uid = 1000;
+                };
+                services.getty.autologinUser = "alice";
+                environment.systemPackages = [ package ];
+                systemd.services.lojix = {
+                  wantedBy = [ "multi-user.target" ];
+                  serviceConfig = {
+                    ExecStart = "${package}/bin/lojix-nexus";
+                    User = "alice";
+                    Group = "users";
+                    StateDirectory = "lojix";
+                    RuntimeDirectory = "lojix";
+                    NoNewPrivileges = true;
+                    PrivateTmp = true;
+                    Environment = "PATH=${
+                      pkgs.lib.makeBinPath [
+                        fake-nix
+                        pkgs.nix
+                        pkgs.coreutils
+                        pkgs.hostname
+                      ]
+                    }";
+                  };
+                  preStart = ''
+                    install -m 0644 ${horizonDefinition}/horizon-definition.datom /var/lib/lojix/horizon-definition.datom
+                  '';
+                };
+              };
+              testScript = ''
+                ordinary = "LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix"
+                owner = "runuser -u alice -- env LOJIX_OWNER_SOCKET=/run/lojix/meta.sock ${package}/bin/lojix-meta"
+
+                def sockets():
+                    machine.wait_for_unit("lojix.service")
+                    machine.wait_until_succeeds("test -S /run/lojix/ordinary.sock && test -S /run/lojix/meta.sock")
+
+                start_all()
+                machine.wait_for_unit("multi-user.target")
+                machine.wait_for_unit("user@1000.service")
+                machine.wait_until_succeeds("test -S /run/user/1000/bus")
+                sockets()
+
+                # What deployment 591 met: a system service running as the
+                # user has no address for that user's manager.
+                status, output = machine.execute("systemd-run --uid=alice --gid=users --property=NoNewPrivileges=yes --wait --pipe --quiet /run/current-system/sw/bin/systemd-run --user --wait --pipe --quiet ${pkgs.coreutils}/bin/true 2>&1")
+                machine.log(output)
+                assert status != 0, output
+                assert "DBUS_SESSION_BUS_ADDRESS" in output, output
+
+                machine.succeed(ordinary + " 'Configure.{ /run/lojix/ordinary.sock 432 /run/lojix/meta.sock 384 /var/lib/lojix atlas NoTestDefaults }' | grep -F Configured")
+                machine.succeed("systemctl restart lojix.service")
+                sockets()
+                machine.succeed("runuser -u alice -- mkdir -p /home/alice/.local/state/nix/profiles")
+                machine.succeed(owner + " 'Deploy.UserEnvironment.{ fixture-cluster atlas alice /var/lib/lojix/horizon-definition.datom NoSecrets github:fixture-owner/fixture-flake?ref=main { ssh-ng://fixture-copy.invalid alice@fixture-activate.invalid } Direct { homeConfigurations.alice } HomeManagerNixProfileV1 ActivateNow ResolveAndRecord None [] }' >/tmp/lojix-admission")
+                machine.log(machine.succeed("cat /tmp/lojix-admission"))
+                machine.succeed("grep -F 'DeployAccepted.' /tmp/lojix-admission")
+                machine.wait_until_succeeds(ordinary + " 'Query.ByDeployment.{ 1 }' | grep -Eq 'Succeeded|Failed'")
+                reply = machine.succeed(ordinary + " 'Query.ByDeployment.{ 1 }'")
+                machine.log(reply)
+                machine.log(machine.succeed("journalctl -u lojix.service --no-pager"))
+                assert "Succeeded" in reply, reply
+
+                activation = machine.succeed("cat /home/alice/lojix-activation")
+                machine.log(activation)
+                assert "uid=1000" in activation, activation
+                assert "arguments=--driver-version 1" in activation, activation
+                assert "/user.slice/user-1000.slice/user@1000.service/" in activation, activation
+                assert machine.succeed("readlink -f /home/alice/.local/state/nix/profiles/home-manager").strip() == "${generation}"
+              '';
+            };
         };
 
         formatter = pkgs.nixfmt;
