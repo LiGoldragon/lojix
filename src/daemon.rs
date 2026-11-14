@@ -576,8 +576,8 @@ impl RequestServable for RequestWorker {
             };
             match turn {
                 WatchTurn::Observed(Some(event)) => {
-                    let frame = signal_lojix::Output::DeploymentPhaseObserved(event.raise()?)
-                        .ordinary_frame()?;
+                    let frame =
+                        signal_lojix::Output::DeploymentPhaseObserved(event).ordinary_frame()?;
                     if writer
                         .write_frame(&FrameBody::from(frame), self.capacity)
                         .await
@@ -766,7 +766,7 @@ trait DeployProcessable {
     fn daemon_host_system_closure() -> Option<String>;
     fn persist_reconciled_self_switch(
         &self,
-        deployment_identifier: u64,
+        deployment_identifier: i64,
         generation: crate::runtime_model::LiveGeneration,
         root: crate::runtime_model::GcRoot,
     );
@@ -868,7 +868,7 @@ impl DeployProcessable for DeployJobs {
                         let observed = unit
                             .journalled(observed, self.configuration.effect_execution())
                             .await;
-                        let optional_failure_evidence =
+                        let failure_evidence_option =
                             Some(crate::schema_runtime::Witnessing::witness(&observed));
                         if self
                             .store
@@ -879,7 +879,7 @@ impl DeployProcessable for DeployJobs {
                                         memory::DeploymentFailureStage::Activate,
                                     deployment_terminal_reason:
                                         memory::DeploymentTerminalReason::ActivationFailed,
-                                    optional_failure_evidence,
+                                    failure_evidence_option,
                                 }),
                             )
                             .is_ok()
@@ -996,7 +996,7 @@ impl DeployProcessable for DeployJobs {
     /// failure can erase the only durable retry witness.
     fn persist_reconciled_self_switch(
         &self,
-        deployment_identifier: u64,
+        deployment_identifier: i64,
         generation: crate::runtime_model::LiveGeneration,
         root: crate::runtime_model::GcRoot,
     ) {
@@ -1129,17 +1129,17 @@ mod tests {
 
     fn self_switch_submission() -> memory::DeploySubmission {
         memory::DeploySubmission::Host(memory::HostDeployment {
-            cluster_name: ordinary::ClusterName::from("fixture-cluster"),
-            node_name: ordinary::NodeName::from("fixture-daemon"),
+            cluster_name: ordinary::ClusterName::new("fixture-cluster".into()),
+            node_name: ordinary::NodeName::new("fixture-daemon".into()),
             host_composition: ordinary::HostComposition::CompleteHost,
-            proposal_source: ordinary::ProposalSource::from("/dev/null"),
+            proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
             secrets_input: memory::SecretsInput::NoSecrets,
             flake_reference: ordinary::FlakeReference::new(format!(
                 "github:LiGoldragon/CriomOS?rev={REVISION}"
             )),
             deployment_transport: memory::DeploymentTransport {
-                nix_store_uri: memory::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
-                ssh_destination: memory::SshDestination::from("root@fixture-daemon.invalid"),
+                nix_store_uri: memory::NixStoreUri::new("ssh-ng://fixture-copy.invalid".into()),
+                ssh_destination: memory::SshDestination::new("root@fixture-daemon.invalid".into()),
             },
             deployment_input_mode: memory::DeploymentInputMode::Direct,
             horizon_definition_option: None,
@@ -1151,7 +1151,7 @@ mod tests {
             activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
             host_deploy_action: ordinary::HostDeployAction::ActivateNow,
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-            optional_nix_builder_spec: None,
+            nix_builder_spec_option: None,
             extra_substituter_vector: Vec::new(),
         })
     }
@@ -1160,21 +1160,21 @@ mod tests {
         memory::DeployJob {
             deployment_identifier: ordinary::DeploymentIdentifier::new(0),
             generation_identifier: ordinary::GenerationIdentifier::new(0),
-            cluster_name: ordinary::ClusterName::from("fixture-cluster"),
-            node_name: ordinary::NodeName::from("fixture-daemon"),
+            cluster_name: ordinary::ClusterName::new("fixture-cluster".into()),
+            node_name: ordinary::NodeName::new("fixture-daemon".into()),
             deploy_job_phase: memory::DeployJobPhase::Submitted,
-            optional_closure_path: Some(ordinary::ClosurePath::from(CLOSURE)),
+            closure_path_option: Some(ordinary::ClosurePath::new(CLOSURE.into())),
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
             flake_reference: ordinary::FlakeReference::new(format!(
                 "github:LiGoldragon/CriomOS?rev={REVISION}"
             )),
-            optional_flake_reference: Some(ordinary::FlakeReference::new(format!(
+            flake_reference_option: Some(ordinary::FlakeReference::new(format!(
                 "github:LiGoldragon/CriomOS?rev={REVISION}"
             ))),
             resolved_revision: Some(REVISION.to_string()),
             deployment_transport: memory::DeploymentTransport {
-                nix_store_uri: memory::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
-                ssh_destination: memory::SshDestination::from("root@fixture-daemon.invalid"),
+                nix_store_uri: memory::NixStoreUri::new("ssh-ng://fixture-copy.invalid".into()),
+                ssh_destination: memory::SshDestination::new("root@fixture-daemon.invalid".into()),
             },
             deployment_input_mode: memory::DeploymentInputMode::Direct,
             deployment_output_selector: memory::DeploymentOutputSelector::new(
@@ -1183,28 +1183,28 @@ mod tests {
                 ),
             ),
             activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
-            optional_nix_builder_spec: None,
+            nix_builder_spec_option: None,
             boot_once_unit: None,
-            optional_generation_slot: Some(ordinary::GenerationSlot::Current),
+            generation_slot_option: Some(ordinary::GenerationSlot::Current),
             persisted_flake_input_override_vector: Vec::new(),
             deploy_resume_stage: memory::DeployResumeStage::ResolveFlakeAuth,
-            optional_phase_receipt: None,
-            optional_deploy_submission: Some(self_switch_submission()),
+            phase_receipt_option: None,
+            deploy_submission_option: Some(self_switch_submission()),
         }
     }
 
     fn self_switch_identity() -> ordinary::DeploymentRequestIdentity {
         ordinary::DeploymentRequestIdentity {
             deployment_environment: ordinary::DeploymentEnvironment::HostEnvironment,
-            cluster_name: ordinary::ClusterName::from("fixture-cluster"),
-            node_name: ordinary::NodeName::from("fixture-daemon"),
+            cluster_name: ordinary::ClusterName::new("fixture-cluster".into()),
+            node_name: ordinary::NodeName::new("fixture-daemon".into()),
             generation_artifact: ordinary::GenerationArtifact::CompleteHost,
             requested_deployment_action: ordinary::RequestedDeploymentAction::Host(
                 ordinary::HostDeployAction::ActivateNow,
             ),
             activation_effect: ordinary::ActivationEffect::LiveActivation,
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-            optional_immutable_revision: Some(ordinary::ImmutableRevision::from(REVISION)),
+            immutable_revision_option: Some(ordinary::ImmutableRevision::new(REVISION.into())),
         }
     }
 
@@ -1218,8 +1218,8 @@ mod tests {
             .allocate_deployment_record(self_switch_identity(), job.clone())
             .expect("admit interrupted self-switch");
         let deployment_identifier = *record.deployment_identifier.payload();
-        job.deployment_identifier = record.deployment_identifier.clone();
-        job.generation_identifier = record.generation_identifier.clone();
+        job.deployment_identifier = record.deployment_identifier;
+        job.generation_identifier = record.generation_identifier;
 
         let copying_position = store
             .allocate_event_log_position()
@@ -1229,21 +1229,25 @@ mod tests {
         store
             .advance_deployment_phase(
                 deployment_identifier,
-                ordinary::DeploymentLifecycle::Copying,
+                ordinary::DeploymentPhase::Copying,
                 job.clone(),
                 ordinary::DeploymentPhaseEvent {
-                    deployment_identifier: record.deployment_identifier.clone(),
-                    generation_identifier: record.generation_identifier.clone(),
-                    cluster_name: ordinary::ClusterName::from("fixture-cluster"),
-                    node_name: ordinary::NodeName::from("fixture-daemon"),
+                    deployment_identifier: record.deployment_identifier,
+                    generation_identifier: record.generation_identifier,
+                    cluster_name: ordinary::ClusterName::new("fixture-cluster".into()),
+                    node_name: ordinary::NodeName::new("fixture-daemon".into()),
                     deployment_phase: ordinary::DeploymentPhase::Copying,
                     event_log_position: ordinary::EventLogPosition::new(copying_position),
-                    state_marker: ordinary::StateMarker {
-                        commit_sequence: ordinary::CommitSequence::new(0),
-                        state_digest: ordinary::StateDigest::new(0),
+                    transition_marker: ordinary::TransitionMarker {
+                        database_marker: ordinary::DatabaseMarker {
+                            commit_sequence: ordinary::CommitSequence::new(0),
+                            state_digest: ordinary::StateDigest::new(0),
+                        },
                     },
-                    optional_immutable_revision: Some(ordinary::ImmutableRevision::from(REVISION)),
-                    optional_deployment_terminal: None,
+                    immutable_revision_option: Some(ordinary::ImmutableRevision::new(
+                        REVISION.into(),
+                    )),
+                    deployment_terminal_option: None,
                 },
             )
             .expect("persist copying boundary");
@@ -1278,27 +1282,27 @@ mod tests {
                 })
         );
         let record = store
-            .records::<crate::runtime_model::DeploymentRecord>()
+            .deployment_records()
             .expect("public deployment record")
             .into_iter()
             .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
             .expect("reconciled deployment record");
         assert!(matches!(
-            record.deployment_lifecycle,
-            ordinary::DeploymentLifecycle::Completed
+            record.deployment_phase,
+            ordinary::DeploymentPhase::Completed
         ));
         assert!(matches!(
-            record.optional_deployment_terminal,
+            record.deployment_terminal_option,
             Some(ordinary::DeploymentTerminal::Succeeded)
         ));
-        assert!(store.event_log_in_range(0, u64::MAX).expect("terminal event").iter().any(
+        assert!(store.event_log_in_range(0, i64::MAX).expect("terminal event").iter().any(
             |entry| matches!(
                 &entry.logged_event,
                 ordinary::LoggedEvent::Deployment(event)
                     if *event.deployment_identifier.payload() == deployment_identifier
                         && matches!(event.deployment_phase, ordinary::DeploymentPhase::Completed)
                         && matches!(
-                            event.optional_deployment_terminal,
+                            event.deployment_terminal_option,
                             Some(ordinary::DeploymentTerminal::Succeeded)
                         )
             )
@@ -1361,7 +1365,7 @@ impl TestProcessable for TestJobs {
             .expect("read durable state marker for test rejection");
         memory::RejectedTest {
             test_rejection_reason: memory::TestRejectionReason::SubstrateUnavailable,
-            state_marker: memory::StateMarker {
+            database_marker: memory::DatabaseMarker {
                 commit_sequence: memory::CommitSequence::new(commit_sequence),
                 state_digest: memory::StateDigest::new(commit_sequence),
             },

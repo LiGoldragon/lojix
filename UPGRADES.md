@@ -54,6 +54,19 @@ with no head:
 The fields inside each request are unchanged. CriomOS's `lojix-reset-store`
 service and its `lojix-write-configuration` request move with this pin.
 
+Inside the Nexus, every value whose shape a contract declares is the
+contract's generated type itself: the scalars, the markers, the
+enumerations, and the records that agree with the contract field for field.
+Their archived bytes are 0.10.6's, so no stored row changes
+(`tests/memory_representation.rs` proves each family both ways against the
+0.10.6 records frozen in `tests/frozen/v0_10_6.rs`, and
+`tests/store_fixture_rows.rs` reads every row of the three store fixtures
+back to its own bytes). A deployment record is stored whole inside
+`StoredDeploymentRecord`, a record of Lojix's own that archives as the record
+it holds. Identifiers are the contract's signed Integer throughout; a
+negative identifier on the wire now reaches the engine and is answered as
+unknown, where the seam used to refuse the frame.
+
 # 0.10.5 to 0.10.6
 
 A revision: the memory format is unchanged and the store stays readable;

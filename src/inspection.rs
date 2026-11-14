@@ -23,8 +23,9 @@ use rkyv::validation::shared::SharedValidator;
 
 use crate::quarantine::QuarantinedRow;
 use crate::runtime_model::{
-    ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, DeploymentRecord, EventLogEntry,
-    GcRoot, IdentifierAllocation, LiveGeneration, PendingTransitionIntent, StoredTestRun,
+    ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, EventLogEntry, GcRoot,
+    IdentifierAllocation, LiveGeneration, PendingTransitionIntent, StoredDeploymentRecord,
+    StoredTestRun,
 };
 use crate::{Error, InlineDatomArguments as _, LojixRecord, OfflineCommand, Result, ingress};
 
@@ -468,7 +469,7 @@ impl InspectionReader for StoreTableReader<'_> {
             self.inspect::<ContainerLifecycleRecord>(),
             self.inspect::<DeployJob>(),
             self.inspect::<StoredTestRun>(),
-            self.inspect::<DeploymentRecord>(),
+            self.inspect::<StoredDeploymentRecord>(),
             self.inspect::<IdentifierAllocation>(),
             self.inspect::<DeploymentOutboxRecord>(),
             self.inspect::<PendingTransitionIntent>(),

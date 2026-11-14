@@ -80,19 +80,19 @@ fn fake_programs_with_activation(directory: &Path, fail_activation: bool) {
 
 fn transport(nix_store_uri: &str, ssh_destination: &str) -> ordinary::DeploymentTransport {
     ordinary::DeploymentTransport {
-        nix_store_uri: ordinary::NixStoreUri::from(nix_store_uri),
-        ssh_destination: ordinary::SshDestination::from(ssh_destination),
+        nix_store_uri: ordinary::NixStoreUri::new(nix_store_uri.into()),
+        ssh_destination: ordinary::SshDestination::new(ssh_destination.into()),
     }
 }
 
 fn user_environment_request(source: &Path) -> meta::DeploySubmission {
     meta::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
-        cluster_name: ordinary::ClusterName::from("alpha"),
-        node_name: ordinary::NodeName::from("beacon"),
-        user_name: ordinary::UserName::from("bird"),
+        cluster_name: ordinary::ClusterName::new("alpha".into()),
+        node_name: ordinary::NodeName::new("beacon".into()),
+        user_name: ordinary::UserName::new("bird".into()),
         proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
         secrets_input: ordinary::SecretsInput::NoSecrets,
-        flake_reference: ordinary::FlakeReference::from(FLAKE),
+        flake_reference: ordinary::FlakeReference::new(FLAKE.into()),
         deployment_transport: transport(
             "ssh-ng://fixture-copy.invalid",
             "root@fixture-activate.invalid",
@@ -100,12 +100,12 @@ fn user_environment_request(source: &Path) -> meta::DeploySubmission {
         deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
         horizon_definition_option: Some(common::read_horizon(source)),
         deployment_output_selector: ordinary::DeploymentOutputSelector::new(
-            ordinary::FlakeAttribute::from("homeConfigurations.bird.activationPackage"),
+            ordinary::FlakeAttribute::new("homeConfigurations.bird.activationPackage".into()),
         ),
         activation_backend: ordinary::ActivationBackend::HomeManagerNixProfileV1,
         user_environment_action: ordinary::UserEnvironmentAction::ActivateNow,
         source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-        optional_nix_builder_spec: None,
+        nix_builder_spec_option: None,
         extra_substituter_vector: vec![],
     })
 }
@@ -147,7 +147,7 @@ async fn failed_user_environment_activation(
 
 fn terminal_failure(record: &ordinary::DeploymentRecord) -> &ordinary::DeploymentFailure {
     match record
-        .optional_deployment_terminal
+        .deployment_terminal_option
         .as_ref()
         .expect("a driven deployment reaches a terminal")
     {
@@ -164,7 +164,7 @@ async fn a_failed_activation_names_the_command_and_its_exit_status() {
 
     let record = engine
         .store()
-        .records::<lojix::runtime_model::DeploymentRecord>()
+        .deployment_records()
         .expect("read durable deployment records")
         .into_iter()
         .find(|record| record.deployment_identifier == identifier)
@@ -181,17 +181,17 @@ async fn a_failed_activation_names_the_command_and_its_exit_status() {
     );
 
     let evidence = failure
-        .optional_failure_evidence
+        .failure_evidence_option
         .as_ref()
         .expect("a failed activation carries what the stage reported");
     let command = evidence
-        .optional_failed_command
+        .failed_command_option
         .as_ref()
         .expect("an activation that ran a subprocess names it");
     assert_eq!(command.command_program.payload(), "ssh");
     assert_eq!(
         command
-            .optional_exit_code
+            .exit_code_option
             .as_ref()
             .map(|code| *code.payload()),
         Some(42),
@@ -212,14 +212,14 @@ async fn the_durable_detail_drops_the_credential_line_it_was_printed_beside() {
 
     let record = engine
         .store()
-        .records::<lojix::runtime_model::DeploymentRecord>()
+        .deployment_records()
         .expect("read durable deployment records")
         .into_iter()
         .find(|record| record.deployment_identifier == identifier)
         .expect("the driven deployment has a durable record");
     let failure = terminal_failure(&record);
     let evidence = failure
-        .optional_failure_evidence
+        .failure_evidence_option
         .as_ref()
         .expect("a failed activation carries what the stage reported");
 
@@ -232,7 +232,7 @@ async fn the_durable_detail_drops_the_credential_line_it_was_printed_beside() {
         "a credential line printed beside the cause must not become durable"
     );
     assert!(
-        evidence.detail_truncated,
+        evidence.detail_truncated.0,
         "dropping a line is a truncation, and the record must say so"
     );
 }
@@ -247,8 +247,8 @@ async fn the_event_log_carries_the_same_evidence_as_the_record() {
         .observe_memory_read(
             OriginRoute::new(0),
             memory::MemoryReadInput::ReadEventLog(ordinary::EventLogRange {
-                from: ordinary::EventLogPosition::new(0),
-                until: ordinary::EventLogPosition::new(u64::MAX),
+                first_event_log_position: ordinary::EventLogPosition::new(0),
+                second_event_log_position: ordinary::EventLogPosition::new(i64::MAX),
             }),
         )
         .await
@@ -261,12 +261,11 @@ async fn the_event_log_carries_the_same_evidence_as_the_record() {
         .deployment_phase_event_vector
         .iter()
         .find(|event| {
-            event.deployment_identifier == identifier
-                && event.optional_deployment_terminal.is_some()
+            event.deployment_identifier == identifier && event.deployment_terminal_option.is_some()
         })
         .expect("the terminal transition is journalled");
     let failure = match terminal_event
-        .optional_deployment_terminal
+        .deployment_terminal_option
         .as_ref()
         .expect("filtered on its presence")
     {
@@ -274,7 +273,7 @@ async fn the_event_log_carries_the_same_evidence_as_the_record() {
         other => panic!("expected a failed terminal in the journal, got {other:?}"),
     };
     let evidence = failure
-        .optional_failure_evidence
+        .failure_evidence_option
         .as_ref()
         .expect("the journalled terminal carries the same evidence");
     assert!(evidence.failure_detail.payload().contains(ACTIVATION_CAUSE));
@@ -290,7 +289,7 @@ async fn a_by_deployment_query_answers_with_that_deployment() {
         .observe_memory_read(
             OriginRoute::new(0),
             memory::MemoryReadInput::QueryGenerations(ordinary::Selection::ByDeployment(
-                ordinary::DeploymentLookup::new(identifier.clone()),
+                ordinary::DeploymentLookup::new(identifier),
             )),
         )
         .await
@@ -305,7 +304,7 @@ async fn a_by_deployment_query_answers_with_that_deployment() {
         .find(|record| record.deployment_identifier == identifier)
         .expect("a ByDeployment query answers with that deployment's record");
     let evidence = terminal_failure(record)
-        .optional_failure_evidence
+        .failure_evidence_option
         .as_ref()
         .expect("the queried record carries the evidence");
     assert!(evidence.failure_detail.payload().contains(ACTIVATION_CAUSE));
@@ -333,15 +332,12 @@ async fn a_refused_activation_leaves_the_profile_where_it_was() {
 
     let record = engine
         .store()
-        .records::<lojix::runtime_model::DeploymentRecord>()
+        .deployment_records()
         .expect("read durable deployment records")
         .into_iter()
         .find(|record| record.deployment_identifier == identifier)
         .expect("the driven deployment has a durable record");
-    assert_eq!(
-        record.deployment_lifecycle,
-        ordinary::DeploymentLifecycle::Failed
-    );
+    assert_eq!(record.deployment_phase, ordinary::DeploymentPhase::Failed);
     assert!(
         engine
             .store()
@@ -416,7 +412,7 @@ async fn a_by_deployment_query_answers_with_the_generation_it_produced() {
         .observe_memory_read(
             OriginRoute::new(0),
             memory::MemoryReadInput::QueryGenerations(ordinary::Selection::ByDeployment(
-                ordinary::DeploymentLookup::new(identifier.clone()),
+                ordinary::DeploymentLookup::new(identifier),
             )),
         )
         .await

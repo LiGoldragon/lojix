@@ -3,38 +3,40 @@ use lojix::runtime_model::{self as ordinary, EventLogEntry, LoggedEvent};
 use lojix::{DurableStore as _, EventHistory as _, IdentifierAllocating as _};
 use lojix::{EventLogRetention, Store};
 
-fn event(position: u64) -> EventLogEntry {
+fn event(position: i64) -> EventLogEntry {
     EventLogEntry {
         event_log_position: ordinary::EventLogPosition::new(position),
         logged_event: LoggedEvent::CacheRetention(ordinary::CacheRetentionTransitionEvent {
             generation_identifier: ordinary::GenerationIdentifier::new(position + 1),
-            cluster_name: ordinary::ClusterName::from("alpha"),
-            node_name: ordinary::NodeName::from("node"),
+            cluster_name: ordinary::ClusterName::new("alpha".into()),
+            node_name: ordinary::NodeName::new("node".into()),
             cache_retention_transition: ordinary::CacheRetentionTransition::Pinned,
             generation_slot: ordinary::GenerationSlot::Pinned,
-            optional_generation_slot: None,
-            optional_pin_label: None,
+            generation_slot_option: None,
+            pin_label_option: None,
             event_log_position: ordinary::EventLogPosition::new(position),
         }),
     }
 }
 
-fn deployment_event(position: u64) -> EventLogEntry {
+fn deployment_event(position: i64) -> EventLogEntry {
     EventLogEntry {
         event_log_position: ordinary::EventLogPosition::new(position),
         logged_event: LoggedEvent::Deployment(ordinary::DeploymentPhaseEvent {
             deployment_identifier: ordinary::DeploymentIdentifier::new(position + 1),
             generation_identifier: ordinary::GenerationIdentifier::new(position + 1),
-            cluster_name: ordinary::ClusterName::from("alpha"),
-            node_name: ordinary::NodeName::from("node"),
+            cluster_name: ordinary::ClusterName::new("alpha".into()),
+            node_name: ordinary::NodeName::new("node".into()),
             deployment_phase: ordinary::DeploymentPhase::Submitted,
             event_log_position: ordinary::EventLogPosition::new(position),
-            state_marker: ordinary::StateMarker {
-                commit_sequence: ordinary::CommitSequence::new(0),
-                state_digest: ordinary::StateDigest::new(0),
+            transition_marker: ordinary::TransitionMarker {
+                database_marker: ordinary::DatabaseMarker {
+                    commit_sequence: ordinary::CommitSequence::new(0),
+                    state_digest: ordinary::StateDigest::new(0),
+                },
             },
-            optional_immutable_revision: None,
-            optional_deployment_terminal: None,
+            immutable_revision_option: None,
+            deployment_terminal_option: None,
         }),
     }
 }
@@ -76,7 +78,7 @@ fn deployment_events_cannot_bypass_the_transition_intent_protocol() {
     assert!(store.append_event_log_entry(deployment_event(0)).is_err());
     assert!(
         store
-            .event_log_in_range(0, u64::MAX)
+            .event_log_in_range(0, i64::MAX)
             .expect("event log remains empty")
             .is_empty()
     );

@@ -187,7 +187,9 @@ src/
   daemon.rs             # actor-native two-socket daemon shell
   client.rs             # thin CLI socket exchange
   bootstrap.rs          # daemon-free explicit resumable v5 bootstrap pipeline
-  runtime_model.rs      # hand-written durable and operational nouns
+  runtime_model.rs      # Lojix's own stored and operational nouns; the
+                        # contract types it re-exports are the generated ones
+  adapters.rs           # the contract-to-engine seam, only where shapes differ
   runtime_flow.rs       # hand-written Nexus effects, work, and runner logic
   schema_runtime.rs     # async hand-written Nexus decision engine
 nexus/src/main.rs             # Datom-free daemon entry
@@ -201,7 +203,8 @@ the workspace actor-systems doctrine. No zero-state holders.
 
 ## 4 · Storage and wire
 
-- **Storage:** handwritten runtime nouns in MEMORY tables over a durable `memory-engine`
+- **Storage:** Lojix's own records, and the contracts' generated types they
+  hold, in MEMORY tables over a durable `memory-engine`
   store — one exact configured absolute file shared by daemon startup and the
   reset service. The ten
   record families (live set, gc-roots, event log, container lifecycle,

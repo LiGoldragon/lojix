@@ -20,8 +20,9 @@ use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use rkyv::rancor;
 
 use crate::runtime_model::{
-    ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, DeploymentRecord, EventLogEntry,
-    GcRoot, IdentifierAllocation, LiveGeneration, PendingTransitionIntent, StoredTestRun,
+    ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, EventLogEntry, GcRoot,
+    IdentifierAllocation, LiveGeneration, PendingTransitionIntent, StoredDeploymentRecord,
+    StoredTestRun,
 };
 use crate::{
     DurableStore as _, Error, InlineDatomArguments as _, LegacyConfigurationArchivable as _,
@@ -425,7 +426,7 @@ impl StoreLayouts for LojixCatalog {
     fn recognised() -> Self {
         let Self(mut identities) = Self::core();
         identities.extend([
-            DeploymentRecord::family_identity(),
+            StoredDeploymentRecord::family_identity(),
             IdentifierAllocation::family_identity(),
             DeploymentOutboxRecord::family_identity(),
             PendingTransitionIntent::family_identity(),

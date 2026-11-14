@@ -22,7 +22,7 @@ use crate::runtime_model::{DeploymentPhaseEvent, DeploymentWatch};
 /// The live deployment watchers, by subscription token.
 #[derive(Clone, Default)]
 pub struct DeploymentWatchers {
-    watchers: Arc<Mutex<BTreeMap<u64, DeploymentWatcher>>>,
+    watchers: Arc<Mutex<BTreeMap<i64, DeploymentWatcher>>>,
 }
 
 /// One live watcher: the filter it was opened with, where its matching events
@@ -36,7 +36,7 @@ struct DeploymentWatcher {
 /// The events of one watch, held by the connection that serves it. Dropping
 /// it ends the watch and removes its watcher.
 pub struct DeploymentWatchStream {
-    subscription_token: u64,
+    subscription_token: i64,
     events: mpsc::UnboundedReceiver<DeploymentPhaseEvent>,
     watchers: DeploymentWatchers,
 }
@@ -45,16 +45,16 @@ pub struct DeploymentWatchStream {
 pub trait WatchesDeployments {
     /// Register a watcher under `subscription_token` with its filter. Events
     /// committed from now on that match it are held for its stream.
-    fn register(&self, subscription_token: u64, deployment_watch: DeploymentWatch);
+    fn register(&self, subscription_token: i64, deployment_watch: DeploymentWatch);
 
     /// Hand the registered watcher's stream to the connection that serves
     /// it. `None` when no watcher is registered under the token or its stream
     /// was already claimed.
-    fn claim(&self, subscription_token: u64) -> Option<DeploymentWatchStream>;
+    fn claim(&self, subscription_token: i64) -> Option<DeploymentWatchStream>;
 
     /// End the watcher under `subscription_token`, closing its stream. True
     /// when a live watcher was ended.
-    fn end(&self, subscription_token: u64) -> bool;
+    fn end(&self, subscription_token: i64) -> bool;
 
     /// Write a committed phase event to every watcher whose filter it
     /// matches. A watcher whose stream is gone is removed.
@@ -72,7 +72,7 @@ pub trait MatchesDeploymentEvent {
 
 /// Reading the next event of one watch.
 pub trait StreamsDeploymentEvents {
-    fn subscription_token(&self) -> u64;
+    fn subscription_token(&self) -> i64;
 
     /// The next matching event, or `None` once the watch has been ended.
     fn next_event(
@@ -81,11 +81,11 @@ pub trait StreamsDeploymentEvents {
 }
 
 trait HoldsWatchers {
-    fn held(&self) -> MutexGuard<'_, BTreeMap<u64, DeploymentWatcher>>;
+    fn held(&self) -> MutexGuard<'_, BTreeMap<i64, DeploymentWatcher>>;
 }
 
 impl HoldsWatchers for DeploymentWatchers {
-    fn held(&self) -> MutexGuard<'_, BTreeMap<u64, DeploymentWatcher>> {
+    fn held(&self) -> MutexGuard<'_, BTreeMap<i64, DeploymentWatcher>> {
         // A panic while the map was held leaves it whole: every operation on
         // it is a single insert, remove or send.
         self.watchers
@@ -96,22 +96,22 @@ impl HoldsWatchers for DeploymentWatchers {
 
 impl MatchesDeploymentEvent for DeploymentWatch {
     fn matches(&self, event: &DeploymentPhaseEvent) -> bool {
-        self.optional_deployment_identifier
+        self.deployment_identifier_option
             .as_ref()
             .is_none_or(|identifier| identifier == &event.deployment_identifier)
             && self
-                .optional_cluster_name
+                .cluster_name_option
                 .as_ref()
                 .is_none_or(|cluster| cluster == &event.cluster_name)
             && self
-                .optional_node_name
+                .node_name_option
                 .as_ref()
                 .is_none_or(|node| node == &event.node_name)
     }
 }
 
 impl WatchesDeployments for DeploymentWatchers {
-    fn register(&self, subscription_token: u64, deployment_watch: DeploymentWatch) {
+    fn register(&self, subscription_token: i64, deployment_watch: DeploymentWatch) {
         let (events, receiver) = mpsc::unbounded_channel();
         self.held().insert(
             subscription_token,
@@ -123,7 +123,7 @@ impl WatchesDeployments for DeploymentWatchers {
         );
     }
 
-    fn claim(&self, subscription_token: u64) -> Option<DeploymentWatchStream> {
+    fn claim(&self, subscription_token: i64) -> Option<DeploymentWatchStream> {
         let events = self.held().get_mut(&subscription_token)?.unclaimed.take()?;
         Some(DeploymentWatchStream {
             subscription_token,
@@ -132,7 +132,7 @@ impl WatchesDeployments for DeploymentWatchers {
         })
     }
 
-    fn end(&self, subscription_token: u64) -> bool {
+    fn end(&self, subscription_token: i64) -> bool {
         self.held().remove(&subscription_token).is_some()
     }
 
@@ -148,7 +148,7 @@ impl WatchesDeployments for DeploymentWatchers {
 }
 
 impl StreamsDeploymentEvents for DeploymentWatchStream {
-    fn subscription_token(&self) -> u64 {
+    fn subscription_token(&self) -> i64 {
         self.subscription_token
     }
 
@@ -170,32 +170,34 @@ mod tests {
     use super::*;
     use crate::Payload as _;
     use crate::runtime_model::{
-        ClusterName, CommitSequence, DeploymentIdentifier, DeploymentPhase, EventLogPosition,
-        GenerationIdentifier, NodeName, StateDigest, StateMarker,
+        ClusterName, CommitSequence, DatabaseMarker, DeploymentIdentifier, DeploymentPhase,
+        EventLogPosition, GenerationIdentifier, NodeName, StateDigest, TransitionMarker,
     };
 
-    fn event(deployment: u64, node: &str, phase: DeploymentPhase) -> DeploymentPhaseEvent {
+    fn event(deployment: i64, node: &str, phase: DeploymentPhase) -> DeploymentPhaseEvent {
         DeploymentPhaseEvent {
             deployment_identifier: DeploymentIdentifier::new(deployment),
             generation_identifier: GenerationIdentifier::new(1),
-            cluster_name: ClusterName::from("alpha"),
-            node_name: NodeName::from(node),
+            cluster_name: ClusterName::new("alpha".into()),
+            node_name: NodeName::new(node.into()),
             deployment_phase: phase,
             event_log_position: EventLogPosition::new(deployment),
-            state_marker: StateMarker {
-                commit_sequence: CommitSequence::new(deployment),
-                state_digest: StateDigest::new(deployment),
+            transition_marker: TransitionMarker {
+                database_marker: DatabaseMarker {
+                    commit_sequence: CommitSequence::new(deployment),
+                    state_digest: StateDigest::new(deployment),
+                },
             },
-            optional_immutable_revision: None,
-            optional_deployment_terminal: None,
+            immutable_revision_option: None,
+            deployment_terminal_option: None,
         }
     }
 
     fn watch(node: Option<&str>) -> DeploymentWatch {
         DeploymentWatch {
-            optional_deployment_identifier: None,
-            optional_cluster_name: Some(ClusterName::from("alpha")),
-            optional_node_name: node.map(NodeName::from),
+            deployment_identifier_option: None,
+            cluster_name_option: Some(ClusterName::new("alpha".into())),
+            node_name_option: node.map(|node| NodeName::new(node.into())),
         }
     }
 

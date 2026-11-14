@@ -19,17 +19,17 @@ const RAW_NEXUS_CONFIGURATION: TableDefinition<String, &[u8]> =
 const UNDECODABLE_DEPLOY_JOB: &[u8] = b"deploy-job archived before the Horizon bump";
 const UNDECODABLE_CONFIGURATION: &[u8] = b"nexus configuration archived before the bump";
 
-fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
+fn activation(generation_identifier: i64) -> (LiveGeneration, GcRoot) {
     let generation = ordinary::GenerationIdentifier::new(generation_identifier);
-    let cluster = ordinary::ClusterName::from("fixture-cluster");
-    let node = ordinary::NodeName::from("dune");
-    let closure = ordinary::ClosurePath::from(
-        "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-startup-gate-closure",
+    let cluster = ordinary::ClusterName::new("fixture-cluster".into());
+    let node = ordinary::NodeName::new("dune".into());
+    let closure = ordinary::ClosurePath::new(
+        "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-startup-gate-closure".into(),
     );
     (
         LiveGeneration {
             deployment_identifier: ordinary::DeploymentIdentifier::new(generation_identifier),
-            generation_identifier: generation.clone(),
+            generation_identifier: generation,
             cluster_name: cluster.clone(),
             node_name: node.clone(),
             deployment_environment: ordinary::DeploymentEnvironment::HostEnvironment,
@@ -39,9 +39,9 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
             closure_path: closure.clone(),
             source_revision_record: ordinary::SourceRevisionRecord {
                 source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
-                requested_ref: ordinary::FlakeReference::from("github:owner/repo/main"),
-                resolved_ref: ordinary::FlakeReference::from(
-                    "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                requested_ref: ordinary::FlakeReference::new("github:owner/repo/main".into()),
+                resolved_ref: ordinary::FlakeReference::new(
+                    "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                 ),
                 string: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             },
@@ -52,7 +52,7 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
             node_name: node,
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path: closure,
-            optional_pin_label: None,
+            pin_label_option: None,
         },
     )
 }

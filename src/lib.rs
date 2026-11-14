@@ -21,7 +21,7 @@ use crate::legacy_store::LegacyStoreConverting as _;
 use crate::quarantine::{OpeningReport as _, RowQuarantine as _};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use memory_engine::{
@@ -40,11 +40,12 @@ use rkyv::validation::shared::SharedValidator;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use crate::runtime_model::{
-    AdmissionMarker, CommitSequence, ContainerLifecycleRecord, DeployJob, DeploymentLifecycle,
-    DeploymentOutboxRecord, DeploymentRecord, DeploymentRequestIdentity, DeploymentTerminal,
-    EventLogEntry, GcRoot, IdentifierAllocation, ImmutableRevision, LiveGeneration,
-    OutboxDeliveryState, OutboxRetryCount, PendingTransitionIntent, StateDigest, StateMarker,
-    StoredTestRun, TerminalMarker, TransitionIntentState, TransitionMarker, TransitionOrdinal,
+    AdmissionMarker, CommitSequence, ContainerLifecycleRecord, DatabaseMarker, DeployJob,
+    DeploymentOutboxRecord, DeploymentPhase, DeploymentRecord, DeploymentRequestIdentity,
+    DeploymentTerminal, EventLogEntry, GcRoot, IdentifierAllocation, ImmutableRevision,
+    LiveGeneration, OutboxDeliveryState, OutboxRetryCount, PendingTransitionIntent, StateDigest,
+    StoredDeploymentRecord, StoredTestRun, TerminalMarker, TransitionIntentState, TransitionMarker,
+    TransitionOrdinal,
 };
 
 /// A named wrapper around exactly one carried value. The wrapper exists to give
@@ -280,7 +281,7 @@ impl LojixRecord for StoredTestRun {
     }
 }
 
-impl LojixRecord for DeploymentRecord {
+impl LojixRecord for StoredDeploymentRecord {
     const TABLE: &'static str = "deployment-record";
     const FAMILY: &'static str = "DeploymentRecordFamily";
     const SCHEMA_HASH: [u8; 32] = [7; 32];
@@ -758,25 +759,16 @@ pub trait LegacyConfigurationMigratable {
 /// read from it rather than carried alongside it — a terminal and a lifecycle
 /// that disagree is a state no caller can now express.
 pub trait TerminalOutcome {
-    fn deployment_lifecycle(&self) -> DeploymentLifecycle;
-    fn deployment_phase(&self) -> crate::runtime_model::DeploymentPhase;
+    fn deployment_phase(&self) -> DeploymentPhase;
     fn deploy_job_phase(&self) -> crate::runtime_model::DeployJobPhase;
 }
 
 impl TerminalOutcome for DeploymentTerminal {
-    fn deployment_lifecycle(&self) -> DeploymentLifecycle {
+    fn deployment_phase(&self) -> DeploymentPhase {
         match self {
-            Self::Succeeded => DeploymentLifecycle::Completed,
-            Self::Failed(_) => DeploymentLifecycle::Failed,
-            Self::Rejected(_) => DeploymentLifecycle::Rejected,
-        }
-    }
-
-    fn deployment_phase(&self) -> crate::runtime_model::DeploymentPhase {
-        match self {
-            Self::Succeeded => crate::runtime_model::DeploymentPhase::Completed,
-            Self::Failed(_) => crate::runtime_model::DeploymentPhase::Failed,
-            Self::Rejected(_) => crate::runtime_model::DeploymentPhase::Rejected,
+            Self::Succeeded => DeploymentPhase::Completed,
+            Self::Failed(_) => DeploymentPhase::Failed,
+            Self::Rejected(_) => DeploymentPhase::Rejected,
         }
     }
 
@@ -846,7 +838,7 @@ pub struct Store {
     /// The ephemeral subscription-token counter. Subscriptions are connection
     /// state, not durable state — they do NOT persist across restart — so an
     /// in-memory atomic is the correct issuer (decision 5).
-    subscription_sequence: AtomicU64,
+    subscription_sequence: AtomicI64,
     /// The live deployment watchers, fed at each committed phase event.
     /// Connection state like the token counter, so held in memory only.
     deployment_watchers: deployment_watch::DeploymentWatchers,
@@ -862,7 +854,7 @@ pub struct LojixDirectory {
     containers: TableReference<ContainerLifecycleRecord>,
     deploy_jobs: TableReference<DeployJob>,
     test_runs: TableReference<StoredTestRun>,
-    deployment_records: TableReference<DeploymentRecord>,
+    deployment_records: TableReference<StoredDeploymentRecord>,
     identifier_allocation: TableReference<IdentifierAllocation>,
     deployment_outbox: TableReference<DeploymentOutboxRecord>,
     pending_transition_intents: TableReference<PendingTransitionIntent>,
@@ -885,7 +877,7 @@ impl LojixTables for LojixDirectory {
             containers: ContainerLifecycleRecord::register(database, path)?,
             deploy_jobs: DeployJob::register(database, path)?,
             test_runs: StoredTestRun::register(database, path)?,
-            deployment_records: DeploymentRecord::register(database, path)?,
+            deployment_records: StoredDeploymentRecord::register(database, path)?,
             identifier_allocation: IdentifierAllocation::register(database, path)?,
             deployment_outbox: DeploymentOutboxRecord::register(database, path)?,
             pending_transition_intents: PendingTransitionIntent::register(database, path)?,
@@ -896,8 +888,8 @@ impl LojixTables for LojixDirectory {
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Clone, Debug, PartialEq)]
-struct NexusConfigurationRecord {
-    state: NexusConfigurationState,
+pub struct NexusConfigurationRecord {
+    pub state: NexusConfigurationState,
 }
 
 impl FamilyDirectory for LojixDirectory {
@@ -909,7 +901,7 @@ impl FamilyDirectory for LojixDirectory {
             ContainerLifecycleRecord::TABLE => row.apply(self.containers),
             DeployJob::TABLE => row.apply(self.deploy_jobs),
             StoredTestRun::TABLE => row.apply(self.test_runs),
-            DeploymentRecord::TABLE => row.apply(self.deployment_records),
+            StoredDeploymentRecord::TABLE => row.apply(self.deployment_records),
             IdentifierAllocation::TABLE => row.apply(self.identifier_allocation),
             DeploymentOutboxRecord::TABLE => row.apply(self.deployment_outbox),
             PendingTransitionIntent::TABLE => row.apply(self.pending_transition_intents),
@@ -934,20 +926,41 @@ impl std::fmt::Debug for Store {
 /// A durable counter that must never wrap: allocating past its end is a store
 /// fault, not a silent reuse of an identifier already spent.
 pub(crate) trait IdentifierSpace {
-    fn next_identifier(self) -> Result<u64>;
+    fn next_identifier(self) -> Result<i64>;
 }
 
-impl IdentifierSpace for u64 {
-    fn next_identifier(self) -> Result<u64> {
+impl IdentifierSpace for i64 {
+    fn next_identifier(self) -> Result<i64> {
         self.checked_add(1)
             .ok_or_else(|| Error::StoreMaintenance("identifier space exhausted".to_string()))
     }
 }
 
-impl From<u64> for StateMarker {
+/// A database marker named by the commit it marks.
+pub trait CommitMarking {
     /// A commit sequence is the whole of a state marker: the digest is derived
     /// from it, so the two never disagree.
-    fn from(commit_sequence: u64) -> Self {
+    fn at_commit(commit_sequence: i64) -> Self;
+}
+
+/// The engine counts commits without sign; the contract's Integer is signed,
+/// so a commit past its range is refused rather than wrapped.
+pub(crate) trait ContractCommitSequence {
+    fn contract_commit_sequence(self) -> Result<i64>;
+}
+
+impl ContractCommitSequence for u64 {
+    fn contract_commit_sequence(self) -> Result<i64> {
+        i64::try_from(self).map_err(|_| {
+            Error::StoreMaintenance(format!(
+                "commit sequence {self} is past the contract's Integer"
+            ))
+        })
+    }
+}
+
+impl CommitMarking for DatabaseMarker {
+    fn at_commit(commit_sequence: i64) -> Self {
         Self {
             commit_sequence: CommitSequence::new(commit_sequence),
             state_digest: StateDigest::new(commit_sequence),
@@ -971,7 +984,7 @@ pub(crate) trait SourceRevisionText {
 impl SourceRevisionText for str {
     fn immutable_revision(&self) -> Option<ImmutableRevision> {
         (self.len() == 40 && self.bytes().all(|byte| byte.is_ascii_hexdigit()))
-            .then(|| ImmutableRevision::from(self))
+            .then(|| ImmutableRevision::new(self.into()))
     }
 
     fn validate_as_closure_path(&self, record_kind: &str) -> Result<()> {
@@ -1004,7 +1017,7 @@ impl ClosureRecord for DeployJob {
     const RECORD_KIND: &'static str = "deploy job";
 
     fn validate_fresh(&self) -> Result<()> {
-        match self.optional_closure_path.as_ref() {
+        match self.closure_path_option.as_ref() {
             Some(closure_path) => closure_path
                 .payload()
                 .validate_as_closure_path(Self::RECORD_KIND),
@@ -1043,15 +1056,15 @@ pub trait DurableStore {
     /// read back after a write for the reply marker. Survives restart because
     /// the engine owns it (it just deletes from RAM here). `state_digest`
     /// remains the commit-sequence stand-in (decision 6).
-    fn commit_sequence(&self) -> Result<u64>;
+    fn commit_sequence(&self) -> Result<i64>;
 
     /// The next subscription token: an in-memory atomic fetch-add. Subscriptions
     /// do not survive restart, so an ephemeral counter is correct (decision 5).
-    fn next_subscription_token(&self) -> u64;
+    fn next_subscription_token(&self) -> i64;
 
     /// Whether `token` was issued by this open of the store. A token that was
     /// issued and is no longer watched names a subscription already closed.
-    fn subscription_token_issued(&self, token: u64) -> bool;
+    fn subscription_token_issued(&self, token: i64) -> bool;
 
     /// The live deployment watchers this store announces each committed phase
     /// event to.
@@ -1065,6 +1078,15 @@ pub trait DurableStore {
             + for<'validation> CheckBytes<
                 Strategy<Validator<ArchiveValidator<'validation>, SharedValidator>, rancor::Error>,
             >;
+
+    /// Every persisted deployment record, as the contract's record.
+    fn deployment_records(&self) -> Result<Vec<DeploymentRecord>> {
+        Ok(self
+            .records::<StoredDeploymentRecord>()?
+            .into_iter()
+            .map(|stored| stored.deployment_record)
+            .collect())
+    }
 }
 
 /// What the store does to itself at startup and between commits: take the
@@ -1142,20 +1164,20 @@ pub trait IdentifierAllocating {
 
     /// The next generation identifier comes from the durable global allocator,
     /// never a scan of currently retained rows.
-    fn next_generation_identifier(&self) -> Result<u64>;
+    fn next_generation_identifier(&self) -> Result<i64>;
 
     /// The next deployment identifier comes from the durable global allocator,
     /// never a scan of currently retained rows.
-    fn next_deployment_identifier(&self) -> Result<u64>;
+    fn next_deployment_identifier(&self) -> Result<i64>;
 
     /// The next event-log position comes from the durable global allocator, so
     /// retention cannot cause an event position to be reused.
-    fn next_event_log_position(&self) -> Result<u64>;
+    fn next_event_log_position(&self) -> Result<i64>;
 
     /// Reserve an event-log position before constructing its record. The
     /// reservation itself is durable, so a crash can introduce only a gap;
     /// it can never lead to a reused position.
-    fn allocate_event_log_position(&self) -> Result<u64>;
+    fn allocate_event_log_position(&self) -> Result<i64>;
 
     /// The persisted test-run rows — read by the ordinary `(ByTestRun …)`
     /// query and on daemon start so an in-flight test reconciles rather than
@@ -1163,7 +1185,7 @@ pub trait IdentifierAllocating {
     /// The next test-run identifier: one past the maximum persisted, or 1 when
     /// empty. Restart-safe — derived from the durable rows, not a RAM counter,
     /// mirroring `next_deployment_identifier`.
-    fn next_test_run_identifier(&self) -> Result<u64>;
+    fn next_test_run_identifier(&self) -> Result<i64>;
 }
 
 /// Exactly-once delivery of a durable transition. An intent is bound to the
@@ -1194,8 +1216,8 @@ pub trait TransitionJournal {
 
     fn intent_from_key(
         &self,
-        deployment_identifier: u64,
-        transition_ordinal: u64,
+        deployment_identifier: i64,
+        transition_ordinal: i64,
     ) -> Result<PendingTransitionIntent>;
 
     /// Bind one freshly committed write-ahead intent to the receipt of its own
@@ -1204,8 +1226,8 @@ pub trait TransitionJournal {
     /// commit log, never predicted before the initial transaction.
     fn bind_transition_intent(
         &self,
-        deployment_identifier: u64,
-        transition_ordinal: u64,
+        deployment_identifier: i64,
+        transition_ordinal: i64,
     ) -> Result<PendingTransitionIntent>;
 
     /// Persist `Pending -> Dispatched` before touching the local journal.  A
@@ -1247,21 +1269,21 @@ pub trait TransitionJournal {
     /// journal record.  It is idempotent over every crash boundary above.
     fn complete_pending_transition_intent(
         &self,
-        deployment_identifier: u64,
-        transition_ordinal: u64,
+        deployment_identifier: i64,
+        transition_ordinal: i64,
     ) -> Result<()>;
 
     fn complete_pending_transition_intent_with_job(
         &self,
-        deployment_identifier: u64,
-        transition_ordinal: u64,
+        deployment_identifier: i64,
+        transition_ordinal: i64,
         job: DeployJob,
     ) -> Result<()>;
 
     fn complete_pending_transition_intent_with_optional_job(
         &self,
-        deployment_identifier: u64,
-        transition_ordinal: u64,
+        deployment_identifier: i64,
+        transition_ordinal: i64,
         job: Option<DeployJob>,
     ) -> Result<()>;
 
@@ -1299,7 +1321,7 @@ pub trait EventHistory {
 
     /// The persisted event-log entries in the half-open position range
     /// `[from, until)`.
-    fn event_log_in_range(&self, from: u64, until: u64) -> Result<Vec<EventLogEntry>>;
+    fn event_log_in_range(&self, from: i64, until: i64) -> Result<Vec<EventLogEntry>>;
 
     fn compact_event_history(&self, retention: EventLogRetention) -> Result<u64>;
 
@@ -1344,15 +1366,15 @@ pub trait DeploymentLedger {
     /// outbox, so a crash cannot turn an unreported terminal into an orphan.
     fn begin_terminal_transition(
         &self,
-        deployment_identifier: u64,
+        deployment_identifier: i64,
         deployment_terminal: DeploymentTerminal,
-    ) -> Result<u64>;
+    ) -> Result<i64>;
 
     /// Complete a terminal transition and return the record only after its
     /// terminal journal/outbox acknowledgement has committed.
     fn terminalize_deployment(
         &self,
-        deployment_identifier: u64,
+        deployment_identifier: i64,
         deployment_terminal: DeploymentTerminal,
     ) -> Result<DeploymentRecord>;
 
@@ -1380,7 +1402,7 @@ pub trait DeploymentLedger {
     /// terminal projections consume the same value.
     fn set_deployment_immutable_revision(
         &self,
-        deployment_identifier: u64,
+        deployment_identifier: i64,
         immutable_revision: crate::runtime_model::ImmutableRevision,
     ) -> Result<()>;
 
@@ -1389,7 +1411,7 @@ pub trait DeploymentLedger {
     /// pinned to one revision while its job replays a different mutable ref.
     fn record_resolved_source(
         &self,
-        deployment_identifier: u64,
+        deployment_identifier: i64,
         immutable_revision: crate::runtime_model::ImmutableRevision,
         deploy_job: DeployJob,
     ) -> Result<()>;
@@ -1400,46 +1422,46 @@ pub trait DeploymentLedger {
     /// delivery is acknowledged before this method returns to the runtime.
     fn begin_deployment_phase_transition(
         &self,
-        deployment_identifier: u64,
-        deployment_lifecycle: DeploymentLifecycle,
+        deployment_identifier: i64,
+        deployment_phase: DeploymentPhase,
         deploy_job: DeployJob,
         event: crate::runtime_model::DeploymentPhaseEvent,
-    ) -> Result<u64>;
+    ) -> Result<i64>;
 
     /// Complete the acknowledged delivery half of one intermediate phase.  No
     /// caller receives a phase receipt, and therefore no next effect becomes
     /// eligible, until this returns the exact marker from the durable intent.
     fn advance_deployment_phase(
         &self,
-        deployment_identifier: u64,
-        deployment_lifecycle: DeploymentLifecycle,
+        deployment_identifier: i64,
+        deployment_phase: DeploymentPhase,
         deploy_job: DeployJob,
         event: crate::runtime_model::DeploymentPhaseEvent,
-    ) -> Result<StateMarker>;
+    ) -> Result<DatabaseMarker>;
 
     /// As above, with the phase receipt folded into the final acknowledgement
     /// transaction that rewrites the resume job.
     fn advance_deployment_phase_with_job(
         &self,
-        deployment_identifier: u64,
-        deployment_lifecycle: DeploymentLifecycle,
+        deployment_identifier: i64,
+        deployment_phase: DeploymentPhase,
         deploy_job: DeployJob,
         event: crate::runtime_model::DeploymentPhaseEvent,
-    ) -> Result<StateMarker>;
+    ) -> Result<DatabaseMarker>;
 
     fn advance_deployment_phase_with_optional_job(
         &self,
-        deployment_identifier: u64,
-        deployment_lifecycle: DeploymentLifecycle,
+        deployment_identifier: i64,
+        deployment_phase: DeploymentPhase,
         deploy_job: DeployJob,
         event: crate::runtime_model::DeploymentPhaseEvent,
         acknowledgement_job: Option<DeployJob>,
-    ) -> Result<StateMarker>;
+    ) -> Result<DatabaseMarker>;
 
     fn record_deployment_phase(
         &self,
         entry: EventLogEntry,
-        deployment_lifecycle: DeploymentLifecycle,
+        deployment_phase: DeploymentPhase,
         deploy_job: DeployJob,
     ) -> Result<EventLogEntry>;
 
@@ -1459,7 +1481,7 @@ pub trait DeploymentLedger {
     /// deploy reaches a terminal phase (Activated or Failed), so the in-flight
     /// mirror tracks only deploys that still need resuming. A no-op when the
     /// row is already absent.
-    fn retract_deploy_job(&self, deployment_identifier: u64) -> Result<()>;
+    fn retract_deploy_job(&self, deployment_identifier: i64) -> Result<()>;
 }
 
 /// What is installed on a node and what keeps it alive: the live generation
@@ -1487,7 +1509,7 @@ pub trait GenerationLedger {
     fn mutate_gc_root(&self, root: GcRoot) -> Result<()>;
 
     /// Drop one GC-root by its generation identifier.
-    fn retract_gc_root(&self, generation_identifier: u64) -> Result<()>;
+    fn retract_gc_root(&self, generation_identifier: i64) -> Result<()>;
 }
 
 /// The durable record of a test run, rewritten through its phases to a
@@ -1509,15 +1531,18 @@ impl DurableStore for Store {
         &self.path
     }
 
-    fn commit_sequence(&self) -> Result<u64> {
-        Ok(self.database.current_commit_sequence()?.value())
+    fn commit_sequence(&self) -> Result<i64> {
+        self.database
+            .current_commit_sequence()?
+            .value()
+            .contract_commit_sequence()
     }
 
-    fn next_subscription_token(&self) -> u64 {
+    fn next_subscription_token(&self) -> i64 {
         self.subscription_sequence.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    fn subscription_token_issued(&self, token: u64) -> bool {
+    fn subscription_token_issued(&self, token: i64) -> bool {
         token != 0 && token <= self.subscription_sequence.load(Ordering::SeqCst)
     }
 
@@ -1575,11 +1600,9 @@ impl StoreIntegrity for Store {
             .map_err(|source| {
                 self.startup_compatibility_error("validating test-run rows", source)
             })?;
-        self.records::<DeploymentRecord>()
-            .map(|_| ())
-            .map_err(|source| {
-                self.startup_compatibility_error("validating deployment-record rows", source)
-            })?;
+        self.deployment_records().map(|_| ()).map_err(|source| {
+            self.startup_compatibility_error("validating deployment-record rows", source)
+        })?;
         self.records::<IdentifierAllocation>()
             .map(|_| ())
             .map_err(|source| {
@@ -1716,7 +1739,7 @@ impl NexusPersistable for Store {
             directory,
             path,
             write_gate: Mutex::new(()),
-            subscription_sequence: AtomicU64::new(0),
+            subscription_sequence: AtomicI64::new(0),
             deployment_watchers: deployment_watch::DeploymentWatchers::default(),
             opening: quarantine::StoreOpening::default(),
         };
@@ -1758,7 +1781,7 @@ impl NexusPersistable for Store {
                     || !self.records::<ContainerLifecycleRecord>()?.is_empty()
                     || !self.deploy_jobs()?.is_empty()
                     || !self.records::<StoredTestRun>()?.is_empty()
-                    || !self.records::<DeploymentRecord>()?.is_empty()
+                    || !self.deployment_records()?.is_empty()
                     || !self.records::<IdentifierAllocation>()?.is_empty()
                     || !self.records::<DeploymentOutboxRecord>()?.is_empty()
                     || !self.records::<PendingTransitionIntent>()?.is_empty();
@@ -1862,7 +1885,7 @@ impl IdentifierAllocating for Store {
                     .map(|job| *job.deployment_identifier.payload()),
             )
             .max()
-            .map(u64::next_identifier)
+            .map(i64::next_identifier)
             .transpose()?
             .unwrap_or(1);
         let next_generation_identifier = self
@@ -1875,7 +1898,7 @@ impl IdentifierAllocating for Store {
                     .map(|job| *job.generation_identifier.payload()),
             )
             .max()
-            .map(u64::next_identifier)
+            .map(i64::next_identifier)
             .transpose()?
             .unwrap_or(1);
         let next_event_log_position = self
@@ -1883,7 +1906,7 @@ impl IdentifierAllocating for Store {
             .iter()
             .map(|entry| *entry.event_log_position.payload())
             .max()
-            .map(u64::next_identifier)
+            .map(i64::next_identifier)
             .transpose()?
             .unwrap_or(0);
         self.database.assert(Assertion::new(
@@ -1910,19 +1933,19 @@ impl IdentifierAllocating for Store {
         }
     }
 
-    fn next_generation_identifier(&self) -> Result<u64> {
+    fn next_generation_identifier(&self) -> Result<i64> {
         Ok(self.identifier_allocation()?.next_generation_identifier)
     }
 
-    fn next_deployment_identifier(&self) -> Result<u64> {
+    fn next_deployment_identifier(&self) -> Result<i64> {
         Ok(self.identifier_allocation()?.next_deployment_identifier)
     }
 
-    fn next_event_log_position(&self) -> Result<u64> {
+    fn next_event_log_position(&self) -> Result<i64> {
         Ok(self.identifier_allocation()?.next_event_log_position)
     }
 
-    fn allocate_event_log_position(&self) -> Result<u64> {
+    fn allocate_event_log_position(&self) -> Result<i64> {
         let _write = self.lock_write()?;
         let allocation = self.identifier_allocation()?;
         let position = allocation.next_event_log_position;
@@ -1938,7 +1961,7 @@ impl IdentifierAllocating for Store {
         Ok(position)
     }
 
-    fn next_test_run_identifier(&self) -> Result<u64> {
+    fn next_test_run_identifier(&self) -> Result<i64> {
         Ok(self
             .records::<StoredTestRun>()?
             .iter()
@@ -1973,19 +1996,19 @@ impl TransitionJournal for Store {
     fn transition_intent_event(
         intent: &PendingTransitionIntent,
     ) -> Result<crate::runtime_model::DeploymentPhaseEvent> {
-        let marker = intent.optional_transition_marker.clone().ok_or_else(|| {
+        let marker = intent.transition_marker_option.clone().ok_or_else(|| {
             Error::Invariant("attempted to deliver an unbound transition intent".to_string())
         })?;
         Ok(crate::runtime_model::DeploymentPhaseEvent {
-            deployment_identifier: intent.deployment_identifier.clone(),
-            generation_identifier: intent.generation_identifier.clone(),
+            deployment_identifier: intent.deployment_identifier,
+            generation_identifier: intent.generation_identifier,
             cluster_name: intent.cluster_name.clone(),
             node_name: intent.node_name.clone(),
-            deployment_phase: intent.deployment_phase,
-            event_log_position: intent.event_log_position.clone(),
-            state_marker: marker.into_payload(),
-            optional_immutable_revision: intent.optional_immutable_revision.clone(),
-            optional_deployment_terminal: intent.optional_deployment_terminal.clone(),
+            deployment_phase: intent.deployment_phase.clone(),
+            event_log_position: intent.event_log_position,
+            transition_marker: marker,
+            immutable_revision_option: intent.immutable_revision_option.clone(),
+            deployment_terminal_option: intent.deployment_terminal_option.clone(),
         })
     }
 
@@ -2005,18 +2028,18 @@ impl TransitionJournal for Store {
                             && operation.key() == Some(&intent_key)
                     });
                 let has_deployment_record = operations.head().table_name()
-                    == DeploymentRecord::TABLE
+                    == StoredDeploymentRecord::TABLE
                     && operations.head().key() == Some(&deployment_key)
                     || operations.tail().iter().any(|operation| {
-                        operation.table_name() == DeploymentRecord::TABLE
+                        operation.table_name() == StoredDeploymentRecord::TABLE
                             && operation.key() == Some(&deployment_key)
                     });
                 has_intent && has_deployment_record
             })
             .collect();
         match candidates.as_slice() {
-            [entry] => Ok(TransitionMarker::new(StateMarker::from(
-                entry.commit_sequence().value(),
+            [entry] => Ok(TransitionMarker::new(DatabaseMarker::at_commit(
+                entry.commit_sequence().value().contract_commit_sequence()?,
             ))),
             [] => Err(Error::Invariant(
                 "pending transition intent has no durable atomic source commit".to_string(),
@@ -2029,8 +2052,8 @@ impl TransitionJournal for Store {
 
     fn intent_from_key(
         &self,
-        deployment_identifier: u64,
-        transition_ordinal: u64,
+        deployment_identifier: i64,
+        transition_ordinal: i64,
     ) -> Result<PendingTransitionIntent> {
         self.records::<PendingTransitionIntent>()?
             .into_iter()
@@ -2047,17 +2070,17 @@ impl TransitionJournal for Store {
 
     fn bind_transition_intent(
         &self,
-        deployment_identifier: u64,
-        transition_ordinal: u64,
+        deployment_identifier: i64,
+        transition_ordinal: i64,
     ) -> Result<PendingTransitionIntent> {
         let _write = self.lock_write()?;
         let mut intent = self.intent_from_key(deployment_identifier, transition_ordinal)?;
-        if intent.optional_transition_marker.is_some() {
+        if intent.transition_marker_option.is_some() {
             return Ok(intent);
         }
         let marker = self.initial_intent_marker(&intent)?;
         let event = Self::transition_intent_event(&PendingTransitionIntent {
-            optional_transition_marker: Some(marker.clone()),
+            transition_marker_option: Some(marker.clone()),
             ..intent.clone()
         })?;
         let outbox = Self::outbox_record_for_event(event);
@@ -2079,7 +2102,7 @@ impl TransitionJournal for Store {
                 "unbound transition intent already has a delivery row".to_string(),
             ));
         }
-        intent.optional_transition_marker = Some(marker.clone());
+        intent.transition_marker_option = Some(marker.clone());
         intent.transition_intent_state = TransitionIntentState::Bound;
 
         let mut commit = self
@@ -2090,10 +2113,10 @@ impl TransitionJournal for Store {
         if matches!(
             intent.deployment_phase,
             crate::runtime_model::DeploymentPhase::Submitted
-        ) || intent.optional_deployment_terminal.is_some()
+        ) || intent.deployment_terminal_option.is_some()
         {
             let mut record = self
-                .records::<DeploymentRecord>()?
+                .deployment_records()?
                 .into_iter()
                 .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
                 .ok_or_else(|| {
@@ -2105,18 +2128,21 @@ impl TransitionJournal for Store {
                 intent.deployment_phase,
                 crate::runtime_model::DeploymentPhase::Submitted
             ) {
-                record.optional_admission_marker =
+                record.admission_marker_option =
                     Some(AdmissionMarker::new(marker.clone().into_payload()));
             }
-            if let Some(terminal) = &intent.optional_deployment_terminal {
-                if record.optional_deployment_terminal.as_ref() != Some(terminal) {
+            if let Some(terminal) = &intent.deployment_terminal_option {
+                if record.deployment_terminal_option.as_ref() != Some(terminal) {
                     return Err(Error::Invariant(
                         "terminal intent does not match its durable deployment record".to_string(),
                     ));
                 }
-                record.optional_terminal_marker = Some(TerminalMarker::new(marker.into_payload()));
+                record.terminal_marker_option = Some(TerminalMarker::new(marker.into_payload()));
             }
-            commit = commit.mutate(self.directory.deployment_records, record);
+            commit = commit.mutate(
+                self.directory.deployment_records,
+                StoredDeploymentRecord::from(record),
+            );
         }
         self.database.commit_atomic(commit)?;
         Ok(intent)
@@ -2178,7 +2204,7 @@ impl TransitionJournal for Store {
         )?;
         let event = Self::transition_intent_event(&intent)?;
         let expected_entry = EventLogEntry {
-            event_log_position: event.event_log_position.clone(),
+            event_log_position: event.event_log_position,
             logged_event: crate::runtime_model::LoggedEvent::Deployment(event.clone()),
         };
         match self
@@ -2243,7 +2269,7 @@ impl TransitionJournal for Store {
         )?;
         let event = Self::transition_intent_event(&intent)?;
         let expected_entry = EventLogEntry {
-            event_log_position: event.event_log_position.clone(),
+            event_log_position: event.event_log_position,
             logged_event: crate::runtime_model::LoggedEvent::Deployment(event.clone()),
         };
         if !self
@@ -2260,7 +2286,7 @@ impl TransitionJournal for Store {
             .into_iter()
             .find(|record| {
                 record.deployment_identifier == event.deployment_identifier
-                    && record.transition_marker.payload() == &event.state_marker
+                    && record.transition_marker == event.transition_marker
             })
             .ok_or_else(|| {
                 Error::Invariant("journalled transition is missing its outbox row".to_string())
@@ -2281,7 +2307,7 @@ impl TransitionJournal for Store {
         }
         outbox.outbox_delivery_state = OutboxDeliveryState::Acknowledged;
         intent.transition_intent_state = TransitionIntentState::Acknowledged;
-        let terminal_job_key = if intent.optional_deployment_terminal.is_some()
+        let terminal_job_key = if intent.deployment_terminal_option.is_some()
             && self
                 .deploy_jobs()?
                 .into_iter()
@@ -2299,9 +2325,9 @@ impl TransitionJournal for Store {
             .mutate(self.directory.deployment_outbox, outbox)
             .mutate(self.directory.pending_transition_intents, intent);
         if let Some(mut job) = job {
-            job.optional_phase_receipt = Some(crate::runtime_model::PhaseReceipt {
-                event_log_position: event.event_log_position.clone(),
-                state_marker: event.state_marker.clone(),
+            job.phase_receipt_option = Some(crate::runtime_model::PhaseReceipt {
+                event_log_position: event.event_log_position,
+                database_marker: event.transition_marker.database_marker.clone(),
             });
             commit = commit.mutate(self.directory.deploy_jobs, job);
         }
@@ -2314,8 +2340,8 @@ impl TransitionJournal for Store {
 
     fn complete_pending_transition_intent(
         &self,
-        deployment_identifier: u64,
-        transition_ordinal: u64,
+        deployment_identifier: i64,
+        transition_ordinal: i64,
     ) -> Result<()> {
         self.complete_pending_transition_intent_with_optional_job(
             deployment_identifier,
@@ -2326,8 +2352,8 @@ impl TransitionJournal for Store {
 
     fn complete_pending_transition_intent_with_job(
         &self,
-        deployment_identifier: u64,
-        transition_ordinal: u64,
+        deployment_identifier: i64,
+        transition_ordinal: i64,
         job: DeployJob,
     ) -> Result<()> {
         self.complete_pending_transition_intent_with_optional_job(
@@ -2339,8 +2365,8 @@ impl TransitionJournal for Store {
 
     fn complete_pending_transition_intent_with_optional_job(
         &self,
-        deployment_identifier: u64,
-        transition_ordinal: u64,
+        deployment_identifier: i64,
+        transition_ordinal: i64,
         job: Option<DeployJob>,
     ) -> Result<()> {
         let intent = self.bind_transition_intent(deployment_identifier, transition_ordinal)?;
@@ -2371,8 +2397,8 @@ impl TransitionJournal for Store {
         event: crate::runtime_model::DeploymentPhaseEvent,
     ) -> DeploymentOutboxRecord {
         DeploymentOutboxRecord {
-            deployment_identifier: event.deployment_identifier.clone(),
-            transition_marker: TransitionMarker::new(event.state_marker.clone()),
+            deployment_identifier: event.deployment_identifier,
+            transition_marker: event.transition_marker.clone(),
             deployment_phase_event: event,
             outbox_delivery_state: OutboxDeliveryState::Pending,
             outbox_retry_count: OutboxRetryCount::new(0),
@@ -2473,7 +2499,7 @@ impl EventHistory for Store {
         Ok(())
     }
 
-    fn event_log_in_range(&self, from: u64, until: u64) -> Result<Vec<EventLogEntry>> {
+    fn event_log_in_range(&self, from: i64, until: i64) -> Result<Vec<EventLogEntry>> {
         Ok(self
             .records::<EventLogEntry>()?
             .into_iter()
@@ -2492,7 +2518,7 @@ impl EventHistory for Store {
         if retired == 0 {
             return Ok(0);
         }
-        let retired_positions: std::collections::BTreeSet<u64> = events
+        let retired_positions: std::collections::BTreeSet<i64> = events
             .into_iter()
             .take(retired)
             .map(|entry| *entry.event_log_position.payload())
@@ -2580,28 +2606,34 @@ impl DeploymentLedger for Store {
         let _write = self.lock_write()?;
         let allocation = self.identifier_allocation()?;
         let record = DeploymentRecord {
-            deployment_identifier: allocation.next_deployment_identifier.into(),
-            generation_identifier: allocation.next_generation_identifier.into(),
+            deployment_identifier: crate::runtime_model::DeploymentIdentifier::new(
+                allocation.next_deployment_identifier,
+            ),
+            generation_identifier: crate::runtime_model::GenerationIdentifier::new(
+                allocation.next_generation_identifier,
+            ),
             deployment_request_identity,
-            optional_admission_marker: None,
-            deployment_lifecycle: DeploymentLifecycle::Submitted,
-            optional_terminal_marker: None,
-            optional_deployment_terminal: None,
+            admission_marker_option: None,
+            deployment_phase: DeploymentPhase::Submitted,
+            terminal_marker_option: None,
+            deployment_terminal_option: None,
         };
         let intent = PendingTransitionIntent {
-            deployment_identifier: record.deployment_identifier.clone(),
-            generation_identifier: record.generation_identifier.clone(),
+            deployment_identifier: record.deployment_identifier,
+            generation_identifier: record.generation_identifier,
             cluster_name: record.deployment_request_identity.cluster_name.clone(),
             node_name: record.deployment_request_identity.node_name.clone(),
             deployment_phase: crate::runtime_model::DeploymentPhase::Submitted,
-            event_log_position: allocation.next_event_log_position.into(),
-            optional_immutable_revision: record
+            event_log_position: crate::runtime_model::EventLogPosition::new(
+                allocation.next_event_log_position,
+            ),
+            immutable_revision_option: record
                 .deployment_request_identity
-                .optional_immutable_revision
+                .immutable_revision_option
                 .clone(),
-            optional_deployment_terminal: None,
+            deployment_terminal_option: None,
             transition_ordinal: TransitionOrdinal::new(0),
-            optional_transition_marker: None,
+            transition_marker_option: None,
             transition_intent_state: TransitionIntentState::Pending,
         };
         if !matches!(
@@ -2614,8 +2646,8 @@ impl DeploymentLedger for Store {
                 "admission restart cursor does not match its deployment identity".to_string(),
             ));
         }
-        deploy_job.deployment_identifier = record.deployment_identifier.clone();
-        deploy_job.generation_identifier = record.generation_identifier.clone();
+        deploy_job.deployment_identifier = record.deployment_identifier;
+        deploy_job.generation_identifier = record.generation_identifier;
         self.database.commit_atomic(
             self.database
                 .begin_atomic_commit()
@@ -2630,7 +2662,10 @@ impl DeploymentLedger for Store {
                             .next_identifier()?,
                     },
                 )
-                .assert(self.directory.deployment_records, record.clone())
+                .assert(
+                    self.directory.deployment_records,
+                    StoredDeploymentRecord::from(record.clone()),
+                )
                 .assert(self.directory.deploy_jobs, deploy_job)
                 .assert(self.directory.pending_transition_intents, intent),
         )?;
@@ -2644,7 +2679,7 @@ impl DeploymentLedger for Store {
     ) -> Result<DeploymentRecord> {
         let record = self.begin_admission_transition(deployment_request_identity, deploy_job)?;
         self.complete_pending_transition_intent(*record.deployment_identifier.payload(), 0)?;
-        self.records::<DeploymentRecord>()?
+        self.deployment_records()?
             .into_iter()
             .find(|existing| existing.deployment_identifier == record.deployment_identifier)
             .ok_or_else(|| {
@@ -2654,15 +2689,14 @@ impl DeploymentLedger for Store {
 
     fn begin_terminal_transition(
         &self,
-        deployment_identifier: u64,
+        deployment_identifier: i64,
         deployment_terminal: DeploymentTerminal,
-    ) -> Result<u64> {
-        let deployment_lifecycle = deployment_terminal.deployment_lifecycle();
+    ) -> Result<i64> {
         let deployment_phase = deployment_terminal.deployment_phase();
         let deploy_job_phase = deployment_terminal.deploy_job_phase();
         let _write = self.lock_write()?;
         let mut record = self
-            .records::<DeploymentRecord>()?
+            .deployment_records()?
             .into_iter()
             .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
             .ok_or_else(|| {
@@ -2670,7 +2704,7 @@ impl DeploymentLedger for Store {
                     "deployment record {deployment_identifier} is missing for terminal transition"
                 ))
             })?;
-        if record.optional_deployment_terminal.is_some() {
+        if record.deployment_terminal_option.is_some() {
             return Err(Error::Invariant(
                 "deployment record is already terminal".to_string(),
             ));
@@ -2693,27 +2727,29 @@ impl DeploymentLedger for Store {
             .filter(|intent| *intent.deployment_identifier.payload() == deployment_identifier)
             .map(|intent| *intent.transition_ordinal.payload())
             .max()
-            .map(u64::next_identifier)
+            .map(i64::next_identifier)
             .transpose()?
             .unwrap_or(0);
         let allocation = self.identifier_allocation()?;
-        record.deployment_lifecycle = deployment_lifecycle;
-        record.optional_deployment_terminal = Some(deployment_terminal.clone());
-        record.optional_terminal_marker = None;
+        record.deployment_phase = deployment_phase.clone();
+        record.deployment_terminal_option = Some(deployment_terminal.clone());
+        record.terminal_marker_option = None;
         let intent = PendingTransitionIntent {
-            deployment_identifier: record.deployment_identifier.clone(),
-            generation_identifier: record.generation_identifier.clone(),
+            deployment_identifier: record.deployment_identifier,
+            generation_identifier: record.generation_identifier,
             cluster_name: record.deployment_request_identity.cluster_name.clone(),
             node_name: record.deployment_request_identity.node_name.clone(),
             deployment_phase,
-            event_log_position: allocation.next_event_log_position.into(),
-            optional_immutable_revision: record
+            event_log_position: crate::runtime_model::EventLogPosition::new(
+                allocation.next_event_log_position,
+            ),
+            immutable_revision_option: record
                 .deployment_request_identity
-                .optional_immutable_revision
+                .immutable_revision_option
                 .clone(),
-            optional_deployment_terminal: Some(deployment_terminal),
+            deployment_terminal_option: Some(deployment_terminal),
             transition_ordinal: TransitionOrdinal::new(transition_ordinal),
-            optional_transition_marker: None,
+            transition_marker_option: None,
             transition_intent_state: TransitionIntentState::Pending,
         };
         let mut commit = self
@@ -2728,7 +2764,10 @@ impl DeploymentLedger for Store {
                         .next_identifier()?,
                 },
             )
-            .mutate(self.directory.deployment_records, record)
+            .mutate(
+                self.directory.deployment_records,
+                StoredDeploymentRecord::from(record),
+            )
             .assert(self.directory.pending_transition_intents, intent);
         if let Some(mut job) = self
             .deploy_jobs()?
@@ -2745,19 +2784,19 @@ impl DeploymentLedger for Store {
 
     fn terminalize_deployment(
         &self,
-        deployment_identifier: u64,
+        deployment_identifier: i64,
         deployment_terminal: DeploymentTerminal,
     ) -> Result<DeploymentRecord> {
         let ordinal = self.begin_terminal_transition(deployment_identifier, deployment_terminal)?;
         self.complete_pending_transition_intent(deployment_identifier, ordinal)?;
         let record = self
-            .records::<DeploymentRecord>()?
+            .deployment_records()?
             .into_iter()
             .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
             .ok_or_else(|| {
                 Error::Invariant("terminal record disappeared after acknowledgement".to_string())
             })?;
-        if record.optional_terminal_marker.is_none() {
+        if record.terminal_marker_option.is_none() {
             return Err(Error::Invariant(
                 "acknowledged terminal record lacks its exact transition marker".to_string(),
             ));
@@ -2774,28 +2813,34 @@ impl DeploymentLedger for Store {
         let _write = self.lock_write()?;
         let allocation = self.identifier_allocation()?;
         let record = DeploymentRecord {
-            deployment_identifier: allocation.next_deployment_identifier.into(),
-            generation_identifier: allocation.next_generation_identifier.into(),
+            deployment_identifier: crate::runtime_model::DeploymentIdentifier::new(
+                allocation.next_deployment_identifier,
+            ),
+            generation_identifier: crate::runtime_model::GenerationIdentifier::new(
+                allocation.next_generation_identifier,
+            ),
             deployment_request_identity,
-            optional_admission_marker: None,
-            deployment_lifecycle: deployment_terminal.deployment_lifecycle(),
-            optional_terminal_marker: None,
-            optional_deployment_terminal: Some(deployment_terminal.clone()),
+            admission_marker_option: None,
+            deployment_phase: deployment_terminal.deployment_phase(),
+            terminal_marker_option: None,
+            deployment_terminal_option: Some(deployment_terminal.clone()),
         };
         let intent = PendingTransitionIntent {
-            deployment_identifier: record.deployment_identifier.clone(),
-            generation_identifier: record.generation_identifier.clone(),
+            deployment_identifier: record.deployment_identifier,
+            generation_identifier: record.generation_identifier,
             cluster_name: record.deployment_request_identity.cluster_name.clone(),
             node_name: record.deployment_request_identity.node_name.clone(),
             deployment_phase: deployment_terminal.deployment_phase(),
-            event_log_position: allocation.next_event_log_position.into(),
-            optional_immutable_revision: record
+            event_log_position: crate::runtime_model::EventLogPosition::new(
+                allocation.next_event_log_position,
+            ),
+            immutable_revision_option: record
                 .deployment_request_identity
-                .optional_immutable_revision
+                .immutable_revision_option
                 .clone(),
-            optional_deployment_terminal: Some(deployment_terminal),
+            deployment_terminal_option: Some(deployment_terminal),
             transition_ordinal: TransitionOrdinal::new(0),
-            optional_transition_marker: None,
+            transition_marker_option: None,
             transition_intent_state: TransitionIntentState::Pending,
         };
         self.database.commit_atomic(
@@ -2812,7 +2857,10 @@ impl DeploymentLedger for Store {
                             .next_identifier()?,
                     },
                 )
-                .assert(self.directory.deployment_records, record.clone())
+                .assert(
+                    self.directory.deployment_records,
+                    StoredDeploymentRecord::from(record.clone()),
+                )
                 .assert(self.directory.pending_transition_intents, intent),
         )?;
         Ok(record)
@@ -2826,7 +2874,7 @@ impl DeploymentLedger for Store {
         let record = self
             .begin_rejected_deployment_request(deployment_request_identity, deployment_terminal)?;
         self.complete_pending_transition_intent(*record.deployment_identifier.payload(), 0)?;
-        self.records::<DeploymentRecord>()?
+        self.deployment_records()?
             .into_iter()
             .find(|current| current.deployment_identifier == record.deployment_identifier)
             .ok_or_else(|| {
@@ -2836,12 +2884,12 @@ impl DeploymentLedger for Store {
 
     fn set_deployment_immutable_revision(
         &self,
-        deployment_identifier: u64,
+        deployment_identifier: i64,
         immutable_revision: crate::runtime_model::ImmutableRevision,
     ) -> Result<()> {
         let _write = self.lock_write()?;
         let mut record = self
-            .records::<DeploymentRecord>()?
+            .deployment_records()?
             .into_iter()
             .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
             .ok_or_else(|| {
@@ -2849,24 +2897,24 @@ impl DeploymentLedger for Store {
                     "deployment record {deployment_identifier} is missing"
                 ))
             })?;
-        record
-            .deployment_request_identity
-            .optional_immutable_revision = Some(immutable_revision);
-        self.database
-            .mutate(Mutation::new(self.directory.deployment_records, record))?;
+        record.deployment_request_identity.immutable_revision_option = Some(immutable_revision);
+        self.database.mutate(Mutation::new(
+            self.directory.deployment_records,
+            StoredDeploymentRecord::from(record),
+        ))?;
         Ok(())
     }
 
     fn record_resolved_source(
         &self,
-        deployment_identifier: u64,
+        deployment_identifier: i64,
         immutable_revision: crate::runtime_model::ImmutableRevision,
         deploy_job: DeployJob,
     ) -> Result<()> {
         deploy_job.validate_fresh()?;
         let _write = self.lock_write()?;
         let mut record = self
-            .records::<DeploymentRecord>()?
+            .deployment_records()?
             .into_iter()
             .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
             .ok_or_else(|| {
@@ -2879,13 +2927,14 @@ impl DeploymentLedger for Store {
                 "resolved source job has a different deployment identity".to_string(),
             ));
         }
-        record
-            .deployment_request_identity
-            .optional_immutable_revision = Some(immutable_revision);
+        record.deployment_request_identity.immutable_revision_option = Some(immutable_revision);
         self.database.commit_atomic(
             self.database
                 .begin_atomic_commit()
-                .mutate(self.directory.deployment_records, record)
+                .mutate(
+                    self.directory.deployment_records,
+                    StoredDeploymentRecord::from(record),
+                )
                 .mutate(self.directory.deploy_jobs, deploy_job),
         )?;
         Ok(())
@@ -2893,16 +2942,14 @@ impl DeploymentLedger for Store {
 
     fn begin_deployment_phase_transition(
         &self,
-        deployment_identifier: u64,
-        deployment_lifecycle: DeploymentLifecycle,
+        deployment_identifier: i64,
+        deployment_phase: DeploymentPhase,
         deploy_job: DeployJob,
         event: crate::runtime_model::DeploymentPhaseEvent,
-    ) -> Result<u64> {
+    ) -> Result<i64> {
         if matches!(
-            deployment_lifecycle,
-            DeploymentLifecycle::Completed
-                | DeploymentLifecycle::Rejected
-                | DeploymentLifecycle::Failed
+            deployment_phase,
+            DeploymentPhase::Completed | DeploymentPhase::Rejected | DeploymentPhase::Failed
         ) {
             return Err(Error::Invariant(
                 "terminal deployment phases require a terminal correlation transition".to_string(),
@@ -2921,7 +2968,7 @@ impl DeploymentLedger for Store {
             ));
         }
         let mut record = self
-            .records::<DeploymentRecord>()?
+            .deployment_records()?
             .into_iter()
             .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
             .ok_or_else(|| {
@@ -2973,29 +3020,32 @@ impl DeploymentLedger for Store {
             .filter(|intent| *intent.deployment_identifier.payload() == deployment_identifier)
             .map(|intent| *intent.transition_ordinal.payload())
             .max()
-            .map(u64::next_identifier)
+            .map(i64::next_identifier)
             .transpose()?
             .unwrap_or(0);
-        record.deployment_lifecycle = deployment_lifecycle;
-        record.optional_deployment_terminal = None;
-        record.optional_terminal_marker = None;
+        record.deployment_phase = deployment_phase;
+        record.deployment_terminal_option = None;
+        record.terminal_marker_option = None;
         let intent = PendingTransitionIntent {
-            deployment_identifier: event.deployment_identifier.clone(),
-            generation_identifier: event.generation_identifier.clone(),
+            deployment_identifier: event.deployment_identifier,
+            generation_identifier: event.generation_identifier,
             cluster_name: event.cluster_name.clone(),
             node_name: event.node_name.clone(),
             deployment_phase: event.deployment_phase,
             event_log_position: event.event_log_position,
-            optional_immutable_revision: event.optional_immutable_revision,
-            optional_deployment_terminal: None,
+            immutable_revision_option: event.immutable_revision_option,
+            deployment_terminal_option: None,
             transition_ordinal: TransitionOrdinal::new(transition_ordinal),
-            optional_transition_marker: None,
+            transition_marker_option: None,
             transition_intent_state: TransitionIntentState::Pending,
         };
         self.database.commit_atomic(
             self.database
                 .begin_atomic_commit()
-                .mutate(self.directory.deployment_records, record)
+                .mutate(
+                    self.directory.deployment_records,
+                    StoredDeploymentRecord::from(record),
+                )
                 .mutate(self.directory.deploy_jobs, deploy_job)
                 .assert(self.directory.pending_transition_intents, intent),
         )?;
@@ -3004,14 +3054,14 @@ impl DeploymentLedger for Store {
 
     fn advance_deployment_phase(
         &self,
-        deployment_identifier: u64,
-        deployment_lifecycle: DeploymentLifecycle,
+        deployment_identifier: i64,
+        deployment_phase: DeploymentPhase,
         deploy_job: DeployJob,
         event: crate::runtime_model::DeploymentPhaseEvent,
-    ) -> Result<StateMarker> {
+    ) -> Result<DatabaseMarker> {
         self.advance_deployment_phase_with_optional_job(
             deployment_identifier,
-            deployment_lifecycle,
+            deployment_phase,
             deploy_job,
             event,
             None,
@@ -3020,14 +3070,14 @@ impl DeploymentLedger for Store {
 
     fn advance_deployment_phase_with_job(
         &self,
-        deployment_identifier: u64,
-        deployment_lifecycle: DeploymentLifecycle,
+        deployment_identifier: i64,
+        deployment_phase: DeploymentPhase,
         deploy_job: DeployJob,
         event: crate::runtime_model::DeploymentPhaseEvent,
-    ) -> Result<StateMarker> {
+    ) -> Result<DatabaseMarker> {
         self.advance_deployment_phase_with_optional_job(
             deployment_identifier,
-            deployment_lifecycle,
+            deployment_phase,
             deploy_job.clone(),
             event,
             Some(deploy_job),
@@ -3036,15 +3086,15 @@ impl DeploymentLedger for Store {
 
     fn advance_deployment_phase_with_optional_job(
         &self,
-        deployment_identifier: u64,
-        deployment_lifecycle: DeploymentLifecycle,
+        deployment_identifier: i64,
+        deployment_phase: DeploymentPhase,
         deploy_job: DeployJob,
         event: crate::runtime_model::DeploymentPhaseEvent,
         acknowledgement_job: Option<DeployJob>,
-    ) -> Result<StateMarker> {
+    ) -> Result<DatabaseMarker> {
         let transition_ordinal = self.begin_deployment_phase_transition(
             deployment_identifier,
-            deployment_lifecycle,
+            deployment_phase,
             deploy_job,
             event,
         )?;
@@ -3064,7 +3114,7 @@ impl DeploymentLedger for Store {
         }
         self.maintain_event_history()?;
         intent
-            .optional_transition_marker
+            .transition_marker_option
             .map(TransitionMarker::into_payload)
             .ok_or_else(|| Error::Invariant("acknowledged phase intent lacks a marker".to_string()))
     }
@@ -3072,7 +3122,7 @@ impl DeploymentLedger for Store {
     fn record_deployment_phase(
         &self,
         mut entry: EventLogEntry,
-        deployment_lifecycle: DeploymentLifecycle,
+        deployment_phase: DeploymentPhase,
         deploy_job: DeployJob,
     ) -> Result<EventLogEntry> {
         let event = match &entry.logged_event {
@@ -3085,12 +3135,12 @@ impl DeploymentLedger for Store {
         };
         let marker = self.advance_deployment_phase(
             *event.deployment_identifier.payload(),
-            deployment_lifecycle,
+            deployment_phase,
             deploy_job,
             event,
         )?;
         if let crate::runtime_model::LoggedEvent::Deployment(event) = &mut entry.logged_event {
-            event.state_marker = marker;
+            event.transition_marker = TransitionMarker::new(marker);
         }
         Ok(entry)
     }
@@ -3125,7 +3175,7 @@ impl DeploymentLedger for Store {
         Ok(())
     }
 
-    fn retract_deploy_job(&self, deployment_identifier: u64) -> Result<()> {
+    fn retract_deploy_job(&self, deployment_identifier: i64) -> Result<()> {
         let _write = self.lock_write()?;
         let present = self
             .deploy_jobs()?
@@ -3196,7 +3246,7 @@ impl GenerationLedger for Store {
         let allocation = self.identifier_allocation()?;
         let deployment_identifier = *generation.deployment_identifier.payload();
         let generation_identifier = *generation.generation_identifier.payload();
-        let prior_current: std::collections::BTreeSet<u64> = if matches!(
+        let prior_current: std::collections::BTreeSet<i64> = if matches!(
             generation.generation_slot,
             crate::runtime_model::GenerationSlot::Current
         ) {
@@ -3266,7 +3316,7 @@ impl GenerationLedger for Store {
         Ok(())
     }
 
-    fn retract_gc_root(&self, generation_identifier: u64) -> Result<()> {
+    fn retract_gc_root(&self, generation_identifier: i64) -> Result<()> {
         let _write = self.lock_write()?;
         self.database.retract(Retraction::new(
             self.directory.gc_roots,
@@ -3355,9 +3405,14 @@ impl EngineRecord for DeployJob {
     }
 }
 
-impl EngineRecord for DeploymentRecord {
+impl EngineRecord for StoredDeploymentRecord {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(self.deployment_identifier.payload().to_string())
+        RecordKey::new(
+            self.deployment_record
+                .deployment_identifier
+                .payload()
+                .to_string(),
+        )
     }
 }
 
@@ -3439,15 +3494,15 @@ mod transition_intent_tests {
     fn admission_identity() -> ordinary::DeploymentRequestIdentity {
         ordinary::DeploymentRequestIdentity {
             deployment_environment: ordinary::DeploymentEnvironment::HostEnvironment,
-            cluster_name: ordinary::ClusterName::from("cluster"),
-            node_name: ordinary::NodeName::from("node"),
+            cluster_name: ordinary::ClusterName::new("cluster".into()),
+            node_name: ordinary::NodeName::new("node".into()),
             generation_artifact: ordinary::GenerationArtifact::BaseHost,
             requested_deployment_action: ordinary::RequestedDeploymentAction::Host(
                 ordinary::HostDeployAction::Evaluate,
             ),
             activation_effect: ordinary::ActivationEffect::ProfileOnly,
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-            optional_immutable_revision: Some(ordinary::ImmutableRevision::new(
+            immutable_revision_option: Some(ordinary::ImmutableRevision::new(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             )),
         }
@@ -3457,34 +3512,34 @@ mod transition_intent_tests {
         ordinary::DeployJob {
             deployment_identifier: ordinary::DeploymentIdentifier::new(0),
             generation_identifier: ordinary::GenerationIdentifier::new(0),
-            cluster_name: ordinary::ClusterName::from("cluster"),
-            node_name: ordinary::NodeName::from("node"),
+            cluster_name: ordinary::ClusterName::new("cluster".into()),
+            node_name: ordinary::NodeName::new("node".into()),
             deploy_job_phase: ordinary::DeployJobPhase::Submitted,
-            optional_closure_path: None,
+            closure_path_option: None,
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
             flake_reference: ordinary::FlakeReference::new(
                 "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             ),
-            optional_flake_reference: None,
+            flake_reference_option: None,
             resolved_revision: None,
             deployment_transport: ordinary::DeploymentTransport {
-                nix_store_uri: ordinary::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
+                nix_store_uri: ordinary::NixStoreUri::new("ssh-ng://fixture-copy.invalid".into()),
                 ssh_destination: ordinary::SshDestination::new(
                     "fixture-login@fixture-activate.invalid".to_string(),
                 ),
             },
             deployment_input_mode: ordinary::DeploymentInputMode::Direct,
             deployment_output_selector: ordinary::DeploymentOutputSelector::new(
-                ordinary::FlakeAttribute::from("checks.fixture-a"),
+                ordinary::FlakeAttribute::new("checks.fixture-a".into()),
             ),
             activation_backend: ordinary::ActivationBackend::NixosSystemdBootV1,
-            optional_nix_builder_spec: None,
+            nix_builder_spec_option: None,
             boot_once_unit: None,
-            optional_generation_slot: None,
+            generation_slot_option: None,
             persisted_flake_input_override_vector: Vec::new(),
             deploy_resume_stage: ordinary::DeployResumeStage::ResolveFlakeAuth,
-            optional_phase_receipt: None,
-            optional_deploy_submission: None,
+            phase_receipt_option: None,
+            deploy_submission_option: None,
         }
     }
 
@@ -3496,7 +3551,7 @@ mod transition_intent_tests {
             "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-private-secret".to_string(),
         );
         let mut job = admission_job();
-        job.optional_closure_path = Some(unsafe_path.clone());
+        job.closure_path_option = Some(unsafe_path.clone());
         assert!(
             store
                 .begin_admission_transition(admission_identity(), job)
@@ -3504,11 +3559,11 @@ mod transition_intent_tests {
         );
         let root = ordinary::GcRoot {
             generation_identifier: ordinary::GenerationIdentifier::new(1),
-            cluster_name: ordinary::ClusterName::from("cluster"),
-            node_name: ordinary::NodeName::from("node"),
+            cluster_name: ordinary::ClusterName::new("cluster".into()),
+            node_name: ordinary::NodeName::new("node".into()),
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path: unsafe_path,
-            optional_pin_label: None,
+            pin_label_option: None,
         };
         assert!(store.append_gc_root(root.clone()).is_err());
         assert!(store.mutate_gc_root(root).is_err());
@@ -3528,7 +3583,7 @@ mod transition_intent_tests {
             .into_iter()
             .find(|job| job.deployment_identifier == record.deployment_identifier)
             .expect("one restart cursor");
-        job.optional_closure_path = Some(ordinary::ClosurePath::new(
+        job.closure_path_option = Some(ordinary::ClosurePath::new(
             "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-private-secret".to_string(),
         ));
         store
@@ -3542,21 +3597,21 @@ mod transition_intent_tests {
 
     fn building_event(
         record: &ordinary::DeploymentRecord,
-        position: u64,
+        position: i64,
     ) -> ordinary::DeploymentPhaseEvent {
         ordinary::DeploymentPhaseEvent {
-            deployment_identifier: record.deployment_identifier.clone(),
-            generation_identifier: record.generation_identifier.clone(),
+            deployment_identifier: record.deployment_identifier,
+            generation_identifier: record.generation_identifier,
             cluster_name: record.deployment_request_identity.cluster_name.clone(),
             node_name: record.deployment_request_identity.node_name.clone(),
             deployment_phase: ordinary::DeploymentPhase::Building,
             event_log_position: ordinary::EventLogPosition::new(position),
-            state_marker: StateMarker::from(0),
-            optional_immutable_revision: record
+            transition_marker: TransitionMarker::new(DatabaseMarker::at_commit(0)),
+            immutable_revision_option: record
                 .deployment_request_identity
-                .optional_immutable_revision
+                .immutable_revision_option
                 .clone(),
-            optional_deployment_terminal: None,
+            deployment_terminal_option: None,
         }
     }
 
@@ -3619,7 +3674,7 @@ mod transition_intent_tests {
                 TransitionIntentState::Acknowledged
             ));
             let marker = intents[0]
-                .optional_transition_marker
+                .transition_marker_option
                 .as_ref()
                 .expect("intent is bound to its source commit");
             let journal: Vec<_> = store
@@ -3629,7 +3684,7 @@ mod transition_intent_tests {
                 .filter(|entry| match &entry.logged_event {
                     ordinary::LoggedEvent::Deployment(event) => {
                         *event.deployment_identifier.payload() == deployment_identifier
-                            && event.state_marker == marker.payload().clone()
+                            && &event.transition_marker == marker
                     }
                     _ => false,
                 })
@@ -3729,14 +3784,14 @@ mod transition_intent_tests {
                     .allocate_event_log_position()
                     .expect("reserve building journal position");
                 let mut job = admission_job();
-                job.deployment_identifier = record.deployment_identifier.clone();
-                job.generation_identifier = record.generation_identifier.clone();
+                job.deployment_identifier = record.deployment_identifier;
+                job.generation_identifier = record.generation_identifier;
                 job.deploy_job_phase = ordinary::DeployJobPhase::Building;
                 job.deploy_resume_stage = ordinary::DeployResumeStage::NixEval;
                 let ordinal = store
                     .begin_deployment_phase_transition(
                         *record.deployment_identifier.payload(),
-                        ordinary::DeploymentLifecycle::Building,
+                        ordinary::DeploymentPhase::Building,
                         job,
                         building_event(&record, position),
                     )
@@ -3801,7 +3856,7 @@ mod transition_intent_tests {
                 TransitionIntentState::Acknowledged
             ));
             let marker = building
-                .optional_transition_marker
+                .transition_marker_option
                 .as_ref()
                 .expect("building intent marker");
             let events: Vec<_> = store
@@ -3812,7 +3867,7 @@ mod transition_intent_tests {
                     ordinary::LoggedEvent::Deployment(event) => {
                         *event.deployment_identifier.payload() == deployment_identifier
                             && matches!(event.deployment_phase, ordinary::DeploymentPhase::Building)
-                            && event.state_marker == marker.payload().clone()
+                            && &event.transition_marker == marker
                     }
                     _ => false,
                 })
@@ -3909,17 +3964,17 @@ mod transition_intent_tests {
 
             let store = Store::open(&path).expect("reopen terminal recovery");
             let record = store
-                .records::<DeploymentRecord>()
+                .deployment_records()
                 .expect("read terminal record")
                 .into_iter()
                 .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
                 .expect("terminal record");
             assert!(matches!(
-                record.deployment_lifecycle,
-                ordinary::DeploymentLifecycle::Completed
+                record.deployment_phase,
+                ordinary::DeploymentPhase::Completed
             ));
             let marker = record
-                .optional_terminal_marker
+                .terminal_marker_option
                 .as_ref()
                 .expect("terminal marker is bound from source commit");
             assert!(
@@ -3934,7 +3989,7 @@ mod transition_intent_tests {
                                     event.deployment_phase,
                                     ordinary::DeploymentPhase::Completed
                                 )
-                                && event.state_marker == marker.payload().clone()
+                                && event.transition_marker.database_marker == *marker.payload()
                         }
                         _ => false,
                     })
@@ -3981,8 +4036,8 @@ mod transition_intent_tests {
             .expect("persist terminal intent");
         let deployment_identifier = *record.deployment_identifier.payload();
         let mut job = admission_job();
-        job.deployment_identifier = record.deployment_identifier.clone();
-        job.generation_identifier = record.generation_identifier.clone();
+        job.deployment_identifier = record.deployment_identifier;
+        job.generation_identifier = record.generation_identifier;
         store
             .upsert_deploy_job(job.clone())
             .expect("persist resume job");
@@ -4034,7 +4089,7 @@ mod transition_intent_tests {
                     |candidate| *candidate.deployment_identifier.payload() == deployment_identifier
                 )
                 .expect("resume job remains")
-                .optional_phase_receipt
+                .phase_receipt_option
                 .is_none()
         );
     }
@@ -4104,7 +4159,7 @@ mod transition_intent_tests {
                     .any(|outbox| {
                         *outbox.deployment_identifier.payload() == deployment_identifier
                             && outbox.transition_marker
-                                == intent.optional_transition_marker.clone().expect("marker")
+                                == intent.transition_marker_option.clone().expect("marker")
                             && matches!(
                                 outbox.outbox_delivery_state,
                                 OutboxDeliveryState::Acknowledged

@@ -1,8 +1,117 @@
 //! Handwritten durable and decision-plane nouns for lojix.
 //!
-//! These Rust values are owned by the daemon itself. Public Interface values
-//! enter and leave only through `adapters`; no build-time schema language or
-//! generated source participates in the runtime model.
+//! Every value whose shape the contracts already declare is the generated
+//! contract type itself, re-exported here under the name the runtime has
+//! always used: signal-lojix's and meta-signal-lojix's scalars, markers,
+//! enumerations and the records that agree with them field for field. What
+//! stays declared here is Lojix's own: its stored records, its decision-plane
+//! inputs and outputs, and the few twins whose shape differs from the
+//! contract's (Generation, the test-run listing, the deploy submission with
+//! its Horizon definition inside, the engine's five-way Selection).
+
+pub use meta_signal_lojix::{
+    AcceptedTest, AppliedPin, AppliedRetire, AppliedUnpin, DeployHandle, DeployRefusalReason,
+    ExtraSubstituter, NodeSelection, PinRejectionReason, PinRequest, QuickCheck, RefusedDeploy,
+    RejectedDeploy, RejectedPin, RejectedRetire, RejectedTest, RejectedUnpin,
+    RetireRejectionReason, RetireRequest, TestRejectionReason, TestRequest, TestRun,
+    UnpinRejectionReason, UnpinRequest,
+};
+pub use signal_lojix::{
+    ActivationBackend, ActivationEffect, AdmissionMarker, CacheRetentionTransition,
+    CacheRetentionTransitionEvent, ClosurePath, ClusterName, CommandArgument, CommandProgram,
+    CommitSequence, ConfigurationReceipt, ConfigurationRejection, ConfigurationRejectionReason,
+    DatabaseMarker, DeploymentEnvironment, DeploymentFailure, DeploymentFailureStage,
+    DeploymentIdentifier, DeploymentInputMode, DeploymentLookup, DeploymentOutputSelector,
+    DeploymentPhase, DeploymentPhaseEvent, DeploymentRecord, DeploymentRequestIdentity,
+    DeploymentTerminal, DeploymentTerminalReason, DeploymentTransport, DeploymentWatch,
+    DetailTruncated, EventLogPage, EventLogPosition, EventLogRange, ExitCode, FailedCommand,
+    FailureDetail, FailureEvidence, FailureStage, FlakeAttribute, FlakeReference,
+    GenerationArtifact, GenerationIdentifier, GenerationLookup, GenerationSlot, HostComposition,
+    HostDeployAction, HostSelection, ImmutableRevision, NixBuilderSpec, NixStoreUri, NixSystem,
+    NodeName, NodeSelector, PinLabel, ProposalSource, QueryRejectionReason, RejectedQuery,
+    RejectedUnwatch, RejectedWatch, RequestedDeploymentAction, SecretsDirectory, SecretsInput,
+    SourceRevisionPolicy, SshDestination, StateDigest, SubscriptionClose, SubscriptionClosed,
+    SubscriptionOpened, SubscriptionToken, TerminalMarker, TestExecutionProfile, TestMode,
+    TestOutcome, TestRunIdentifier, TestRunLookup, TestRunPhase, TransitionMarker,
+    UnwatchRejectionReason, UserEnvironmentAction, UserName, WatchRejectionReason,
+};
+
+/// A generated contract newtype, or a contract struct of one field, read
+/// through the runtime's one capability for a value that carries one value.
+macro_rules! carried {
+    ($name:ident, $inner:ty) => {
+        impl crate::Payload for $name {
+            type Carried = $inner;
+
+            fn new(payload: $inner) -> Self {
+                Self(payload)
+            }
+
+            fn payload(&self) -> &$inner {
+                &self.0
+            }
+
+            fn into_payload(self) -> $inner {
+                self.0
+            }
+        }
+    };
+    ($name:ident, $field:ident: $inner:ty) => {
+        impl crate::Payload for $name {
+            type Carried = $inner;
+
+            fn new($field: $inner) -> Self {
+                Self { $field }
+            }
+
+            fn payload(&self) -> &$inner {
+                &self.$field
+            }
+
+            fn into_payload(self) -> $inner {
+                self.$field
+            }
+        }
+    };
+}
+
+carried!(ClusterName, String);
+carried!(NodeName, String);
+carried!(UserName, String);
+carried!(PinLabel, String);
+carried!(CommandProgram, String);
+carried!(CommandArgument, String);
+carried!(FailureDetail, String);
+carried!(ClosurePath, String);
+carried!(FlakeReference, String);
+carried!(NixStoreUri, String);
+carried!(SshDestination, String);
+carried!(FlakeAttribute, String);
+carried!(NixBuilderSpec, String);
+carried!(NixSystem, String);
+carried!(ProposalSource, String);
+carried!(SecretsDirectory, String);
+carried!(ImmutableRevision, String);
+carried!(DeploymentIdentifier, i64);
+carried!(GenerationIdentifier, i64);
+carried!(TestRunIdentifier, i64);
+carried!(SubscriptionToken, i64);
+carried!(EventLogPosition, i64);
+carried!(ExitCode, i64);
+carried!(CommitSequence, i64);
+carried!(StateDigest, i64);
+carried!(DetailTruncated, bool);
+carried!(QuickCheck, Vec<NodeName>);
+carried!(AdmissionMarker, database_marker: DatabaseMarker);
+carried!(TerminalMarker, database_marker: DatabaseMarker);
+carried!(TransitionMarker, database_marker: DatabaseMarker);
+carried!(DeploymentOutputSelector, flake_attribute: FlakeAttribute);
+carried!(GenerationLookup, generation_identifier: GenerationIdentifier);
+carried!(DeploymentLookup, deployment_identifier: DeploymentIdentifier);
+carried!(SubscriptionClose, subscription_token: SubscriptionToken);
+carried!(SubscriptionClosed, subscription_token: SubscriptionToken);
+carried!(RejectedWatch, watch_rejection_reason: WatchRejectionReason);
+carried!(RejectedDeploy, deployment_record: DeploymentRecord);
 
 macro_rules! runtime_newtype {
     ($name:ident, $inner:ty) => {
@@ -67,143 +176,6 @@ macro_rules! runtime_text {
     };
 }
 
-runtime_text!(ClusterName);
-runtime_text!(NodeName);
-runtime_text!(UserName);
-runtime_text!(PinLabel);
-runtime_text!(CommandProgram);
-runtime_text!(CommandArgument);
-runtime_text!(FailureDetail);
-runtime_text!(ClosurePath);
-runtime_text!(FlakeReference);
-runtime_text!(NixStoreUri);
-runtime_text!(SshDestination);
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct DeploymentTransport {
-    pub nix_store_uri: NixStoreUri,
-    pub ssh_destination: SshDestination,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum DeploymentInputMode {
-    Direct,
-    Horizon,
-}
-runtime_text!(FlakeAttribute);
-runtime_newtype!(DeploymentOutputSelector, FlakeAttribute);
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum ActivationBackend {
-    NixosSystemdBootV1,
-    HomeManagerNixProfileV1,
-}
-runtime_text!(NixBuilderSpec);
-runtime_text!(NixSystem);
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct TestExecutionProfile {
-    pub test_mode: TestMode,
-    pub nix_system: NixSystem,
-    pub deployment_output_selector: DeploymentOutputSelector,
-    pub optional_deployment_transport: Option<DeploymentTransport>,
-}
-runtime_text!(ProposalSource);
-runtime_text!(SecretsDirectory);
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum SecretsInput {
-    NoSecrets,
-    SecretsDirectory(SecretsDirectory),
-}
-runtime_text!(ImmutableRevision);
-runtime_newtype!(DeploymentIdentifier, u64);
-runtime_newtype!(GenerationIdentifier, u64);
-runtime_newtype!(TestRunIdentifier, u64);
-runtime_newtype!(SubscriptionToken, u64);
-runtime_newtype!(EventLogPosition, u64);
-runtime_newtype!(ExitCode, u64);
-runtime_newtype!(CommitSequence, u64);
-runtime_newtype!(StateDigest, u64);
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum SourceRevisionPolicy {
-    RequireImmutable,
-    ResolveAndRecord,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum GenerationArtifact {
-    CompleteHost,
-    BaseHost,
-    UserEnvironment,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum ActivationEffect {
-    LiveActivation,
-    BootProfile,
-    TestActivation,
-    BootOnceProfile,
-    ProfileOnly,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum GenerationSlot {
-    Current,
-    BootPending,
-    Rollback,
-    Pinned,
-    Recent,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum TestMode {
-    Hermetic,
-    Live,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum TestRunPhase {
-    Submitted,
-    BringingUp,
-    Deploying,
-    Asserting,
-    TearingDown,
-    Completed,
-    Failed,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum FailureStage {
-    BringUp,
-    Deploy,
-    Assert,
-    TearDown,
-    HermeticCheck,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum TestOutcome {
-    Pending,
-    Passed,
-    Failed(FailureStage),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct StateMarker {
-    pub commit_sequence: CommitSequence,
-    pub state_digest: StateDigest,
-}
-runtime_newtype!(DatabaseMarker, StateMarker);
-runtime_newtype!(AdmissionMarker, StateMarker);
-runtime_newtype!(TerminalMarker, StateMarker);
-runtime_newtype!(TransitionMarker, StateMarker);
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct NodeSelector {
-    pub cluster_name: ClusterName,
-    pub node_name: NodeName,
-    pub optional_generation_artifact: Option<GenerationArtifact>,
-}
-runtime_newtype!(GenerationLookup, GenerationIdentifier);
-runtime_newtype!(DeploymentLookup, DeploymentIdentifier);
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct EventLogRange {
-    pub from: EventLogPosition,
-    pub until: EventLogPosition,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct TestRunLookup {
-    pub cluster_name: ClusterName,
-    pub node_name: NodeName,
-    pub optional_test_run_identifier: Option<TestRunIdentifier>,
-}
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Selection {
     ByNode(NodeSelector),
@@ -229,140 +201,19 @@ pub struct Generation {
     pub activation_effect: ActivationEffect,
     pub generation_slot: GenerationSlot,
     pub closure_path: ClosurePath,
-    pub optional_immutable_revision: Option<ImmutableRevision>,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum DeploymentEnvironment {
-    HostEnvironment,
-    UserEnvironment(UserName),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum RequestedDeploymentAction {
-    Host(HostDeployAction),
-    UserEnvironment(UserEnvironmentAction),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum DeploymentLifecycle {
-    Submitted,
-    Building,
-    Built,
-    Copying,
-    Activating,
-    Activated,
-    Completed,
-    Rejected,
-    Failed,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum DeploymentFailureStage {
-    Admission,
-    FlakeAuth,
-    MaterializeHorizon,
-    Eval,
-    Build,
-    CopyClosure,
-    Activate,
-    Daemon,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum DeploymentTerminalReason {
-    ClusterUnknown,
-    NodeUnknown,
-    ProposalSourceUnreachable,
-    FlakeReferenceMalformed,
-    InvalidDeploymentRouting,
-    BuilderUnreachable,
-    SubstituterUnreachable,
-    DeploymentInFlight,
-    UnsupportedDeployAction,
-    InternalError,
-    ActivationFailed,
-    EvaluationFailed,
-    BuildFailed,
-    ClosureCopyFailed,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct DeploymentFailure {
-    pub deployment_failure_stage: DeploymentFailureStage,
-    pub deployment_terminal_reason: DeploymentTerminalReason,
-    pub optional_failure_evidence: Option<FailureEvidence>,
-}
-/// What the failing stage actually reported. The detail is always present and
-/// always bounded; the command is present only when a subprocess ran.
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct FailureEvidence {
-    pub optional_failed_command: Option<FailedCommand>,
-    pub failure_detail: FailureDetail,
-    pub detail_truncated: bool,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct FailedCommand {
-    pub command_program: CommandProgram,
-    pub command_argument_vector: Vec<CommandArgument>,
-    pub optional_exit_code: Option<ExitCode>,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum DeploymentTerminal {
-    Succeeded,
-    Rejected(DeploymentTerminalReason),
-    Failed(DeploymentFailure),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct DeploymentRequestIdentity {
-    pub deployment_environment: DeploymentEnvironment,
-    pub cluster_name: ClusterName,
-    pub node_name: NodeName,
-    pub generation_artifact: GenerationArtifact,
-    pub requested_deployment_action: RequestedDeploymentAction,
-    pub activation_effect: ActivationEffect,
-    pub source_revision_policy: SourceRevisionPolicy,
-    pub optional_immutable_revision: Option<ImmutableRevision>,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct DeploymentRecord {
-    pub deployment_identifier: DeploymentIdentifier,
-    pub generation_identifier: GenerationIdentifier,
-    pub deployment_request_identity: DeploymentRequestIdentity,
-    pub optional_admission_marker: Option<AdmissionMarker>,
-    pub deployment_lifecycle: DeploymentLifecycle,
-    pub optional_terminal_marker: Option<TerminalMarker>,
-    pub optional_deployment_terminal: Option<DeploymentTerminal>,
+    pub immutable_revision_option: Option<ImmutableRevision>,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct IdentifierAllocation {
-    pub next_deployment_identifier: u64,
-    pub next_generation_identifier: u64,
-    pub next_event_log_position: u64,
+    pub next_deployment_identifier: i64,
+    pub next_generation_identifier: i64,
+    pub next_event_log_position: i64,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct GenerationListing {
     pub generation_vector: Vec<Generation>,
     pub deployment_record_vector: Vec<DeploymentRecord>,
-    pub state_marker: StateMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum DeploymentPhase {
-    Submitted,
-    Building,
-    Built,
-    Copying,
-    Activating,
-    Activated,
-    Completed,
-    Rejected,
-    Failed,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct DeploymentPhaseEvent {
-    pub deployment_identifier: DeploymentIdentifier,
-    pub generation_identifier: GenerationIdentifier,
-    pub cluster_name: ClusterName,
-    pub node_name: NodeName,
-    pub deployment_phase: DeploymentPhase,
-    pub event_log_position: EventLogPosition,
-    pub state_marker: StateMarker,
-    pub optional_immutable_revision: Option<ImmutableRevision>,
-    pub optional_deployment_terminal: Option<DeploymentTerminal>,
+    pub database_marker: DatabaseMarker,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
 pub enum OutboxDeliveryState {
@@ -370,8 +221,8 @@ pub enum OutboxDeliveryState {
     Dispatched,
     Acknowledged,
 }
-runtime_newtype!(OutboxRetryCount, u64);
-runtime_newtype!(TransitionOrdinal, u64);
+runtime_newtype!(OutboxRetryCount, i64);
+runtime_newtype!(TransitionOrdinal, i64);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DeploymentOutboxRecord {
     pub deployment_identifier: DeploymentIdentifier,
@@ -388,10 +239,10 @@ pub struct PendingTransitionIntent {
     pub node_name: NodeName,
     pub deployment_phase: DeploymentPhase,
     pub event_log_position: EventLogPosition,
-    pub optional_immutable_revision: Option<ImmutableRevision>,
-    pub optional_deployment_terminal: Option<DeploymentTerminal>,
+    pub immutable_revision_option: Option<ImmutableRevision>,
+    pub deployment_terminal_option: Option<DeploymentTerminal>,
     pub transition_ordinal: TransitionOrdinal,
-    pub optional_transition_marker: Option<TransitionMarker>,
+    pub transition_marker_option: Option<TransitionMarker>,
     pub transition_intent_state: TransitionIntentState,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
@@ -400,26 +251,6 @@ pub enum TransitionIntentState {
     Bound,
     Appended,
     Acknowledged,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum CacheRetentionTransition {
-    Pinned,
-    Unpinned,
-    Promoted,
-    Demoted,
-    Retired,
-    Evicted,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct CacheRetentionTransitionEvent {
-    pub generation_identifier: GenerationIdentifier,
-    pub cluster_name: ClusterName,
-    pub node_name: NodeName,
-    pub cache_retention_transition: CacheRetentionTransition,
-    pub generation_slot: GenerationSlot,
-    pub optional_generation_slot: Option<GenerationSlot>,
-    pub optional_pin_label: Option<PinLabel>,
-    pub event_log_position: EventLogPosition,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TestRunRecord {
@@ -430,73 +261,12 @@ pub struct TestRunRecord {
     pub test_mode: TestMode,
     pub test_run_phase: TestRunPhase,
     pub test_outcome: TestOutcome,
-    pub optional_closure_path: Option<ClosurePath>,
+    pub closure_path_option: Option<ClosurePath>,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TestRunListing {
     pub test_run_record_vector: Vec<TestRunRecord>,
     pub database_marker: DatabaseMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct DeploymentWatch {
-    pub optional_deployment_identifier: Option<DeploymentIdentifier>,
-    pub optional_cluster_name: Option<ClusterName>,
-    pub optional_node_name: Option<NodeName>,
-}
-runtime_newtype!(SubscriptionClose, SubscriptionToken);
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct SubscriptionOpened {
-    pub subscription_token: SubscriptionToken,
-    pub commit_sequence: CommitSequence,
-}
-runtime_newtype!(SubscriptionClosed, SubscriptionToken);
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum HostDeployAction {
-    Evaluate,
-    Realize,
-    SetBootProfile,
-    ActivateNow,
-    TestActivation,
-    ScheduleBootOnce,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum HostComposition {
-    CompleteHost,
-    BaseHost,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum UserEnvironmentAction {
-    Realize,
-    SetProfile,
-    ActivateNow,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum HostSelection {
-    DefaultHost,
-    OnHost(NodeName),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum NodeSelection {
-    Nodes(Vec<NodeName>),
-    All,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct TestRun {
-    pub cluster_name: ClusterName,
-    pub node_selection: NodeSelection,
-    pub host_selection: HostSelection,
-    pub test_execution_profile: TestExecutionProfile,
-}
-runtime_newtype!(QuickCheck, Vec<NodeName>);
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum TestRequest {
-    Run(TestRun),
-    Check(QuickCheck),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ExtraSubstituter {
-    pub url: String,
-    pub public_key: String,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub struct HostDeployment {
@@ -513,7 +283,7 @@ pub struct HostDeployment {
     pub activation_backend: ActivationBackend,
     pub host_deploy_action: HostDeployAction,
     pub source_revision_policy: SourceRevisionPolicy,
-    pub optional_nix_builder_spec: Option<NixBuilderSpec>,
+    pub nix_builder_spec_option: Option<NixBuilderSpec>,
     pub extra_substituter_vector: Vec<ExtraSubstituter>,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
@@ -531,59 +301,8 @@ pub struct UserEnvironmentDeployment {
     pub activation_backend: ActivationBackend,
     pub user_environment_action: UserEnvironmentAction,
     pub source_revision_policy: SourceRevisionPolicy,
-    pub optional_nix_builder_spec: Option<NixBuilderSpec>,
+    pub nix_builder_spec_option: Option<NixBuilderSpec>,
     pub extra_substituter_vector: Vec<ExtraSubstituter>,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct PinRequest {
-    pub cluster_name: ClusterName,
-    pub node_name: NodeName,
-    pub generation_identifier: GenerationIdentifier,
-    pub pin_label: PinLabel,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct UnpinRequest {
-    pub cluster_name: ClusterName,
-    pub node_name: NodeName,
-    pub pin_label: PinLabel,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RetireRequest {
-    pub cluster_name: ClusterName,
-    pub node_name: NodeName,
-    pub generation_identifier: GenerationIdentifier,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct DeployHandle {
-    pub deployment_identifier: DeploymentIdentifier,
-    pub state_marker: StateMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct AcceptedTest {
-    pub test_run_identifier: TestRunIdentifier,
-    pub state_marker: StateMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct AppliedPin {
-    pub generation_identifier: GenerationIdentifier,
-    pub pin_label: PinLabel,
-    pub from_slot: GenerationSlot,
-    pub to_slot: GenerationSlot,
-    pub state_marker: StateMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct AppliedUnpin {
-    pub generation_identifier: GenerationIdentifier,
-    pub pin_label: PinLabel,
-    pub from_slot: GenerationSlot,
-    pub to_slot: GenerationSlot,
-    pub state_marker: StateMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct AppliedRetire {
-    pub generation_identifier: GenerationIdentifier,
-    pub generation_slot: GenerationSlot,
-    pub state_marker: StateMarker,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum MemoryReadInput {
@@ -599,12 +318,6 @@ pub enum MemoryReadOutput {
     ReadMissed(RejectionReport),
     /// The store failed under the read; the text names the failure.
     StoreRefused(String),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct EventLogPage {
-    pub deployment_phase_event_vector: Vec<DeploymentPhaseEvent>,
-    pub cache_retention_transition_event_vector: Vec<CacheRetentionTransitionEvent>,
-    pub state_marker: StateMarker,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum MemoryWriteInput {
@@ -673,23 +386,23 @@ pub enum MemoryWriteOutput {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PhaseReceipt {
     pub event_log_position: EventLogPosition,
-    pub state_marker: StateMarker,
+    pub database_marker: DatabaseMarker,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AppliedActivation {
     pub generation_identifier: GenerationIdentifier,
     pub generation_slot: GenerationSlot,
-    pub state_marker: StateMarker,
+    pub database_marker: DatabaseMarker,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ContainerReceipt {
     pub event_log_position: EventLogPosition,
-    pub state_marker: StateMarker,
+    pub database_marker: DatabaseMarker,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RejectionReport {
     pub rejection_reason: RejectionReason,
-    pub state_marker: StateMarker,
+    pub database_marker: DatabaseMarker,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
 pub enum RejectionReason {
@@ -705,119 +418,6 @@ pub enum RejectionReason {
     ProposalSourceUnreachable,
     /// The durable write itself failed, so no record was produced.
     DurableWriteFailed,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum QueryRejectionReason {
-    GenerationUnknown,
-    NodeUnknown,
-    EventLogPositionOutOfRange,
-    MalformedSelector,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum WatchRejectionReason {
-    SubscriptionLimitReached,
-    MalformedWatch,
-    StreamUnavailable,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum UnwatchRejectionReason {
-    SubscriptionTokenUnknown,
-    SubscriptionAlreadyClosed,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RejectedQuery {
-    pub query_rejection_reason: QueryRejectionReason,
-    pub state_marker: StateMarker,
-}
-runtime_newtype!(RejectedWatch, WatchRejectionReason);
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RejectedUnwatch {
-    pub unwatch_rejection_reason: UnwatchRejectionReason,
-    pub subscription_token: SubscriptionToken,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum PinRejectionReason {
-    GenerationUnknown,
-    NodeUnknown,
-    PinLabelInUse,
-    PinSlotExhausted,
-    InternalError,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum UnpinRejectionReason {
-    PinLabelUnknown,
-    NodeUnknown,
-    GenerationNotPinned,
-    InternalError,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum RetireRejectionReason {
-    GenerationUnknown,
-    NodeUnknown,
-    GenerationActive,
-    GenerationPinned,
-    InternalError,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum TestRejectionReason {
-    ClusterUnknown,
-    NodeUnknown,
-    VmHostNotDeclaredForNode,
-    HostDeclaresNoVmHost,
-    NoTestDefaults,
-    LiveNotYetEnabled,
-    SubstrateUnavailable,
-    InternalError,
-}
-runtime_newtype!(RejectedDeploy, DeploymentRecord);
-/// A deploy refusal that names no deployment, because at the moment of refusal
-/// there is none to name. `RejectedDeploy` carries the record it rejected;
-/// this carries only what happened, in the `reason + marker` shape every other
-/// meta refusal has.
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RefusedDeploy {
-    pub deploy_refusal_reason: DeployRefusalReason,
-    pub state_marker: StateMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
-pub enum DeployRefusalReason {
-    ContinuationBudgetExhausted,
-    NoCorrelatedDeployment,
-    DurableWriteFailed,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RejectedPin {
-    pub pin_rejection_reason: PinRejectionReason,
-    pub state_marker: StateMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RejectedUnpin {
-    pub unpin_rejection_reason: UnpinRejectionReason,
-    pub state_marker: StateMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RejectedRetire {
-    pub retire_rejection_reason: RetireRejectionReason,
-    pub state_marker: StateMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct RejectedTest {
-    pub test_rejection_reason: TestRejectionReason,
-    pub state_marker: StateMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub struct ConfigurationReceipt {
-    pub configuration: crate::NexusConfiguration,
-    pub meta_configure_occurred: bool,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum ConfigurationRejectionReason {
-    OrdinaryConfigureClosed,
-    InvalidConfiguration,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ConfigurationRejection {
-    pub reason: ConfigurationRejectionReason,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum OrdinaryIngress {
@@ -891,7 +491,7 @@ pub struct GcRoot {
     pub node_name: NodeName,
     pub generation_slot: GenerationSlot,
     pub closure_path: ClosurePath,
-    pub optional_pin_label: Option<PinLabel>,
+    pub pin_label_option: Option<PinLabel>,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct EventLogEntry {
@@ -941,22 +541,22 @@ pub struct DeployJob {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
     pub deploy_job_phase: DeployJobPhase,
-    pub optional_closure_path: Option<ClosurePath>,
+    pub closure_path_option: Option<ClosurePath>,
     pub source_revision_policy: SourceRevisionPolicy,
     pub flake_reference: FlakeReference,
-    pub optional_flake_reference: Option<FlakeReference>,
+    pub flake_reference_option: Option<FlakeReference>,
     pub resolved_revision: Option<String>,
     pub deployment_transport: DeploymentTransport,
     pub deployment_input_mode: DeploymentInputMode,
     pub deployment_output_selector: DeploymentOutputSelector,
     pub activation_backend: ActivationBackend,
-    pub optional_nix_builder_spec: Option<NixBuilderSpec>,
+    pub nix_builder_spec_option: Option<NixBuilderSpec>,
     pub boot_once_unit: Option<String>,
-    pub optional_generation_slot: Option<GenerationSlot>,
+    pub generation_slot_option: Option<GenerationSlot>,
     pub persisted_flake_input_override_vector: Vec<PersistedFlakeInputOverride>,
     pub deploy_resume_stage: DeployResumeStage,
-    pub optional_phase_receipt: Option<PhaseReceipt>,
-    pub optional_deploy_submission: Option<DeploySubmission>,
+    pub phase_receipt_option: Option<PhaseReceipt>,
+    pub deploy_submission_option: Option<DeploySubmission>,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
 pub enum DeployJobPhase {
@@ -977,10 +577,22 @@ pub struct StoredTestRun {
     pub test_mode: TestMode,
     pub test_run_phase: TestRunPhase,
     pub test_outcome: TestOutcome,
-    pub optional_closure_path: Option<ClosurePath>,
+    pub closure_path_option: Option<ClosurePath>,
 }
 
 impl triad_runtime::MemoryWriteInput for MemoryWriteInput {}
 impl triad_runtime::MemoryWriteOutput for MemoryWriteOutput {}
 impl triad_runtime::MemoryReadInput for MemoryReadInput {}
 impl triad_runtime::MemoryReadOutput for MemoryReadOutput {}
+
+/// A deployment record as the store keeps it: the contract's own record,
+/// whole, inside a record of Lojix's own. It archives as the record it holds.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StoredDeploymentRecord {
+    pub deployment_record: DeploymentRecord,
+}
+impl From<DeploymentRecord> for StoredDeploymentRecord {
+    fn from(deployment_record: DeploymentRecord) -> Self {
+        Self { deployment_record }
+    }
+}

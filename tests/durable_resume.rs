@@ -17,16 +17,17 @@ use lojix::{DurableStore as _, GenerationLedger as _, IdentifierAllocating as _}
 use tempfile::TempDir;
 
 /// A live generation and its matching gc-root for one generation identifier.
-fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
+fn activation(generation_identifier: i64) -> (LiveGeneration, GcRoot) {
     let generation = ordinary::GenerationIdentifier::new(generation_identifier);
-    let cluster = ordinary::ClusterName::from("fixture-cluster");
-    let node = ordinary::NodeName::from("dune");
-    let closure =
-        ordinary::ClosurePath::from("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-resume-closure");
+    let cluster = ordinary::ClusterName::new("fixture-cluster".into());
+    let node = ordinary::NodeName::new("dune".into());
+    let closure = ordinary::ClosurePath::new(
+        "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-resume-closure".into(),
+    );
     (
         LiveGeneration {
             deployment_identifier: ordinary::DeploymentIdentifier::new(generation_identifier),
-            generation_identifier: generation.clone(),
+            generation_identifier: generation,
             cluster_name: cluster.clone(),
             node_name: node.clone(),
             deployment_environment: ordinary::DeploymentEnvironment::HostEnvironment,
@@ -36,9 +37,9 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
             closure_path: closure.clone(),
             source_revision_record: ordinary::SourceRevisionRecord {
                 source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
-                requested_ref: ordinary::FlakeReference::from("github:owner/repo/main"),
-                resolved_ref: ordinary::FlakeReference::from(
-                    "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                requested_ref: ordinary::FlakeReference::new("github:owner/repo/main".into()),
+                resolved_ref: ordinary::FlakeReference::new(
+                    "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                 ),
                 string: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             },
@@ -49,13 +50,13 @@ fn activation(generation_identifier: u64) -> (LiveGeneration, GcRoot) {
             node_name: node,
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path: closure,
-            optional_pin_label: None,
+            pin_label_option: None,
         },
     )
 }
 
 fn activation_in_environment(
-    generation_identifier: u64,
+    generation_identifier: i64,
     environment: ordinary::DeploymentEnvironment,
 ) -> (LiveGeneration, GcRoot) {
     let (mut generation, root) = activation(generation_identifier);
@@ -144,14 +145,16 @@ fn current_generation_is_unique_per_host_or_user_environment_across_reopen() {
             .expect("record first host current");
         let (alice, alice_root) = activation_in_environment(
             2,
-            ordinary::DeploymentEnvironment::UserEnvironment(ordinary::UserName::from("alice")),
+            ordinary::DeploymentEnvironment::UserEnvironment(ordinary::UserName::new(
+                "alice".into(),
+            )),
         );
         store
             .record_activation(alice, alice_root)
             .expect("record alice current");
         let (bob, bob_root) = activation_in_environment(
             3,
-            ordinary::DeploymentEnvironment::UserEnvironment(ordinary::UserName::from("bob")),
+            ordinary::DeploymentEnvironment::UserEnvironment(ordinary::UserName::new("bob".into())),
         );
         store
             .record_activation(bob, bob_root)
@@ -173,6 +176,7 @@ fn current_generation_is_unique_per_host_or_user_environment_across_reopen() {
             .find(|generation| *generation.generation_identifier.payload() == identifier)
             .expect("generation")
             .generation_slot
+            .clone()
     };
     assert_eq!(slot(1), ordinary::GenerationSlot::Recent);
     assert_eq!(slot(2), ordinary::GenerationSlot::Current);

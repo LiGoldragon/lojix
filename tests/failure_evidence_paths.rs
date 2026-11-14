@@ -66,53 +66,53 @@ fn fake_programs(directory: &Path, output: &str, nix_cases: &str, ssh_cases: &st
 
 fn transport() -> ordinary::DeploymentTransport {
     ordinary::DeploymentTransport {
-        nix_store_uri: ordinary::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
-        ssh_destination: ordinary::SshDestination::from("root@fixture-activate.invalid"),
+        nix_store_uri: ordinary::NixStoreUri::new("ssh-ng://fixture-copy.invalid".into()),
+        ssh_destination: ordinary::SshDestination::new("root@fixture-activate.invalid".into()),
     }
 }
 
 fn user_environment_request(source: &Path) -> meta::DeploySubmission {
     meta::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
-        cluster_name: ordinary::ClusterName::from("alpha"),
-        node_name: ordinary::NodeName::from(NODE),
-        user_name: ordinary::UserName::from("bird"),
+        cluster_name: ordinary::ClusterName::new("alpha".into()),
+        node_name: ordinary::NodeName::new(NODE.into()),
+        user_name: ordinary::UserName::new("bird".into()),
         proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
         secrets_input: ordinary::SecretsInput::NoSecrets,
-        flake_reference: ordinary::FlakeReference::from(FLAKE),
+        flake_reference: ordinary::FlakeReference::new(FLAKE.into()),
         deployment_transport: transport(),
         deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
         horizon_definition_option: Some(common::read_horizon(source)),
         deployment_output_selector: ordinary::DeploymentOutputSelector::new(
-            ordinary::FlakeAttribute::from("homeConfigurations.bird.activationPackage"),
+            ordinary::FlakeAttribute::new("homeConfigurations.bird.activationPackage".into()),
         ),
         activation_backend: ordinary::ActivationBackend::HomeManagerNixProfileV1,
         user_environment_action: ordinary::UserEnvironmentAction::ActivateNow,
         source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-        optional_nix_builder_spec: None,
+        nix_builder_spec_option: None,
         extra_substituter_vector: vec![],
     })
 }
 
 fn host_request(action: ordinary::HostDeployAction) -> meta::DeploySubmission {
     meta::DeploySubmission::Host(meta::HostDeployment {
-        cluster_name: ordinary::ClusterName::from("alpha"),
-        node_name: ordinary::NodeName::from(NODE),
+        cluster_name: ordinary::ClusterName::new("alpha".into()),
+        node_name: ordinary::NodeName::new(NODE.into()),
         host_composition: ordinary::HostComposition::BaseHost,
-        proposal_source: ordinary::ProposalSource::from("/dev/null"),
+        proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
         secrets_input: ordinary::SecretsInput::NoSecrets,
-        flake_reference: ordinary::FlakeReference::from(FLAKE),
+        flake_reference: ordinary::FlakeReference::new(FLAKE.into()),
         deployment_transport: transport(),
         deployment_input_mode: ordinary::DeploymentInputMode::Direct,
         horizon_definition_option: None,
         deployment_output_selector: ordinary::DeploymentOutputSelector::new(
-            ordinary::FlakeAttribute::from(
-                "nixosConfigurations.beacon.config.system.build.toplevel",
+            ordinary::FlakeAttribute::new(
+                "nixosConfigurations.beacon.config.system.build.toplevel".into(),
             ),
         ),
         activation_backend: ordinary::ActivationBackend::NixosSystemdBootV1,
         host_deploy_action: action,
         source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-        optional_nix_builder_spec: None,
+        nix_builder_spec_option: None,
         extra_substituter_vector: vec![],
     })
 }
@@ -125,7 +125,7 @@ fn runtime(directory: &Path, programs: &Path, daemon_host: &str) -> SchemaRuntim
             directory.join("generated-inputs"),
             programs.to_path_buf(),
         )
-        .with_daemon_host(ordinary::NodeName::from(daemon_host)),
+        .with_daemon_host(ordinary::NodeName::new(daemon_host.into())),
     );
     SchemaRuntime::with_store_and_configuration(store, configuration)
 }
@@ -150,12 +150,12 @@ async fn drive(directory: &Path, daemon_host: &str, request: meta::DeploySubmiss
     engine.drive_submitted_deploy().await;
     let record = engine
         .store()
-        .records::<lojix::runtime_model::DeploymentRecord>()
+        .deployment_records()
         .expect("read durable deployment records")
         .into_iter()
         .find(|record| record.deployment_identifier == identifier)
         .expect("the driven deployment has a durable record");
-    let failure = match record.optional_deployment_terminal {
+    let failure = match record.deployment_terminal_option {
         Some(ordinary::DeploymentTerminal::Failed(failure)) => failure,
         other => panic!("expected a failed terminal, got {other:?}"),
     };
@@ -181,17 +181,17 @@ async fn failed_user_environment(directory: &Path, activation_arm: &str) -> Driv
 
 fn evidence(failure: &ordinary::DeploymentFailure) -> &ordinary::FailureEvidence {
     failure
-        .optional_failure_evidence
+        .failure_evidence_option
         .as_ref()
         .expect("a failed deployment carries what the stage reported")
 }
 
-fn exit_code(evidence: &ordinary::FailureEvidence) -> Option<u64> {
+fn exit_code(evidence: &ordinary::FailureEvidence) -> Option<i64> {
     evidence
-        .optional_failed_command
+        .failed_command_option
         .as_ref()
         .expect("a stage that ran a subprocess names it")
-        .optional_exit_code
+        .exit_code_option
         .as_ref()
         .map(|code| *code.payload())
 }
@@ -224,7 +224,7 @@ async fn an_activation_that_prints_its_cause_on_stdout_keeps_it() {
         detail.contains("--- stderr: empty ---"),
         "an empty stream is said to be empty, got {detail:?}"
     );
-    assert!(!evidence.detail_truncated);
+    assert!(!evidence.detail_truncated.0);
 }
 
 #[tokio::test]
@@ -260,7 +260,7 @@ async fn both_streams_keep_their_tails_within_the_bound() {
     let evidence = evidence(&driven.failure);
     let detail = evidence.failure_detail.payload();
     assert!(detail.len() <= DETAIL_BOUND, "{} bytes", detail.len());
-    assert!(evidence.detail_truncated, "a cut stream is a truncation");
+    assert!(evidence.detail_truncated.0, "a cut stream is a truncation");
     assert!(detail.contains("exited with status 3"), "got {detail:?}");
     assert!(detail.contains("--- stdout (tail) ---"), "got {detail:?}");
     assert!(detail.contains("--- stderr (tail) ---"), "got {detail:?}");
@@ -286,7 +286,7 @@ async fn a_tail_cut_inside_a_multibyte_character_is_kept_whole() {
     let evidence = evidence(&driven.failure);
     let detail = evidence.failure_detail.payload();
     assert!(detail.len() <= DETAIL_BOUND, "{} bytes", detail.len());
-    assert!(evidence.detail_truncated);
+    assert!(evidence.detail_truncated.0);
     assert!(
         detail.ends_with("éa"),
         "got the tail {:?}",
@@ -429,7 +429,7 @@ async fn evaluation_build_and_copy_failures_keep_both_streams() {
         let evidence = evidence(&driven.failure);
         let detail = evidence.failure_detail.payload();
         let command = evidence
-            .optional_failed_command
+            .failed_command_option
             .as_ref()
             .expect("the failed command is named");
         assert_eq!(command.command_program.payload(), "nix");

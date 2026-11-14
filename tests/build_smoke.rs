@@ -139,7 +139,7 @@ async fn fixture_eval_reserves_a_durable_deployment_before_effects() {
     };
     let records = engine
         .store()
-        .records::<lojix::runtime_model::DeploymentRecord>()
+        .deployment_records()
         .expect("read durable deployment records");
     assert!(
         records

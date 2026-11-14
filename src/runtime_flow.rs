@@ -231,7 +231,7 @@ pub struct TestExecutionProfile {
     pub test_mode: TestMode,
     pub nix_system: NixSystem,
     pub deployment_output_selector: DeploymentOutputSelector,
-    pub optional_deployment_transport: Option<DeploymentTransport>,
+    pub deployment_transport_option: Option<DeploymentTransport>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HermeticCheckCommand {

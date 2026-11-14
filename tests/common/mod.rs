@@ -95,6 +95,12 @@ pub fn write_single_node(path: &Path) {
 }
 
 pub fn write_hosted_pair(path: &Path) {
+    write(path, hosted_pair());
+}
+
+/// Two nodes, the second a virtual machine the first hosts: a definition with
+/// every level of nesting a stored deploy job can carry.
+pub fn hosted_pair() -> HorizonDefinition {
     let atlas = node(
         "atlas",
         MachineDefinition::Metal(Metal_Data {
@@ -115,5 +121,5 @@ pub fn write_hosted_pair(path: &Path) {
             integer_option: Some(20),
         }),
     );
-    write(path, definition(vec![atlas, beacon]));
+    definition(vec![atlas, beacon])
 }

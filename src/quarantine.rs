@@ -16,8 +16,9 @@ use memory_engine::{EngineRecord, QueryPlan, RecordKey, TableName, TableReferenc
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use crate::runtime_model::{
-    ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, DeploymentRecord, EventLogEntry,
-    GcRoot, IdentifierAllocation, LiveGeneration, PendingTransitionIntent, StoredTestRun,
+    ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, EventLogEntry, GcRoot,
+    IdentifierAllocation, LiveGeneration, PendingTransitionIntent, StoredDeploymentRecord,
+    StoredTestRun,
 };
 use crate::{LojixDirectory, LojixRecord, NexusConfigurationRecord, Result, Store};
 
@@ -158,7 +159,7 @@ impl RowQuarantine for Store {
         moved.extend(self.quarantine_undecodable::<ContainerLifecycleRecord>()?);
         moved.extend(self.quarantine_undecodable::<DeployJob>()?);
         moved.extend(self.quarantine_undecodable::<StoredTestRun>()?);
-        moved.extend(self.quarantine_undecodable::<DeploymentRecord>()?);
+        moved.extend(self.quarantine_undecodable::<StoredDeploymentRecord>()?);
         moved.extend(self.quarantine_undecodable::<IdentifierAllocation>()?);
         moved.extend(self.quarantine_undecodable::<DeploymentOutboxRecord>()?);
         moved.extend(self.quarantine_undecodable::<PendingTransitionIntent>()?);

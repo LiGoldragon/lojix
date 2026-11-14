@@ -16,12 +16,12 @@ use crate::inspected_text::{
     StoreItemShape,
 };
 use crate::runtime_flow::{Routable, Routed};
+use crate::{CommitMarking as _, Named as _, Payload};
 use crate::{
     DeploymentLedger as _, DurableStore as _, EventHistory as _, GenerationLedger as _,
     IdentifierAllocating as _, NexusPersistable as _, TestRunLedger as _,
 };
 use crate::{HorizonArchitecture as _, SourceRevisionText as _};
-use crate::{Named as _, Payload};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -85,7 +85,7 @@ const UNIT_JOURNAL_LINES: usize = 200;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StageFailure {
     detail: String,
-    optional_failed_command: Option<crate::runtime_model::FailedCommand>,
+    failed_command_option: Option<crate::runtime_model::FailedCommand>,
     reported_outputs: Vec<ReportedOutput>,
 }
 
@@ -208,7 +208,7 @@ impl From<String> for StageFailure {
     fn from(detail: String) -> Self {
         Self {
             detail,
-            optional_failed_command: None,
+            failed_command_option: None,
             reported_outputs: Vec::new(),
         }
     }
@@ -369,9 +369,9 @@ pub(crate) trait Witnessing {
         }
         let (detail, cut) = Self::tail_within(&sections.join("\n"), FAILURE_DETAIL_BOUND);
         crate::runtime_model::FailureEvidence {
-            optional_failed_command: self.reported_command(),
+            failed_command_option: self.reported_command(),
             failure_detail: crate::runtime_model::FailureDetail::new(detail),
-            detail_truncated: truncated || cut,
+            detail_truncated: crate::runtime_model::DetailTruncated(truncated || cut),
         }
     }
 }
@@ -386,7 +386,7 @@ impl Witnessing for StageFailure {
     }
 
     fn reported_command(&self) -> Option<crate::runtime_model::FailedCommand> {
-        self.optional_failed_command.clone()
+        self.failed_command_option.clone()
     }
 }
 
@@ -658,11 +658,13 @@ impl TestLowering for TestDefaults {
 
     fn test_default() -> Self {
         Self {
-            cluster: ordinary::ClusterName::from("fixture-cluster"),
-            default_vm_host: ordinary::NodeName::from("fixture-vm-host"),
+            cluster: ordinary::ClusterName::new("fixture-cluster".into()),
+            default_vm_host: ordinary::NodeName::new("fixture-vm-host".into()),
             default_mode: ordinary::TestMode::Hermetic,
-            test_flake: ordinary::FlakeReference::from("github:fixture-owner/fixture-test-flake"),
-            test_nix_system: memory::NixSystem::from("x86_64-linux"),
+            test_flake: ordinary::FlakeReference::new(
+                "github:fixture-owner/fixture-test-flake".into(),
+            ),
+            test_nix_system: memory::NixSystem::new("x86_64-linux".into()),
             test_output_selector: memory::DeploymentOutputSelector::new(
                 memory::FlakeAttribute::new("checks.fixture-a".to_string()),
             ),
@@ -672,10 +674,10 @@ impl TestLowering for TestDefaults {
 
     fn default_profile(&self) -> memory::TestExecutionProfile {
         memory::TestExecutionProfile {
-            test_mode: self.default_mode,
+            test_mode: self.default_mode.clone(),
             nix_system: self.test_nix_system.clone(),
             deployment_output_selector: self.test_output_selector.clone(),
-            optional_deployment_transport: None,
+            deployment_transport_option: None,
         }
     }
 
@@ -769,10 +771,10 @@ impl TestRunCommands for ResolvedTestRun {
             cluster_name: self.cluster.clone(),
             node: self.node.clone(),
             host: self.host.clone(),
-            test_mode: self.profile.test_mode,
+            test_mode: self.profile.test_mode.clone(),
             test_run_phase: ordinary::TestRunPhase::Submitted,
             test_outcome: ordinary::TestOutcome::Pending,
-            optional_closure_path: None,
+            closure_path_option: None,
         }
     }
 
@@ -787,7 +789,7 @@ impl TestRunCommands for ResolvedTestRun {
 
     fn nexus_test_execution_profile(&self) -> nexus::TestExecutionProfile {
         nexus::TestExecutionProfile {
-            test_mode: self.profile.test_mode,
+            test_mode: self.profile.test_mode.clone(),
             nix_system: nexus::NixSystem::new(self.profile.nix_system.payload().clone()),
             deployment_output_selector: nexus::DeploymentOutputSelector::new(
                 nexus::FlakeAttribute::new(
@@ -798,7 +800,7 @@ impl TestRunCommands for ResolvedTestRun {
                         .clone(),
                 ),
             ),
-            optional_deployment_transport: self.profile.optional_deployment_transport.as_ref().map(
+            deployment_transport_option: self.profile.deployment_transport_option.as_ref().map(
                 |transport| nexus::DeploymentTransport {
                     nix_store_uri: nexus::NixStoreUri::new(
                         transport.nix_store_uri.payload().clone(),
@@ -818,7 +820,7 @@ impl TestRunCommands for ResolvedTestRun {
             host: self.host.clone(),
             deployment_transport: self
                 .nexus_test_execution_profile()
-                .optional_deployment_transport
+                .deployment_transport_option
                 .expect("live test transport is validated before dispatch"),
             closure_path: runner,
             string: String::new(),
@@ -832,7 +834,7 @@ impl TestRunCommands for ResolvedTestRun {
             host: self.host.clone(),
             deployment_transport: self
                 .nexus_test_execution_profile()
-                .optional_deployment_transport
+                .deployment_transport_option
                 .expect("live test transport is validated before dispatch"),
         }
     }
@@ -850,7 +852,7 @@ pub struct TestPipeline {
     identifier: ordinary::TestRunIdentifier,
     stage: TestStage,
     /// The accepted database marker, replayed on the terminal reply.
-    accepted_marker: ordinary::StateMarker,
+    accepted_marker: ordinary::DatabaseMarker,
 }
 
 /// The test pipeline cursor stage — the step that has just completed. The
@@ -899,7 +901,7 @@ impl TestCursor for TestPipeline {
             run,
             identifier,
             stage: TestStage::Submitted,
-            accepted_marker: ordinary::StateMarker {
+            accepted_marker: ordinary::DatabaseMarker {
                 commit_sequence: ordinary::CommitSequence::new(0),
                 state_digest: ordinary::StateDigest::new(0),
             },
@@ -913,14 +915,14 @@ impl TestCursor for TestPipeline {
         closure_path: Option<ordinary::ClosurePath>,
     ) -> ordinary::TestRunRecord {
         ordinary::TestRunRecord {
-            test_run_identifier: self.identifier.clone(),
+            test_run_identifier: self.identifier,
             cluster_name: self.run.cluster.clone(),
             node: self.run.node.clone(),
             host: self.run.host.clone(),
-            test_mode: self.run.profile.test_mode,
+            test_mode: self.run.profile.test_mode.clone(),
             test_run_phase: phase,
             test_outcome: outcome,
-            optional_closure_path: closure_path,
+            closure_path_option: closure_path,
         }
     }
 
@@ -1293,7 +1295,7 @@ impl DaemonRuntime for RuntimeConfiguration {
     fn test_default() -> Self {
         Self {
             generated_inputs_directory: std::env::temp_dir().join("lojix-generated-inputs"),
-            daemon_host: ordinary::NodeName::from("daemon-host"),
+            daemon_host: ordinary::NodeName::new("daemon-host".into()),
             effect_execution: EffectExecution::production(),
             test_defaults: Some(TestDefaults::test_default()),
         }
@@ -1305,7 +1307,7 @@ impl DaemonRuntime for RuntimeConfiguration {
     ) -> Self {
         Self {
             generated_inputs_directory,
-            daemon_host: ordinary::NodeName::from("daemon-host"),
+            daemon_host: ordinary::NodeName::new("daemon-host".into()),
             effect_execution: EffectExecution::test(program_directory),
             test_defaults: Some(TestDefaults::test_default()),
         }
@@ -1424,7 +1426,7 @@ pub struct DeployPipeline {
     substituters: Vec<nexus::ExtraSubstituter>,
     input_overrides: Vec<nexus::FlakeInputOverride>,
     closure_path: Option<ordinary::ClosurePath>,
-    accepted_marker: ordinary::StateMarker,
+    accepted_marker: ordinary::DatabaseMarker,
     stage: DeployStage,
     /// The exact next continuation action, durably mirrored on `DeployJob`.
     /// It advances only after the preceding materialization/result is stored.
@@ -1515,10 +1517,10 @@ impl DeployActionShape for DeployAction {
 
     fn activation_profile(&self) -> nexus::ActivationProfile {
         match self {
-            Self::Host(action) => nexus::ActivationProfile::Host(*action),
+            Self::Host(action) => nexus::ActivationProfile::Host(action.clone()),
             Self::UserEnvironment { action, user } => {
                 nexus::ActivationProfile::UserEnvironment(nexus::UserEnvironmentActivationProfile {
-                    user_environment_action: *action,
+                    user_environment_action: action.clone(),
                     user_name: user.clone(),
                 })
             }
@@ -1792,7 +1794,7 @@ trait DeployCursor {
     fn from_submission(
         deployment_identifier: ordinary::DeploymentIdentifier,
         generation_identifier: ordinary::GenerationIdentifier,
-        accepted_marker: ordinary::StateMarker,
+        accepted_marker: ordinary::DatabaseMarker,
         submission: memory::DeploySubmission,
     ) -> Self
     where
@@ -1896,13 +1898,17 @@ impl DeployCursor for DeployPipeline {
                 deployment_environment: memory::DeploymentEnvironment::HostEnvironment,
                 cluster_name: deployment.cluster_name.clone(),
                 node_name: deployment.node_name.clone(),
-                generation_artifact: Self::host_generation_artifact(deployment.host_composition),
-                requested_deployment_action: memory::RequestedDeploymentAction::Host(
-                    deployment.host_deploy_action,
+                generation_artifact: Self::host_generation_artifact(
+                    deployment.host_composition.clone(),
                 ),
-                activation_effect: Self::host_activation_effect(deployment.host_deploy_action),
-                source_revision_policy: deployment.source_revision_policy,
-                optional_immutable_revision: FlakeReferencePolicy::new(
+                requested_deployment_action: memory::RequestedDeploymentAction::Host(
+                    deployment.host_deploy_action.clone(),
+                ),
+                activation_effect: Self::host_activation_effect(
+                    deployment.host_deploy_action.clone(),
+                ),
+                source_revision_policy: deployment.source_revision_policy.clone(),
+                immutable_revision_option: FlakeReferencePolicy::new(
                     deployment.flake_reference.payload(),
                 )
                 .immutable_revision(),
@@ -1916,13 +1922,13 @@ impl DeployCursor for DeployPipeline {
                     node_name: deployment.node_name.clone(),
                     generation_artifact: memory::GenerationArtifact::UserEnvironment,
                     requested_deployment_action: memory::RequestedDeploymentAction::UserEnvironment(
-                        deployment.user_environment_action,
+                        deployment.user_environment_action.clone(),
                     ),
                     activation_effect: Self::user_environment_activation_effect(
-                        deployment.user_environment_action,
+                        deployment.user_environment_action.clone(),
                     ),
-                    source_revision_policy: deployment.source_revision_policy,
-                    optional_immutable_revision: FlakeReferencePolicy::new(
+                    source_revision_policy: deployment.source_revision_policy.clone(),
+                    immutable_revision_option: FlakeReferencePolicy::new(
                         deployment.flake_reference.payload(),
                     )
                     .immutable_revision(),
@@ -1934,7 +1940,7 @@ impl DeployCursor for DeployPipeline {
     fn from_submission(
         deployment_identifier: ordinary::DeploymentIdentifier,
         generation_identifier: ordinary::GenerationIdentifier,
-        accepted_marker: ordinary::StateMarker,
+        accepted_marker: ordinary::DatabaseMarker,
         submission: memory::DeploySubmission,
     ) -> Self {
         let durable_submission = submission.clone();
@@ -1945,7 +1951,9 @@ impl DeployCursor for DeployPipeline {
                 cluster_name: deployment.cluster_name,
                 node_name: deployment.node_name,
                 generation_artifact: Self::host_generation_artifact(deployment.host_composition),
-                activation_effect: Self::host_activation_effect(deployment.host_deploy_action),
+                activation_effect: Self::host_activation_effect(
+                    deployment.host_deploy_action.clone(),
+                ),
                 activation_slot: None,
                 secrets_input: deployment.secrets_input,
                 requested_flake: deployment.flake_reference.clone(),
@@ -1958,7 +1966,7 @@ impl DeployCursor for DeployPipeline {
                 action: DeployAction::Host(deployment.host_deploy_action),
                 source_revision_policy: deployment.source_revision_policy,
                 source_revision: None,
-                builder: deployment.optional_nix_builder_spec,
+                builder: deployment.nix_builder_spec_option,
                 substituters: Self::convert_substituters(deployment.extra_substituter_vector),
                 input_overrides: Vec::new(),
                 closure_path: None,
@@ -1975,7 +1983,7 @@ impl DeployCursor for DeployPipeline {
                 node_name: deployment.node_name,
                 generation_artifact: ordinary::GenerationArtifact::UserEnvironment,
                 activation_effect: Self::user_environment_activation_effect(
-                    deployment.user_environment_action,
+                    deployment.user_environment_action.clone(),
                 ),
                 activation_slot: None,
                 secrets_input: deployment.secrets_input,
@@ -1992,7 +2000,7 @@ impl DeployCursor for DeployPipeline {
                 },
                 source_revision_policy: deployment.source_revision_policy,
                 source_revision: None,
-                builder: deployment.optional_nix_builder_spec,
+                builder: deployment.nix_builder_spec_option,
                 substituters: Self::convert_substituters(deployment.extra_substituter_vector),
                 input_overrides: Vec::new(),
                 closure_path: None,
@@ -2045,8 +2053,8 @@ impl DeployCursor for DeployPipeline {
         substituters
             .into_iter()
             .map(|substituter| nexus::ExtraSubstituter {
-                url: substituter.url,
-                public_key: substituter.public_key,
+                url: substituter.first_string,
+                public_key: substituter.second_string,
             })
             .collect()
     }
@@ -2084,7 +2092,7 @@ impl DeployCursor for DeployPipeline {
     fn flake_auth_request(&self) -> nexus::FlakeAuthRequest {
         nexus::FlakeAuthRequest {
             flake_reference: self.flake.clone(),
-            source_revision_policy: self.source_revision_policy,
+            source_revision_policy: self.source_revision_policy.clone(),
         }
     }
 
@@ -2129,10 +2137,10 @@ impl DeployCursor for DeployPipeline {
 
     fn nix_eval_command(&self, daemon_host: &ordinary::NodeName) -> nexus::NixEvalCommand {
         nexus::NixEvalCommand {
-            generation_identifier: self.generation_identifier.clone(),
+            generation_identifier: self.generation_identifier,
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
-            generation_artifact: self.generation_artifact,
+            generation_artifact: self.generation_artifact.clone(),
             flake_reference: self.flake.clone(),
             source_revision_record: self.source_revision_record(),
             deployment_output_selector: nexus::DeploymentOutputSelector::new(
@@ -2154,7 +2162,7 @@ impl DeployCursor for DeployPipeline {
         daemon_host: &ordinary::NodeName,
     ) -> nexus::NixBuildCommand {
         nexus::NixBuildCommand {
-            generation_identifier: self.generation_identifier.clone(),
+            generation_identifier: self.generation_identifier,
             closure_path,
             build_target: self.build_target(daemon_host),
             extra_substituter_vector: self.substituters.clone(),
@@ -2173,7 +2181,7 @@ impl DeployCursor for DeployPipeline {
             }
         };
         nexus::CopyClosureCommand {
-            generation_identifier: self.generation_identifier.clone(),
+            generation_identifier: self.generation_identifier,
             node_name: self.node_name.clone(),
             deployment_transport: self.effect_transport(),
             closure_path,
@@ -2186,8 +2194,8 @@ impl DeployCursor for DeployPipeline {
         closure_path: ordinary::ClosurePath,
     ) -> nexus::ActivateGenerationCommand {
         nexus::ActivateGenerationCommand {
-            deployment_identifier: self.deployment_identifier.clone(),
-            generation_identifier: self.generation_identifier.clone(),
+            deployment_identifier: self.deployment_identifier,
+            generation_identifier: self.generation_identifier,
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             deployment_transport: nexus::DeploymentTransport {
@@ -2199,7 +2207,7 @@ impl DeployCursor for DeployPipeline {
                 ),
             },
             closure_path,
-            activation_effect: self.activation_effect,
+            activation_effect: self.activation_effect.clone(),
             activation_backend: match self.activation_backend {
                 memory::ActivationBackend::NixosSystemdBootV1 => {
                     nexus::ActivationBackend::NixosSystemdBootV1
@@ -2216,7 +2224,7 @@ impl DeployCursor for DeployPipeline {
         self.source_revision
             .clone()
             .unwrap_or_else(|| ordinary::SourceRevisionRecord {
-                source_revision_policy: self.source_revision_policy,
+                source_revision_policy: self.source_revision_policy.clone(),
                 requested_ref: self.requested_flake.clone(),
                 resolved_ref: self.flake.clone(),
                 string: String::new(),
@@ -2225,11 +2233,11 @@ impl DeployCursor for DeployPipeline {
 
     fn activation_commit(&self) -> Option<memory::ActivationCommit> {
         Some(memory::ActivationCommit {
-            generation_identifier: self.generation_identifier.clone(),
+            generation_identifier: self.generation_identifier,
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             deployment_environment: self.deployment_environment(),
-            generation_slot: self.activation_slot?,
+            generation_slot: self.activation_slot.clone()?,
             closure_path: self.closure_path.clone()?,
             source_revision_record: self.source_revision.clone()?,
         })
@@ -2241,18 +2249,18 @@ impl DeployCursor for DeployPipeline {
         event_log_position: ordinary::EventLogPosition,
     ) -> ordinary::DeploymentPhaseEvent {
         ordinary::DeploymentPhaseEvent {
-            deployment_identifier: self.deployment_identifier.clone(),
-            generation_identifier: self.generation_identifier.clone(),
+            deployment_identifier: self.deployment_identifier,
+            generation_identifier: self.generation_identifier,
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             deployment_phase: phase,
             event_log_position,
-            state_marker: self.accepted_marker.clone(),
-            optional_immutable_revision: self
+            transition_marker: memory::TransitionMarker::new(self.accepted_marker.clone()),
+            immutable_revision_option: self
                 .source_revision
                 .as_ref()
                 .and_then(|record| record.string.immutable_revision()),
-            optional_deployment_terminal: None,
+            deployment_terminal_option: None,
         }
     }
 
@@ -2276,15 +2284,15 @@ impl DeployCursor for DeployPipeline {
 
     fn deploy_job(&self, phase: memory::DeployJobPhase) -> memory::DeployJob {
         memory::DeployJob {
-            deployment_identifier: self.deployment_identifier.clone(),
-            generation_identifier: self.generation_identifier.clone(),
+            deployment_identifier: self.deployment_identifier,
+            generation_identifier: self.generation_identifier,
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             deploy_job_phase: phase,
-            optional_closure_path: self.closure_path.clone(),
-            source_revision_policy: self.source_revision_policy,
+            closure_path_option: self.closure_path.clone(),
+            source_revision_policy: self.source_revision_policy.clone(),
             flake_reference: self.requested_flake.clone(),
-            optional_flake_reference: self
+            flake_reference_option: self
                 .source_revision
                 .as_ref()
                 .map(|source_revision| source_revision.resolved_ref.clone()),
@@ -2293,12 +2301,12 @@ impl DeployCursor for DeployPipeline {
                 .as_ref()
                 .map(|source_revision| source_revision.string.clone()),
             deployment_transport: self.deployment_transport.clone(),
-            deployment_input_mode: self.deployment_input_mode,
+            deployment_input_mode: self.deployment_input_mode.clone(),
             deployment_output_selector: self.deployment_output_selector.clone(),
-            activation_backend: self.activation_backend,
-            optional_nix_builder_spec: self.builder.clone(),
+            activation_backend: self.activation_backend.clone(),
+            nix_builder_spec_option: self.builder.clone(),
             boot_once_unit: self.boot_once_unit(),
-            optional_generation_slot: self.activation_slot,
+            generation_slot_option: self.activation_slot.clone(),
             persisted_flake_input_override_vector: self
                 .input_overrides
                 .iter()
@@ -2314,8 +2322,8 @@ impl DeployCursor for DeployPipeline {
                 })
                 .collect(),
             deploy_resume_stage: self.resume_stage,
-            optional_phase_receipt: self.phase_receipt.clone(),
-            optional_deploy_submission: Some(self.submission.clone()),
+            phase_receipt_option: self.phase_receipt.clone(),
+            deploy_submission_option: Some(self.submission.clone()),
         }
     }
 }
@@ -2403,7 +2411,7 @@ impl DeployJobResuming for memory::DeployJob {
         &self,
         daemon_host: &ordinary::NodeName,
     ) -> Option<DetachedActivationUnit> {
-        let host = match self.optional_deploy_submission.as_ref() {
+        let host = match self.deploy_submission_option.as_ref() {
             Some(memory::DeploySubmission::Host(host))
                 if host.host_deploy_action == ordinary::HostDeployAction::TestActivation
                     && host.activation_backend == memory::ActivationBackend::NixosSystemdBootV1 =>
@@ -2419,7 +2427,7 @@ impl DeployJobResuming for memory::DeployJob {
             return None;
         }
         let unit = DetachedActivationUnit::for_deployment(&self.deployment_identifier);
-        let optional_journal = SshTarget::from_transport(&nexus::DeploymentTransport {
+        let journal_option = SshTarget::from_transport(&nexus::DeploymentTransport {
             nix_store_uri: nexus::NixStoreUri::new(
                 host.deployment_transport.nix_store_uri.payload().clone(),
             ),
@@ -2430,7 +2438,7 @@ impl DeployJobResuming for memory::DeployJob {
         .ok()
         .map(|target| UnitJournal::new(unit.name.clone(), target));
         Some(DetachedActivationUnit {
-            optional_journal,
+            journal_option,
             ..unit
         })
     }
@@ -2457,22 +2465,22 @@ impl DeployJobResuming for memory::DeployJob {
         if !self.is_persisted_host_activate_now() {
             return None;
         }
-        let closure_path = self.optional_closure_path.clone()?;
+        let closure_path = self.closure_path_option.clone()?;
         if daemon_host_system_closure != Some(closure_path.payload().as_str()) {
             return None;
         }
         let source_revision_record = ordinary::SourceRevisionRecord {
-            source_revision_policy: self.source_revision_policy,
+            source_revision_policy: self.source_revision_policy.clone(),
             requested_ref: self.flake_reference.clone(),
             resolved_ref: self
-                .optional_flake_reference
+                .flake_reference_option
                 .clone()
                 .unwrap_or_else(|| self.flake_reference.clone()),
             string: self.resolved_revision.clone().unwrap_or_default(),
         };
         let generation = memory::LiveGeneration {
-            deployment_identifier: self.deployment_identifier.clone(),
-            generation_identifier: self.generation_identifier.clone(),
+            deployment_identifier: self.deployment_identifier,
+            generation_identifier: self.generation_identifier,
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             deployment_environment: memory::DeploymentEnvironment::HostEnvironment,
@@ -2486,12 +2494,12 @@ impl DeployJobResuming for memory::DeployJob {
             source_revision_record,
         };
         let root = memory::GcRoot {
-            generation_identifier: self.generation_identifier.clone(),
+            generation_identifier: self.generation_identifier,
             cluster_name: self.cluster_name.clone(),
             node_name: self.node_name.clone(),
             generation_slot: ordinary::GenerationSlot::Current,
             closure_path,
-            optional_pin_label: None,
+            pin_label_option: None,
         };
         Some((generation, root))
     }
@@ -2499,7 +2507,7 @@ impl DeployJobResuming for memory::DeployJob {
     fn is_persisted_host_activate_now(&self) -> bool {
         self.activation_backend == memory::ActivationBackend::NixosSystemdBootV1
             && matches!(
-                self.optional_deploy_submission.as_ref(),
+                self.deploy_submission_option.as_ref(),
                 Some(memory::DeploySubmission::Host(host))
                     if host.host_deploy_action == ordinary::HostDeployAction::ActivateNow
                         && host.activation_backend == memory::ActivationBackend::NixosSystemdBootV1
@@ -2520,7 +2528,7 @@ impl From<ordinary::TestRunRecord> for memory::StoredTestRun {
             test_mode: record.test_mode,
             test_run_phase: record.test_run_phase,
             test_outcome: record.test_outcome,
-            optional_closure_path: record.optional_closure_path,
+            closure_path_option: record.closure_path_option,
         }
     }
 }
@@ -2537,7 +2545,7 @@ impl From<memory::StoredTestRun> for ordinary::TestRunRecord {
             test_mode: run.test_mode,
             test_run_phase: run.test_run_phase,
             test_outcome: run.test_outcome,
-            optional_closure_path: run.optional_closure_path,
+            closure_path_option: run.closure_path_option,
         }
     }
 }
@@ -2779,28 +2787,6 @@ impl FailureStaging for nexus::EffectStage {
     }
 }
 
-/// The durable lifecycle a public deployment phase is recorded as.
-trait PhaseLifecycle {
-    fn deployment_lifecycle(self) -> memory::DeploymentLifecycle;
-}
-
-impl PhaseLifecycle for ordinary::DeploymentPhase {
-    fn deployment_lifecycle(self) -> memory::DeploymentLifecycle {
-        let phase = self;
-        match phase {
-            ordinary::DeploymentPhase::Submitted => memory::DeploymentLifecycle::Submitted,
-            ordinary::DeploymentPhase::Building => memory::DeploymentLifecycle::Building,
-            ordinary::DeploymentPhase::Built => memory::DeploymentLifecycle::Built,
-            ordinary::DeploymentPhase::Copying => memory::DeploymentLifecycle::Copying,
-            ordinary::DeploymentPhase::Activating => memory::DeploymentLifecycle::Activating,
-            ordinary::DeploymentPhase::Activated => memory::DeploymentLifecycle::Activated,
-            ordinary::DeploymentPhase::Completed => memory::DeploymentLifecycle::Completed,
-            ordinary::DeploymentPhase::Rejected => memory::DeploymentLifecycle::Rejected,
-            ordinary::DeploymentPhase::Failed => memory::DeploymentLifecycle::Failed,
-        }
-    }
-}
-
 /// Which generation slot an activation effect leaves the generation in.
 trait ActivationSlot {
     fn activation_slot(&self) -> ordinary::GenerationSlot;
@@ -2830,7 +2816,7 @@ impl TestRunSelecting for ordinary::TestRunLookup {
         lookup.cluster_name == run.cluster_name
             && lookup.node_name == run.node
             && lookup
-                .optional_test_run_identifier
+                .test_run_identifier_option
                 .as_ref()
                 .is_none_or(|identifier| identifier == &run.test_run_identifier)
     }
@@ -2852,7 +2838,7 @@ impl GenerationSelecting for ordinary::Selection {
                 selector.cluster_name == live.cluster_name
                     && selector.node_name == live.node_name
                     && selector
-                        .optional_generation_artifact
+                        .generation_artifact_option
                         .as_ref()
                         .is_none_or(|artifact| artifact == &live.generation_artifact)
             }
@@ -2879,7 +2865,7 @@ impl GenerationSelecting for ordinary::Selection {
                 record.deployment_request_identity.cluster_name == selector.cluster_name
                     && record.deployment_request_identity.node_name == selector.node_name
                     && selector
-                        .optional_generation_artifact
+                        .generation_artifact_option
                         .as_ref()
                         .is_none_or(|artifact| {
                             artifact == &record.deployment_request_identity.generation_artifact
@@ -2964,11 +2950,11 @@ impl DeployAdmission for meta::DeployRequest {
         let request = self;
         let (policy, flake) = match request {
             meta::DeployRequest::Host(deployment) => (
-                deployment.source_revision_policy,
+                deployment.source_revision_policy.clone(),
                 deployment.flake_reference.payload(),
             ),
             meta::DeployRequest::UserEnvironment(deployment) => (
-                deployment.source_revision_policy,
+                deployment.source_revision_policy.clone(),
                 deployment.flake_reference.payload(),
             ),
         };
@@ -2992,16 +2978,16 @@ impl DeployAdmission for meta::DeployRequest {
             meta::DeployRequest::Host(deployment) => (
                 &deployment.deployment_transport,
                 &deployment.deployment_output_selector,
-                deployment.activation_backend,
+                deployment.activation_backend.clone(),
                 true,
-                deployment.optional_nix_builder_spec.as_ref(),
+                deployment.nix_builder_spec_option.as_ref(),
             ),
             meta::DeployRequest::UserEnvironment(deployment) => (
                 &deployment.deployment_transport,
                 &deployment.deployment_output_selector,
-                deployment.activation_backend,
+                deployment.activation_backend.clone(),
                 false,
-                deployment.optional_nix_builder_spec.as_ref(),
+                deployment.nix_builder_spec_option.as_ref(),
             ),
         };
         let valid_backend = matches!(
@@ -3065,12 +3051,12 @@ impl DeployAdmission for meta::DeployRequest {
         let request = self;
         let (mode, definition, node) = match request {
             meta::DeployRequest::Host(deployment) => (
-                deployment.deployment_input_mode,
+                deployment.deployment_input_mode.clone(),
                 deployment.horizon_definition_option.as_ref(),
                 &deployment.node_name,
             ),
             meta::DeployRequest::UserEnvironment(deployment) => (
-                deployment.deployment_input_mode,
+                deployment.deployment_input_mode.clone(),
                 deployment.horizon_definition_option.as_ref(),
                 &deployment.node_name,
             ),
@@ -3090,14 +3076,14 @@ impl DeployAdmission for meta::DeployRequest {
 /// A read that could not be answered, reported with the store state it was
 /// asked against.
 trait ReadMiss {
-    fn read_missed(commit_sequence: u64, reason: memory::RejectionReason) -> Self;
+    fn read_missed(commit_sequence: i64, reason: memory::RejectionReason) -> Self;
 }
 
 impl ReadMiss for memory::MemoryReadOutput {
-    fn read_missed(commit_sequence: u64, reason: memory::RejectionReason) -> Self {
+    fn read_missed(commit_sequence: i64, reason: memory::RejectionReason) -> Self {
         Self::ReadMissed(memory::RejectionReport {
             rejection_reason: reason,
-            state_marker: ordinary::StateMarker::from(commit_sequence),
+            database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
         })
     }
 }
@@ -3108,11 +3094,19 @@ impl From<meta::Output> for nexus::NexusAction {
     }
 }
 
-impl From<crate::NexusConfigurationState> for memory::ConfigurationReceipt {
-    fn from(state: crate::NexusConfigurationState) -> Self {
-        Self {
-            configuration: state.desired_configuration,
-            meta_configure_occurred: state.meta_configure_occurred,
+/// The receipt a Configure answers with: the configuration the Nexus now
+/// desires, and whether the privileged Configure has happened.
+trait ConfigurationReceipting {
+    fn receipt(self) -> memory::ConfigurationReceipt;
+}
+
+impl ConfigurationReceipting for crate::NexusConfigurationState {
+    fn receipt(self) -> memory::ConfigurationReceipt {
+        memory::ConfigurationReceipt {
+            lojix_nexus_configuration: self.desired_configuration,
+            meta_configure_occurred: signal_lojix::MetaConfigureOccurred(
+                self.meta_configure_occurred,
+            ),
         }
     }
 }
@@ -3120,7 +3114,7 @@ impl From<crate::NexusConfigurationState> for memory::ConfigurationReceipt {
 impl From<crate::Error> for memory::ConfigurationRejection {
     fn from(error: crate::Error) -> Self {
         Self {
-            reason: match error {
+            configuration_rejection_reason: match error {
                 crate::Error::OrdinaryConfigureClosed => {
                     memory::ConfigurationRejectionReason::OrdinaryConfigureClosed
                 }
@@ -3172,7 +3166,7 @@ pub trait RuntimeCore {
     /// public protocol has no infrastructure-error variant, so manufacturing a
     /// zero marker would falsely correlate a reply to a state that was never
     /// observed.
-    fn current_commit_sequence(&self) -> u64;
+    fn current_commit_sequence(&self) -> i64;
 
     /// Drive a test-pipeline `NexusAction` to its terminal `Tested`/
     /// `TestRejected` reply, threading any further effect / memory-write
@@ -3224,7 +3218,7 @@ impl RuntimeCore for SchemaRuntime {
         self.store.as_ref()
     }
 
-    fn current_commit_sequence(&self) -> u64 {
+    fn current_commit_sequence(&self) -> i64 {
         self.store
             .commit_sequence()
             .expect("read durable state marker before protocol reply")
@@ -3514,7 +3508,7 @@ impl SignalDeciding for SchemaRuntime {
                 let identifier = ordinary::TestRunIdentifier::new(
                     self.store.next_test_run_identifier().unwrap_or(1),
                 );
-                self.active_test = Some(TestPipeline::accepted(run.clone(), identifier.clone()));
+                self.active_test = Some(TestPipeline::accepted(run.clone(), identifier));
                 nexus::NexusAction::CommandMemoryWrite(memory::MemoryWriteInput::RecordTestRun(
                     run.pending_record(identifier),
                 ))
@@ -3566,7 +3560,7 @@ impl SignalDeciding for SchemaRuntime {
     fn test_rejection(&self, reason: meta::TestRejectionReason) -> meta::RejectedTest {
         meta::RejectedTest {
             test_rejection_reason: reason,
-            state_marker: ordinary::StateMarker::from(self.current_commit_sequence()),
+            database_marker: ordinary::DatabaseMarker::at_commit(self.current_commit_sequence()),
         }
     }
 
@@ -3584,7 +3578,7 @@ impl SignalDeciding for SchemaRuntime {
             memory::MemoryReadOutput::ReadMissed(report) => {
                 ordinary::Output::QueryRejected(ordinary::RejectedQuery {
                     query_rejection_reason: ordinary::QueryRejectionReason::GenerationUnknown,
-                    state_marker: report.state_marker,
+                    database_marker: report.database_marker,
                 })
             }
             memory::MemoryReadOutput::StoreRefused(detail) => {
@@ -3854,8 +3848,8 @@ impl SignalDeciding for SchemaRuntime {
                 // predecessor leaves this durable Activating cursor for its
                 // successor to reconcile.
                 let accepted = meta::DeployHandle {
-                    deployment_identifier: pipeline.deployment_identifier.clone(),
-                    state_marker: pipeline.accepted_marker.clone(),
+                    deployment_identifier: pipeline.deployment_identifier,
+                    database_marker: pipeline.accepted_marker.clone(),
                 };
                 self.active_deploy = None;
                 nexus::NexusAction::from(meta::Output::DeployAccepted(accepted))
@@ -3893,7 +3887,7 @@ impl SignalDeciding for SchemaRuntime {
             .active_operation
             .take()
             .unwrap_or(MetaOperation::Deploy);
-        let marker = report.state_marker;
+        let marker = report.database_marker;
         let output = match operation {
             MetaOperation::Deploy => match rejected {
                 Some(pipeline) => self.deploy_rejection(
@@ -3907,19 +3901,19 @@ impl SignalDeciding for SchemaRuntime {
             },
             MetaOperation::Pin => meta::Output::PinRejected(meta::RejectedPin {
                 pin_rejection_reason: (report.rejection_reason).pin_reason(),
-                state_marker: marker,
+                database_marker: marker,
             }),
             MetaOperation::Unpin => meta::Output::UnpinRejected(meta::RejectedUnpin {
                 unpin_rejection_reason: (report.rejection_reason).unpin_reason(),
-                state_marker: marker,
+                database_marker: marker,
             }),
             MetaOperation::Retire => meta::Output::RetireRejected(meta::RejectedRetire {
                 retire_rejection_reason: (report.rejection_reason).retire_reason(),
-                state_marker: marker,
+                database_marker: marker,
             }),
             MetaOperation::Test => meta::Output::TestRejected(meta::RejectedTest {
                 test_rejection_reason: (report.rejection_reason).test_reason(),
-                state_marker: marker,
+                database_marker: marker,
             }),
         };
         nexus::NexusAction::from(output)
@@ -3977,7 +3971,9 @@ impl SignalDeciding for SchemaRuntime {
         eprintln!("lojix deploy refused reason={deploy_refusal_reason:?} cause={cause}");
         meta::RefusedDeploy {
             deploy_refusal_reason,
-            state_marker: ordinary::StateMarker::from(self.store.commit_sequence().unwrap_or(0)),
+            database_marker: ordinary::DatabaseMarker::at_commit(
+                self.store.commit_sequence().unwrap_or(0),
+            ),
         }
     }
 }
@@ -4087,7 +4083,7 @@ impl DeployDriving for SchemaRuntime {
     fn active_deployment_identifier(&self) -> Option<ordinary::DeploymentIdentifier> {
         self.active_deploy
             .as_ref()
-            .map(|pipeline| pipeline.deployment_identifier.clone())
+            .map(|pipeline| pipeline.deployment_identifier)
     }
 
     fn reject_deployment_in_flight(
@@ -4125,11 +4121,11 @@ impl DeployDriving for SchemaRuntime {
 
     fn resume_deploy_job(&mut self, job: memory::DeployJob) -> Result<bool> {
         let persisted_phase = job.deploy_job_phase;
-        let Some(submission) = job.optional_deploy_submission.clone() else {
+        let Some(submission) = job.deploy_submission_option.clone() else {
             return Ok(false);
         };
         if job
-            .optional_closure_path
+            .closure_path_option
             .as_ref()
             .is_some_and(|closure_path| {
                 !NixStorePath::from(closure_path.payload().as_str()).is_canonical_item_root()
@@ -4141,28 +4137,28 @@ impl DeployDriving for SchemaRuntime {
         }
         let record = self
             .store
-            .records::<crate::runtime_model::DeploymentRecord>()?
+            .deployment_records()?
             .into_iter()
             .find(|record| record.deployment_identifier == job.deployment_identifier)
             .ok_or_else(|| {
                 Error::Invariant("persisted deploy job lacks correlation record".to_string())
             })?;
-        let Some(admission) = record.optional_admission_marker else {
+        let Some(admission) = record.admission_marker_option else {
             return Err(Error::Invariant(
                 "persisted deploy job lacks its admission receipt".to_string(),
             ));
         };
         if matches!(
-            record.deployment_lifecycle,
-            memory::DeploymentLifecycle::Completed
-                | memory::DeploymentLifecycle::Rejected
-                | memory::DeploymentLifecycle::Failed
+            record.deployment_phase,
+            memory::DeploymentPhase::Completed
+                | memory::DeploymentPhase::Rejected
+                | memory::DeploymentPhase::Failed
         ) {
             return Ok(false);
         }
         let mut pipeline = DeployPipeline::from_submission(
-            job.deployment_identifier.clone(),
-            job.generation_identifier.clone(),
+            job.deployment_identifier,
+            job.generation_identifier,
             admission.into_payload(),
             submission,
         );
@@ -4170,7 +4166,7 @@ impl DeployDriving for SchemaRuntime {
             || pipeline.deployment_input_mode != job.deployment_input_mode
             || pipeline.deployment_output_selector != job.deployment_output_selector
             || pipeline.activation_backend != job.activation_backend
-            || pipeline.builder != job.optional_nix_builder_spec
+            || pipeline.builder != job.nix_builder_spec_option
         {
             return Err(Error::Invariant(
                 "persisted deploy job routing snapshot disagrees with its submission".to_string(),
@@ -4185,9 +4181,9 @@ impl DeployDriving for SchemaRuntime {
         pipeline.deployment_input_mode = job.deployment_input_mode;
         pipeline.deployment_output_selector = job.deployment_output_selector.clone();
         pipeline.activation_backend = job.activation_backend;
-        pipeline.builder = job.optional_nix_builder_spec.clone();
-        pipeline.closure_path = job.optional_closure_path.clone();
-        pipeline.activation_slot = job.optional_generation_slot;
+        pipeline.builder = job.nix_builder_spec_option.clone();
+        pipeline.closure_path = job.closure_path_option.clone();
+        pipeline.activation_slot = job.generation_slot_option;
         pipeline.input_overrides = job
             .persisted_flake_input_override_vector
             .iter()
@@ -4203,7 +4199,7 @@ impl DeployDriving for SchemaRuntime {
             })
             .collect();
         pipeline.resume_stage = job.deploy_resume_stage;
-        pipeline.phase_receipt = job.optional_phase_receipt.clone();
+        pipeline.phase_receipt = job.phase_receipt_option.clone();
         let mut recovered_phase_receipt = false;
         if let Some(expected_phase) = pipeline.resume_stage.recorded_phase()
             && pipeline.phase_receipt.is_none()
@@ -4232,24 +4228,24 @@ impl DeployDriving for SchemaRuntime {
                 .next()
                 .expect("checked one intent");
             let marker = intent
-                .optional_transition_marker
+                .transition_marker_option
                 .ok_or_else(|| {
                     Error::Invariant("acknowledged phase intent lacks a marker".to_string())
                 })?
                 .into_payload();
             let matching_receipts: Vec<_> = self
                 .store
-                .event_log_in_range(0, u64::MAX)?
+                .event_log_in_range(0, i64::MAX)?
                 .into_iter()
                 .filter_map(|entry| match entry.logged_event {
                     memory::LoggedEvent::Deployment(event)
                         if event.deployment_identifier == pipeline.deployment_identifier
                             && event.event_log_position == intent.event_log_position
-                            && event.state_marker == marker =>
+                            && event.transition_marker.database_marker == marker =>
                     {
                         Some(memory::PhaseReceipt {
                             event_log_position: event.event_log_position,
-                            state_marker: event.state_marker,
+                            database_marker: event.transition_marker.database_marker,
                         })
                     }
                     _ => None,
@@ -4264,14 +4260,15 @@ impl DeployDriving for SchemaRuntime {
             recovered_phase_receipt = true;
         }
         pipeline.stage = pipeline.resume_stage.deploy_stage();
-        pipeline.source_revision = job.optional_flake_reference.clone().map(|resolved_ref| {
-            ordinary::SourceRevisionRecord {
-                source_revision_policy: job.source_revision_policy,
-                requested_ref: job.flake_reference.clone(),
-                resolved_ref,
-                string: job.resolved_revision.clone().unwrap_or_default(),
-            }
-        });
+        pipeline.source_revision =
+            job.flake_reference_option
+                .clone()
+                .map(|resolved_ref| ordinary::SourceRevisionRecord {
+                    source_revision_policy: job.source_revision_policy,
+                    requested_ref: job.flake_reference.clone(),
+                    resolved_ref,
+                    string: job.resolved_revision.clone().unwrap_or_default(),
+                });
         if let Some(source_revision) = pipeline.source_revision.as_ref() {
             pipeline.flake = source_revision.resolved_ref.clone();
         }
@@ -4290,10 +4287,10 @@ impl DeployDriving for SchemaRuntime {
                 &"a submitted deploy was driven with no correlated cursor",
             );
         };
-        let identifier = pipeline.deployment_identifier.clone();
+        let identifier = pipeline.deployment_identifier;
         let accepted = meta::DeployHandle {
-            deployment_identifier: identifier.clone(),
-            state_marker: pipeline.accepted_marker.clone(),
+            deployment_identifier: identifier,
+            database_marker: pipeline.accepted_marker.clone(),
         };
         let work = match pipeline.resume_stage {
             memory::DeployResumeStage::FinishDeployment => {
@@ -4334,7 +4331,7 @@ impl DeployDriving for SchemaRuntime {
                 };
                 nexus::NexusWork::EffectCompleted(nexus::EffectResult::from(
                     nexus::EvaluatedClosure {
-                        generation_identifier: pipeline.generation_identifier.clone(),
+                        generation_identifier: pipeline.generation_identifier,
                         closure_path,
                     },
                 ))
@@ -4345,7 +4342,7 @@ impl DeployDriving for SchemaRuntime {
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
                 nexus::NexusWork::EffectCompleted(nexus::EffectResult::from(nexus::BuiltClosure {
-                    generation_identifier: pipeline.generation_identifier.clone(),
+                    generation_identifier: pipeline.generation_identifier,
                     closure_path,
                 }))
             }
@@ -4558,7 +4555,7 @@ impl DeployDriving for SchemaRuntime {
         if let Some((deployment_identifier, deploy_job)) = snapshot {
             let record_exists = self
                 .store
-                .records::<crate::runtime_model::DeploymentRecord>()
+                .deployment_records()
                 .expect("read deployment correlation records for resolved revision")
                 .iter()
                 .any(|record| *record.deployment_identifier.payload() == deployment_identifier);
@@ -4677,7 +4674,7 @@ impl DeployDriving for SchemaRuntime {
         let terminal = memory::DeploymentTerminal::Failed(memory::DeploymentFailure {
             deployment_failure_stage: (failure.effect_stage).deployment_failure_stage(),
             deployment_terminal_reason: reason.terminal_reason(),
-            optional_failure_evidence: Some(failure.failure_evidence),
+            failure_evidence_option: Some(failure.failure_evidence),
         });
         let recorded = self
             .store
@@ -4768,7 +4765,7 @@ impl TestDriving for SchemaRuntime {
                 // Stamp the accepted marker onto the cursor so the terminal
                 // outcome reply carries the acceptance marker (like deploy).
                 if let Some(pipeline) = self.active_test.as_mut() {
-                    pipeline.accepted_marker = accepted.state_marker.clone();
+                    pipeline.accepted_marker = accepted.database_marker.clone();
                 }
                 TestSubmissionOutcome::Accepted(accepted)
             }
@@ -4928,7 +4925,7 @@ pub(crate) trait MemoryApplying {
     fn reject_durable_write(&self, cause: &dyn std::fmt::Display) -> memory::MemoryWriteOutput;
 
     fn write_rejected(
-        commit_sequence: u64,
+        commit_sequence: i64,
         reason: memory::RejectionReason,
     ) -> memory::MemoryWriteOutput;
 }
@@ -4967,9 +4964,7 @@ impl MemoryApplying for SchemaRuntime {
         configuration: crate::NexusConfiguration,
     ) -> memory::MemoryWriteOutput {
         match self.store.ordinary_configure(configuration) {
-            Ok(state) => memory::MemoryWriteOutput::OrdinaryConfigured(
-                memory::ConfigurationReceipt::from(state),
-            ),
+            Ok(state) => memory::MemoryWriteOutput::OrdinaryConfigured(state.receipt()),
             Err(error) => memory::MemoryWriteOutput::OrdinaryConfigurationRejected(
                 memory::ConfigurationRejection::from(error),
             ),
@@ -4981,9 +4976,7 @@ impl MemoryApplying for SchemaRuntime {
         configuration: crate::NexusConfiguration,
     ) -> memory::MemoryWriteOutput {
         match self.store.meta_configure(configuration) {
-            Ok(state) => {
-                memory::MemoryWriteOutput::MetaConfigured(memory::ConfigurationReceipt::from(state))
-            }
+            Ok(state) => memory::MemoryWriteOutput::MetaConfigured(state.receipt()),
             Err(error) => memory::MemoryWriteOutput::MetaConfigurationRejected(
                 memory::ConfigurationRejection::from(error),
             ),
@@ -4992,9 +4985,7 @@ impl MemoryApplying for SchemaRuntime {
 
     fn reverse_meta_configuration(&self) -> memory::MemoryWriteOutput {
         match self.store.reverse_meta_configuration() {
-            Ok(state) => memory::MemoryWriteOutput::ConfigurationReversed(
-                memory::ConfigurationReceipt::from(state),
-            ),
+            Ok(state) => memory::MemoryWriteOutput::ConfigurationReversed(state.receipt()),
             Err(error) => memory::MemoryWriteOutput::MetaConfigurationRejected(
                 memory::ConfigurationRejection::from(error),
             ),
@@ -5002,7 +4993,7 @@ impl MemoryApplying for SchemaRuntime {
     }
 
     fn record_test_run(&mut self, record: ordinary::TestRunRecord) -> memory::MemoryWriteOutput {
-        let identifier = record.test_run_identifier.clone();
+        let identifier = record.test_run_identifier;
         match self
             .store
             .upsert_test_run(memory::StoredTestRun::from(record))
@@ -5010,7 +5001,7 @@ impl MemoryApplying for SchemaRuntime {
         {
             Ok(commit_sequence) => memory::MemoryWriteOutput::TestRunRecorded(meta::AcceptedTest {
                 test_run_identifier: identifier,
-                state_marker: ordinary::StateMarker::from(commit_sequence),
+                database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
             }),
             Err(error) => panic!("persist durable test-run record: {error}"),
         }
@@ -5027,7 +5018,7 @@ impl MemoryApplying for SchemaRuntime {
         let restart_cursor = DeployPipeline::from_submission(
             ordinary::DeploymentIdentifier::new(0),
             ordinary::GenerationIdentifier::new(0),
-            ordinary::StateMarker::from(0),
+            ordinary::DatabaseMarker::at_commit(0),
             submission.clone(),
         )
         .deploy_job(memory::DeployJobPhase::Submitted);
@@ -5042,15 +5033,15 @@ impl MemoryApplying for SchemaRuntime {
             // that path instead of aborting the daemon.
             Err(error) => return self.reject_durable_write(&error),
         };
-        let Some(admission_marker) = record.optional_admission_marker.clone() else {
+        let Some(admission_marker) = record.admission_marker_option.clone() else {
             return self.reject_durable_write(
                 &"an admitted deployment record carries no admission marker",
             );
         };
         let accepted_marker = admission_marker.into_payload();
-        let deployment_identifier = record.deployment_identifier.clone();
+        let deployment_identifier = record.deployment_identifier;
         let pipeline = DeployPipeline::from_submission(
-            deployment_identifier.clone(),
+            deployment_identifier,
             record.generation_identifier,
             accepted_marker.clone(),
             submission,
@@ -5062,7 +5053,7 @@ impl MemoryApplying for SchemaRuntime {
         self.active_deploy = Some(pipeline);
         memory::MemoryWriteOutput::DeploySubmitted(meta::DeployHandle {
             deployment_identifier,
-            state_marker: accepted_marker,
+            database_marker: accepted_marker,
         })
     }
 
@@ -5070,26 +5061,26 @@ impl MemoryApplying for SchemaRuntime {
         &mut self,
         mut event: ordinary::DeploymentPhaseEvent,
     ) -> memory::MemoryWriteOutput {
-        let recorded_phase = event.deployment_phase;
-        let event_log_position = event.event_log_position.clone();
+        let recorded_phase = event.deployment_phase.clone();
+        let event_log_position = event.event_log_position;
         let Some(pipeline) = self.active_deploy.as_ref() else {
             return self.reject_durable_write(
                 &"a deployment phase transition arrived with no correlated cursor",
             );
         };
-        let job = pipeline.deploy_job(memory::DeployJobPhase::from(recorded_phase));
+        let job = pipeline.deploy_job(memory::DeployJobPhase::from(recorded_phase.clone()));
         let recorded = self.store.advance_deployment_phase_with_job(
             *event.deployment_identifier.payload(),
-            recorded_phase.deployment_lifecycle(),
+            recorded_phase.clone(),
             job,
             event.clone(),
         );
         match recorded {
             Ok(marker) => {
-                event.state_marker = marker.clone();
+                event.transition_marker = memory::TransitionMarker::new(marker.clone());
                 let receipt = memory::PhaseReceipt {
                     event_log_position,
-                    state_marker: marker,
+                    database_marker: marker,
                 };
                 if let Some(pipeline) = self.active_deploy.as_mut() {
                     pipeline.phase_receipt = Some(receipt.clone());
@@ -5109,28 +5100,28 @@ impl MemoryApplying for SchemaRuntime {
                 &"a generation activation arrived with no correlated cursor",
             );
         };
-        let deployment_identifier = pipeline.deployment_identifier.clone();
+        let deployment_identifier = pipeline.deployment_identifier;
         let generation_artifact = pipeline.generation_artifact;
         let activation_effect = pipeline.activation_effect;
         let generation = memory::LiveGeneration {
             deployment_identifier,
-            generation_identifier: commit.generation_identifier.clone(),
+            generation_identifier: commit.generation_identifier,
             cluster_name: commit.cluster_name.clone(),
             node_name: commit.node_name.clone(),
             deployment_environment: commit.deployment_environment.clone(),
             generation_artifact,
             activation_effect,
-            generation_slot: commit.generation_slot,
+            generation_slot: commit.generation_slot.clone(),
             closure_path: commit.closure_path.clone(),
             source_revision_record: commit.source_revision_record.clone(),
         };
         let root = memory::GcRoot {
-            generation_identifier: commit.generation_identifier.clone(),
+            generation_identifier: commit.generation_identifier,
             cluster_name: commit.cluster_name.clone(),
             node_name: commit.node_name.clone(),
-            generation_slot: commit.generation_slot,
+            generation_slot: commit.generation_slot.clone(),
             closure_path: commit.closure_path.clone(),
-            optional_pin_label: None,
+            pin_label_option: None,
         };
         // The live generation, its GC root, and the identifier high-water row
         // share one Store atomic commit. A crash therefore leaves either all
@@ -5149,7 +5140,7 @@ impl MemoryApplying for SchemaRuntime {
                 memory::MemoryWriteOutput::GenerationActivated(memory::AppliedActivation {
                     generation_identifier: commit.generation_identifier,
                     generation_slot: commit.generation_slot,
-                    state_marker: ordinary::StateMarker::from(commit_sequence),
+                    database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
                 })
             }
             Err(error) => self.reject_durable_write(&error),
@@ -5168,7 +5159,7 @@ impl MemoryApplying for SchemaRuntime {
         let current_sequence = self.current_commit_sequence();
         let already_used = roots
             .iter()
-            .any(|root| root.optional_pin_label.as_ref() == Some(&request.pin_label));
+            .any(|root| root.pin_label_option.as_ref() == Some(&request.pin_label));
         if already_used {
             return Self::write_rejected(current_sequence, memory::RejectionReason::PinLabelInUse);
         }
@@ -5184,7 +5175,7 @@ impl MemoryApplying for SchemaRuntime {
         };
         let from_slot = root.generation_slot;
         root.generation_slot = ordinary::GenerationSlot::Pinned;
-        root.optional_pin_label = Some(request.pin_label.clone());
+        root.pin_label_option = Some(request.pin_label.clone());
         let committed = self
             .store
             .mutate_gc_root(root)
@@ -5193,9 +5184,9 @@ impl MemoryApplying for SchemaRuntime {
             Ok(commit_sequence) => memory::MemoryWriteOutput::GenerationPinned(meta::AppliedPin {
                 generation_identifier: request.generation_identifier,
                 pin_label: request.pin_label,
-                from_slot,
-                to_slot: ordinary::GenerationSlot::Pinned,
-                state_marker: ordinary::StateMarker::from(commit_sequence),
+                first_generation_slot: from_slot,
+                second_generation_slot: ordinary::GenerationSlot::Pinned,
+                database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
             }),
             Err(error) => memory::MemoryWriteOutput::StoreRefused(format!(
                 "persist generation pin transition: {error}"
@@ -5214,7 +5205,7 @@ impl MemoryApplying for SchemaRuntime {
         };
         let current_sequence = self.current_commit_sequence();
         let Some(mut root) = roots.into_iter().find(|root| {
-            root.optional_pin_label.as_ref() == Some(&request.pin_label)
+            root.pin_label_option.as_ref() == Some(&request.pin_label)
                 && root.cluster_name == request.cluster_name
                 && root.node_name == request.node_name
         }) else {
@@ -5223,10 +5214,10 @@ impl MemoryApplying for SchemaRuntime {
                 memory::RejectionReason::PinLabelUnknown,
             );
         };
-        let generation_identifier = root.generation_identifier.clone();
+        let generation_identifier = root.generation_identifier;
         let from_slot = root.generation_slot;
         root.generation_slot = ordinary::GenerationSlot::Recent;
-        root.optional_pin_label = None;
+        root.pin_label_option = None;
         let committed = self
             .store
             .mutate_gc_root(root)
@@ -5236,9 +5227,9 @@ impl MemoryApplying for SchemaRuntime {
                 memory::MemoryWriteOutput::GenerationUnpinned(meta::AppliedUnpin {
                     generation_identifier,
                     pin_label: request.pin_label,
-                    from_slot,
-                    to_slot: ordinary::GenerationSlot::Recent,
-                    state_marker: ordinary::StateMarker::from(commit_sequence),
+                    first_generation_slot: from_slot,
+                    second_generation_slot: ordinary::GenerationSlot::Recent,
+                    database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
                 })
             }
             Err(error) => memory::MemoryWriteOutput::StoreRefused(format!(
@@ -5282,7 +5273,7 @@ impl MemoryApplying for SchemaRuntime {
                 memory::MemoryWriteOutput::GenerationRetired(meta::AppliedRetire {
                     generation_identifier: request.generation_identifier,
                     generation_slot: root.generation_slot,
-                    state_marker: ordinary::StateMarker::from(commit_sequence),
+                    database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
                 })
             }
             Err(error) => memory::MemoryWriteOutput::StoreRefused(format!(
@@ -5319,7 +5310,7 @@ impl MemoryApplying for SchemaRuntime {
             Ok((event_log_position, commit_sequence)) => {
                 memory::MemoryWriteOutput::ContainerRecorded(memory::ContainerReceipt {
                     event_log_position: ordinary::EventLogPosition::new(event_log_position),
-                    state_marker: ordinary::StateMarker::from(commit_sequence),
+                    database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
                 })
             }
             Err(error) => panic!("persist container transition: {error}"),
@@ -5335,12 +5326,12 @@ impl MemoryApplying for SchemaRuntime {
     }
 
     fn write_rejected(
-        commit_sequence: u64,
+        commit_sequence: i64,
         reason: memory::RejectionReason,
     ) -> memory::MemoryWriteOutput {
         memory::MemoryWriteOutput::WriteRejected(memory::RejectionReport {
             rejection_reason: reason,
-            state_marker: ordinary::StateMarker::from(commit_sequence),
+            database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
         })
     }
 }
@@ -5401,9 +5392,7 @@ impl MemoryObserving for SchemaRuntime {
                 .into_iter()
                 .map(ordinary::TestRunRecord::from)
                 .collect(),
-            database_marker: memory::DatabaseMarker::new(ordinary::StateMarker::from(
-                commit_sequence,
-            )),
+            database_marker: memory::DatabaseMarker::at_commit(commit_sequence),
         })
     }
 
@@ -5421,10 +5410,7 @@ impl MemoryObserving for SchemaRuntime {
         };
         let commit_sequence = self.current_commit_sequence();
         let deployment_records: Vec<memory::DeploymentRecord> =
-            match self
-                .store
-                .records::<crate::runtime_model::DeploymentRecord>()
-            {
+            match self.store.deployment_records() {
                 Ok(records) => records
                     .into_iter()
                     .filter(|record| selection.matches_deployment_record(record))
@@ -5442,7 +5428,7 @@ impl MemoryObserving for SchemaRuntime {
         memory::MemoryReadOutput::GenerationsQueried(ordinary::GenerationListing {
             generation_vector: generations,
             deployment_record_vector: deployment_records,
-            state_marker: ordinary::StateMarker::from(commit_sequence),
+            database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
         })
     }
 
@@ -5451,31 +5437,31 @@ impl MemoryObserving for SchemaRuntime {
         deployment_records: &[memory::DeploymentRecord],
     ) -> ordinary::Generation {
         ordinary::Generation {
-            generation_identifier: live.generation_identifier.clone(),
-            deployment_identifier: live.deployment_identifier.clone(),
+            generation_identifier: live.generation_identifier,
+            deployment_identifier: live.deployment_identifier,
             cluster_name: live.cluster_name.clone(),
             node_name: live.node_name.clone(),
-            generation_artifact: live.generation_artifact,
-            activation_effect: live.activation_effect,
-            generation_slot: live.generation_slot,
+            generation_artifact: live.generation_artifact.clone(),
+            activation_effect: live.activation_effect.clone(),
+            generation_slot: live.generation_slot.clone(),
             closure_path: live.closure_path.clone(),
-            optional_immutable_revision: deployment_records
+            immutable_revision_option: deployment_records
                 .iter()
                 .find(|record| record.deployment_identifier == live.deployment_identifier)
                 .and_then(|record| {
                     record
                         .deployment_request_identity
-                        .optional_immutable_revision
+                        .immutable_revision_option
                         .clone()
                 }),
         }
     }
 
     fn read_event_log(&self, range: ordinary::EventLogRange) -> memory::MemoryReadOutput {
-        let entries = match self
-            .store
-            .event_log_in_range(*range.from.payload(), *range.until.payload())
-        {
+        let entries = match self.store.event_log_in_range(
+            *range.first_event_log_position.payload(),
+            *range.second_event_log_position.payload(),
+        ) {
             Ok(entries) => entries,
             Err(_) => {
                 return memory::MemoryReadOutput::read_missed(
@@ -5497,7 +5483,7 @@ impl MemoryObserving for SchemaRuntime {
         memory::MemoryReadOutput::EventLogRead(memory::EventLogPage {
             deployment_phase_event_vector: deployment_events,
             cache_retention_transition_event_vector: retention_events,
-            state_marker: ordinary::StateMarker::from(commit_sequence),
+            database_marker: ordinary::DatabaseMarker::at_commit(commit_sequence),
         })
     }
 }
@@ -5709,7 +5695,7 @@ impl EffectRunning for SchemaRuntime {
                     realization.gc_root_text(),
                 );
                 nexus::EffectResult::ClosureBuilt(nexus::BuiltClosure {
-                    generation_identifier: command.generation_identifier.clone(),
+                    generation_identifier: command.generation_identifier,
                     closure_path: ordinary::ClosurePath::new(closure_path),
                 })
             }
@@ -5719,7 +5705,7 @@ impl EffectRunning for SchemaRuntime {
 
     async fn run_copy_closure(&self, command: nexus::CopyClosureCommand) -> nexus::EffectResult {
         let copied = nexus::EffectResult::ClosureCopied(nexus::CopiedClosure {
-            generation_identifier: command.generation_identifier.clone(),
+            generation_identifier: command.generation_identifier,
             node_name: command.node_name.clone(),
             closure_path: command.closure_path.clone(),
         });
@@ -6705,7 +6691,7 @@ struct TargetStoreRealization {
 struct TargetGcRoot {
     directory: TargetGcRootDirectory,
     operator_node: String,
-    generation: u64,
+    generation: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6716,7 +6702,7 @@ enum TargetGcRootDirectory {
 
 /// Naming and writing the target-side GC root.
 trait TargetGcRooting {
-    fn for_login(ssh_destination: &str, operator_node: &str, generation: u64) -> Self
+    fn for_login(ssh_destination: &str, operator_node: &str, generation: i64) -> Self
     where
         Self: Sized;
 
@@ -6731,7 +6717,7 @@ trait TargetGcRooting {
 }
 
 impl TargetGcRooting for TargetGcRoot {
-    fn for_login(ssh_destination: &str, operator_node: &str, generation: u64) -> Self {
+    fn for_login(ssh_destination: &str, operator_node: &str, generation: i64) -> Self {
         let login = ssh_destination
             .split_once('@')
             .map(|(login, _)| login)
@@ -6919,12 +6905,12 @@ impl Activating for Activation {
                 nexus::ActivationBackend::NixosSystemdBootV1,
                 nexus::ActivationProfile::Host(action),
             ) => Ok(Self::Host(HostActivation {
-                deployment_identifier: command.deployment_identifier.clone(),
+                deployment_identifier: command.deployment_identifier,
                 target,
                 node_name: command.node_name.clone(),
                 daemon_host: daemon_host.cloned(),
                 store_path,
-                action: *action,
+                action: action.clone(),
             })),
             (
                 nexus::ActivationBackend::HomeManagerNixProfileV1,
@@ -6938,7 +6924,7 @@ impl Activating for Activation {
                     target,
                     user,
                     store_path,
-                    mode: profile.user_environment_action,
+                    mode: profile.user_environment_action.clone(),
                 }))
             }
             _ => Err(
@@ -6956,7 +6942,7 @@ impl Activating for Activation {
             {
                 Some(DetachedActivationUnit {
                     name: activation.self_switch_unit_name(),
-                    optional_journal: Some(UnitJournal::new(
+                    journal_option: Some(UnitJournal::new(
                         activation.self_switch_unit_name(),
                         activation.target.clone(),
                     )),
@@ -7421,7 +7407,7 @@ pub(crate) struct DetachedActivationUnit {
     /// Where the unit's journal is read from: the route the activation was
     /// dispatched over. `None` only for a unit named without a deployment
     /// behind it.
-    optional_journal: Option<UnitJournal>,
+    journal_option: Option<UnitJournal>,
 }
 
 /// The exact Manager.UnitNew subscription created before dispatch.  It is
@@ -7442,7 +7428,7 @@ pub(crate) struct DetachedActivationFailure {
     unit_name: String,
     active_state: String,
     result: String,
-    optional_process_end: Option<ProcessEnd>,
+    process_end_option: Option<ProcessEnd>,
     reported_outputs: Vec<ReportedOutput>,
 }
 
@@ -7457,7 +7443,7 @@ impl Witnessing for DetachedActivationFailure {
 
     fn reported_command(&self) -> Option<crate::runtime_model::FailedCommand> {
         Some(crate::runtime_model::FailedCommand {
-            command_program: crate::runtime_model::CommandProgram::from("systemd-run"),
+            command_program: crate::runtime_model::CommandProgram::new("systemd-run".into()),
             command_argument_vector: vec![
                 crate::runtime_model::CommandArgument::new(format!("--unit={}", self.unit_name)),
                 crate::runtime_model::CommandArgument::new(format!(
@@ -7465,10 +7451,11 @@ impl Witnessing for DetachedActivationFailure {
                     self.active_state
                 )),
             ],
-            optional_exit_code: self
-                .optional_process_end
+            exit_code_option: self
+                .process_end_option
                 .and_then(|end| end.exit_code())
-                .and_then(|status| u64::try_from(status).ok())
+                .filter(|status| *status >= 0)
+                .map(i64::from)
                 .map(crate::runtime_model::ExitCode::new),
         })
     }
@@ -7575,7 +7562,7 @@ impl DetachedActivation for DetachedActivationUnit {
     fn new(name: String) -> Self {
         Self {
             name,
-            optional_journal: None,
+            journal_option: None,
         }
     }
 
@@ -7617,7 +7604,7 @@ impl DetachedActivation for DetachedActivationUnit {
                 memory::DeploymentTerminal::Failed(memory::DeploymentFailure {
                     deployment_failure_stage: memory::DeploymentFailureStage::Activate,
                     deployment_terminal_reason: memory::DeploymentTerminalReason::ActivationFailed,
-                    optional_failure_evidence: Some(observed.witness()),
+                    failure_evidence_option: Some(observed.witness()),
                 }),
             ),
             Some(DetachedActivationOutcome::Missing)
@@ -7700,7 +7687,7 @@ impl DetachedActivation for DetachedActivationUnit {
                 // reason.
                 let main_code = proxy.service.get_property::<i32>("ExecMainCode").await;
                 let main_status = proxy.service.get_property::<i32>("ExecMainStatus").await;
-                let optional_process_end = match (main_code, main_status) {
+                let process_end_option = match (main_code, main_status) {
                     (Ok(code), Ok(status)) => ProcessEnd::from_main_process(code, status),
                     _ => None,
                 };
@@ -7713,11 +7700,11 @@ impl DetachedActivation for DetachedActivationUnit {
                 DetachedActivationOutcome::Failed(DetachedActivationFailure {
                     unit_name: self.name.clone(),
                     active_state: state.to_string(),
-                    result: match optional_process_end {
+                    result: match process_end_option {
                         Some(end) => format!("{reported}; main process {}", end.statement()),
                         None => reported,
                     },
-                    optional_process_end,
+                    process_end_option,
                     reported_outputs: Vec::new(),
                 })
             }
@@ -7733,7 +7720,7 @@ impl DetachedActivation for DetachedActivationUnit {
                 "systemd no longer holds {}, so it reported no result",
                 self.name
             ),
-            optional_process_end: None,
+            process_end_option: None,
             reported_outputs: Vec::new(),
         }
     }
@@ -7743,7 +7730,7 @@ impl DetachedActivation for DetachedActivationUnit {
         failure: DetachedActivationFailure,
         execution: &EffectExecution,
     ) -> DetachedActivationFailure {
-        match &self.optional_journal {
+        match &self.journal_option {
             Some(journal) => failure.with_output(journal.tail(execution).await),
             None => failure.with_output(ReportedOutput::new(
                 format!("journal of {} unavailable", self.name),
@@ -7783,7 +7770,7 @@ pub(crate) trait DetachedObserving {
     /// Start the private event observer after `systemd-run --no-block` has
     /// accepted the handoff. An observer interruption is deliberately not a
     /// terminal result: a replacement daemon uses the retained PID-1 receipt.
-    fn observe(self, store: Arc<Store>, deployment_identifier: u64, execution: EffectExecution);
+    fn observe(self, store: Arc<Store>, deployment_identifier: i64, execution: EffectExecution);
 
     async fn await_completion(
         &mut self,
@@ -7807,7 +7794,7 @@ impl DetachedObserving for DetachedActivationObserver {
     fn observe(
         mut self,
         store: Arc<Store>,
-        deployment_identifier: u64,
+        deployment_identifier: i64,
         execution: EffectExecution,
     ) {
         tokio::spawn(async move {
@@ -8217,7 +8204,7 @@ trait NixInvoking {
     /// This command's identity, paired with what the attempt reported. A code
     /// is present only when the process itself exited; a process killed by a
     /// signal reports none.
-    fn reported(&self, optional_code: Option<i32>, detail: String) -> StageFailure;
+    fn reported(&self, code_option: Option<i32>, detail: String) -> StageFailure;
 
     /// This command's identity after it ran and failed: how it ended, then
     /// the tail of both of its streams. A failing step may print its cause on
@@ -8389,19 +8376,20 @@ impl NixInvoking for NixCommand {
         )
     }
 
-    fn reported(&self, optional_code: Option<i32>, detail: String) -> StageFailure {
+    fn reported(&self, code_option: Option<i32>, detail: String) -> StageFailure {
         StageFailure {
             detail,
             reported_outputs: Vec::new(),
-            optional_failed_command: Some(crate::runtime_model::FailedCommand {
+            failed_command_option: Some(crate::runtime_model::FailedCommand {
                 command_program: crate::runtime_model::CommandProgram::new(self.program.clone()),
                 command_argument_vector: self
                     .arguments
                     .iter()
                     .map(|argument| crate::runtime_model::CommandArgument::new(argument.clone()))
                     .collect(),
-                optional_exit_code: optional_code
-                    .and_then(|code| u64::try_from(code).ok())
+                exit_code_option: code_option
+                    .filter(|code| *code >= 0)
+                    .map(i64::from)
                     .map(crate::runtime_model::ExitCode::new),
             }),
         }
@@ -8617,12 +8605,12 @@ mod tests {
 
     fn host_submission(action: ordinary::HostDeployAction) -> memory::DeploySubmission {
         memory::DeploySubmission::Host(meta::HostDeployment {
-            cluster_name: ordinary::ClusterName::from("alpha"),
-            node_name: ordinary::NodeName::from("node-1"),
+            cluster_name: ordinary::ClusterName::new("alpha".into()),
+            node_name: ordinary::NodeName::new("node-1".into()),
             host_composition: ordinary::HostComposition::BaseHost,
-            proposal_source: ordinary::ProposalSource::from("/dev/null"),
+            proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
             secrets_input: memory::SecretsInput::NoSecrets,
-            flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
+            flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
             deployment_transport: fixture_transport(),
             deployment_input_mode: memory::DeploymentInputMode::Direct,
             horizon_definition_option: None,
@@ -8630,7 +8618,7 @@ mod tests {
             activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
             host_deploy_action: action,
             source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-            optional_nix_builder_spec: None,
+            nix_builder_spec_option: None,
             extra_substituter_vector: Vec::new(),
         })
     }
@@ -8639,19 +8627,19 @@ mod tests {
         DeployPipeline::from_submission(
             ordinary::DeploymentIdentifier::new(1),
             ordinary::GenerationIdentifier::new(1),
-            ordinary::StateMarker::from(0),
+            ordinary::DatabaseMarker::at_commit(0),
             host_submission(action),
         )
     }
 
     fn user_submission() -> memory::DeploySubmission {
         memory::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
-            cluster_name: ordinary::ClusterName::from("fixture-cluster"),
-            node_name: ordinary::NodeName::from("fixture-daemon"),
-            user_name: ordinary::UserName::from("fixture-user"),
-            proposal_source: ordinary::ProposalSource::from("/dev/null"),
+            cluster_name: ordinary::ClusterName::new("fixture-cluster".into()),
+            node_name: ordinary::NodeName::new("fixture-daemon".into()),
+            user_name: ordinary::UserName::new("fixture-user".into()),
+            proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
             secrets_input: memory::SecretsInput::NoSecrets,
-            flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
+            flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
             deployment_transport: fixture_transport(),
             deployment_input_mode: memory::DeploymentInputMode::Direct,
             horizon_definition_option: None,
@@ -8659,7 +8647,7 @@ mod tests {
             activation_backend: memory::ActivationBackend::HomeManagerNixProfileV1,
             user_environment_action: meta::UserEnvironmentAction::ActivateNow,
             source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-            optional_nix_builder_spec: None,
+            nix_builder_spec_option: None,
             extra_substituter_vector: Vec::new(),
         })
     }
@@ -8667,7 +8655,7 @@ mod tests {
     fn source_revision(policy: ordinary::SourceRevisionPolicy) -> ordinary::SourceRevisionRecord {
         ordinary::SourceRevisionRecord {
             source_revision_policy: policy,
-            requested_ref: ordinary::FlakeReference::from("github:owner/repo/main"),
+            requested_ref: ordinary::FlakeReference::new("github:owner/repo/main".into()),
             resolved_ref: ordinary::FlakeReference::new(
                 "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             ),
@@ -8680,37 +8668,41 @@ mod tests {
     }
 
     fn cluster() -> ordinary::ClusterName {
-        ordinary::ClusterName::from("alpha")
+        ordinary::ClusterName::new("alpha".into())
     }
 
     fn node() -> ordinary::NodeName {
-        ordinary::NodeName::from("node-1")
+        ordinary::NodeName::new("node-1".into())
     }
 
     /// The daemon host every `RuntimeConfiguration::test_default` names.
     fn daemon_host() -> ordinary::NodeName {
-        ordinary::NodeName::from("daemon-host")
+        ordinary::NodeName::new("daemon-host".into())
     }
 
     fn fixture_transport() -> memory::DeploymentTransport {
         memory::DeploymentTransport {
-            nix_store_uri: memory::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
-            ssh_destination: memory::SshDestination::from("fixture-login@fixture-activate.invalid"),
+            nix_store_uri: memory::NixStoreUri::new("ssh-ng://fixture-copy.invalid".into()),
+            ssh_destination: memory::SshDestination::new(
+                "fixture-login@fixture-activate.invalid".into(),
+            ),
         }
     }
 
     fn fixture_output_selector() -> memory::DeploymentOutputSelector {
-        memory::DeploymentOutputSelector::new(memory::FlakeAttribute::from("checks.fixture-a"))
+        memory::DeploymentOutputSelector::new(memory::FlakeAttribute::new(
+            "checks.fixture-a".into(),
+        ))
     }
 
     fn fixture_test_profile() -> nexus::TestExecutionProfile {
         nexus::TestExecutionProfile {
             test_mode: ordinary::TestMode::Hermetic,
-            nix_system: nexus::NixSystem::from("x86_64-linux"),
+            nix_system: nexus::NixSystem::new("x86_64-linux".into()),
             deployment_output_selector: nexus::DeploymentOutputSelector::new(
-                nexus::FlakeAttribute::from("checks.fixture-a"),
+                nexus::FlakeAttribute::new("checks.fixture-a".into()),
             ),
-            optional_deployment_transport: None,
+            deployment_transport_option: None,
         }
     }
 
@@ -8724,7 +8716,7 @@ mod tests {
         // never dropped between build and activate (risk R2).
         let mut engine = SchemaRuntime::new();
         engine.active_deploy = Some(host_pipeline(ordinary::HostDeployAction::ActivateNow));
-        let built = ordinary::ClosurePath::from(STORE);
+        let built = ordinary::ClosurePath::new(STORE.into());
         assert!(engine.set_closure_path(built.clone()));
         engine.set_stage(DeployStage::BuildingRecorded);
 
@@ -8768,7 +8760,7 @@ mod tests {
             ordinary::SourceRevisionPolicy::ResolveAndRecord,
         ));
         assert!(pipeline.activation_commit().is_none());
-        pipeline.closure_path = Some(ordinary::ClosurePath::from(STORE));
+        pipeline.closure_path = Some(ordinary::ClosurePath::new(STORE.into()));
         let commit = pipeline.activation_commit().expect("commit with closure");
         assert_eq!(commit.closure_path.payload(), STORE);
     }
@@ -8784,9 +8776,9 @@ mod tests {
             cluster_name: cluster(),
             node_name: node(),
             host_composition: ordinary::HostComposition::BaseHost,
-            proposal_source: ordinary::ProposalSource::from("/dev/null"),
+            proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
             secrets_input: memory::SecretsInput::NoSecrets,
-            flake_reference: ordinary::FlakeReference::from(flake),
+            flake_reference: ordinary::FlakeReference::new(flake.into()),
             deployment_transport: fixture_transport(),
             deployment_input_mode: memory::DeploymentInputMode::Direct,
             horizon_definition_option: None,
@@ -8794,7 +8786,7 @@ mod tests {
             activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
             host_deploy_action: ordinary::HostDeployAction::Evaluate,
             source_revision_policy: policy,
-            optional_nix_builder_spec: None,
+            nix_builder_spec_option: None,
             extra_substituter_vector: Vec::new(),
         })
     }
@@ -8843,7 +8835,8 @@ mod tests {
                 false,
             ),
         ] {
-            let rejected = (deployment_request(policy, flake)).source_revision_policy_rejection();
+            let rejected =
+                (deployment_request(policy.clone(), flake)).source_revision_policy_rejection();
             assert_eq!(rejected.is_none(), accepted, "{policy:?}: {flake}");
         }
     }
@@ -8857,7 +8850,8 @@ mod tests {
         let meta::DeployRequest::Host(deployment) = &mut request else {
             unreachable!("fixture is a host deploy")
         };
-        deployment.deployment_transport.ssh_destination = memory::SshDestination::from("root");
+        deployment.deployment_transport.ssh_destination =
+            memory::SshDestination::new("root".into());
         assert_eq!(
             request.deployment_routing_rejection(),
             Some(meta::DeployRejectionReason::InvalidDeploymentRouting)
@@ -8873,7 +8867,7 @@ mod tests {
             panic!("invalid routing must reject")
         };
         assert!(matches!(
-            rejected.into_payload().optional_deployment_terminal,
+            rejected.into_payload().deployment_terminal_option,
             Some(memory::DeploymentTerminal::Rejected(
                 memory::DeploymentTerminalReason::InvalidDeploymentRouting
             ))
@@ -8905,7 +8899,7 @@ mod tests {
                 "github:owner/repo?ref=release/%2Funsafe",
             ] {
                 assert_eq!(
-                    (deployment_request(policy, flake,)).source_revision_policy_rejection(),
+                    (deployment_request(policy.clone(), flake,)).source_revision_policy_rejection(),
                     Some(meta::DeployRejectionReason::FlakeReferenceMalformed),
                     "{policy:?}: {flake}"
                 );
@@ -8976,7 +8970,7 @@ mod tests {
         match engine.submit_deploy(request) {
             DeploySubmissionOutcome::Rejected(record) => {
                 assert!(matches!(
-                    record.into_payload().optional_deployment_terminal,
+                    record.into_payload().deployment_terminal_option,
                     Some(memory::DeploymentTerminal::Rejected(
                         memory::DeploymentTerminalReason::ProposalSourceUnreachable
                     ))
@@ -9007,7 +9001,7 @@ mod tests {
                 .as_ref()
                 .expect("source revision")
                 .requested_ref,
-            ordinary::FlakeReference::from("github:owner/repo/main")
+            ordinary::FlakeReference::new("github:owner/repo/main".into())
         );
         let command = pipeline.nix_eval_command(&daemon_host());
         assert_eq!(
@@ -9036,7 +9030,7 @@ mod tests {
                 meta::Output::DeployTerminal(record),
             )) => {
                 assert!(matches!(
-                    record.optional_deployment_terminal,
+                    record.deployment_terminal_option,
                     Some(memory::DeploymentTerminal::Failed(
                         memory::DeploymentFailure {
                             deployment_failure_stage: memory::DeploymentFailureStage::FlakeAuth,
@@ -9070,7 +9064,7 @@ mod tests {
             nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
                 meta::Output::DeployTerminal(record),
             )) => assert!(matches!(
-                record.optional_deployment_terminal,
+                record.deployment_terminal_option,
                 Some(memory::DeploymentTerminal::Failed(
                     memory::DeploymentFailure {
                         deployment_failure_stage: memory::DeploymentFailureStage::Eval,
@@ -9096,7 +9090,7 @@ mod tests {
             nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
                 meta::Output::DeployTerminal(record),
             )) => assert!(matches!(
-                record.optional_deployment_terminal,
+                record.deployment_terminal_option,
                 Some(memory::DeploymentTerminal::Failed(
                     memory::DeploymentFailure {
                         deployment_failure_stage: memory::DeploymentFailureStage::Build,
@@ -9121,7 +9115,7 @@ mod tests {
                     ordinary::DeploymentPhase::Building,
                     ordinary::EventLogPosition::new(7),
                 )
-                .optional_immutable_revision
+                .immutable_revision_option
                 .is_none()
         );
     }
@@ -9156,14 +9150,14 @@ mod tests {
         let eval = pipeline.nix_eval_command(&daemon_host());
         let build = nexus::NixBuildCommand {
             generation_identifier: ordinary::GenerationIdentifier::new(1),
-            closure_path: ordinary::ClosurePath::from(STORE),
+            closure_path: ordinary::ClosurePath::new(STORE.into()),
             build_target: nexus::BuildTarget::Local,
             extra_substituter_vector: Vec::new(),
         };
         let hermetic = nexus::HermeticCheckCommand {
             cluster_name: cluster(),
             node_name: node(),
-            flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
+            flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
             test_execution_profile: fixture_test_profile(),
         };
         let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -9232,7 +9226,7 @@ mod tests {
             memory::DeployResumeStage::RecordBuilding
         );
         assert_eq!(
-            persisted.optional_flake_reference,
+            persisted.flake_reference_option,
             Some(source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord).resolved_ref)
         );
         drop(before_crash);
@@ -9250,7 +9244,7 @@ mod tests {
         let mut resumed = SchemaRuntime::with_store(reopened.clone());
         assert!(resumed.resume_deploy_job(job).expect("resume cursor"));
         let pipeline = resumed.active_deploy.as_ref().expect("restored pipeline");
-        assert_eq!(pipeline.accepted_marker, accepted.state_marker);
+        assert_eq!(pipeline.accepted_marker, accepted.database_marker);
         assert_eq!(
             pipeline.resume_stage,
             memory::DeployResumeStage::RecordBuilding
@@ -9292,7 +9286,7 @@ mod tests {
             resolved_flake(ordinary::SourceRevisionPolicy::ResolveAndRecord),
             memory::DeployResumeStage::RecordBuilding,
         );
-        assert!(engine.set_closure_path(ordinary::ClosurePath::from(STORE)));
+        assert!(engine.set_closure_path(ordinary::ClosurePath::new(STORE.into())));
         engine.set_activation_slot(ordinary::GenerationSlot::Current);
 
         for (phase, resume_stage) in [
@@ -9327,12 +9321,12 @@ mod tests {
                 .into_iter()
                 .next()
                 .expect("one job");
-            assert_eq!(job.optional_phase_receipt, Some(receipt.clone()));
+            assert_eq!(job.phase_receipt_option, Some(receipt.clone()));
 
             // Simulate a crash after public event append but before the
             // receipt-side job rewrite. Reopen reconstructs the SAME receipt
             // from the durable event, not a synthetic value.
-            job.optional_phase_receipt = None;
+            job.phase_receipt_option = None;
             store
                 .upsert_deploy_job(job)
                 .expect("simulate pre-receipt cursor");
@@ -9371,7 +9365,7 @@ mod tests {
         let source_revision = source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord);
         pipeline.source_revision = Some(source_revision.clone());
         pipeline.activation_slot = Some(ordinary::GenerationSlot::Current);
-        pipeline.closure_path = Some(ordinary::ClosurePath::from(STORE));
+        pipeline.closure_path = Some(ordinary::ClosurePath::new(STORE.into()));
         engine.active_deploy = Some(pipeline.clone());
 
         let event = pipeline.phase_event(
@@ -9384,8 +9378,8 @@ mod tests {
             memory::MemoryWriteOutput::PhaseRecorded(_)
         ));
         match engine.read_event_log(ordinary::EventLogRange {
-            from: ordinary::EventLogPosition::new(1),
-            until: ordinary::EventLogPosition::new(2),
+            first_event_log_position: ordinary::EventLogPosition::new(1),
+            second_event_log_position: ordinary::EventLogPosition::new(2),
         }) {
             memory::MemoryReadOutput::EventLogRead(page) => assert_eq!(
                 page.deployment_phase_event_vector
@@ -9405,7 +9399,7 @@ mod tests {
         match engine.query_generations(ordinary::Selection::ByNode(ordinary::NodeSelector {
             cluster_name: cluster(),
             node_name: node(),
-            optional_generation_artifact: None,
+            generation_artifact_option: None,
         })) {
             memory::MemoryReadOutput::GenerationsQueried(listing) => assert_eq!(
                 listing
@@ -9413,7 +9407,7 @@ mod tests {
                     .first()
                     .expect("generation")
                     .closure_path,
-                ordinary::ClosurePath::from(STORE)
+                ordinary::ClosurePath::new(STORE.into())
             ),
             other => panic!("expected GenerationsQueried, got {other:?}"),
         }
@@ -9433,17 +9427,17 @@ mod tests {
                 cluster_name: cluster(),
                 node_name: node(),
                 host_composition: ordinary::HostComposition::BaseHost,
-                proposal_source: ordinary::ProposalSource::from("/dev/null"),
+                proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
                 secrets_input: memory::SecretsInput::NoSecrets,
-                flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
+                flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
                 deployment_transport: fixture_transport(),
                 deployment_input_mode: memory::DeploymentInputMode::Direct,
                 horizon_definition_option: None,
                 deployment_output_selector: fixture_output_selector(),
                 activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
-                host_deploy_action: action,
+                host_deploy_action: action.clone(),
                 source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-                optional_nix_builder_spec: None,
+                nix_builder_spec_option: None,
                 extra_substituter_vector: Vec::new(),
             });
             assert!(
@@ -9459,18 +9453,18 @@ mod tests {
             let request = meta::DeployRequest::UserEnvironment(meta::UserEnvironmentDeployment {
                 cluster_name: cluster(),
                 node_name: node(),
-                user_name: ordinary::UserName::from("li"),
-                proposal_source: ordinary::ProposalSource::from("/dev/null"),
+                user_name: ordinary::UserName::new("li".into()),
+                proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
                 secrets_input: memory::SecretsInput::NoSecrets,
-                flake_reference: ordinary::FlakeReference::from("github:owner/repo"),
+                flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
                 deployment_transport: fixture_transport(),
                 deployment_input_mode: memory::DeploymentInputMode::Direct,
                 horizon_definition_option: None,
                 deployment_output_selector: fixture_output_selector(),
                 activation_backend: memory::ActivationBackend::HomeManagerNixProfileV1,
-                user_environment_action: mode,
+                user_environment_action: mode.clone(),
                 source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-                optional_nix_builder_spec: None,
+                nix_builder_spec_option: None,
                 extra_substituter_vector: Vec::new(),
             });
             assert!(
@@ -9558,8 +9552,10 @@ mod tests {
 
     fn nexus_fixture_transport() -> nexus::DeploymentTransport {
         nexus::DeploymentTransport {
-            nix_store_uri: nexus::NixStoreUri::from("ssh-ng://fixture-copy.invalid"),
-            ssh_destination: nexus::SshDestination::from("fixture-login@fixture-activate.invalid"),
+            nix_store_uri: nexus::NixStoreUri::new("ssh-ng://fixture-copy.invalid".into()),
+            ssh_destination: nexus::SshDestination::new(
+                "fixture-login@fixture-activate.invalid".into(),
+            ),
         }
     }
 
@@ -9568,7 +9564,7 @@ mod tests {
             generation_identifier: ordinary::GenerationIdentifier::new(1),
             node_name: node(),
             deployment_transport: nexus_fixture_transport(),
-            closure_path: ordinary::ClosurePath::from(STORE),
+            closure_path: ordinary::ClosurePath::new(STORE.into()),
             closure_origin: nexus::ClosureOrigin::DaemonStore,
         }
     }
@@ -9595,7 +9591,7 @@ mod tests {
     fn copy_preserves_login_host_and_params() {
         let mut command = copy_command();
         command.deployment_transport.nix_store_uri =
-            nexus::NixStoreUri::from("ssh-ng://bird@zeus.example:2222?compress=true");
+            nexus::NixStoreUri::new("ssh-ng://bird@zeus.example:2222?compress=true".into());
         let copy = ClosureCopy::from_command(&command).expect("copy transport");
         let invocation = copy.invocation();
         let argv = invocation.joined_arguments();
@@ -9611,7 +9607,7 @@ mod tests {
     fn copy_preserves_root_login_unchanged() {
         let mut command = copy_command();
         command.deployment_transport.nix_store_uri =
-            nexus::NixStoreUri::from("ssh-ng://root@zeus.example");
+            nexus::NixStoreUri::new("ssh-ng://root@zeus.example".into());
         let copy = ClosureCopy::from_command(&command).expect("copy transport");
         let invocation = copy.invocation();
         let argv = invocation.joined_arguments();
@@ -9628,7 +9624,7 @@ mod tests {
             cluster_name: cluster(),
             node_name: node(),
             deployment_transport: nexus_fixture_transport(),
-            closure_path: ordinary::ClosurePath::from(STORE),
+            closure_path: ordinary::ClosurePath::new(STORE.into()),
             activation_effect: kind,
             activation_backend: match &profile {
                 nexus::ActivationProfile::Host(_) => nexus::ActivationBackend::NixosSystemdBootV1,
@@ -9897,16 +9893,16 @@ mod tests {
         memory::DeployJob {
             deployment_identifier: ordinary::DeploymentIdentifier::new(72),
             generation_identifier: ordinary::GenerationIdentifier::new(72),
-            cluster_name: ordinary::ClusterName::from("fixture-cluster"),
-            node_name: ordinary::NodeName::from("fixture-daemon"),
+            cluster_name: ordinary::ClusterName::new("fixture-cluster".into()),
+            node_name: ordinary::NodeName::new("fixture-daemon".into()),
             deploy_job_phase: memory::DeployJobPhase::Activating,
-            optional_closure_path: closure.map(ordinary::ClosurePath::from),
+            closure_path_option: closure.map(|path| ordinary::ClosurePath::new(path.into())),
             source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
             flake_reference: ordinary::FlakeReference::new(
                 "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567"
                     .to_string(),
             ),
-            optional_flake_reference: Some(ordinary::FlakeReference::new(
+            flake_reference_option: Some(ordinary::FlakeReference::new(
                 "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567"
                     .to_string(),
             )),
@@ -9915,13 +9911,13 @@ mod tests {
             deployment_input_mode: memory::DeploymentInputMode::Direct,
             deployment_output_selector: fixture_output_selector(),
             activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
-            optional_nix_builder_spec: None,
+            nix_builder_spec_option: None,
             boot_once_unit: None,
-            optional_generation_slot: None,
+            generation_slot_option: None,
             persisted_flake_input_override_vector: Vec::new(),
             deploy_resume_stage: memory::DeployResumeStage::ResolveFlakeAuth,
-            optional_phase_receipt: None,
-            optional_deploy_submission: Some(host_submission(
+            phase_receipt_option: None,
+            deploy_submission_option: Some(host_submission(
                 ordinary::HostDeployAction::ActivateNow,
             )),
         }
@@ -9970,7 +9966,7 @@ mod tests {
         );
         assert_eq!(root.generation_slot, ordinary::GenerationSlot::Current);
         assert_eq!(root.closure_path.payload(), "/nix/store/aaaaaaaa-system");
-        assert_eq!(root.optional_pin_label, None);
+        assert_eq!(root.pin_label_option, None);
     }
 
     #[test]
@@ -10006,7 +10002,7 @@ mod tests {
         // leave an Activating row behind if the daemon restarts for another
         // reason, but it never runs the detached self-switch protocol.
         let mut job = interrupted_self_switch_job(Some("/nix/store/aaaaaaaa-system"));
-        job.optional_deploy_submission =
+        job.deploy_submission_option =
             Some(host_submission(ordinary::HostDeployAction::SetBootProfile));
         assert!(
             job.self_switch_activation_record(Some("/nix/store/aaaaaaaa-system"))
@@ -10020,7 +10016,7 @@ mod tests {
         // coincidental closure string, but no user submission owns the host
         // system profile. It must remain for normal S5 reconciliation.
         let mut job = interrupted_self_switch_job(Some("/nix/store/aaaaaaaa-system"));
-        job.optional_deploy_submission = Some(user_submission());
+        job.deploy_submission_option = Some(user_submission());
         assert!(
             job.self_switch_activation_record(Some("/nix/store/aaaaaaaa-system"))
                 .is_none()
@@ -10044,7 +10040,7 @@ mod tests {
         // ssh is not at risk there.
         let foreign = host_activation_on_host(
             ordinary::HostDeployAction::ActivateNow,
-            Some(ordinary::NodeName::from("some-other-node")),
+            Some(ordinary::NodeName::new("some-other-node".into())),
         );
         assert!(foreign.detached_self_activation().is_none());
         let no_context = host_activation(ordinary::HostDeployAction::ActivateNow);
@@ -10203,7 +10199,10 @@ mod tests {
             Some(FIXTURE_BUILDER)
         );
         let realization = TargetStoreRealization::from_command(
-            &pipeline.nix_build_command(ordinary::ClosurePath::from(DERIVATION), &daemon_host()),
+            &pipeline.nix_build_command(
+                ordinary::ClosurePath::new(DERIVATION.into()),
+                &daemon_host(),
+            ),
             &build,
         )
         .expect("target-store realization");
@@ -10248,8 +10247,10 @@ mod tests {
     ) -> TargetStoreRealization {
         let build = nexus::TargetStoreBuild {
             deployment_transport: nexus::DeploymentTransport {
-                nix_store_uri: nexus::NixStoreUri::from("ssh-ng://root@fixture-target.invalid"),
-                ssh_destination: nexus::SshDestination::from(ssh_destination),
+                nix_store_uri: nexus::NixStoreUri::new(
+                    "ssh-ng://root@fixture-target.invalid".into(),
+                ),
+                ssh_destination: nexus::SshDestination::new(ssh_destination.into()),
             },
             node_name: node(),
             operator_node: daemon_host(),
@@ -10257,7 +10258,7 @@ mod tests {
         };
         let command = nexus::NixBuildCommand {
             generation_identifier: ordinary::GenerationIdentifier::new(7),
-            closure_path: ordinary::ClosurePath::from(DERIVATION),
+            closure_path: ordinary::ClosurePath::new(DERIVATION.into()),
             build_target: nexus::BuildTarget::TargetStore(build.clone()),
             extra_substituter_vector: substituters,
         };
@@ -10351,7 +10352,7 @@ mod tests {
         };
         let command = nexus::NixBuildCommand {
             generation_identifier: ordinary::GenerationIdentifier::new(1),
-            closure_path: ordinary::ClosurePath::from(STORE),
+            closure_path: ordinary::ClosurePath::new(STORE.into()),
             build_target: nexus::BuildTarget::TargetStore(build.clone()),
             extra_substituter_vector: Vec::new(),
         };
@@ -10362,7 +10363,7 @@ mod tests {
     fn copy_after_a_target_store_build_is_a_presence_check() {
         let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
         let command =
-            pipeline.copy_closure_command(ordinary::ClosurePath::from(STORE), &daemon_host());
+            pipeline.copy_closure_command(ordinary::ClosurePath::new(STORE.into()), &daemon_host());
         assert_eq!(command.closure_origin, nexus::ClosureOrigin::TargetStore);
         let argv = ClosureCopy::from_command(&command)
             .expect("copy transport")
@@ -10377,7 +10378,8 @@ mod tests {
     #[test]
     fn copy_after_a_daemon_host_build_still_transfers() {
         let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
-        let command = pipeline.copy_closure_command(ordinary::ClosurePath::from(STORE), &node());
+        let command =
+            pipeline.copy_closure_command(ordinary::ClosurePath::new(STORE.into()), &node());
         assert_eq!(command.closure_origin, nexus::ClosureOrigin::DaemonStore);
         let argv = ClosureCopy::from_command(&command)
             .expect("copy transport")
@@ -10421,8 +10423,10 @@ mod tests {
             Arc::new(Store::open(directory.path().join("lojix.memory")).expect("open store"));
         let engine = SchemaRuntime::with_store_and_configuration(store, configuration);
         let pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
-        let command =
-            pipeline.nix_build_command(ordinary::ClosurePath::from(DERIVATION), &daemon_host());
+        let command = pipeline.nix_build_command(
+            ordinary::ClosurePath::new(DERIVATION.into()),
+            &daemon_host(),
+        );
         let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
         for _ in 0..2 {
             let result = runtime.block_on(engine.run_nix_build(command.clone()));
@@ -10498,7 +10502,7 @@ mod tests {
         );
 
         let user = nexus::MaterializationShape::UserEnvironment(
-            nexus::UserEnvironmentMaterialization::new(ordinary::UserName::from("li")),
+            nexus::UserEnvironmentMaterialization::new(ordinary::UserName::new("li".into())),
         );
         assert!(DeploymentInput::from_shape(&user).is_none());
     }
@@ -10638,11 +10642,12 @@ mod tests {
     ) -> UserEnvironmentActivation {
         let profile =
             nexus::ActivationProfile::UserEnvironment(nexus::UserEnvironmentActivationProfile {
-                user_environment_action: mode,
-                user_name: ordinary::UserName::from("li"),
+                user_environment_action: mode.clone(),
+                user_name: ordinary::UserName::new("li".into()),
             });
         let mut command = activate_command(profile, ordinary::ActivationEffect::LiveActivation);
-        command.deployment_transport.ssh_destination = nexus::SshDestination::from(ssh_destination);
+        command.deployment_transport.ssh_destination =
+            nexus::SshDestination::new(ssh_destination.into());
         match Activation::from_command(&command, None).expect("activation") {
             Activation::UserEnvironment(activation) => activation,
             Activation::Host(_) => panic!("expected user-environment activation"),
@@ -10744,8 +10749,8 @@ mod tests {
         for login in ["li@fixture.invalid", "root@fixture.invalid"] {
             let mut activation = activation.clone();
             activation.target = SshTarget::from_transport(&nexus::DeploymentTransport {
-                nix_store_uri: nexus::NixStoreUri::from("ssh-ng://fixture.invalid"),
-                ssh_destination: nexus::SshDestination::from(login),
+                nix_store_uri: nexus::NixStoreUri::new("ssh-ng://fixture.invalid".into()),
+                ssh_destination: nexus::SshDestination::new(login.into()),
             })
             .expect("target");
             activation.authority = activation
@@ -11137,7 +11142,7 @@ mod tests {
         let job_unit =
             DetachedActivationUnit::for_deployment(&ordinary::DeploymentIdentifier::new(41));
         DetachedActivationUnit {
-            optional_journal: Some(UnitJournal::new(
+            journal_option: Some(UnitJournal::new(
                 job_unit.name.clone(),
                 SshTarget::from_transport(&nexus_fixture_transport()).expect("fixture transport"),
             )),
@@ -11157,7 +11162,7 @@ mod tests {
                 "systemd reported Result=signal; main process {}",
                 main.expect("signal").statement()
             ),
-            optional_process_end: main,
+            process_end_option: main,
             reported_outputs: Vec::new(),
         };
         let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -11174,8 +11179,8 @@ mod tests {
             "{detail}"
         );
         assert!(detail.contains("unit sshd failed"), "{detail}");
-        let command = evidence.optional_failed_command.expect("systemd-run named");
-        assert_eq!(command.optional_exit_code, None);
+        let command = evidence.failed_command_option.expect("systemd-run named");
+        assert_eq!(command.exit_code_option, None);
         assert_eq!(
             command.command_argument_vector[0].payload(),
             "--unit=lojix-self-switch-deploy-41.service"
@@ -11206,6 +11211,6 @@ mod tests {
             detail.contains("activating the configuration..."),
             "{detail}"
         );
-        assert!(evidence.optional_failed_command.is_some());
+        assert!(evidence.failed_command_option.is_some());
     }
 }
