@@ -9,7 +9,9 @@ client. Both clients speak portable typed Signals over Unix sockets.
 > two authority-tiered sockets and answers each input through its
 > contract's generated dispatch, `input.answer(&answerer)`. An admitted
 > deploy or test is handed to its actor, which drives the handwritten async
-> runner; child-process effects use `tokio::process`. Production
+> runner. Each external call is a typed emission generated from
+> `ethos/emission.ethos`; its synchronous `emit` runs on a blocking thread
+> (`std::process`, zbus's blocking API) and the actor awaits it. Production
 > host and user-environment build requests select their materialization mode
 > explicitly. `Horizon` enters a materialization effect that projects the proposal with
 > `horizon-rs`, writes generated `horizon` / `system` / `deployment`
@@ -198,7 +200,11 @@ src/
                         # operations and the outcomes they come to
   runtime_model.rs      # contract, stored and operation types re-exported
                         # from where they are generated
-  runtime_flow.rs       # hand-written pipeline effects, work, and the
+  emission.rs           # generated from ethos/emission.ethos: every
+                        # external call and the outcome observed
+  translator.rs         # the one place holding the words of each call:
+                        # argv, scripts, systemd D-Bus methods
+  runtime_flow.rs       # hand-written pipeline stages, work, and the
                         # pipeline runner (NexusEngine::drive)
   schema_runtime.rs     # async hand-written pipeline engine
 nexus/src/main.rs             # Datom-free daemon entry

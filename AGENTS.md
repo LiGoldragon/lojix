@@ -24,8 +24,9 @@
 
 - **Actor discipline.** The daemon socket shell uses
   `triad-runtime`'s actor-native multi-listener. Generated Nexus
-  execution and effect hooks are async; do not reintroduce
-  blocking-pool bridges around the engine. No zero-state holders per
+  execution and its pipeline stages are async; do not move the engine
+  onto a blocking pool. An external call is an emission whose synchronous
+  `emit` runs on a blocking thread, and only the emission goes there. No zero-state holders per
   the actor-system discipline
   §"Zero-sized actors are not actors".
 

@@ -1,0 +1,148 @@
+; What the Lojix Nexus sends into the world: every external call a deploy or
+; test pipeline makes, each one emission, and the outcome its translator
+; observed. A command line is a type: an emission names what is asked, a
+; field per argument, and the translator, in src/translator.rs, is the one
+; place that holds the words of the call, a process's program and argv or a
+; systemd D-Bus method. A String stands only where nothing narrower is
+; known: a path Lojix generated, a unit's name, the text a process printed.
+;
+; The process emissions run under the effect execution, which says where a
+; program comes from; the D-Bus emissions run on one system-bus session that
+; keeps the subscriptions a detached activation is watched through. An
+; attempt, one stage of a pipeline, composes the emissions it needs; each
+; emission is emitted on a blocking thread and awaited.
+Emission
+
+[ signal_lojix:[ FlakeReference DeploymentOutputSelector ClosurePath NixStoreUri SshDestination
+                 NixBuilderSpec NodeName GenerationIdentifier CommandProgram CommandArgument
+                 UserName ]
+  meta_signal_lojix:[ ExtraSubstituter ]
+  :crate:memory:[ PersistedFlakeInputOverride ResolvedRevision ] ]
+
+[ ReadFlakeMetadata.FlakeMetadataQuery
+  EvaluateDerivation.DerivationEvaluation
+  HashInput.InputHashing
+  BuildClosure.ClosureBuild
+  BuildCheck.CheckBuild
+  CopyDerivation.DerivationCopy
+  BuildInTargetStore.TargetStoreBuild
+  RootInTargetStore.TargetStoreRooting
+  CheckClosurePresence.ClosurePresence
+  CopyClosure.ClosureCopy
+  SwitchConfiguration.ConfigurationSwitch
+  ClearBootEntry.BootEntryClearing
+  RunTransientUnit.TransientUnitRun
+  DispatchRetainedUnit.RetainedUnitDispatch
+  ReadUnitJournal.UnitJournalQuery
+  SetLocalHomeProfile.LocalHomeProfile
+  ActivateLocalHome.LocalHomeActivation
+  SetRemoteHomeProfile.RemoteHomeProfile
+  ActivateRemoteHome.RemoteHomeActivation
+  ReadShortHostName
+  CollectGarbage.GarbageCollection
+  BringUpTestVm.TestVmBringUp
+  TearDownTestVm.TestVmTearDown
+  SubscribeUnitNew
+  FindUnit.UnitLookup
+  AwaitUnitNew.UnitArrival
+  ReadUnitState.UnitStateQuery
+  AwaitUnitStateChange.UnitStateWatch
+  StopUnit.UnitStop ]
+
+[ FlakeMetadataRead.FlakeMetadataOutcome
+  DerivationEvaluated.PathOutcome
+  InputHashed.HashOutcome
+  ClosureBuilt.PathOutcome
+  CheckBuilt.PathOutcome
+  DerivationCopied.CallOutcome
+  TargetStoreBuilt.PathOutcome
+  TargetStoreRooted.CallOutcome
+  ClosurePresenceChecked.CallOutcome
+  ClosureCopied.CallOutcome
+  ConfigurationSwitched.CallOutcome
+  BootEntryCleared.CallOutcome
+  TransientUnitRan.CallOutcome
+  RetainedUnitDispatched.CallOutcome
+  UnitJournalRead.JournalOutcome
+  LocalHomeProfileSet.CallOutcome
+  LocalHomeActivated.CallOutcome
+  RemoteHomeProfileSet.CallOutcome
+  RemoteHomeActivated.CallOutcome
+  ShortHostNameRead.HostNameOutcome
+  GarbageCollected.GarbageOutcome
+  TestVmBroughtUp.CallOutcome
+  TestVmTornDown.CallOutcome
+  UnitNewSubscribed.BusCallOutcome
+  UnitFound.UnitLookupOutcome
+  UnitNewAwaited.UnitArrivalOutcome
+  UnitStateRead.UnitState
+  UnitStateChangeAwaited.UnitStateWatchOutcome
+  UnitStopped.BusCallOutcome ]
+
+[ FlakeMetadataQuery.{ FlakeReference }
+  DerivationEvaluation.{ FlakeReference DeploymentOutputSelector EvaluationFreshness Vector<PersistedFlakeInputOverride> }
+  EvaluationFreshness.[ Refreshed TrustingPin ]
+  InputHashing.{ InputDirectory.String }
+  ClosureBuild.{ ClosurePath BuildPlace Vector<ExtraSubstituter> }
+  BuildPlace.[ DaemonStore Offloaded.NixBuilderSpec ]
+  CheckBuild.{ FlakeReference DeploymentOutputSelector }
+  DerivationCopy.{ NixStoreUri ClosurePath }
+  TargetStoreBuild.{ NixStoreUri ClosurePath Vector<ExtraSubstituter> }
+  TargetStoreRooting.{ SshDestination GcRootDirectory OperatorNode GenerationIdentifier ClosurePath }
+  GcRootDirectory.[ SystemRoots LoginHome ]
+  OperatorNode.NodeName
+  ClosurePresence.{ NixStoreUri ClosurePath }
+  ClosureCopy.{ NixStoreUri ClosurePath }
+  ConfigurationSwitch.{ SshDestination ClosurePath SwitchAction }
+  SwitchAction.[ Boot Switch Test ]
+  BootEntryClearing.{ SshDestination BootEntry }
+  BootEntry.[ Default Oneshot ]
+  TransientUnitRun.{ SshDestination UnitName TransientScript }
+  TransientScript.[ BootOnce.ClosurePath SelfSwitch.ClosurePath ]
+  RetainedUnitDispatch.{ SshDestination UnitName ClosurePath }
+  UnitJournalQuery.{ SshDestination UnitName }
+  LocalHomeProfile.{ HomeDirectory.String ClosurePath }
+  LocalHomeActivation.{ ClosurePath }
+  RemoteHomeProfile.{ SshDestination RemoteHomeLogin ClosurePath }
+  RemoteHomeActivation.{ SshDestination RemoteHomeLogin ClosurePath }
+  RemoteHomeLogin.[ AsTargetUser MediatedFor.UserName ]
+  GarbageCollection.{ NodeName }
+  TestVmBringUp.{ SshDestination GuestNode ClosurePath GuestAddress.String }
+  TestVmTearDown.{ SshDestination GuestNode }
+  GuestNode.NodeName
+  UnitName.String
+  UnitLookup.{ UnitName }
+  UnitArrival.{ UnitName }
+  UnitStateQuery.{ UnitName }
+  UnitStateWatch.{ UnitName }
+  UnitStop.{ UnitName }
+
+  CallOutcome.[ Completed Failed.ProcessFailure ]
+  PathOutcome.[ Printed.PrintedPath Failed.ProcessFailure ]
+  PrintedPath.{ Option<ClosurePath> }
+  HashOutcome.[ Hashed.SriHash Failed.ProcessFailure ]
+  SriHash.String
+  FlakeMetadataOutcome.[ Read.FlakeMetadata Malformed.MetadataFault Failed.ProcessFailure ]
+  FlakeMetadata.{ Option<FlakeReference> Option<ResolvedRevision> }
+  MetadataFault.String
+  JournalOutcome.[ Read.JournalText Failed.ProcessFailure ]
+  JournalText.String
+  HostNameOutcome.[ Named.NodeName Failed.ProcessFailure ]
+  GarbageOutcome.[ Collected.CollectedPaths Failed.ProcessFailure ]
+  CollectedPaths.Integer
+  ProcessFailure.{ CommandProgram Vector<CommandArgument> ProcessFault }
+  ProcessFault.[ Unstarted.OsFault Unfinished.OsFault Ended.ProcessEnding ]
+  OsFault.String
+  ProcessEnding.{ ProcessEnd Stdout.String Stderr.String }
+  ProcessEnd.[ Exited.ExitStatus Signalled.SignalEnd Unreported.WaitStatus ]
+  ExitStatus.Integer
+  SignalEnd.{ SignalNumber.Integer CoreDumped.Boolean }
+  WaitStatus.Integer
+
+  BusCallOutcome.[ Answered Refused.BusFault ]
+  BusFault.String
+  UnitLookupOutcome.[ Found NoSuchUnit Refused.BusFault ]
+  UnitArrivalOutcome.[ Arrived StreamEnded Refused.BusFault ]
+  UnitState.{ ActiveState.PropertyReading ServiceResult.PropertyReading Option<ProcessEnd> }
+  PropertyReading.[ Read.String Unreadable.BusFault ]
+  UnitStateWatchOutcome.[ Changed StreamEnded ] ]

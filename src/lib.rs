@@ -72,6 +72,7 @@ pub mod bootstrap;
 pub mod client;
 pub mod daemon;
 pub mod deployment_watch;
+pub mod emission;
 #[cfg(feature = "tools")]
 pub mod ingress;
 mod inspected_text;
@@ -86,6 +87,7 @@ pub mod reconstruction;
 pub mod runtime_flow;
 pub mod runtime_model;
 pub mod schema_runtime;
+mod translator;
 pub mod upgrade;
 
 /// An offline lojix tool: a request read from the process's one inline Datom

@@ -7,10 +7,13 @@
 
 use crate::Payload;
 pub use crate::runtime_model::{
-    ActivationEffect, ClosurePath, ClusterName, DeploymentIdentifier, FlakeReference,
-    GenerationArtifact, GenerationIdentifier, GenerationSlot, HostComposition, HostDeployAction,
-    NodeName, Operation, Outcome, ProposalSource, SecretsInput, SourceRevisionPolicy,
-    SourceRevisionRecord, TestMode, UserEnvironmentAction, UserName,
+    ActivationBackend, ActivationEffect, ClosurePath, ClusterName, DeploymentIdentifier,
+    DeploymentInputMode, DeploymentOutputSelector, DeploymentTransport, ExtraSubstituter,
+    FlakeAttribute, FlakeReference, GenerationArtifact, GenerationIdentifier, GenerationSlot,
+    HostComposition, HostDeployAction, NixBuilderSpec, NixStoreUri, NixSystem, NodeName, Operation,
+    Outcome, PersistedFlakeInputOverride, ProposalSource, SecretsInput, SourceRevisionPolicy,
+    SourceRevisionRecord, SshDestination, TestExecutionProfile, TestMode, UserEnvironmentAction,
+    UserName,
 };
 
 /// What a driven pipeline ends with: the privileged contract's own output,
@@ -45,59 +48,6 @@ macro_rules! flow_newtype {
     };
 }
 
-macro_rules! flow_text {
-    ($name:ident) => {
-        #[derive(Clone, Debug, PartialEq, Eq)]
-        pub struct $name(String);
-        impl crate::Payload for $name {
-            type Carried = String;
-
-            fn new(payload: String) -> Self {
-                Self(payload)
-            }
-
-            fn payload(&self) -> &String {
-                &self.0
-            }
-
-            fn into_payload(self) -> String {
-                self.0
-            }
-        }
-        impl From<String> for $name {
-            fn from(payload: String) -> Self {
-                Self(payload)
-            }
-        }
-        impl From<&str> for $name {
-            fn from(payload: &str) -> Self {
-                Self(payload.to_string())
-            }
-        }
-    };
-}
-
-flow_text!(NixStoreUri);
-flow_text!(SshDestination);
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DeploymentTransport {
-    pub nix_store_uri: NixStoreUri,
-    pub ssh_destination: SshDestination,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Copy)]
-pub enum DeploymentInputMode {
-    Direct,
-    Horizon,
-}
-flow_text!(FlakeAttribute);
-flow_newtype!(DeploymentOutputSelector, FlakeAttribute);
-#[derive(Clone, Debug, PartialEq, Eq, Copy)]
-pub enum ActivationBackend {
-    NixosSystemdBootV1,
-    HomeManagerNixProfileV1,
-}
-flow_text!(NixBuilderSpec);
-flow_text!(NixSystem);
 /// Where a deploy's closure is realized.
 ///
 /// `Local` and `Remote` realize into the daemon host's own store (`Remote`
@@ -131,11 +81,6 @@ pub enum ClosureOrigin {
     TargetStore,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExtraSubstituter {
-    pub url: String,
-    pub public_key: String,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlakeAuthRequest {
     pub flake_reference: FlakeReference,
     pub source_revision_policy: SourceRevisionPolicy,
@@ -156,17 +101,7 @@ pub struct HorizonMaterializationCommand {
     pub secrets_input: SecretsInput,
     pub materialization_shape: MaterializationShape,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FlakeInputReference {
-    pub url: String,
-    pub nix_archive_hash: String,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FlakeInputOverride {
-    pub string: String,
-    pub flake_input_reference: FlakeInputReference,
-}
-flow_newtype!(MaterializedInputs, Vec<FlakeInputOverride>);
+flow_newtype!(MaterializedInputs, Vec<PersistedFlakeInputOverride>);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NixEvalCommand {
     pub generation_identifier: GenerationIdentifier,
@@ -176,7 +111,7 @@ pub struct NixEvalCommand {
     pub flake_reference: FlakeReference,
     pub source_revision_record: SourceRevisionRecord,
     pub deployment_output_selector: DeploymentOutputSelector,
-    pub flake_input_override_vector: Vec<FlakeInputOverride>,
+    pub flake_input_override_vector: Vec<PersistedFlakeInputOverride>,
     pub build_target: BuildTarget,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -220,13 +155,6 @@ pub struct ActivateGenerationCommand {
 pub struct PathInfoGcCommand {
     pub cluster_name: ClusterName,
     pub node_name: NodeName,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TestExecutionProfile {
-    pub test_mode: TestMode,
-    pub nix_system: NixSystem,
-    pub deployment_output_selector: DeploymentOutputSelector,
-    pub deployment_transport_option: Option<DeploymentTransport>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HermeticCheckCommand {
@@ -373,8 +301,8 @@ impl From<SourceRevisionRecord> for EffectResult {
     }
 }
 
-impl From<Vec<FlakeInputOverride>> for EffectResult {
-    fn from(value: Vec<FlakeInputOverride>) -> Self {
+impl From<Vec<PersistedFlakeInputOverride>> for EffectResult {
+    fn from(value: Vec<PersistedFlakeInputOverride>) -> Self {
         Self::HorizonMaterialized(MaterializedInputs::new(value))
     }
 }

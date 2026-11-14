@@ -6,8 +6,9 @@
 //! the flake, materialize Horizon inputs, eval, build, copy, activate — with a
 //! phase recorded between stages; `NexusEngine::decide` picks the next action
 //! from the last step's result and `NexusEngine::drive` carries it out until
-//! the pipeline finishes. `run_effect` does real `nix` IO through
-//! `tokio::process::Command`.
+//! the pipeline finishes. `run_effect` composes each stage's emissions,
+//! generated from `ethos/emission.ethos`, and awaits each on a blocking thread;
+//! the translator in `translator.rs` holds every word of the calls.
 
 use crate::inspected_text::{
     CredentialBearing, InspectedText, NixStorePath, OfferedPath, PathAdmission, PercentEncodedText,
@@ -21,19 +22,14 @@ use crate::{
 use crate::{HorizonArchitecture as _, SourceRevisionText as _};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 
-use futures_util::StreamExt;
 use horizon_lib::{Horizon, HorizonDefinition, Projecting};
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
-use zbus::proxy::{Builder as ProxyBuilder, CacheProperties, SignalStream};
-use zbus::zvariant::OwnedObjectPath;
-use zbus::{Connection, Proxy};
 
+use crate::emission;
 use crate::runtime_flow::{self as nexus, NexusEngine as _};
 use crate::runtime_model as memory;
+use crate::translator::{Emitting as _, GcRootNaming as _, SystemdBus};
 
 /// A local activation-login noun. Horizon projects users as public strings;
 /// Lojix validates the command-bearing login independently before it reaches
@@ -67,11 +63,6 @@ impl crate::Named for HorizonUserName {
 /// needs, not a log stream: the tail is where a Nix or activation failure
 /// states its cause, so the tail of each stream is what is kept.
 const FAILURE_DETAIL_BOUND: usize = 4096;
-
-/// How many journal lines are read back for a transient unit an activation
-/// ran in. The durable bound is `FAILURE_DETAIL_BOUND`; this only has to be
-/// enough lines to fill it.
-const UNIT_JOURNAL_LINES: usize = 200;
 
 /// What a stage reported when it failed: its own statement, every stream the
 /// failing process printed, and, when a subprocess ran, that process's
@@ -137,19 +128,6 @@ impl OutputReporting for ReportedOutput {
     }
 }
 
-/// How a process ended, as its parent was told: an exit status, or the signal
-/// that killed it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProcessEnd {
-    Exited(i32),
-    Signalled {
-        signal: i32,
-        core_dumped: bool,
-    },
-    /// A wait status that is neither, kept as the raw number.
-    Unreported(i32),
-}
-
 /// Reading a process end as the exit code the record keeps and the sentence
 /// the detail opens with.
 pub(crate) trait ProcessEnding {
@@ -159,40 +137,64 @@ pub(crate) trait ProcessEnding {
     fn statement(&self) -> String;
 }
 
-impl ProcessEnding for ProcessEnd {
+impl ProcessEnding for emission::ProcessEnd {
     fn exit_code(&self) -> Option<i32> {
         match self {
-            Self::Exited(code) => Some(*code),
-            Self::Signalled { .. } | Self::Unreported(_) => None,
+            Self::Exited(code) => i32::try_from(code.0).ok(),
+            Self::Signalled(_) | Self::Unreported(_) => None,
         }
     }
 
     fn statement(&self) -> String {
         match self {
-            Self::Exited(code) => format!("exited with status {code}"),
-            Self::Signalled {
-                signal,
-                core_dumped: false,
-            } => format!("killed by signal {signal}"),
-            Self::Signalled {
-                signal,
-                core_dumped: true,
-            } => format!("killed by signal {signal}, core dumped"),
-            Self::Unreported(raw) => format!("ended with wait status {raw}"),
+            Self::Exited(code) => format!("exited with status {}", code.0),
+            Self::Signalled(ended) if ended.core_dumped.0 => {
+                format!("killed by signal {}, core dumped", ended.signal_number.0)
+            }
+            Self::Signalled(ended) => format!("killed by signal {}", ended.signal_number.0),
+            Self::Unreported(raw) => format!("ended with wait status {}", raw.0),
         }
     }
 }
 
-impl From<std::process::ExitStatus> for ProcessEnd {
-    fn from(status: std::process::ExitStatus) -> Self {
-        use std::os::unix::process::ExitStatusExt as _;
-        match (status.code(), status.signal()) {
-            (Some(code), _) => Self::Exited(code),
-            (None, Some(signal)) => Self::Signalled {
-                signal,
-                core_dumped: status.core_dumped(),
-            },
-            (None, None) => Self::Unreported(status.into_raw()),
+impl From<emission::ProcessFailure> for StageFailure {
+    /// What the translator observed of a failed process: the command it ran,
+    /// how it ended, and both streams it printed, whole. A failing step may
+    /// print its cause on either — Home Manager's `errorEcho` writes to
+    /// stdout. A code is present only when the process itself exited.
+    fn from(failure: emission::ProcessFailure) -> Self {
+        let program = failure.command_program.payload().clone();
+        let (exit_code, detail, reported_outputs) = match failure.process_fault {
+            emission::ProcessFault::Unstarted(fault) => (
+                None,
+                format!("failed to spawn session for {program}: {}", fault.0),
+                Vec::new(),
+            ),
+            emission::ProcessFault::Unfinished(fault) => (
+                None,
+                format!("failed while waiting for {program}: {}", fault.0),
+                Vec::new(),
+            ),
+            emission::ProcessFault::Ended(ending) => (
+                ending.process_end.exit_code(),
+                ending.process_end.statement(),
+                vec![
+                    ReportedOutput::new("stdout", ending.stdout.0),
+                    ReportedOutput::new("stderr", ending.stderr.0),
+                ],
+            ),
+        };
+        Self {
+            detail,
+            failed_command_option: Some(crate::runtime_model::FailedCommand {
+                command_program: failure.command_program,
+                command_argument_vector: failure.command_argument_vector,
+                exit_code_option: exit_code
+                    .filter(|code| *code >= 0)
+                    .map(i64::from)
+                    .map(crate::runtime_model::ExitCode::new),
+            }),
+            reported_outputs,
         }
     }
 }
@@ -466,7 +468,8 @@ pub struct RuntimeConfiguration {
     test_defaults: Option<TestDefaults>,
 }
 
-/// Bounded execution settings for commands that leave the daemon process.
+/// The translator every process emission is emitted under: where a program
+/// comes from. Its `Emittable` impls, in `translator.rs`, hold the words.
 ///
 /// The optional program directory is a hermetic test seam: production resolves
 /// command names through the daemon service PATH; focused tests install fake
@@ -1019,21 +1022,12 @@ impl ClusterTopology for ClusterProjection {
     }
 }
 
-/// One hermetic-check build — the real `nix build <exact-selector>
-/// --print-out-paths` the daemon runs as the hermetic test effect. The selected
-/// check owns its sandboxed VM, so this is a pure build: exit 0 + an out-path
-/// = Passed; a non-zero exit = Failed(HermeticCheck). No SSH, tap, or live
-/// host is inferred by the daemon.
-#[derive(Debug, Clone)]
-struct HermeticCheck {
-    command: nexus::HermeticCheckCommand,
-}
-
-/// Something lojix does to the world outside itself: a process is run, a file
-/// system is written, a remote host is reached. Every effect runs through one
-/// [`EffectExecution`], which decides where the program comes from, and every
-/// failure comes back as a [`StageFailure`] carrying what the stage reported —
-/// the stage classification is the pipeline's business, not the effect's.
+/// A stage's attempt at the world outside lojix that takes more than one
+/// emission: a closure realized in the target's store, an activation, a
+/// Horizon materialization. It composes its emissions under one
+/// [`EffectExecution`], which decides where each program comes from, and
+/// every failure comes back as a [`StageFailure`] carrying what was observed —
+/// the stage classification is the pipeline's business, not the attempt's.
 pub(crate) trait Effect {
     /// What the world hands back when the effect succeeds.
     type Product;
@@ -1042,157 +1036,6 @@ pub(crate) trait Effect {
         &self,
         execution: &EffectExecution,
     ) -> std::result::Result<Self::Product, StageFailure>;
-}
-
-/// The one installable a hermetic check builds.
-trait CheckInstallable {
-    /// The exact `<flake>#<selector>` installable from the execution profile.
-    fn installable(&self) -> String;
-}
-
-impl CheckInstallable for HermeticCheck {
-    fn installable(&self) -> String {
-        format!(
-            "{}#{}",
-            self.command.flake_reference.payload(),
-            self.command
-                .test_execution_profile
-                .deployment_output_selector
-                .payload()
-                .payload(),
-        )
-    }
-}
-
-impl Effect for HermeticCheck {
-    type Product = ordinary::ClosurePath;
-
-    /// Run the real `nix build <installable> --print-out-paths`. On exit 0 the
-    /// first printed line is the realised check out-path (the closure under
-    /// test); on a non-zero exit the build/test failed.
-    async fn run(
-        &self,
-        execution: &EffectExecution,
-    ) -> std::result::Result<ordinary::ClosurePath, StageFailure> {
-        let output = NixCommand::build_check(&self.installable())
-            .run(execution)
-            .await?;
-        let closure_path = NixCommand::first_line(&output);
-        NixStorePath::from(closure_path.as_str())
-            .is_canonical_item_root()
-            .then(|| ordinary::ClosurePath::new(closure_path))
-            .ok_or_else(|| {
-                StageFailure::from("nix hermetic check returned a noncanonical closure path")
-            })
-    }
-}
-
-/// The live host-untouched VM lifecycle.
-/// — the report-51 user-namespace bring-up/teardown of the built microVM
-/// runner on the resolved vmhost. BUILT here, NOT run live (the first
-/// Prometheus cycle is psyche-gated): the invocation shapes are constructed so
-/// the bracket is provably end-to-end, but a live run is gated.
-///
-/// Bring-up `ssh <host-fqdn>` runs a `systemd-run --user` durable unit that
-/// `unshare -rn`'s a private network namespace, creates the additive tap
-/// inside it, and `nsenter`s the built runner — no sudo, no
-/// switch-to-configuration, host netns byte-identical. Teardown
-/// `systemctl --user stop`s the units so the tap + route vanish with the
-/// namespace.
-#[derive(Debug, Clone)]
-struct LiveTestVm {
-    target: SshTarget,
-    node: ordinary::NodeName,
-    runner: String,
-    guest_ip: String,
-}
-
-/// A live test VM as a systemd transient unit: its name and the invocations
-/// that bring it up and tear it down.
-trait TestVmCommands {
-    fn from_bring_up(command: &nexus::BringUpTestVmCommand) -> std::result::Result<Self, String>
-    where
-        Self: Sized;
-
-    fn from_tear_down(command: &nexus::TearDownTestVmCommand) -> std::result::Result<Self, String>
-    where
-        Self: Sized;
-
-    /// The durable `--user` unit name for this guest's namespace bring-up
-    /// (`lojix-test-vm-<node>`), the unit teardown stops.
-    fn unit_name(&self) -> String;
-
-    /// The host-untouched bring-up invocation (report 51 §3): a `--user`
-    /// systemd-run unit that `unshare -rn`s a private netns, brings up the
-    /// additive tap inside it, and `nsenter`s the built runner. Constructed
-    /// here; on a live (gated) run this is `.run().await`'d.
-    fn bring_up_invocation(&self) -> NixCommand;
-
-    /// The in-namespace bring-up body: create the tap, route to the guest IP,
-    /// then `nsenter` the built runner. The tap design maps one-to-one onto
-    /// the C2-emitted `.network` content (report 51 §2), applied in the netns
-    /// instead of host networkd.
-    fn bring_up_body(&self) -> String;
-
-    /// The host-untouched teardown invocation: stop the user units so the tap +
-    /// route vanish with the namespace (host netns byte-identical).
-    fn tear_down_invocation(&self) -> NixCommand;
-}
-
-impl TestVmCommands for LiveTestVm {
-    fn from_bring_up(command: &nexus::BringUpTestVmCommand) -> std::result::Result<Self, String> {
-        Ok(Self {
-            target: SshTarget::from_transport(&command.deployment_transport)?,
-            node: command.node.clone(),
-            runner: command.closure_path.payload().clone(),
-            guest_ip: command.string.clone(),
-        })
-    }
-
-    fn from_tear_down(command: &nexus::TearDownTestVmCommand) -> std::result::Result<Self, String> {
-        Ok(Self {
-            target: SshTarget::from_transport(&command.deployment_transport)?,
-            node: command.node.clone(),
-            runner: String::new(),
-            guest_ip: String::new(),
-        })
-    }
-
-    fn unit_name(&self) -> String {
-        format!("lojix-test-vm-{}", self.node.payload())
-    }
-
-    fn bring_up_invocation(&self) -> NixCommand {
-        let script = format!(
-            "set -eu\n\
-             systemd-run --user --unit={unit} --collect --service-type=notify \
-             unshare -rn /bin/sh -c {body}\n",
-            unit = self.unit_name(),
-            body = ShellArgument::new(self.bring_up_body()).to_command_text(),
-        );
-        self.target
-            .remote_invocation(ShellCommand::from_raw(script))
-    }
-
-    fn bring_up_body(&self) -> String {
-        format!(
-            "ip tuntap add dev vmt0 mode tap; \
-             ip addr add 169.254.100.1/32 dev vmt0; \
-             ip link set vmt0 up; \
-             ip route add {guest_ip} dev vmt0; \
-             exec {runner}",
-            guest_ip = self.guest_ip,
-            runner = self.runner,
-        )
-    }
-
-    fn tear_down_invocation(&self) -> NixCommand {
-        self.target
-            .remote_invocation(ShellCommand::from_raw(format!(
-                "systemctl --user stop {unit} || true",
-                unit = self.unit_name(),
-            )))
-    }
 }
 
 /// The synchronous outcome of [`SchemaRuntime::submit_deploy`] — the verdict the
@@ -1412,7 +1255,7 @@ pub struct DeployPipeline {
     source_revision: Option<ordinary::SourceRevisionRecord>,
     builder: Option<memory::NixBuilderSpec>,
     substituters: Vec<nexus::ExtraSubstituter>,
-    input_overrides: Vec<nexus::FlakeInputOverride>,
+    input_overrides: Vec<memory::PersistedFlakeInputOverride>,
     closure_path: Option<ordinary::ClosurePath>,
     accepted_marker: ordinary::DatabaseMarker,
     stage: DeployStage,
@@ -1672,13 +1515,6 @@ impl<'a> FlakeAdmission<'a> for FlakeReferencePolicy<'a> {
 /// full re-eval of the whole tree (witnessed at 10+ minutes over a slow link).
 /// Any other reference is potentially mutable, so it keeps `--refresh` and a
 /// moved ref re-resolves rather than serving a stale cached evaluation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EvalRefresh {
-    ForceRefresh,
-    TrustImmutablePin,
-}
-
-/// Whether a flake evaluation must refuse Nix's cached resolution.
 trait EvalFreshness {
     /// The refresh decision for one eval, from the deploy's source-revision
     /// policy and its resolved flake reference. Only a `RequireImmutable`
@@ -1687,88 +1523,51 @@ trait EvalFreshness {
     fn for_source(policy: ordinary::SourceRevisionPolicy, flake: &str) -> Self
     where
         Self: Sized;
-
-    fn adds_refresh_flag(self) -> bool;
 }
 
-impl EvalFreshness for EvalRefresh {
+impl EvalFreshness for emission::EvaluationFreshness {
     fn for_source(policy: ordinary::SourceRevisionPolicy, flake: &str) -> Self {
         match policy {
             ordinary::SourceRevisionPolicy::RequireImmutable
                 if FlakeReferencePolicy::new(flake).is_immutable() =>
             {
-                Self::TrustImmutablePin
+                Self::TrustingPin
             }
-            _ => Self::ForceRefresh,
+            _ => Self::Refreshed,
         }
     }
-
-    fn adds_refresh_flag(self) -> bool {
-        matches!(self, Self::ForceRefresh)
-    }
-}
-
-struct NixFlakeMetadata {
-    value: serde_json::Value,
 }
 
 /// Reading the source identity out of what `nix flake metadata` answered.
-trait FlakeMetadataReading {
-    fn parse(text: &str) -> std::result::Result<Self, String>
-    where
-        Self: Sized;
-
+trait SourceRevisionReading {
     fn source_revision(
         &self,
         policy: ordinary::SourceRevisionPolicy,
         requested_ref: ordinary::FlakeReference,
     ) -> ordinary::SourceRevisionRecord;
-
-    fn resolved_revision(&self) -> String;
-
-    fn string_at(&self, path: &[&str]) -> Option<String>;
 }
 
-impl FlakeMetadataReading for NixFlakeMetadata {
-    fn parse(text: &str) -> std::result::Result<Self, String> {
-        serde_json::from_str(text)
-            .map(|value| Self { value })
-            .map_err(|error| format!("nix flake metadata returned malformed json: {error}"))
-    }
-
+impl SourceRevisionReading for emission::FlakeMetadata {
+    /// The locked reference Nix resolved, or the requested one when it named
+    /// none; the revision it locked, or nothing.
     fn source_revision(
         &self,
         policy: ordinary::SourceRevisionPolicy,
         requested_ref: ordinary::FlakeReference,
     ) -> ordinary::SourceRevisionRecord {
         let resolved_ref = self
-            .string_at(&["url"])
-            .or_else(|| self.string_at(&["resolvedUrl"]))
-            .map(ordinary::FlakeReference::new)
+            .flake_reference_option
+            .clone()
             .unwrap_or_else(|| requested_ref.clone());
         ordinary::SourceRevisionRecord {
             source_revision_policy: policy,
             requested_reference: memory::RequestedReference(requested_ref),
             resolved_reference: memory::ResolvedReference(resolved_ref),
-            resolved_revision: memory::ResolvedRevision(self.resolved_revision()),
+            resolved_revision: self
+                .resolved_revision_option
+                .clone()
+                .unwrap_or_else(|| memory::ResolvedRevision(String::new())),
         }
-    }
-
-    fn resolved_revision(&self) -> String {
-        self.string_at(&["locked", "rev"])
-            .or_else(|| self.string_at(&["revision"]))
-            .or_else(|| self.string_at(&["rev"]))
-            .or_else(|| self.string_at(&["locked", "narHash"]))
-            .or_else(|| self.string_at(&["narHash"]))
-            .unwrap_or_default()
-    }
-
-    fn string_at(&self, path: &[&str]) -> Option<String> {
-        let mut value = &self.value;
-        for key in path {
-            value = value.get(*key)?;
-        }
-        value.as_str().map(ToOwned::to_owned)
     }
 }
 
@@ -1797,10 +1596,6 @@ trait DeployCursor {
     fn user_environment_activation_effect(
         action: meta::UserEnvironmentAction,
     ) -> ordinary::ActivationEffect;
-
-    fn convert_substituters(
-        substituters: Vec<meta::ExtraSubstituter>,
-    ) -> Vec<nexus::ExtraSubstituter>;
 
     /// Where the closure is realized. A deployment whose node is the daemon
     /// host builds through the local daemon Nix client (an explicit builder
@@ -1956,7 +1751,7 @@ impl DeployCursor for DeployPipeline {
                 source_revision_policy: deployment.source_revision_policy,
                 source_revision: None,
                 builder: deployment.nix_builder_spec_option,
-                substituters: Self::convert_substituters(deployment.extra_substituter_vector),
+                substituters: deployment.extra_substituter_vector,
                 input_overrides: Vec::new(),
                 closure_path: None,
                 accepted_marker,
@@ -1990,7 +1785,7 @@ impl DeployCursor for DeployPipeline {
                 source_revision_policy: deployment.source_revision_policy,
                 source_revision: None,
                 builder: deployment.nix_builder_spec_option,
-                substituters: Self::convert_substituters(deployment.extra_substituter_vector),
+                substituters: deployment.extra_substituter_vector,
                 input_overrides: Vec::new(),
                 closure_path: None,
                 accepted_marker,
@@ -2034,18 +1829,6 @@ impl DeployCursor for DeployPipeline {
             meta::UserEnvironmentAction::SetProfile => ordinary::ActivationEffect::ProfileOnly,
             meta::UserEnvironmentAction::ActivateNow => ordinary::ActivationEffect::LiveActivation,
         }
-    }
-
-    fn convert_substituters(
-        substituters: Vec<meta::ExtraSubstituter>,
-    ) -> Vec<nexus::ExtraSubstituter> {
-        substituters
-            .into_iter()
-            .map(|substituter| nexus::ExtraSubstituter {
-                url: substituter.first_string,
-                public_key: substituter.second_string,
-            })
-            .collect()
     }
 
     fn build_target(&self, daemon_host: &ordinary::NodeName) -> nexus::BuildTarget {
@@ -2296,24 +2079,7 @@ impl DeployCursor for DeployPipeline {
             nix_builder_spec_option: self.builder.clone(),
             boot_once_unit_option: self.boot_once_unit().map(memory::BootOnceUnit),
             generation_slot_option: self.activation_slot.clone(),
-            persisted_flake_input_override_vector: self
-                .input_overrides
-                .iter()
-                .map(|override_value| memory::PersistedFlakeInputOverride {
-                    flake_input_name: memory::FlakeInputName(override_value.string.clone()),
-                    persisted_flake_input_reference: memory::PersistedFlakeInputReference {
-                        flake_input_url: memory::FlakeInputUrl(
-                            override_value.flake_input_reference.url.clone(),
-                        ),
-                        nix_archive_hash: memory::NixArchiveHash(
-                            override_value
-                                .flake_input_reference
-                                .nix_archive_hash
-                                .clone(),
-                        ),
-                    },
-                })
-                .collect(),
+            persisted_flake_input_override_vector: self.input_overrides.clone(),
             deploy_resume_stage: self.resume_stage.clone(),
             phase_receipt_option: self.phase_receipt.clone(),
             actualized_deploy_submission_option: Some(self.submission.clone()),
@@ -3765,7 +3531,7 @@ pub trait DeployDriving {
     /// `EffectResult` must not reach a later build, copy, or activation command.
     fn set_closure_path(&mut self, closure_path: ordinary::ClosurePath) -> bool;
 
-    fn set_input_overrides(&mut self, overrides: Vec<nexus::FlakeInputOverride>);
+    fn set_input_overrides(&mut self, overrides: Vec<memory::PersistedFlakeInputOverride>);
 
     fn set_resolved_flake(
         &mut self,
@@ -3904,25 +3670,7 @@ impl DeployDriving for SchemaRuntime {
         pipeline.builder = job.nix_builder_spec_option.clone();
         pipeline.closure_path = job.closure_path_option.clone();
         pipeline.activation_slot = job.generation_slot_option;
-        pipeline.input_overrides = job
-            .persisted_flake_input_override_vector
-            .iter()
-            .map(|override_value| nexus::FlakeInputOverride {
-                string: override_value.flake_input_name.0.clone(),
-                flake_input_reference: nexus::FlakeInputReference {
-                    url: override_value
-                        .persisted_flake_input_reference
-                        .flake_input_url
-                        .0
-                        .clone(),
-                    nix_archive_hash: override_value
-                        .persisted_flake_input_reference
-                        .nix_archive_hash
-                        .0
-                        .clone(),
-                },
-            })
-            .collect();
+        pipeline.input_overrides = job.persisted_flake_input_override_vector.clone();
         pipeline.resume_stage = job.deploy_resume_stage;
         pipeline.phase_receipt = job.phase_receipt_option.clone();
         let mut recovered_phase_receipt = false;
@@ -4234,7 +3982,7 @@ impl DeployDriving for SchemaRuntime {
         }
     }
 
-    fn set_input_overrides(&mut self, overrides: Vec<nexus::FlakeInputOverride>) {
+    fn set_input_overrides(&mut self, overrides: Vec<memory::PersistedFlakeInputOverride>) {
         if let Some(pipeline) = self.active_deploy.as_mut() {
             pipeline.input_overrides = overrides;
         }
@@ -5194,8 +4942,9 @@ impl MemoryObserving for SchemaRuntime {
 }
 
 /// Running one decided effect against the world outside the Nexus and
-/// reporting what came back. Each arm hands its work to the [`Effect`] that
-/// owns it and classifies the failure into the stage the pipeline understands.
+/// reporting what came back. Each arm is one attempt: it composes the
+/// emissions its stage needs, awaits each on a blocking thread, and
+/// classifies a failure into the stage the pipeline understands.
 pub(crate) trait EffectRunning {
     async fn resolve_flake_auth(&self, request: nexus::FlakeAuthRequest) -> nexus::EffectResult;
 
@@ -5227,19 +4976,19 @@ pub(crate) trait EffectRunning {
 
     /// The live bring-up effect. BUILT
     /// here, NOT run live (the first Prometheus cycle is psyche-gated): the
-    /// host-untouched user-namespace bring-up command is constructed
-    /// (`ssh <host-fqdn>` + `systemd-run --user` + `unshare -rn` + `nsenter`)
-    /// and would, on a live run, start the generated microVM runner + additive
-    /// tap inside a private user network namespace on the resolved vmhost. The
-    /// gated build path returns `TestVmBroughtUp` so the bracket is provably
-    /// constructed end-to-end without touching a real host.
+    /// host-untouched user-namespace bring-up emission is constructed
+    /// (`ssh <host-fqdn>` + `systemd-run --user` + `unshare -rn`) and would, on
+    /// a live run, start the generated microVM runner + additive tap inside a
+    /// private user network namespace on the resolved vmhost. The gated build
+    /// path returns `TestVmBroughtUp` so the bracket is provably constructed
+    /// end-to-end without touching a real host.
     async fn run_bring_up_test_vm(
         &self,
         command: nexus::BringUpTestVmCommand,
     ) -> nexus::EffectResult;
 
     /// The LIVE teardown effect (Unit 2b). BUILT here, NOT run live: constructs
-    /// the `systemctl --user stop` command that, on a live run, stops the user
+    /// the `systemctl --user stop` emission that, on a live run, stops the user
     /// units so the tap + route vanish with the namespace (host netns
     /// byte-identical). Returns `TestVmTornDown` for the gated build path.
     async fn run_tear_down_test_vm(
@@ -5266,18 +5015,27 @@ impl EffectRunning for SchemaRuntime {
         // Resolve the flake metadata to a locked revision through Nix. The
         // typed SourceRevisionRecord produced here is carried through the
         // eval/build path, event log, deploy-job row, and live-generation state.
-        match NixCommand::flake_metadata(request.flake_reference.payload())
-            .run(self.configuration.effect_execution())
+        match self
+            .configuration
+            .effect_execution()
+            .emitted(emission::FlakeMetadataQuery {
+                flake_reference: request.flake_reference.clone(),
+            })
             .await
         {
-            Ok(output) => match NixFlakeMetadata::parse(&output) {
-                Ok(metadata) => nexus::EffectResult::FlakeResolved(nexus::ResolvedFlake::new(
+            emission::FlakeMetadataOutcome::Read(metadata) => {
+                nexus::EffectResult::FlakeResolved(nexus::ResolvedFlake::new(
                     metadata
                         .source_revision(request.source_revision_policy, request.flake_reference),
-                )),
-                Err(detail) => Self::effect_failed(nexus::EffectStage::FlakeAuth, detail),
-            },
-            Err(detail) => Self::effect_failed(nexus::EffectStage::FlakeAuth, detail),
+                ))
+            }
+            emission::FlakeMetadataOutcome::Malformed(fault) => Self::effect_failed(
+                nexus::EffectStage::FlakeAuth,
+                format!("nix flake metadata returned malformed json: {}", fault.0),
+            ),
+            emission::FlakeMetadataOutcome::Failed(failure) => {
+                Self::effect_failed(nexus::EffectStage::FlakeAuth, failure)
+            }
         }
     }
 
@@ -5299,26 +5057,14 @@ impl EffectRunning for SchemaRuntime {
     }
 
     async fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> nexus::EffectResult {
-        let attribute = format!(
-            "{}#{}",
-            command.flake_reference.payload(),
-            command.deployment_output_selector.payload().payload(),
-        );
-        let refresh = EvalRefresh::for_source(
-            command.source_revision_record.source_revision_policy,
-            command.flake_reference.payload(),
-        );
-        match NixCommand::eval_drv_path(
-            &attribute,
-            &command.flake_input_override_vector,
-            &command.build_target,
-            refresh,
-        )
-        .run(self.configuration.effect_execution())
-        .await
+        match self
+            .configuration
+            .effect_execution()
+            .emitted(command.evaluation())
+            .await
         {
-            Ok(output) => {
-                let closure_path = NixCommand::first_line(&output);
+            emission::PathOutcome::Printed(printed) => {
+                let closure_path = printed.printed_text();
                 if !NixStorePath::from(closure_path.as_str()).is_canonical_item_root() {
                     return Self::effect_failed(
                         nexus::EffectStage::Eval,
@@ -5330,7 +5076,9 @@ impl EffectRunning for SchemaRuntime {
                     closure_path: ordinary::ClosurePath::new(closure_path),
                 })
             }
-            Err(detail) => Self::effect_failed(nexus::EffectStage::Eval, detail),
+            emission::PathOutcome::Failed(failure) => {
+                Self::effect_failed(nexus::EffectStage::Eval, failure)
+            }
         }
     }
 
@@ -5341,24 +5089,30 @@ impl EffectRunning for SchemaRuntime {
         // other node realizes in its own store (`TargetStore`): the derivation
         // closure goes over, the target daemon builds, and a target-side GC
         // root holds the output until activation.
-        let invocation = match &command.build_target {
+        let build_place = match &command.build_target {
             nexus::BuildTarget::TargetStore(build) => {
                 return self.run_target_store_build(&command, build).await;
             }
-            nexus::BuildTarget::Local => NixCommand::build_closure(
-                command.closure_path.payload(),
-                &command.extra_substituter_vector,
-            ),
-            nexus::BuildTarget::Remote(builder_spec) => NixCommand::build_closure_remote(
-                command.closure_path.payload(),
-                builder_spec.payload(),
-                &command.extra_substituter_vector,
-            ),
+            nexus::BuildTarget::Local => emission::BuildPlace::DaemonStore,
+            nexus::BuildTarget::Remote(builder_spec) => {
+                emission::BuildPlace::Offloaded(builder_spec.clone())
+            }
         };
-        match invocation.run(self.configuration.effect_execution()).await {
-            Ok(output) => {
-                let closure_path =
-                    NixCommand::first_line_or(&output, command.closure_path.payload());
+        match self
+            .configuration
+            .effect_execution()
+            .emitted(emission::ClosureBuild {
+                closure_path: command.closure_path.clone(),
+                build_place,
+                extra_substituter_vector: command.extra_substituter_vector.clone(),
+            })
+            .await
+        {
+            emission::PathOutcome::Printed(printed) => {
+                let closure_path = printed
+                    .closure_path_option
+                    .unwrap_or_else(|| command.closure_path.clone())
+                    .into_payload();
                 if !NixStorePath::from(closure_path.as_str()).is_canonical_item_root() {
                     return Self::effect_failed(
                         nexus::EffectStage::Build,
@@ -5370,7 +5124,9 @@ impl EffectRunning for SchemaRuntime {
                     closure_path: ordinary::ClosurePath::new(closure_path),
                 })
             }
-            Err(detail) => Self::effect_failed(nexus::EffectStage::Build, detail),
+            emission::PathOutcome::Failed(failure) => {
+                Self::effect_failed(nexus::EffectStage::Build, failure)
+            }
         }
     }
 
@@ -5409,17 +5165,16 @@ impl EffectRunning for SchemaRuntime {
     }
 
     async fn run_copy_closure(&self, command: nexus::CopyClosureCommand) -> nexus::EffectResult {
-        let copied = nexus::EffectResult::ClosureCopied(nexus::CopiedClosure {
-            generation_identifier: command.generation_identifier,
-            node_name: command.node_name.clone(),
-            closure_path: command.closure_path.clone(),
-        });
-        let copy = match ClosureCopy::from_command(&command) {
-            Ok(copy) => copy,
+        let transfer = match ClosureTransfer::from_command(&command) {
+            Ok(transfer) => transfer,
             Err(detail) => return Self::effect_failed(nexus::EffectStage::CopyClosure, detail),
         };
-        match copy.run(self.configuration.effect_execution()).await {
-            Ok(()) => copied,
+        match transfer.run(self.configuration.effect_execution()).await {
+            Ok(()) => nexus::EffectResult::ClosureCopied(nexus::CopiedClosure {
+                generation_identifier: command.generation_identifier,
+                node_name: command.node_name,
+                closure_path: command.closure_path,
+            }),
             Err(detail) => Self::effect_failed(nexus::EffectStage::CopyClosure, detail),
         }
     }
@@ -5466,16 +5221,24 @@ impl EffectRunning for SchemaRuntime {
     }
 
     async fn run_path_info_gc(&self, command: nexus::PathInfoGcCommand) -> nexus::EffectResult {
-        match NixCommand::collect_garbage(command.node_name.payload())
-            .run(self.configuration.effect_execution())
+        match self
+            .configuration
+            .effect_execution()
+            .emitted(emission::GarbageCollection {
+                node_name: command.node_name.clone(),
+            })
             .await
         {
-            Ok(output) => nexus::EffectResult::PathsCollected(nexus::GarbageCollected {
-                cluster_name: command.cluster_name,
-                node_name: command.node_name,
-                integer: NixCommand::count_lines(&output),
-            }),
-            Err(detail) => Self::effect_failed(nexus::EffectStage::Gc, detail),
+            emission::GarbageOutcome::Collected(collected) => {
+                nexus::EffectResult::PathsCollected(nexus::GarbageCollected {
+                    cluster_name: command.cluster_name,
+                    node_name: command.node_name,
+                    integer: collected.0 as u64,
+                })
+            }
+            emission::GarbageOutcome::Failed(failure) => {
+                Self::effect_failed(nexus::EffectStage::Gc, failure)
+            }
         }
     }
 
@@ -5483,18 +5246,35 @@ impl EffectRunning for SchemaRuntime {
         &self,
         command: nexus::HermeticCheckCommand,
     ) -> nexus::EffectResult {
-        let cluster_name = command.cluster_name.clone();
-        let node_name = command.node_name.clone();
-        match (HermeticCheck { command })
-            .run(self.configuration.effect_execution())
+        match self
+            .configuration
+            .effect_execution()
+            .emitted(emission::CheckBuild {
+                flake_reference: command.flake_reference.clone(),
+                deployment_output_selector: command
+                    .test_execution_profile
+                    .deployment_output_selector
+                    .clone(),
+            })
             .await
         {
-            Ok(closure_path) => nexus::EffectResult::HermeticCheckBuilt(nexus::CheckBuilt {
-                cluster_name,
-                node_name,
-                closure_path,
-            }),
-            Err(detail) => Self::effect_failed(nexus::EffectStage::HermeticCheck, detail),
+            emission::PathOutcome::Printed(printed) => {
+                let closure_path = printed.printed_text();
+                if !NixStorePath::from(closure_path.as_str()).is_canonical_item_root() {
+                    return Self::effect_failed(
+                        nexus::EffectStage::HermeticCheck,
+                        "nix hermetic check returned a noncanonical closure path",
+                    );
+                }
+                nexus::EffectResult::HermeticCheckBuilt(nexus::CheckBuilt {
+                    cluster_name: command.cluster_name,
+                    node_name: command.node_name,
+                    closure_path: ordinary::ClosurePath::new(closure_path),
+                })
+            }
+            emission::PathOutcome::Failed(failure) => {
+                Self::effect_failed(nexus::EffectStage::HermeticCheck, failure)
+            }
         }
     }
 
@@ -5502,15 +5282,12 @@ impl EffectRunning for SchemaRuntime {
         &self,
         command: nexus::BringUpTestVmCommand,
     ) -> nexus::EffectResult {
-        let bring_up = match LiveTestVm::from_bring_up(&command) {
-            Ok(bring_up) => bring_up,
-            Err(detail) => return Self::effect_failed(nexus::EffectStage::BringUpTestVm, detail),
-        };
-        // The invocation is CONSTRUCTED (the host-untouched user-namespace
-        // command) but not executed — a live run is gated. Constructing it
-        // proves the command shape; `invocation()` is the on-host effect a live
-        // run would `.run().await`.
-        let _invocation = bring_up.bring_up_invocation();
+        // The emission is CONSTRUCTED (the host-untouched user-namespace
+        // call) but not emitted — a live run is gated. Constructing it proves
+        // the call's shape; emitting it is the on-host effect a live run makes.
+        if let Err(detail) = command.emission() {
+            return Self::effect_failed(nexus::EffectStage::BringUpTestVm, detail);
+        }
         nexus::EffectResult::TestVmStarted(nexus::TestVmBroughtUp {
             cluster_name: command.cluster_name,
             node: command.node,
@@ -5522,11 +5299,9 @@ impl EffectRunning for SchemaRuntime {
         &self,
         command: nexus::TearDownTestVmCommand,
     ) -> nexus::EffectResult {
-        let tear_down = match LiveTestVm::from_tear_down(&command) {
-            Ok(tear_down) => tear_down,
-            Err(detail) => return Self::effect_failed(nexus::EffectStage::TearDownTestVm, detail),
-        };
-        let _invocation = tear_down.tear_down_invocation();
+        if let Err(detail) = command.emission() {
+            return Self::effect_failed(nexus::EffectStage::TearDownTestVm, detail);
+        }
         nexus::EffectResult::TestVmStopped(nexus::TestVmTornDown {
             cluster_name: command.cluster_name,
             node: command.node,
@@ -5542,6 +5317,76 @@ impl EffectRunning for SchemaRuntime {
             effect_stage: stage,
             failure_evidence: reported.into().witness(),
         })
+    }
+}
+
+/// The live test VM's emissions: the host-untouched user-namespace bring-up
+/// of the built runner on the resolved vmhost, and its teardown.
+trait TestVmEmitting {
+    type Emission;
+
+    fn emission(&self) -> std::result::Result<Self::Emission, String>;
+}
+
+impl TestVmEmitting for nexus::BringUpTestVmCommand {
+    type Emission = emission::TestVmBringUp;
+
+    fn emission(&self) -> std::result::Result<emission::TestVmBringUp, String> {
+        let target = SshTarget::from_transport(&self.deployment_transport)?;
+        Ok(emission::TestVmBringUp {
+            ssh_destination: target.ssh_destination,
+            guest_node: emission::GuestNode(self.node.clone()),
+            closure_path: self.closure_path.clone(),
+            guest_address: emission::GuestAddress(self.string.clone()),
+        })
+    }
+}
+
+impl TestVmEmitting for nexus::TearDownTestVmCommand {
+    type Emission = emission::TestVmTearDown;
+
+    fn emission(&self) -> std::result::Result<emission::TestVmTearDown, String> {
+        let target = SshTarget::from_transport(&self.deployment_transport)?;
+        Ok(emission::TestVmTearDown {
+            ssh_destination: target.ssh_destination,
+            guest_node: emission::GuestNode(self.node.clone()),
+        })
+    }
+}
+
+/// The evaluation an eval command asks for. The build target it carries
+/// contributes nothing: evaluation always stays in the daemon host's own
+/// store, because an ssh-ng evaluation store can deadlock in remote transport
+/// (lojix 0.3.9), and a `TargetStore` build copies the evaluated derivation
+/// closure to the target afterwards instead.
+trait Evaluating {
+    fn evaluation(&self) -> emission::DerivationEvaluation;
+}
+
+impl Evaluating for nexus::NixEvalCommand {
+    fn evaluation(&self) -> emission::DerivationEvaluation {
+        emission::DerivationEvaluation {
+            flake_reference: self.flake_reference.clone(),
+            deployment_output_selector: self.deployment_output_selector.clone(),
+            evaluation_freshness: emission::EvaluationFreshness::for_source(
+                self.source_revision_record.source_revision_policy.clone(),
+                self.flake_reference.payload(),
+            ),
+            persisted_flake_input_override_vector: self.flake_input_override_vector.clone(),
+        }
+    }
+}
+
+/// The path a Nix command printed first, as text: empty when it printed none.
+trait PrintedPathText {
+    fn printed_text(self) -> String;
+}
+
+impl PrintedPathText for emission::PrintedPath {
+    fn printed_text(self) -> String {
+        self.closure_path_option
+            .map(Payload::into_payload)
+            .unwrap_or_default()
     }
 }
 
@@ -5745,7 +5590,7 @@ trait GeneratedInputWriting: Sized {
         &self,
         name: GeneratedInputName,
         execution: &EffectExecution,
-    ) -> Result<nexus::FlakeInputOverride>;
+    ) -> Result<memory::PersistedFlakeInputOverride>;
 }
 
 impl GeneratedInputWriting for GeneratedInputDirectory {
@@ -5832,13 +5677,27 @@ impl GeneratedInputWriting for GeneratedInputDirectory {
         &self,
         name: GeneratedInputName,
         execution: &EffectExecution,
-    ) -> Result<nexus::FlakeInputOverride> {
-        let hash = NarHash::from_path(&self.path, execution).await?;
-        Ok(nexus::FlakeInputOverride {
-            string: name.as_str().to_string(),
-            flake_input_reference: nexus::FlakeInputReference {
-                url: format!("path:{}", self.path.display()),
-                nix_archive_hash: hash.as_url_query_value(),
+    ) -> Result<memory::PersistedFlakeInputOverride> {
+        let hash = match execution
+            .emitted(emission::InputHashing {
+                input_directory: emission::InputDirectory(self.path.display().to_string()),
+            })
+            .await
+        {
+            emission::HashOutcome::Hashed(hash) => hash,
+            emission::HashOutcome::Failed(failure) => {
+                return Err(std::io::Error::other(format!(
+                    "failed to hash generated input: {}",
+                    StageFailure::from(failure).reported_text()
+                ))
+                .into());
+            }
+        };
+        Ok(memory::PersistedFlakeInputOverride {
+            flake_input_name: memory::FlakeInputName(name.as_str().to_string()),
+            persisted_flake_input_reference: memory::PersistedFlakeInputReference {
+                flake_input_url: memory::FlakeInputUrl(format!("path:{}", self.path.display())),
+                nix_archive_hash: memory::NixArchiveHash(hash.as_url_query_value()),
             },
         })
     }
@@ -6064,34 +5923,12 @@ impl crate::Named for NixSystemName {
     }
 }
 
-/// SRI NAR hash for a generated input directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NarHash(String);
-
-/// The NAR hash of a store path, as Nix reports it and as a flake URL carries
-/// it.
-trait NarHashing {
-    async fn from_path(path: &Path, execution: &EffectExecution) -> Result<Self>
-    where
-        Self: Sized;
-
+/// An SRI NAR hash as a flake URL's `narHash` query value carries it.
+trait NarHashQuery {
     fn as_url_query_value(&self) -> String;
 }
 
-impl NarHashing for NarHash {
-    async fn from_path(path: &Path, execution: &EffectExecution) -> Result<Self> {
-        let output = NixCommand::hash_path(path)
-            .run(execution)
-            .await
-            .map_err(|detail| {
-                std::io::Error::other(format!(
-                    "failed to hash generated input: {}",
-                    detail.reported_text()
-                ))
-            })?;
-        Ok(Self(NixCommand::first_line(&output)))
-    }
-
+impl NarHashQuery for emission::SriHash {
     fn as_url_query_value(&self) -> String {
         self.0
             .chars()
@@ -6105,14 +5942,14 @@ impl NarHashing for NarHash {
     }
 }
 
-/// Exact request-supplied deployment transport. The two strings have distinct
+/// Exact request-supplied deployment transport. The two values have distinct
 /// consumers: Nix receives `nix_store_uri` and SSH receives
 /// `ssh_destination`. They are validated as command arguments but never
 /// normalized, rewritten, or derived from cluster/node identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SshTarget {
-    nix_store_uri: String,
-    ssh_destination: String,
+    nix_store_uri: ordinary::NixStoreUri,
+    ssh_destination: ordinary::SshDestination,
 }
 
 /// The authority available to a remote Home Manager activation. The SSH login
@@ -6137,6 +5974,9 @@ trait SshRouting {
 
     fn validate_ssh_destination(value: &str) -> std::result::Result<(), String>;
 
+    /// The login half of the validated destination.
+    fn login(&self) -> &str;
+
     /// Classify the explicit SSH login for a Home Manager target. Only the
     /// literal `root` login carries mediation authority; Lojix never promotes
     /// another login or derives a root route from node or user identity.
@@ -6144,20 +5984,15 @@ trait SshRouting {
         &self,
         user: &HorizonUserName,
     ) -> RemoteUserActivationAuthority;
-
-    /// `ssh -o BatchMode=yes <user>@<domain> <remote_command>`.
-    fn remote_invocation(&self, remote_command: ShellCommand) -> NixCommand;
 }
 
 impl SshRouting for SshTarget {
     fn from_transport(transport: &nexus::DeploymentTransport) -> std::result::Result<Self, String> {
-        let nix_store_uri = transport.nix_store_uri.payload().clone();
-        let ssh_destination = transport.ssh_destination.payload().clone();
-        Self::validate_nix_store_uri(&nix_store_uri)?;
-        Self::validate_ssh_destination(&ssh_destination)?;
+        Self::validate_nix_store_uri(transport.nix_store_uri.payload())?;
+        Self::validate_ssh_destination(transport.ssh_destination.payload())?;
         Ok(Self {
-            nix_store_uri,
-            ssh_destination,
+            nix_store_uri: transport.nix_store_uri.clone(),
+            ssh_destination: transport.ssh_destination.clone(),
         })
     }
 
@@ -6196,14 +6031,19 @@ impl SshRouting for SshTarget {
         Ok(())
     }
 
+    fn login(&self) -> &str {
+        self.ssh_destination
+            .payload()
+            .split_once('@')
+            .map(|(login, _)| login)
+            .expect("SshTarget retains a validated SSH destination")
+    }
+
     fn user_environment_activation_authority(
         &self,
         user: &HorizonUserName,
     ) -> RemoteUserActivationAuthority {
-        let (login, _) = self
-            .ssh_destination
-            .split_once('@')
-            .expect("SshTarget retains a validated SSH destination");
+        let login = self.login();
         if login == user.as_str() {
             RemoteUserActivationAuthority::MatchedUser
         } else if login == "root" {
@@ -6212,266 +6052,73 @@ impl SshRouting for SshTarget {
             RemoteUserActivationAuthority::UnprivilegedMismatch
         }
     }
-
-    fn remote_invocation(&self, remote_command: ShellCommand) -> NixCommand {
-        NixCommand::new(
-            "ssh",
-            vec![
-                "-o".to_string(),
-                "BatchMode=yes".to_string(),
-                self.ssh_destination.clone(),
-                remote_command.into_text(),
-            ],
-        )
-    }
 }
 
-/// A pre-quoted remote shell command body — the single string ssh runs on the
-/// target.
+/// Moving the realized closure to the activation target. A closure the
+/// dispatcher realized is copied with `--substitute-on-destination`, so the
+/// target pulls signed paths from the cluster cache when it can, using the
+/// request-owned `nix_store_uri` verbatim. A closure the target built itself
+/// is not transferred: its presence there is confirmed, and its absence fails
+/// with that command's evidence. Both are idempotent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ShellCommand(String);
-
-/// A remote shell script body, admitted as raw text and handed over unchanged.
-trait ShellScript {
-    fn from_raw(script: impl Into<String>) -> Self
-    where
-        Self: Sized;
-
-    fn into_text(self) -> String;
+enum ClosureTransfer {
+    Copy(emission::ClosureCopy),
+    PresenceCheck(emission::ClosurePresence),
 }
 
-impl ShellScript for ShellCommand {
-    fn from_raw(script: impl Into<String>) -> Self {
-        Self(script.into())
-    }
-
-    fn into_text(self) -> String {
-        self.0
-    }
-}
-
-/// A single argument rendered safe for a remote `/bin/sh -c` body. Ported from
-/// shell argument rendering: bare when the text is wholly
-/// shell-safe, single-quoted (with `'\''` escaping) otherwise.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ShellArgument {
-    text: String,
-}
-
-/// One argument as it must appear inside a shell command line.
-trait ShellQuoting {
-    fn new(text: impl Into<String>) -> Self
-    where
-        Self: Sized;
-
-    fn to_command_text(&self) -> String;
-}
-
-impl ShellQuoting for ShellArgument {
-    fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
-    }
-
-    fn to_command_text(&self) -> String {
-        let safe = !self.text.is_empty()
-            && self.text.bytes().all(|byte| {
-                matches!(
-                    byte,
-                    b'a'..=b'z'
-                        | b'A'..=b'Z'
-                        | b'0'..=b'9'
-                        | b'-'
-                        | b'_'
-                        | b'.'
-                        | b'/'
-                        | b'='
-                        | b':'
-                        | b'#'
-                        | b'+'
-                        | b','
-                )
-            });
-        if safe {
-            return self.text.clone();
-        }
-        format!("'{}'", self.text.replace('\'', "'\\''"))
-    }
-}
-
-/// Move the locally realized immutable closure from the dispatcher store to
-/// the activation target. Uses the request-owned `nix_store_uri` verbatim.
-/// Always passes `--substitute-on-destination` so the target pulls signed paths
-/// from the cluster cache when available; unsigned daemon-to-daemon transfer
-/// is rejected under `require-sigs` (risk R6).
-///
-/// A closure realized in the target's own store is not transferred: the copy
-/// only confirms, with `nix path-info --store <uri>`, that the output is valid
-/// there, and fails with that command's evidence when it is not.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ClosureCopy {
-    store_path: String,
-    store_uri: String,
-    closure_origin: nexus::ClosureOrigin,
-}
-
-/// Copying one closure to the store the deployment names.
-trait ClosureCopying: Sized {
+/// Choosing the transfer a copy command needs.
+trait ClosureTransferring: Sized {
     fn from_command(command: &nexus::CopyClosureCommand) -> std::result::Result<Self, String>;
-
-    fn invocation(&self) -> NixCommand;
 }
 
-impl ClosureCopying for ClosureCopy {
+impl ClosureTransferring for ClosureTransfer {
     fn from_command(command: &nexus::CopyClosureCommand) -> std::result::Result<Self, String> {
         let target = SshTarget::from_transport(&command.deployment_transport)?;
-        Ok(Self {
-            store_path: command.closure_path.payload().clone(),
-            store_uri: target.nix_store_uri,
-            closure_origin: command.closure_origin,
+        Ok(match command.closure_origin {
+            nexus::ClosureOrigin::TargetStore => Self::PresenceCheck(emission::ClosurePresence {
+                nix_store_uri: target.nix_store_uri,
+                closure_path: command.closure_path.clone(),
+            }),
+            nexus::ClosureOrigin::DaemonStore => Self::Copy(emission::ClosureCopy {
+                nix_store_uri: target.nix_store_uri,
+                closure_path: command.closure_path.clone(),
+            }),
         })
-    }
-
-    /// Copy is idempotent: if the closure already exists on the target, Nix
-    /// exits successfully without changing the activation state. A closure the
-    /// target built itself is only checked for presence there.
-    fn invocation(&self) -> NixCommand {
-        if matches!(self.closure_origin, nexus::ClosureOrigin::TargetStore) {
-            return NixCommand::new(
-                "nix",
-                vec![
-                    "path-info".to_string(),
-                    "--store".to_string(),
-                    self.store_uri.clone(),
-                    self.store_path.clone(),
-                ],
-            );
-        }
-        let arguments: Vec<String> = vec![
-            "copy".to_string(),
-            "--substitute-on-destination".to_string(),
-            "--to".to_string(),
-            self.store_uri.clone(),
-            self.store_path.clone(),
-        ];
-        NixCommand::new("nix", arguments)
     }
 }
 
-impl Effect for ClosureCopy {
+impl Effect for ClosureTransfer {
     type Product = ();
 
     async fn run(&self, execution: &EffectExecution) -> std::result::Result<(), StageFailure> {
-        self.invocation().run(execution).await.map(|_| ())
+        match self {
+            Self::Copy(copy) => execution.emitted(copy.clone()).await,
+            Self::PresenceCheck(presence) => execution.emitted(presence.clone()).await,
+        }
+        .completed()
     }
 }
 
 /// Realizing a locally evaluated derivation in the deployment's own store.
 ///
-/// Evaluation already happened in the daemon host's store (never over ssh-ng;
-/// see `eval_drv_path`). Three commands follow, each idempotent, so a resumed
-/// `NixBuild` stage simply runs them again:
+/// Evaluation already happened in the daemon host's store (never over ssh-ng).
+/// Three emissions follow, each idempotent, so a resumed `NixBuild` stage
+/// simply makes them again:
 ///
-/// 1. `nix copy --derivation --to <uri> <drv>` sends the derivation closure;
-/// 2. `nix build --no-link --print-out-paths --store <uri> <drv>^*` has the
-///    target's daemon build or substitute the outputs with its own settings
-///    (no `--builders`, no `max-jobs`: the operator's builder list is not the
-///    target's);
-/// 3. `ssh <destination> nix-store --add-root <root> --realise <out>` roots
-///    the output on the target so its garbage collector keeps it until the
-///    copy and activation stages have run.
+/// 1. the derivation closure is copied to the target store;
+/// 2. the target's daemon builds or substitutes the outputs with its own
+///    settings (no `--builders`, no `max-jobs`: the operator's builder list is
+///    not the target's);
+/// 3. the output is rooted on the target, so its garbage collector keeps it
+///    until the copy and activation stages have run. A root login writes a
+///    direct root under `/nix/var/nix/gcroots/lojix/<operator>/`; any other
+///    login an indirect root under its own
+///    `$HOME/.local/state/lojix/gcroots/<operator>/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TargetStoreRealization {
-    derivation_path: String,
-    target: SshTarget,
-    gc_root: TargetGcRoot,
-    substituters: Vec<nexus::ExtraSubstituter>,
-}
-
-/// Where the target-side GC root for one generation lives. A root login
-/// writes a direct root under `/nix/var/nix/gcroots/lojix/<operator>/`; any
-/// other login writes an indirect root under its own
-/// `$HOME/.local/state/lojix/gcroots/<operator>/`, which the target daemon
-/// registers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TargetGcRoot {
-    directory: TargetGcRootDirectory,
-    operator_node: String,
-    generation: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TargetGcRootDirectory {
-    SystemRoots,
-    LoginHome,
-}
-
-/// Naming and writing the target-side GC root.
-trait TargetGcRooting {
-    fn for_login(ssh_destination: &str, operator_node: &str, generation: i64) -> Self
-    where
-        Self: Sized;
-
-    /// The root directory as remote shell text (`$HOME` is expanded there).
-    fn directory_text(&self) -> String;
-
-    /// The root path as readable text, for the daemon log.
-    fn display_text(&self) -> String;
-
-    /// The remote shell body that creates the directory and the root.
-    fn shell_command(&self, output_path: &str) -> ShellCommand;
-}
-
-impl TargetGcRooting for TargetGcRoot {
-    fn for_login(ssh_destination: &str, operator_node: &str, generation: i64) -> Self {
-        let login = ssh_destination
-            .split_once('@')
-            .map(|(login, _)| login)
-            .unwrap_or(ssh_destination);
-        let directory = if login == "root" {
-            TargetGcRootDirectory::SystemRoots
-        } else {
-            TargetGcRootDirectory::LoginHome
-        };
-        Self {
-            directory,
-            operator_node: operator_node.to_string(),
-            generation,
-        }
-    }
-
-    fn directory_text(&self) -> String {
-        let operator = ShellArgument::new(self.operator_node.clone()).to_command_text();
-        match self.directory {
-            TargetGcRootDirectory::SystemRoots => {
-                format!("/nix/var/nix/gcroots/lojix/{operator}")
-            }
-            TargetGcRootDirectory::LoginHome => {
-                format!("\"$HOME\"/.local/state/lojix/gcroots/{operator}")
-            }
-        }
-    }
-
-    fn display_text(&self) -> String {
-        let directory = match self.directory {
-            TargetGcRootDirectory::SystemRoots => "/nix/var/nix/gcroots/lojix",
-            TargetGcRootDirectory::LoginHome => "$HOME/.local/state/lojix/gcroots",
-        };
-        format!(
-            "{directory}/{}/generation-{}",
-            self.operator_node, self.generation
-        )
-    }
-
-    fn shell_command(&self, output_path: &str) -> ShellCommand {
-        let directory = self.directory_text();
-        let output = ShellArgument::new(output_path).to_command_text();
-        ShellCommand::from_raw(format!(
-            "export PATH=/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:$PATH \
-             && mkdir -p {directory} \
-             && nix-store --add-root {directory}/generation-{generation} --realise {output}",
-            generation = self.generation,
-        ))
-    }
+    derivation_copy: emission::DerivationCopy,
+    build: emission::TargetStoreBuild,
+    rooting: emission::TargetStoreRooting,
 }
 
 /// Building one derivation in the deployment's own store.
@@ -6481,11 +6128,8 @@ trait TargetStoreRealizing: Sized {
         build: &nexus::TargetStoreBuild,
     ) -> std::result::Result<Self, String>;
 
-    fn derivation_copy_invocation(&self) -> NixCommand;
-
-    fn build_invocation(&self) -> NixCommand;
-
-    fn gc_root_invocation(&self, output_path: &str) -> NixCommand;
+    /// The rooting emission for the output the build printed.
+    fn rooting_of(&self, output_path: &str) -> emission::TargetStoreRooting;
 
     fn gc_root_text(&self) -> String;
 }
@@ -6496,7 +6140,7 @@ impl TargetStoreRealizing for TargetStoreRealization {
         build: &nexus::TargetStoreBuild,
     ) -> std::result::Result<Self, String> {
         let target = SshTarget::from_transport(&build.deployment_transport)?;
-        let derivation_path = command.closure_path.payload().clone();
+        let derivation_path = command.closure_path.payload();
         if !NixStorePath::from(derivation_path.as_str()).is_canonical_item_root()
             || !derivation_path.ends_with(".drv")
         {
@@ -6504,52 +6148,40 @@ impl TargetStoreRealizing for TargetStoreRealization {
                 "target-store build needs the evaluated derivation path, not an output".to_string(),
             );
         }
-        let gc_root = TargetGcRoot::for_login(
-            &target.ssh_destination,
-            build.operator_node.payload(),
-            *command.generation_identifier.payload(),
-        );
+        let gc_root_directory = if target.login() == "root" {
+            emission::GcRootDirectory::SystemRoots
+        } else {
+            emission::GcRootDirectory::LoginHome
+        };
         Ok(Self {
-            derivation_path,
-            target,
-            gc_root,
-            substituters: command.extra_substituter_vector.clone(),
+            derivation_copy: emission::DerivationCopy {
+                nix_store_uri: target.nix_store_uri.clone(),
+                closure_path: command.closure_path.clone(),
+            },
+            build: emission::TargetStoreBuild {
+                nix_store_uri: target.nix_store_uri.clone(),
+                closure_path: command.closure_path.clone(),
+                extra_substituter_vector: command.extra_substituter_vector.clone(),
+            },
+            rooting: emission::TargetStoreRooting {
+                ssh_destination: target.ssh_destination,
+                gc_root_directory,
+                operator_node: emission::OperatorNode(build.operator_node.clone()),
+                generation_identifier: command.generation_identifier,
+                closure_path: command.closure_path.clone(),
+            },
         })
     }
 
-    fn derivation_copy_invocation(&self) -> NixCommand {
-        NixCommand::new(
-            "nix",
-            vec![
-                "copy".to_string(),
-                "--derivation".to_string(),
-                "--to".to_string(),
-                self.target.nix_store_uri.clone(),
-                self.derivation_path.clone(),
-            ],
-        )
-    }
-
-    fn build_invocation(&self) -> NixCommand {
-        let mut arguments = vec![
-            "build".to_string(),
-            "--no-link".to_string(),
-            "--print-out-paths".to_string(),
-            "--store".to_string(),
-            self.target.nix_store_uri.clone(),
-            NixCommand::output_installable(&self.derivation_path),
-        ];
-        arguments.extend(NixCommand::substituter_options(&self.substituters));
-        NixCommand::new("nix", arguments)
-    }
-
-    fn gc_root_invocation(&self, output_path: &str) -> NixCommand {
-        self.target
-            .remote_invocation(self.gc_root.shell_command(output_path))
+    fn rooting_of(&self, output_path: &str) -> emission::TargetStoreRooting {
+        emission::TargetStoreRooting {
+            closure_path: ordinary::ClosurePath::new(output_path.to_string()),
+            ..self.rooting.clone()
+        }
     }
 
     fn gc_root_text(&self) -> String {
-        self.gc_root.display_text()
+        self.rooting.display_text()
     }
 }
 
@@ -6557,16 +6189,24 @@ impl Effect for TargetStoreRealization {
     type Product = String;
 
     async fn run(&self, execution: &EffectExecution) -> std::result::Result<String, StageFailure> {
-        self.derivation_copy_invocation().run(execution).await?;
-        let output = self.build_invocation().run(execution).await?;
-        let output_path = NixCommand::first_line(&output);
+        if let emission::CallOutcome::Failed(failure) =
+            execution.emitted(self.derivation_copy.clone()).await
+        {
+            return Err(failure.into());
+        }
+        let output_path = match execution.emitted(self.build.clone()).await {
+            emission::PathOutcome::Printed(printed) => printed.printed_text(),
+            emission::PathOutcome::Failed(failure) => return Err(failure.into()),
+        };
         if !NixStorePath::from(output_path.as_str()).is_canonical_item_root() {
             return Err(StageFailure::from(format!(
                 "nix build in the target store returned a noncanonical output path: {output_path:?}"
             )));
         }
-        self.gc_root_invocation(&output_path).run(execution).await?;
-        Ok(output_path)
+        match execution.emitted(self.rooting_of(&output_path)).await {
+            emission::CallOutcome::Completed => Ok(output_path),
+            emission::CallOutcome::Failed(failure) => Err(failure.into()),
+        }
     }
 }
 
@@ -6579,8 +6219,6 @@ enum Activation {
     UserEnvironment(UserEnvironmentActivation),
 }
 
-/// Turning an activation command into the activation it names, and saying when
-/// that activation must be handed to PID 1 rather than run in the daemon.
 /// Turning an activation command into the activation it names, and saying when
 /// that activation must be handed to PID 1 rather than run in the daemon.
 trait Activating: Sized {
@@ -6596,15 +6234,12 @@ trait Activating: Sized {
 }
 
 impl Activating for Activation {
-    /// `daemon_host` is the node the dispatching daemon runs on, so a host
-    /// activation can detect a self-targeting deploy and route around the
-    /// self-Switch deadlock; `None` when no daemon host context is available.
     fn from_command(
         command: &nexus::ActivateGenerationCommand,
         daemon_host: Option<&ordinary::NodeName>,
     ) -> std::result::Result<Self, String> {
         let target = SshTarget::from_transport(&command.deployment_transport)?;
-        let store_path = command.closure_path.payload().clone();
+        let closure_path = command.closure_path.clone();
         match (&command.activation_backend, &command.activation_profile) {
             (
                 nexus::ActivationBackend::NixosSystemdBootV1,
@@ -6614,7 +6249,7 @@ impl Activating for Activation {
                 target,
                 node_name: command.node_name.clone(),
                 daemon_host: daemon_host.cloned(),
-                store_path,
+                closure_path,
                 action: action.clone(),
             })),
             (
@@ -6628,7 +6263,7 @@ impl Activating for Activation {
                     authority: target.user_environment_activation_authority(&user),
                     target,
                     user,
-                    store_path,
+                    closure_path,
                     mode: profile.user_environment_action.clone(),
                 }))
             }
@@ -6637,6 +6272,7 @@ impl Activating for Activation {
             ),
         }
     }
+
     fn detached_test_activation_unit(&self) -> Option<DetachedActivationUnit> {
         match self {
             Self::Host(activation)
@@ -6684,12 +6320,10 @@ enum DetachedSelfActivation {
 
 /// Host activation on the target.
 ///
-/// `Boot`/`Switch`/`Test`: one ssh call running `switch-to-configuration
-/// <action>` directly (Boot/Switch first set the system profile). `BootOnce`:
-/// one ssh call wrapping the boot-once script in `systemd-run --unit=<name>
-/// --collect --wait --service-type=oneshot /bin/sh -c '…'` — owned by PID 1,
-/// not the dispatcher's ssh, so a network blip that kills the ssh leaves the
-/// unit running on the target to completion.
+/// `Boot`/`Switch`/`Test`: one switch emission over ssh (Boot/Switch first set
+/// the system profile). `BootOnce`: one emission wrapping the boot-once script
+/// in a PID-1-owned transient unit, so a network blip that kills the ssh
+/// leaves the unit running on the target to completion.
 #[derive(Debug, Clone)]
 struct HostActivation {
     /// The deployment this activation belongs to. The BootOnce transient unit
@@ -6707,107 +6341,65 @@ struct HostActivation {
     /// killed when `switch-to-configuration switch` restarts the daemon,
     /// deadlocking the deploy. `None` outside a daemon context (some tests).
     daemon_host: Option<ordinary::NodeName>,
-    store_path: String,
+    closure_path: ordinary::ClosurePath,
     action: ordinary::HostDeployAction,
 }
 
-/// Activating a whole host: the invocations it needs, whether it must run
-/// detached from the daemon that started it, and the EFI reconciliation a boot
-/// entry change requires.
+/// Activating a whole host: the emissions it makes, whether it must run
+/// detached from the daemon that started it, and the EFI reconciliation a
+/// boot entry change requires.
 trait HostActivating {
-    /// Invocation for the simple Boot/Switch/Test path. `None` for the
-    /// non-simple actions (BootOnce uses `systemd_run_invocation`; Eval/Build
-    /// do not activate).
-    fn ssh_invocation(&self) -> Option<NixCommand>;
+    /// The switch emission for the simple Boot/Switch/Test path. `None` for
+    /// the non-simple actions (BootOnce runs a transient unit; Eval/Build do
+    /// not activate).
+    fn switch_emission(&self) -> Option<emission::ConfigurationSwitch>;
 
     /// The deterministic BootOnce transient unit name for this deploy:
     /// `lojix-boot-once-deploy-<deployment-identifier>`, the same string the
-    /// durable resume cursor (`DeployJob::boot_once_unit`) persists at submit.
-    /// Deriving both from the deployment identifier (not the old time + pid
-    /// suffix) is what lets a daemon that crashes inside the BootOnce window
-    /// recompute the running unit's name on restart and reconcile by polling
-    /// `journalctl -u <unit>` rather than re-activating (report 150). One
-    /// deploy → one identifier → one unit, so concurrent deploys still don't
-    /// collide.
+    /// durable resume cursor (`DeployJob::boot_once_unit`) persists at submit,
+    /// so a daemon that crashes inside the BootOnce window can recompute the
+    /// running unit's name on restart (report 150).
     fn unit_name(&self) -> String;
 
-    /// The bash script that runs inside the transient unit on the target. `OLD`
-    /// (the rollback target) is read from `bootctl status`'s `Current Entry`.
-    /// After the candidate has generated its boot configuration, `NEW` is read
-    /// from its generated `loader.conf`, which is the only authority that names
-    /// the hash-named entry. Reboot 1 lands NEW; reboot 2+ returns to OLD.
-    fn boot_once_script(&self) -> String;
+    /// The BootOnce emission: the boot-once script in a waited-on transient
+    /// unit.
+    fn boot_once_emission(&self) -> emission::TransientUnitRun;
 
-    /// BootOnce ssh call: wraps the boot-once script in `systemd-run --wait`.
-    /// ssh holds open as a live stdout/stderr channel; if it dies the unit runs
-    /// to completion regardless (`detached_invocation()`).
-    fn systemd_run_invocation(&self, unit_name: &str) -> NixCommand;
-
-    /// Wrap an arbitrary activation `script` in a PID-1-owned transient unit
-    /// (`systemd-run --service-type=oneshot --wait`). The unit is owned by
-    /// systemd, not the dispatcher's ssh, so a restart of the daemon mid-script
-    /// (a self-Switch restarting `switch-to-configuration switch`) or a network
-    /// blip that kills the ssh leaves the unit running to completion on the
-    /// target. Shared by BootOnce and the deadlock-free self-Switch shape.
-    fn detached_invocation(&self, unit_name: &str, script: String) -> NixCommand;
-
-    /// Whether this activation must run in the detached PID-1-owned shape rather
-    /// than a foreground ssh: a `Switch` whose target node IS the dispatching
-    /// daemon's own host. `switch-to-configuration switch` restarts the daemon,
-    /// which would kill a foreground ssh and deadlock the deploy; the detached
-    /// transient unit survives the restart (report 150 self-Switch). Always
-    /// false when the daemon host is unknown or the target is a different node.
     /// Which detached self-activation this is, or `None` when the activation
-    /// is not one. The two actions that hand off to a transient unit are the
-    /// only ones with a handoff script, so naming them as their own type is
-    /// what makes [`Self::self_switch_script`] total.
+    /// is not one: a `Switch` or `Test` whose target node IS the dispatching
+    /// daemon's own host. `switch-to-configuration` restarts the daemon,
+    /// which would kill a foreground ssh and deadlock the deploy; the detached
+    /// transient unit survives the restart (report 150 self-Switch).
     fn detached_self_activation(&self) -> Option<DetachedSelfActivation>;
 
-    /// The deterministic transient unit name for a detached self-Switch:
-    /// `lojix-self-switch-deploy-<deployment-identifier>.service`. Distinct from the
-    /// BootOnce unit name (a self-Switch is `switch-to-configuration switch`,
-    /// not a boot-once entry), but derived from the same deployment identifier so
-    /// it is one deploy → one unit.
+    /// The deterministic transient unit name for a detached self-activation:
+    /// `lojix-self-switch-deploy-<deployment-identifier>.service`.
     fn self_switch_unit_name(&self) -> String;
 
-    /// The activation script for a detached self-Switch: set the system profile,
-    /// `switch-to-configuration switch` — the same Switch semantics as the
-    /// foreground path's `ssh_invocation`, NOT a boot-once entry — then clears
-    /// both EFI overrides so declarative `loader.conf` is the sole authority.
-    /// The whole
-    /// activation runs inside the transient unit, so the daemon restart `switch`
-    /// triggers cannot kill it mid-flight; the post-switch reconcile rides along
-    /// in the same PID-1-owned unit rather than a (now-dead) foreground ssh.
-    fn self_switch_script(&self, activation: DetachedSelfActivation) -> String;
+    /// The detached self-Switch: the whole Switch, profile set and EFI
+    /// overrides cleared, inside a waited-on transient unit.
+    fn self_switch_emission(&self) -> emission::TransientUnitRun;
+
+    /// The detached self-Test: dispatched without tying its lifetime to the
+    /// old daemon cgroup, its PID-1 receipt retained until the successor has
+    /// reconciled and explicitly cleans it.
+    fn self_test_emission(&self) -> emission::RetainedUnitDispatch;
 
     /// Whether this action reconciles EFI bootloader vars after activation.
-    /// `Boot`/`Switch` write the declarative `loader.conf` default. Reconcile
+    /// `Boot`/`Switch` write the declarative `loader.conf` default; reconcile
     /// removes both EFI overrides so they cannot compete. `Test` is
-    /// non-persistent; `BootOnce` is its own thing
-    /// (`requires_efi_reconcile()`).
+    /// non-persistent; `BootOnce` is its own thing.
     fn requires_efi_reconcile(&self) -> bool;
 
-    /// Clear EFI `LoaderEntryDefault`; `loader.conf` owns persistent boot.
-    fn step_clear_efi_default_invocation(&self) -> NixCommand;
+    /// Clearing one EFI override: `LoaderEntryDefault` (`loader.conf` owns
+    /// persistent boot) or a pending one-shot from a prior BootOnce.
+    fn boot_entry_clearing(&self, boot_entry: emission::BootEntry) -> emission::BootEntryClearing;
 
-    /// `bootctl set-oneshot ''` — clears any pending EFI one-shot from a prior
-    /// BootOnce so it does not hijack the next reboot.
-    fn step_clear_efi_oneshot_invocation(&self) -> NixCommand;
-
-    /// Deadlock-free self-Switch: run the full Switch activation inside a
-    /// PID-1-owned transient unit (the BootOnce mechanism, carrying Switch
-    /// semantics) so `switch-to-configuration switch` restarting the dispatching
-    /// daemon does not kill the activation's foreground ssh (report 150).
     async fn run_detached_self_activation(
         &self,
         execution: &EffectExecution,
         activation: DetachedSelfActivation,
     ) -> std::result::Result<(), StageFailure>;
-
-    /// Dispatch a test activation without tying its lifetime to the old daemon
-    /// cgroup. `RemainAfterExit` retains PID-1's terminal receipt until the
-    /// successor has reconciled and explicitly cleans it.
-    fn retained_detached_invocation(&self, unit_name: &str, script: String) -> NixCommand;
 
     async fn run_simple(
         &self,
@@ -6819,77 +6411,42 @@ trait HostActivating {
         execution: &EffectExecution,
     ) -> std::result::Result<(), StageFailure>;
 
-    async fn run_boot_once(
+    /// A transient unit run, whose failure carries the unit's journal: the
+    /// script ran in its own unit, so its output is there and not in ssh's.
+    async fn run_journalled_unit(
         &self,
         execution: &EffectExecution,
+        run: emission::TransientUnitRun,
     ) -> std::result::Result<(), StageFailure>;
 }
 
 impl HostActivating for HostActivation {
-    fn ssh_invocation(&self) -> Option<NixCommand> {
-        let action_word = match self.action {
-            ordinary::HostDeployAction::SetBootProfile => "boot",
-            ordinary::HostDeployAction::ActivateNow => "switch",
-            ordinary::HostDeployAction::TestActivation => "test",
+    fn switch_emission(&self) -> Option<emission::ConfigurationSwitch> {
+        let switch_action = match self.action {
+            ordinary::HostDeployAction::SetBootProfile => emission::SwitchAction::Boot,
+            ordinary::HostDeployAction::ActivateNow => emission::SwitchAction::Switch,
+            ordinary::HostDeployAction::TestActivation => emission::SwitchAction::Test,
             ordinary::HostDeployAction::ScheduleBootOnce
             | ordinary::HostDeployAction::Evaluate
             | ordinary::HostDeployAction::Realize => return None,
         };
-        let store = &self.store_path;
-        let remote_command = if matches!(self.action, ordinary::HostDeployAction::TestActivation) {
-            format!("{store}/bin/switch-to-configuration {action_word}")
-        } else {
-            format!(
-                "nix-env -p /nix/var/nix/profiles/system --set {store} \
-                 && {store}/bin/switch-to-configuration {action_word}"
-            )
-        };
-        Some(
-            self.target
-                .remote_invocation(ShellCommand::from_raw(remote_command)),
-        )
+        Some(emission::ConfigurationSwitch {
+            ssh_destination: self.target.ssh_destination.clone(),
+            closure_path: self.closure_path.clone(),
+            switch_action,
+        })
     }
 
     fn unit_name(&self) -> String {
         self.deployment_identifier.boot_once_unit_name()
     }
 
-    fn boot_once_script(&self) -> String {
-        let store = &self.store_path;
-        format!(
-            "export PATH=/run/current-system/sw/bin:/run/wrappers/bin:$PATH\n\
-             set -eu\n\
-             CLOSURE='{store}'\n\
-             OLD=$(bootctl status | awk -F': *' '/Current Entry:/ {{print $2}}')\n\
-             [ -n \"$OLD\" ]\n\
-             nix-env -p /nix/var/nix/profiles/system --set \"$CLOSURE\"\n\
-             \"$CLOSURE/bin/switch-to-configuration\" boot\n\
-             NEW=$(awk '$1 == \"default\" {{print $2; exit}}' /boot/loader/loader.conf)\n\
-             [ -n \"$NEW\" ]\n\
-             [ -f \"/boot/loader/entries/$NEW\" ]\n\
-             [ \"$NEW\" != \"$OLD\" ]\n\
-             bootctl set-default \"$OLD\"\n\
-             bootctl set-oneshot \"$NEW\"\n\
-             echo \"boot-once: oneshot=$NEW persistent-default=$OLD (=running generation)\"\n",
-        )
-    }
-
-    fn systemd_run_invocation(&self, unit_name: &str) -> NixCommand {
-        self.detached_invocation(unit_name, self.boot_once_script())
-    }
-
-    fn detached_invocation(&self, unit_name: &str, script: String) -> NixCommand {
-        let remote_command = format!(
-            "systemd-run \
-             --unit={unit_name} \
-             --collect \
-             --wait \
-             --service-type=oneshot \
-             /bin/sh -c {script}",
-            script = ShellArgument::new(script).to_command_text(),
-        );
-        self.target
-            .remote_invocation(ShellCommand::from_raw(remote_command))
+    fn boot_once_emission(&self) -> emission::TransientUnitRun {
+        emission::TransientUnitRun {
+            ssh_destination: self.target.ssh_destination.clone(),
+            unit_name: emission::UnitName(self.unit_name()),
+            transient_script: emission::TransientScript::BootOnce(self.closure_path.clone()),
+        }
     }
 
     fn detached_self_activation(&self) -> Option<DetachedSelfActivation> {
@@ -6911,22 +6468,19 @@ impl HostActivating for HostActivation {
         DetachedActivationUnit::canonical_name(&self.deployment_identifier)
     }
 
-    fn self_switch_script(&self, activation: DetachedSelfActivation) -> String {
-        let store = &self.store_path;
-        match activation {
-            DetachedSelfActivation::Switch => format!(
-                "export PATH=/run/current-system/sw/bin:/run/wrappers/bin:$PATH\n\
-                 set -eu\n\
-                 nix-env -p /nix/var/nix/profiles/system --set {store}\n\
-                 {store}/bin/switch-to-configuration switch\n\
-                 bootctl set-default ''\n\
-                 bootctl set-oneshot ''\n"
-            ),
-            DetachedSelfActivation::Test => format!(
-                "export PATH=/run/current-system/sw/bin:/run/wrappers/bin:$PATH\n\
-                 set -eu\n\
-                 {store}/bin/switch-to-configuration test\n"
-            ),
+    fn self_switch_emission(&self) -> emission::TransientUnitRun {
+        emission::TransientUnitRun {
+            ssh_destination: self.target.ssh_destination.clone(),
+            unit_name: emission::UnitName(self.self_switch_unit_name()),
+            transient_script: emission::TransientScript::SelfSwitch(self.closure_path.clone()),
+        }
+    }
+
+    fn self_test_emission(&self) -> emission::RetainedUnitDispatch {
+        emission::RetainedUnitDispatch {
+            ssh_destination: self.target.ssh_destination.clone(),
+            unit_name: emission::UnitName(self.self_switch_unit_name()),
+            closure_path: self.closure_path.clone(),
         }
     }
 
@@ -6937,14 +6491,11 @@ impl HostActivating for HostActivation {
         )
     }
 
-    fn step_clear_efi_default_invocation(&self) -> NixCommand {
-        self.target
-            .remote_invocation(ShellCommand::from_raw("bootctl set-default ''"))
-    }
-
-    fn step_clear_efi_oneshot_invocation(&self) -> NixCommand {
-        self.target
-            .remote_invocation(ShellCommand::from_raw("bootctl set-oneshot ''"))
+    fn boot_entry_clearing(&self, boot_entry: emission::BootEntry) -> emission::BootEntryClearing {
+        emission::BootEntryClearing {
+            ssh_destination: self.target.ssh_destination.clone(),
+            boot_entry,
+        }
     }
 
     async fn run_detached_self_activation(
@@ -6952,54 +6503,34 @@ impl HostActivating for HostActivation {
         execution: &EffectExecution,
         activation: DetachedSelfActivation,
     ) -> std::result::Result<(), StageFailure> {
-        let unit_name = self.self_switch_unit_name();
-        let script = self.self_switch_script(activation);
         match activation {
             // `--wait` returns only once the unit has ended, and what the
             // switch printed went to the unit's journal, not to this ssh.
             DetachedSelfActivation::Switch => {
-                match self
-                    .detached_invocation(&unit_name, script)
-                    .run(execution)
+                self.run_journalled_unit(execution, self.self_switch_emission())
                     .await
-                {
-                    Ok(_) => Ok(()),
-                    Err(failure) => Err(failure.with_output(
-                        UnitJournal::new(unit_name, self.target.clone())
-                            .tail(execution)
-                            .await,
-                    )),
+            }
+            DetachedSelfActivation::Test => {
+                match execution.emitted(self.self_test_emission()).await {
+                    emission::CallOutcome::Completed => Ok(()),
+                    emission::CallOutcome::Failed(failure) => Err(failure.into()),
                 }
             }
-            DetachedSelfActivation::Test => self
-                .retained_detached_invocation(&unit_name, script)
-                .run(execution)
-                .await
-                .map(|_| ()),
         }
-    }
-
-    fn retained_detached_invocation(&self, unit_name: &str, script: String) -> NixCommand {
-        let remote_command = format!(
-            "systemd-run --unit={unit_name} --no-block --service-type=oneshot --remain-after-exit /bin/sh -c {script}",
-            script = ShellArgument::new(script).to_command_text(),
-        );
-        self.target
-            .remote_invocation(ShellCommand::from_raw(remote_command))
     }
 
     async fn run_simple(
         &self,
         execution: &EffectExecution,
     ) -> std::result::Result<(), StageFailure> {
-        match self.ssh_invocation() {
-            Some(invocation) => invocation.run(execution).await.map(|_| ())?,
-            None => {
-                return Err(StageFailure::from(format!(
-                    "no simple activation for action {:?}",
-                    self.action
-                )));
-            }
+        let Some(switch) = self.switch_emission() else {
+            return Err(StageFailure::from(format!(
+                "no simple activation for action {:?}",
+                self.action
+            )));
+        };
+        if let emission::CallOutcome::Failed(failure) = execution.emitted(switch).await {
+            return Err(failure.into());
         }
         if self.requires_efi_reconcile() {
             self.reconcile_efi(execution).await?;
@@ -7011,25 +6542,26 @@ impl HostActivating for HostActivation {
         &self,
         execution: &EffectExecution,
     ) -> std::result::Result<(), StageFailure> {
-        self.step_clear_efi_default_invocation()
-            .run(execution)
-            .await?;
-        self.step_clear_efi_oneshot_invocation()
-            .run(execution)
-            .await?;
+        for boot_entry in [emission::BootEntry::Default, emission::BootEntry::Oneshot] {
+            if let emission::CallOutcome::Failed(failure) = execution
+                .emitted(self.boot_entry_clearing(boot_entry))
+                .await
+            {
+                return Err(failure.into());
+            }
+        }
         Ok(())
     }
 
-    async fn run_boot_once(
+    async fn run_journalled_unit(
         &self,
         execution: &EffectExecution,
+        run: emission::TransientUnitRun,
     ) -> std::result::Result<(), StageFailure> {
-        let unit_name = self.unit_name();
-        match self.systemd_run_invocation(&unit_name).run(execution).await {
-            Ok(_) => Ok(()),
-            // The boot-once script ran in its own unit; its output is in that
-            // unit's journal.
-            Err(failure) => Err(failure.with_output(
+        let unit_name = run.unit_name.0.clone();
+        match execution.emitted(run).await {
+            emission::CallOutcome::Completed => Ok(()),
+            emission::CallOutcome::Failed(failure) => Err(StageFailure::from(failure).with_output(
                 UnitJournal::new(unit_name, self.target.clone())
                     .tail(execution)
                     .await,
@@ -7048,7 +6580,10 @@ impl Effect for HostActivation {
                 .await;
         }
         match self.action {
-            ordinary::HostDeployAction::ScheduleBootOnce => self.run_boot_once(execution).await,
+            ordinary::HostDeployAction::ScheduleBootOnce => {
+                self.run_journalled_unit(execution, self.boot_once_emission())
+                    .await
+            }
             _ => self.run_simple(execution).await,
         }
     }
@@ -7070,9 +6605,8 @@ trait UnitJournalReading {
     where
         Self: Sized;
 
-    /// `journalctl --unit=<unit> --lines=<n> --no-pager --output=cat` on the
-    /// unit's node.
-    fn invocation(&self) -> NixCommand;
+    /// The journal query for this unit on its node.
+    fn query(&self) -> emission::UnitJournalQuery;
 
     /// The journal tail under `journal of <unit>`; when it cannot be read,
     /// what the read reported, under `journal of <unit> unavailable`.
@@ -7084,21 +6618,21 @@ impl UnitJournalReading for UnitJournal {
         Self { unit_name, target }
     }
 
-    fn invocation(&self) -> NixCommand {
-        self.target
-            .remote_invocation(ShellCommand::from_raw(format!(
-                "journalctl --unit={} --lines={UNIT_JOURNAL_LINES} --no-pager --output=cat",
-                ShellArgument::new(self.unit_name.clone()).to_command_text(),
-            )))
+    fn query(&self) -> emission::UnitJournalQuery {
+        emission::UnitJournalQuery {
+            ssh_destination: self.target.ssh_destination.clone(),
+            unit_name: emission::UnitName(self.unit_name.clone()),
+        }
     }
 
     async fn tail(&self, execution: &EffectExecution) -> ReportedOutput {
         let label = format!("journal of {}", self.unit_name);
-        match self.invocation().run(execution).await {
-            Ok(text) => ReportedOutput::new(label, text),
-            Err(failure) => {
-                ReportedOutput::new(format!("{label} unavailable"), failure.reported_text())
-            }
+        match execution.emitted(self.query()).await {
+            emission::JournalOutcome::Read(text) => ReportedOutput::new(label, text.0),
+            emission::JournalOutcome::Failed(failure) => ReportedOutput::new(
+                format!("{label} unavailable"),
+                StageFailure::from(failure).reported_text(),
+            ),
         }
     }
 }
@@ -7115,14 +6649,14 @@ pub(crate) struct DetachedActivationUnit {
     journal_option: Option<UnitJournal>,
 }
 
-/// The exact Manager.UnitNew subscription created before dispatch.  It is
-/// intentionally private runtime state: the deployment identity and unit name
-/// are already durable, while this closes only the short systemd registration
-/// race in the predecessor.
+/// The exact Manager.UnitNew subscription created before dispatch, held by the
+/// system-bus session the observer's emissions run on.  It is intentionally
+/// private runtime state: the deployment identity and unit name are already
+/// durable, while this closes only the short systemd registration race in the
+/// predecessor.
 pub(crate) struct DetachedActivationObserver {
     unit: DetachedActivationUnit,
-    connection: Connection,
-    unit_new: SignalStream<'static>,
+    bus: SystemdBus,
 }
 
 /// What PID 1 reported about a detached activation transient: its
@@ -7133,7 +6667,7 @@ pub(crate) struct DetachedActivationFailure {
     unit_name: String,
     active_state: String,
     result: String,
-    process_end_option: Option<ProcessEnd>,
+    process_end_option: Option<emission::ProcessEnd>,
     reported_outputs: Vec<ReportedOutput>,
 }
 
@@ -7158,6 +6692,7 @@ impl Witnessing for DetachedActivationFailure {
             ],
             exit_code_option: self
                 .process_end_option
+                .as_ref()
                 .and_then(|end| end.exit_code())
                 .filter(|status| *status >= 0)
                 .map(i64::from)
@@ -7170,32 +6705,6 @@ impl FailureReporting for DetachedActivationFailure {
     fn with_output(mut self, output: ReportedOutput) -> Self {
         self.reported_outputs.push(output);
         self
-    }
-}
-
-/// Reading PID 1's `ExecMainCode`/`ExecMainStatus` pair: `CLD_EXITED` (1)
-/// carries an exit status, `CLD_KILLED` (2) and `CLD_DUMPED` (3) a signal, and
-/// 0 means no main process ended.
-pub(crate) trait MainProcessReading {
-    fn from_main_process(code: i32, status: i32) -> Option<Self>
-    where
-        Self: Sized;
-}
-
-impl MainProcessReading for ProcessEnd {
-    fn from_main_process(code: i32, status: i32) -> Option<Self> {
-        match code {
-            1 => Some(Self::Exited(status)),
-            2 => Some(Self::Signalled {
-                signal: status,
-                core_dumped: false,
-            }),
-            3 => Some(Self::Signalled {
-                signal: status,
-                core_dumped: true,
-            }),
-            _ => None,
-        }
     }
 }
 
@@ -7235,16 +6744,9 @@ pub(crate) trait DetachedActivation {
     #[cfg(test)]
     fn needs_completion_observer(outcome: Option<DetachedActivationOutcome>) -> bool;
 
-    async fn manager_proxy<'a>(
-        connection: &'a Connection,
-    ) -> std::result::Result<Proxy<'a>, String>;
-
-    async fn unit_proxy<'a>(
-        &self,
-        connection: &'a Connection,
-    ) -> std::result::Result<Option<DetachedActivationProxies<'a>>, String>;
-
-    async fn classify(&self, proxy: &DetachedActivationProxies<'_>) -> DetachedActivationOutcome;
+    /// What PID 1's reading of the unit says: succeeded, failed with what it
+    /// reported, still running, or gone.
+    fn classify(&self, state: emission::UnitState) -> DetachedActivationOutcome;
 
     /// What is known of a unit PID 1 no longer holds: that it is gone, and
     /// whatever its journal kept.
@@ -7259,8 +6761,6 @@ pub(crate) trait DetachedActivation {
     ) -> DetachedActivationFailure;
 
     async fn clean(&self);
-
-    fn is_expected_unit_new(&self, name: &str) -> bool;
 }
 
 impl DetachedActivation for DetachedActivationUnit {
@@ -7283,19 +6783,14 @@ impl DetachedActivation for DetachedActivationUnit {
     }
 
     async fn prepare_observer(&self) -> std::result::Result<DetachedActivationObserver, String> {
-        let connection = Connection::system()
-            .await
-            .map_err(|error| format!("connect to systemd for detached activation: {error}"))?;
-        let manager = Self::manager_proxy(&connection).await?;
-        let unit_new = manager
-            .receive_signal("UnitNew")
-            .await
-            .map_err(|error| format!("subscribe to systemd UnitNew: {error}"))?;
-        Ok(DetachedActivationObserver {
-            unit: self.clone(),
-            connection,
-            unit_new,
-        })
+        let bus = SystemdBus::default();
+        match bus.emitted(emission::SubscribeUnitNew {}).await {
+            emission::BusCallOutcome::Answered => Ok(DetachedActivationObserver {
+                unit: self.clone(),
+                bus,
+            }),
+            emission::BusCallOutcome::Refused(fault) => Err(fault.0),
+        }
     }
 
     fn terminal_outcome(
@@ -7323,62 +6818,13 @@ impl DetachedActivation for DetachedActivationUnit {
         matches!(outcome, None | Some(DetachedActivationOutcome::Running))
     }
 
-    async fn manager_proxy<'a>(
-        connection: &'a Connection,
-    ) -> std::result::Result<Proxy<'a>, String> {
-        Proxy::new(
-            connection,
-            "org.freedesktop.systemd1",
-            "/org/freedesktop/systemd1",
-            "org.freedesktop.systemd1.Manager",
-        )
-        .await
-        .map_err(|error| format!("open systemd manager: {error}"))
-    }
-
-    async fn unit_proxy<'a>(
-        &self,
-        connection: &'a Connection,
-    ) -> std::result::Result<Option<DetachedActivationProxies<'a>>, String> {
-        let manager = Self::manager_proxy(connection).await?;
-        let path: OwnedObjectPath = match manager.call("GetUnit", &(self.name.as_str(),)).await {
-            Ok(path) => path,
-            Err(error) if error.to_string().contains("NoSuchUnit") => return Ok(None),
-            Err(error) => {
-                return Err(format!(
-                    "find detached activation unit {}: {error}",
-                    self.name
-                ));
-            }
+    fn classify(&self, state: emission::UnitState) -> DetachedActivationOutcome {
+        let reading = |reading: emission::PropertyReading| match reading {
+            emission::PropertyReading::Read(value) => Ok(value),
+            emission::PropertyReading::Unreadable(fault) => Err(fault.0),
         };
-        let unit = ProxyBuilder::new(connection)
-            .destination("org.freedesktop.systemd1")
-            .map_err(|error| format!("address detached activation unit: {error}"))?
-            .path(path.clone())
-            .map_err(|error| format!("address detached activation path: {error}"))?
-            .interface("org.freedesktop.systemd1.Unit")
-            .map_err(|error| format!("address detached activation interface: {error}"))?
-            .cache_properties(CacheProperties::Yes)
-            .build()
-            .await
-            .map_err(|error| format!("open detached activation unit: {error}"))?;
-        let service = ProxyBuilder::new(connection)
-            .destination("org.freedesktop.systemd1")
-            .map_err(|error| format!("address detached activation service: {error}"))?
-            .path(path)
-            .map_err(|error| format!("address detached activation service path: {error}"))?
-            .interface("org.freedesktop.systemd1.Service")
-            .map_err(|error| format!("address detached activation service interface: {error}"))?
-            .cache_properties(CacheProperties::Yes)
-            .build()
-            .await
-            .map_err(|error| format!("open detached activation service: {error}"))?;
-        Ok(Some(DetachedActivationProxies { unit, service }))
-    }
-
-    async fn classify(&self, proxy: &DetachedActivationProxies<'_>) -> DetachedActivationOutcome {
-        let active = proxy.unit.get_property::<String>("ActiveState").await;
-        let result = proxy.service.get_property::<String>("Result").await;
+        let active = reading(state.active_state.0);
+        let result = reading(state.service_result.0);
         eprintln!(
             "lojix detached test activation observer state active={active:?} result={result:?}"
         );
@@ -7386,26 +6832,21 @@ impl DetachedActivation for DetachedActivationUnit {
             (Ok("active"), Ok("success")) => DetachedActivationOutcome::Succeeded,
             (Ok("activating" | "reloading"), _) => DetachedActivationOutcome::Running,
             (Ok("active"), _) => DetachedActivationOutcome::Running,
-            (Ok(state), _) => {
+            (Ok(active_state), _) => {
                 // What PID 1 said is the whole evidence for this failure —
                 // keep it rather than printing it and terminalizing a generic
                 // reason.
-                let main_code = proxy.service.get_property::<i32>("ExecMainCode").await;
-                let main_status = proxy.service.get_property::<i32>("ExecMainStatus").await;
-                let process_end_option = match (main_code, main_status) {
-                    (Ok(code), Ok(status)) => ProcessEnd::from_main_process(code, status),
-                    _ => None,
-                };
-                let reported = match result {
+                let process_end_option = state.process_end_option;
+                let reported = match &result {
                     Ok(result) => format!("systemd reported Result={result}"),
-                    Err(error) => {
-                        format!("systemd reported ActiveState={state}, Result unreadable: {error}")
-                    }
+                    Err(error) => format!(
+                        "systemd reported ActiveState={active_state}, Result unreadable: {error}"
+                    ),
                 };
                 DetachedActivationOutcome::Failed(DetachedActivationFailure {
                     unit_name: self.name.clone(),
-                    active_state: state.to_string(),
-                    result: match process_end_option {
+                    active_state: active_state.to_string(),
+                    result: match &process_end_option {
                         Some(end) => format!("{reported}; main process {}", end.statement()),
                         None => reported,
                     },
@@ -7445,19 +6886,11 @@ impl DetachedActivation for DetachedActivationUnit {
     }
 
     async fn clean(&self) {
-        let Ok(connection) = Connection::system().await else {
-            return;
-        };
-        let Ok(manager) = Self::manager_proxy(&connection).await else {
-            return;
-        };
-        let _ = manager
-            .call::<_, _, ()>("StopUnit", &(self.name.as_str(), "replace"))
+        let _ = SystemdBus::default()
+            .emitted(emission::UnitStop {
+                unit_name: emission::UnitName(self.name.clone()),
+            })
             .await;
-    }
-
-    fn is_expected_unit_new(&self, name: &str) -> bool {
-        name == self.name
     }
 }
 
@@ -7480,19 +6913,29 @@ pub(crate) trait DetachedObserving {
     async fn await_completion(
         &mut self,
     ) -> std::result::Result<Option<DetachedActivationOutcome>, String>;
+
+    /// Read the found unit's state and classify it.
+    async fn read_outcome(&self) -> DetachedActivationOutcome;
 }
 
 impl DetachedObserving for DetachedActivationObserver {
     async fn initial_outcome(
         &self,
     ) -> std::result::Result<Option<DetachedActivationOutcome>, String> {
-        match self.unit.unit_proxy(&self.connection).await? {
-            Some(proxy) => Ok(Some(self.unit.classify(&proxy).await)),
+        match self
+            .bus
+            .emitted(emission::UnitLookup {
+                unit_name: emission::UnitName(self.unit.name.clone()),
+            })
+            .await
+        {
+            emission::UnitLookupOutcome::Found => Ok(Some(self.read_outcome().await)),
             // PID 1 has not yet made this exact transient visible to GetUnit.
             // A registration window is the absence of an outcome, not one of
             // its values: `classify` reads a resolved unit and cannot report
             // one.
-            None => Ok(None),
+            emission::UnitLookupOutcome::NoSuchUnit => Ok(None),
+            emission::UnitLookupOutcome::Refused(fault) => Err(fault.0),
         }
     }
 
@@ -7543,39 +6986,43 @@ impl DetachedObserving for DetachedActivationObserver {
     async fn await_completion(
         &mut self,
     ) -> std::result::Result<Option<DetachedActivationOutcome>, String> {
-        let proxy = loop {
-            match self.unit.unit_proxy(&self.connection).await? {
-                Some(proxy) => break proxy,
-                None => {
+        let unit_name = emission::UnitName(self.unit.name.clone());
+        loop {
+            match self
+                .bus
+                .emitted(emission::UnitLookup {
+                    unit_name: unit_name.clone(),
+                })
+                .await
+            {
+                emission::UnitLookupOutcome::Found => break,
+                emission::UnitLookupOutcome::Refused(fault) => return Err(fault.0),
+                emission::UnitLookupOutcome::NoSuchUnit => {
                     eprintln!(
                         "lojix detached test activation observer awaiting registration unit={}",
                         self.unit.name
                     );
-                    loop {
-                        let Some(signal) = self.unit_new.next().await else {
-                            return Ok(None);
-                        };
-                        let (name, _path): (String, OwnedObjectPath) =
-                            signal.body().deserialize().map_err(|error| {
-                                format!("decode systemd UnitNew for detached activation: {error}")
-                            })?;
-                        if self.unit.is_expected_unit_new(&name) {
-                            break;
-                        }
+                    match self
+                        .bus
+                        .emitted(emission::UnitArrival {
+                            unit_name: unit_name.clone(),
+                        })
+                        .await
+                    {
+                        emission::UnitArrivalOutcome::Arrived => {}
+                        emission::UnitArrivalOutcome::StreamEnded => return Ok(None),
+                        emission::UnitArrivalOutcome::Refused(fault) => return Err(fault.0),
                     }
                 }
             }
-        };
-        // Subscribe before the first cache-backed read. If PID 1 completed
-        // between proxy construction and this subscription, the initial read
-        // sees that terminal receipt; otherwise the stream sees its
-        // transition. No clock polling is involved.
-        let mut changed = proxy
-            .unit
-            .receive_property_changed::<String>("ActiveState")
-            .await;
+        }
+        // The lookup subscribed to the unit's ActiveState changes before
+        // anything is read from it. If PID 1 completed between the lookup and
+        // the subscription, the first read sees that terminal receipt;
+        // otherwise the subscription sees its transition. No clock polling is
+        // involved.
         loop {
-            match self.unit.classify(&proxy).await {
+            match self.read_outcome().await {
                 outcome @ (DetachedActivationOutcome::Succeeded
                 | DetachedActivationOutcome::Failed(_)) => {
                     return Ok(Some(outcome));
@@ -7585,16 +7032,27 @@ impl DetachedObserving for DetachedActivationObserver {
                 }
                 DetachedActivationOutcome::Running => {}
             }
-            if changed.next().await.is_none() {
+            if let emission::UnitStateWatchOutcome::StreamEnded = self
+                .bus
+                .emitted(emission::UnitStateWatch {
+                    unit_name: unit_name.clone(),
+                })
+                .await
+            {
                 return Ok(None);
             }
         }
     }
-}
 
-pub(crate) struct DetachedActivationProxies<'a> {
-    unit: Proxy<'a>,
-    service: Proxy<'a>,
+    async fn read_outcome(&self) -> DetachedActivationOutcome {
+        let state = self
+            .bus
+            .emitted(emission::UnitStateQuery {
+                unit_name: emission::UnitName(self.unit.name.clone()),
+            })
+            .await;
+        self.unit.classify(state)
+    }
 }
 
 /// User-environment activation on the target. A request explicitly logged in as
@@ -7608,51 +7066,30 @@ struct UserEnvironmentActivation {
     authority: RemoteUserActivationAuthority,
     target: SshTarget,
     user: HorizonUserName,
-    store_path: String,
+    closure_path: ordinary::ClosurePath,
     mode: meta::UserEnvironmentAction,
 }
-
-/// Home Manager's activation driver protocol: at version 1 the activation
-/// script leaves the Home Manager profile alone, so the profile names a
-/// generation only after that generation's activation has succeeded.
-const HOME_MANAGER_DRIVER_VERSION_FLAG: &str = "--driver-version";
-const HOME_MANAGER_DRIVER_VERSION: &str = "1";
 
 /// Activating one user environment, locally or through a remote shell.
 /// `ActivateNow` runs the activation first and sets the profile only once it
 /// has succeeded, so a refused activation leaves the profile where it was.
 trait UserEnvironmentActivating {
-    fn local_profile_invocation(&self, home: &Path) -> NixCommand;
+    fn local_profile_emission(&self, home: &Path) -> emission::LocalHomeProfile;
 
-    fn local_activate_invocation(&self) -> NixCommand;
+    fn local_activate_emission(&self) -> emission::LocalHomeActivation;
 
-    fn remote_profile_invocation(&self) -> std::result::Result<NixCommand, String>;
+    fn remote_profile_emission(&self) -> std::result::Result<emission::RemoteHomeProfile, String>;
 
-    fn remote_activate_invocation(&self) -> std::result::Result<NixCommand, String>;
+    fn remote_activate_emission(
+        &self,
+    ) -> std::result::Result<emission::RemoteHomeActivation, String>;
 
-    /// Build the remote command from the authority carried by the explicit SSH
-    /// destination. This is the effect-side fail-closed guard for recovered
-    /// jobs; fresh submissions reject this same mismatch before any effect.
-    fn remote_invocation(&self, command: ShellCommand) -> std::result::Result<NixCommand, String>;
-
-    /// The explicit deployment SSH identity is root. Drop privilege to the
-    /// target account for the profile and activation commands, so a user profile
-    /// deploy works even when that account has no SSH login while preserving the
-    /// profile's user-owned state.
-    ///
-    /// Drop through a login (`runuser --login`), not a bare privilege drop. The
-    /// root SSH session's environment — `XDG_RUNTIME_DIR` and
-    /// `DBUS_SESSION_BUS_ADDRESS` (`/run/user/0`), `NIX_PROFILES`,
-    /// `XDG_DATA_DIRS`, `XDG_CONFIG_DIRS`, … — otherwise survives into the target
-    /// context and points Home Manager's activation at root-owned runtime and
-    /// profile paths; its `mkdir`, `dconf`, and systemd-reload steps then fail
-    /// with permission errors. A login rebuilds the environment from the target
-    /// account: correct `HOME`, `USER`, `LOGNAME`, and the target's own profile
-    /// and runtime paths, so activation runs as a clean session of that user
-    /// (its systemd reload reaches the target's live `/run/user/<uid>` session).
-    /// The login also resolves the account's home natively, obviating a manual
-    /// `getent` lookup.
-    fn root_mediated_invocation(&self, command: ShellCommand) -> NixCommand;
+    /// The login a remote command runs as, from the authority carried by the
+    /// explicit SSH destination: the target user directly, or root mediating
+    /// through a login of the target user. This is the effect-side fail-closed
+    /// guard for recovered jobs; fresh submissions reject this same mismatch
+    /// before any effect.
+    fn remote_home_login(&self) -> std::result::Result<emission::RemoteHomeLogin, String>;
 
     async fn run_profile(
         &self,
@@ -7673,66 +7110,61 @@ trait UserEnvironmentActivating {
     async fn current_node(&self, execution: &EffectExecution) -> Option<String>;
 }
 
+/// Reading a completed-or-failed emission outcome as a stage result.
+trait CompletedCall {
+    fn completed(self) -> std::result::Result<(), StageFailure>;
+}
+
+impl CompletedCall for emission::CallOutcome {
+    fn completed(self) -> std::result::Result<(), StageFailure> {
+        match self {
+            Self::Completed => Ok(()),
+            Self::Failed(failure) => Err(failure.into()),
+        }
+    }
+}
+
 impl UserEnvironmentActivating for UserEnvironmentActivation {
-    fn local_profile_invocation(&self, home: &Path) -> NixCommand {
-        NixCommand::new(
-            "nix-env",
-            vec![
-                "-p".to_string(),
-                home.join(".local/state/nix/profiles/home-manager")
-                    .display()
-                    .to_string(),
-                "--set".to_string(),
-                self.store_path.clone(),
-            ],
-        )
+    fn local_profile_emission(&self, home: &Path) -> emission::LocalHomeProfile {
+        emission::LocalHomeProfile {
+            home_directory: emission::HomeDirectory(home.display().to_string()),
+            closure_path: self.closure_path.clone(),
+        }
     }
 
-    fn local_activate_invocation(&self) -> NixCommand {
-        NixCommand::new(
-            "/run/current-system/sw/bin/systemd-run",
-            vec![
-                "--user".to_string(),
-                "--wait".to_string(),
-                "--pipe".to_string(),
-                "--collect".to_string(),
-                "--quiet".to_string(),
-                "--service-type=exec".to_string(),
-                "--expand-environment=no".to_string(),
-                "--property=PrivateTmp=yes".to_string(),
-                "--setenv=TMPDIR=/tmp".to_string(),
-                "--".to_string(),
-                format!("{}/activate", self.store_path),
-                HOME_MANAGER_DRIVER_VERSION_FLAG.to_string(),
-                HOME_MANAGER_DRIVER_VERSION.to_string(),
-            ],
-        )
+    fn local_activate_emission(&self) -> emission::LocalHomeActivation {
+        emission::LocalHomeActivation {
+            closure_path: self.closure_path.clone(),
+        }
     }
 
-    fn remote_profile_invocation(&self) -> std::result::Result<NixCommand, String> {
-        self.remote_invocation(ShellCommand::from_raw(format!(
-            "nix-env -p \"$HOME/.local/state/nix/profiles/home-manager\" --set {}",
-            ShellArgument::new(self.store_path.clone()).to_command_text(),
-        )))
+    fn remote_profile_emission(&self) -> std::result::Result<emission::RemoteHomeProfile, String> {
+        Ok(emission::RemoteHomeProfile {
+            ssh_destination: self.target.ssh_destination.clone(),
+            remote_home_login: self.remote_home_login()?,
+            closure_path: self.closure_path.clone(),
+        })
     }
 
-    fn remote_activate_invocation(&self) -> std::result::Result<NixCommand, String> {
-        let invocation = self.local_activate_invocation();
-        let command = std::iter::once(invocation.program)
-            .chain(invocation.arguments)
-            .map(|argument| ShellArgument::new(argument).to_command_text())
-            .collect::<Vec<_>>()
-            .join(" ");
-        self.remote_invocation(ShellCommand::from_raw(command))
+    fn remote_activate_emission(
+        &self,
+    ) -> std::result::Result<emission::RemoteHomeActivation, String> {
+        Ok(emission::RemoteHomeActivation {
+            ssh_destination: self.target.ssh_destination.clone(),
+            remote_home_login: self.remote_home_login()?,
+            closure_path: self.closure_path.clone(),
+        })
     }
 
-    fn remote_invocation(&self, command: ShellCommand) -> std::result::Result<NixCommand, String> {
+    fn remote_home_login(&self) -> std::result::Result<emission::RemoteHomeLogin, String> {
         match self.authority {
             RemoteUserActivationAuthority::MatchedUser => {
-                Ok(self.target.remote_invocation(command))
+                Ok(emission::RemoteHomeLogin::AsTargetUser)
             }
             RemoteUserActivationAuthority::RootMediated => {
-                Ok(self.root_mediated_invocation(command))
+                Ok(emission::RemoteHomeLogin::MediatedFor(
+                    ordinary::UserName::new(self.user.as_str().to_string()),
+                ))
             }
             RemoteUserActivationAuthority::UnprivilegedMismatch => Err(
                 "remote Home Manager activation login differs from the target user and is not root"
@@ -7741,32 +7173,22 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
         }
     }
 
-    fn root_mediated_invocation(&self, command: ShellCommand) -> NixCommand {
-        let user = ShellArgument::new(self.user.as_str()).to_command_text();
-        let command = ShellArgument::new(command.into_text()).to_command_text();
-        self.target
-            .remote_invocation(ShellCommand::from_raw(format!(
-                "runuser --login --command {command} {user}",
-            )))
-    }
-
     async fn run_profile(
         &self,
         execution: &EffectExecution,
     ) -> std::result::Result<(), StageFailure> {
         if !self.is_local_context(execution).await {
-            return self
-                .remote_profile_invocation()?
-                .run(execution)
+            return execution
+                .emitted(self.remote_profile_emission()?)
                 .await
-                .map(|_| ());
+                .completed();
         }
         let home = std::env::var("HOME")
             .map_err(|_| "HOME is unset for local home activation".to_string())?;
-        self.local_profile_invocation(Path::new(&home))
-            .run(execution)
+        execution
+            .emitted(self.local_profile_emission(Path::new(&home)))
             .await
-            .map(|_| ())
+            .completed()
     }
 
     async fn run_activate(
@@ -7774,16 +7196,15 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
         execution: &EffectExecution,
     ) -> std::result::Result<(), StageFailure> {
         if !self.is_local_context(execution).await {
-            return self
-                .remote_activate_invocation()?
-                .run(execution)
+            return execution
+                .emitted(self.remote_activate_emission()?)
                 .await
-                .map(|_| ());
+                .completed();
         }
-        self.local_activate_invocation()
-            .run(execution)
+        execution
+            .emitted(self.local_activate_emission())
             .await
-            .map(|_| ())
+            .completed()
     }
 
     async fn is_local_context(&self, execution: &EffectExecution) -> bool {
@@ -7801,11 +7222,10 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
     async fn current_node(&self, execution: &EffectExecution) -> Option<String> {
         // The local-context node match compares the dispatcher's short hostname
         // against the deploy cursor's node name.
-        let output = NixCommand::new("hostname", vec!["-s".to_string()])
-            .run(execution)
-            .await
-            .ok()?;
-        Some(output.trim().to_string())
+        match execution.emitted(emission::ReadShortHostName {}).await {
+            emission::HostNameOutcome::Named(node) => Some(node.into_payload()),
+            emission::HostNameOutcome::Failed(_) => None,
+        }
     }
 }
 
@@ -7820,411 +7240,6 @@ impl Effect for UserEnvironmentActivation {
                 self.run_activate(execution).await?;
                 self.run_profile(execution).await
             }
-        }
-    }
-}
-
-/// A typed `nix` / `nix-store` invocation. Holds the program name and its
-/// argument vector so the same value can be inspected before it runs; `run`
-/// spawns it via `tokio::process::Command` and returns captured stdout or a
-/// failure detail string. Constructors model the target-side Nix invocations.
-#[derive(Debug, Clone)]
-struct NixCommand {
-    program: String,
-    arguments: Vec<String>,
-}
-
-/// One external program invocation and what lojix reads out of its output.
-trait NixInvoking {
-    fn new(program: impl Into<String>, arguments: Vec<String>) -> Self
-    where
-        Self: Sized;
-
-    fn flake_metadata(flake: &str) -> Self
-    where
-        Self: Sized;
-
-    /// Resolve the toplevel `.drvPath` before building in the daemon's local
-    /// Nix context. The target parameter is retained in the generated command
-    /// contract, but it deliberately contributes no `--store` redirect: an
-    /// ssh-ng evaluation can deadlock in remote transport (lojix 0.3.9). A
-    /// `TargetStore` build copies the evaluated derivation closure to the
-    /// target afterwards instead.
-    fn eval_drv_path(
-        attribute: &str,
-        overrides: &[nexus::FlakeInputOverride],
-        target: &nexus::BuildTarget,
-        refresh: EvalRefresh,
-    ) -> Self
-    where
-        Self: Sized;
-
-    fn hash_path(path: &Path) -> Self
-    where
-        Self: Sized;
-
-    fn build_closure(closure_path: &str, substituters: &[nexus::ExtraSubstituter]) -> Self
-    where
-        Self: Sized;
-
-    /// `nix build <installable> --no-link --print-out-paths` for a hermetic
-    /// check. The exact request/configuration-owned output selector is passed
-    /// verbatim — no derived attribute, `^*` output selector, or `.drvPath`
-    /// indirection. Exit status is pass/fail; the printed line is the realised
-    /// check out-path.
-    fn build_check(installable: &str) -> Self
-    where
-        Self: Sized;
-
-    fn build_closure_remote(
-        closure_path: &str,
-        builder_spec: &str,
-        substituters: &[nexus::ExtraSubstituter],
-    ) -> Self
-    where
-        Self: Sized;
-
-    /// Select the derivation's *outputs* with the `^*` installable suffix so
-    /// `nix build ... --print-out-paths` returns the realised output store
-    /// path. The closure path threaded in is a `.drv` path (from
-    /// `eval_drv_path`'s `.drvPath`); on nix 2.4+ a bare `.drv` installable
-    /// makes `--print-out-paths` print the `.drv` path itself, NOT the built
-    /// output — the daemon would then copy and activate the `.drv` and
-    /// activation could never succeed (Unit C live e2e on Prometheus). The
-    /// `^*` selector resolves the derivation to all its outputs.
-    fn output_installable(closure_path: &str) -> String;
-
-    /// The `--option extra-substituters / extra-trusted-public-keys` arguments
-    /// for the deploy's extra substituters (audit C2 — `NixBuildCommand`
-    /// carries them but the build previously ignored them, so it could not pull
-    /// from the configured cache). Empty when there are none.
-    fn substituter_options(substituters: &[nexus::ExtraSubstituter]) -> Vec<String>;
-
-    fn override_input_options(overrides: &[nexus::FlakeInputOverride]) -> Vec<String>;
-
-    fn collect_garbage(node_name: &str) -> Self
-    where
-        Self: Sized;
-
-    /// This command's identity, paired with what the attempt reported. A code
-    /// is present only when the process itself exited; a process killed by a
-    /// signal reports none.
-    fn reported(&self, code_option: Option<i32>, detail: String) -> StageFailure;
-
-    /// This command's identity after it ran and failed: how it ended, then
-    /// the tail of both of its streams. A failing step may print its cause on
-    /// either — Home Manager's `errorEcho` writes to stdout.
-    fn ended(&self, end: ProcessEnd, stdout: &[u8], stderr: &[u8]) -> StageFailure;
-
-    fn first_line(output: &str) -> String;
-
-    fn first_line_or(output: &str, fallback: &str) -> String;
-
-    fn count_lines(output: &str) -> u64;
-
-    /// The program name. Test-only inspection of the constructed invocation
-    /// (the on-node execution is proven at S5).
-    #[cfg(test)]
-    fn program(&self) -> &str;
-
-    /// The arguments joined by single spaces — a flat view of the constructed
-    /// argv for inspection (the remote-command body is the final argument).
-    /// Test-only.
-    #[cfg(test)]
-    fn joined_arguments(&self) -> String;
-}
-
-impl NixInvoking for NixCommand {
-    fn new(program: impl Into<String>, arguments: Vec<String>) -> Self {
-        Self {
-            program: program.into(),
-            arguments,
-        }
-    }
-
-    fn flake_metadata(flake: &str) -> Self {
-        Self::new(
-            "nix",
-            vec![
-                "flake".to_string(),
-                "metadata".to_string(),
-                "--no-write-lock-file".to_string(),
-                "--json".to_string(),
-                flake.to_string(),
-            ],
-        )
-    }
-
-    fn eval_drv_path(
-        attribute: &str,
-        overrides: &[nexus::FlakeInputOverride],
-        target: &nexus::BuildTarget,
-        refresh: EvalRefresh,
-    ) -> Self {
-        // `--refresh` is conditional (bead primary-8sv6): an immutable pin
-        // evaluates deterministically, so the eval cache is authoritative and
-        // the flag only forces a redundant full re-eval; a mutable ref keeps it.
-        let mut arguments = vec!["eval".to_string()];
-        if refresh.adds_refresh_flag() {
-            arguments.push("--refresh".to_string());
-        }
-        arguments.push("--raw".to_string());
-        let _ = target;
-        arguments.extend(Self::override_input_options(overrides));
-        arguments.push(format!("{attribute}.drvPath"));
-        Self::new("nix", arguments)
-    }
-
-    fn hash_path(path: &Path) -> Self {
-        Self::new(
-            "nix",
-            vec![
-                "hash".to_string(),
-                "path".to_string(),
-                "--type".to_string(),
-                "sha256".to_string(),
-                "--sri".to_string(),
-                path.display().to_string(),
-            ],
-        )
-    }
-
-    fn build_closure(closure_path: &str, substituters: &[nexus::ExtraSubstituter]) -> Self {
-        let mut arguments = vec![
-            "build".to_string(),
-            "--no-link".to_string(),
-            "--print-out-paths".to_string(),
-            Self::output_installable(closure_path),
-        ];
-        arguments.extend(Self::substituter_options(substituters));
-        Self::new("nix", arguments)
-    }
-
-    fn build_check(installable: &str) -> Self {
-        Self::new(
-            "nix",
-            vec![
-                "build".to_string(),
-                "--no-link".to_string(),
-                "--print-out-paths".to_string(),
-                installable.to_string(),
-            ],
-        )
-    }
-
-    fn build_closure_remote(
-        closure_path: &str,
-        builder_spec: &str,
-        substituters: &[nexus::ExtraSubstituter],
-    ) -> Self {
-        let mut arguments = vec![
-            "build".to_string(),
-            "--no-link".to_string(),
-            "--print-out-paths".to_string(),
-            "--option".to_string(),
-            "max-jobs".to_string(),
-            "0".to_string(),
-            "--builders".to_string(),
-            builder_spec.to_string(),
-            Self::output_installable(closure_path),
-        ];
-        arguments.extend(Self::substituter_options(substituters));
-        Self::new("nix", arguments)
-    }
-
-    fn output_installable(closure_path: &str) -> String {
-        format!("{closure_path}^*")
-    }
-
-    fn substituter_options(substituters: &[nexus::ExtraSubstituter]) -> Vec<String> {
-        if substituters.is_empty() {
-            return Vec::new();
-        }
-        let urls = substituters
-            .iter()
-            .map(|substituter| substituter.url.clone())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let public_keys = substituters
-            .iter()
-            .map(|substituter| substituter.public_key.clone())
-            .collect::<Vec<_>>()
-            .join(" ");
-        vec![
-            "--option".to_string(),
-            "extra-substituters".to_string(),
-            urls,
-            "--option".to_string(),
-            "extra-trusted-public-keys".to_string(),
-            public_keys,
-        ]
-    }
-
-    fn override_input_options(overrides: &[nexus::FlakeInputOverride]) -> Vec<String> {
-        let mut arguments = Vec::new();
-        for override_input in overrides {
-            arguments.push("--override-input".to_string());
-            arguments.push(override_input.string.clone());
-            arguments.push(format!(
-                "{}?narHash={}",
-                override_input.flake_input_reference.url,
-                override_input.flake_input_reference.nix_archive_hash
-            ));
-        }
-        arguments
-    }
-
-    fn collect_garbage(node_name: &str) -> Self {
-        Self::new(
-            "ssh",
-            vec![node_name.to_string(), "nix-store --gc".to_string()],
-        )
-    }
-
-    fn reported(&self, code_option: Option<i32>, detail: String) -> StageFailure {
-        StageFailure {
-            detail,
-            reported_outputs: Vec::new(),
-            failed_command_option: Some(crate::runtime_model::FailedCommand {
-                command_program: crate::runtime_model::CommandProgram::new(self.program.clone()),
-                command_argument_vector: self
-                    .arguments
-                    .iter()
-                    .map(|argument| crate::runtime_model::CommandArgument::new(argument.clone()))
-                    .collect(),
-                exit_code_option: code_option
-                    .filter(|code| *code >= 0)
-                    .map(i64::from)
-                    .map(crate::runtime_model::ExitCode::new),
-            }),
-        }
-    }
-
-    fn ended(&self, end: ProcessEnd, stdout: &[u8], stderr: &[u8]) -> StageFailure {
-        self.reported(end.exit_code(), end.statement())
-            .with_output(ReportedOutput::new(
-                "stdout",
-                String::from_utf8_lossy(stdout),
-            ))
-            .with_output(ReportedOutput::new(
-                "stderr",
-                String::from_utf8_lossy(stderr),
-            ))
-    }
-
-    fn first_line(output: &str) -> String {
-        output.lines().next().unwrap_or("").trim().to_string()
-    }
-
-    fn first_line_or(output: &str, fallback: &str) -> String {
-        let line = Self::first_line(output);
-        if line.is_empty() {
-            fallback.to_string()
-        } else {
-            line
-        }
-    }
-
-    fn count_lines(output: &str) -> u64 {
-        output
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .count() as u64
-    }
-
-    #[cfg(test)]
-    fn program(&self) -> &str {
-        &self.program
-    }
-
-    #[cfg(test)]
-    fn joined_arguments(&self) -> String {
-        self.arguments.join(" ")
-    }
-}
-
-impl Effect for NixCommand {
-    type Product = String;
-
-    async fn run(&self, execution: &EffectExecution) -> std::result::Result<String, StageFailure> {
-        let mut command = Command::new(execution.program(&self.program));
-        command
-            .args(&self.arguments)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(|error| {
-            self.reported(
-                None,
-                format!("failed to spawn session for {}: {error}", self.program),
-            )
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            self.reported(
-                None,
-                format!("spawned {} without a stdout pipe", self.program),
-            )
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            self.reported(
-                None,
-                format!("spawned {} without a stderr pipe", self.program),
-            )
-        })?;
-        let stdout_task = tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            let mut stdout = stdout;
-            stdout.read_to_end(&mut bytes).await.map(|_| bytes)
-        });
-        let stderr_task = tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            let mut stderr = stderr;
-            stderr.read_to_end(&mut bytes).await.map(|_| bytes)
-        });
-
-        let outcome = match child.wait().await {
-            Ok(status) => Ok(status),
-            Err(error) => Err(self.reported(
-                None,
-                format!("failed while waiting for {}: {error}", self.program),
-            )),
-        };
-        let stdout = stdout_task
-            .await
-            .map_err(|error| {
-                self.reported(
-                    None,
-                    format!("failed to join {} stdout reader: {error}", self.program),
-                )
-            })?
-            .map_err(|error| {
-                self.reported(
-                    None,
-                    format!("failed to read {} stdout: {error}", self.program),
-                )
-            })?;
-        let stderr = stderr_task
-            .await
-            .map_err(|error| {
-                self.reported(
-                    None,
-                    format!("failed to join {} stderr reader: {error}", self.program),
-                )
-            })?
-            .map_err(|error| {
-                self.reported(
-                    None,
-                    format!("failed to read {} stderr: {error}", self.program),
-                )
-            })?;
-        let status = outcome?;
-        if status.success() {
-            Ok(String::from_utf8_lossy(&stdout).into_owned())
-        } else {
-            // How the process ended and both streams it printed, kept whole
-            // here; bounding and redaction belong to `Witnessing`, at the
-            // durable edge.
-            Err(self.ended(ProcessEnd::from(status), &stdout, &stderr))
         }
     }
 }
@@ -8279,6 +7294,168 @@ mod tests {
     //! behavior is proven later at S5 on a live VM.
 
     use super::*;
+    use crate::translator::{
+        ActivationScript as _, ArrivalMatching as _, CommandLine, Commanded as _,
+        ProcessRunning as _, ShellArgument, ShellQuoting as _,
+    };
+
+    /// The view the argv tests read an emission's command line through.
+    trait InvocationView {
+        fn program(&self) -> &str;
+
+        fn joined_arguments(&self) -> String;
+    }
+
+    impl InvocationView for CommandLine {
+        fn program(&self) -> &str {
+            &self.program
+        }
+
+        fn joined_arguments(&self) -> String {
+            self.arguments.join(" ")
+        }
+    }
+
+    /// The command lines a host activation's emissions become.
+    trait HostInvocations {
+        fn ssh_invocation(&self) -> Option<CommandLine>;
+
+        fn step_clear_efi_default_invocation(&self) -> CommandLine;
+
+        fn step_clear_efi_oneshot_invocation(&self) -> CommandLine;
+
+        fn systemd_run_invocation(&self, unit_name: &str) -> CommandLine;
+    }
+
+    impl HostInvocations for HostActivation {
+        fn ssh_invocation(&self) -> Option<CommandLine> {
+            self.switch_emission()
+                .map(|emission| emission.command_line())
+        }
+
+        fn step_clear_efi_default_invocation(&self) -> CommandLine {
+            self.boot_entry_clearing(emission::BootEntry::Default)
+                .command_line()
+        }
+
+        fn step_clear_efi_oneshot_invocation(&self) -> CommandLine {
+            self.boot_entry_clearing(emission::BootEntry::Oneshot)
+                .command_line()
+        }
+
+        fn systemd_run_invocation(&self, unit_name: &str) -> CommandLine {
+            emission::TransientUnitRun {
+                unit_name: emission::UnitName(unit_name.to_string()),
+                ..self.boot_once_emission()
+            }
+            .command_line()
+        }
+    }
+
+    /// The command lines a target-store realization's emissions become.
+    trait RealizationInvocations {
+        fn derivation_copy_invocation(&self) -> CommandLine;
+
+        fn build_invocation(&self) -> CommandLine;
+
+        fn gc_root_invocation(&self, output_path: &str) -> CommandLine;
+    }
+
+    impl RealizationInvocations for TargetStoreRealization {
+        fn derivation_copy_invocation(&self) -> CommandLine {
+            self.derivation_copy.command_line()
+        }
+
+        fn build_invocation(&self) -> CommandLine {
+            self.build.command_line()
+        }
+
+        fn gc_root_invocation(&self, output_path: &str) -> CommandLine {
+            self.rooting_of(output_path).command_line()
+        }
+    }
+
+    /// The command line a closure transfer's emission becomes.
+    trait TransferInvocation {
+        fn invocation(&self) -> CommandLine;
+    }
+
+    impl TransferInvocation for ClosureTransfer {
+        fn invocation(&self) -> CommandLine {
+            match self {
+                Self::Copy(copy) => copy.command_line(),
+                Self::PresenceCheck(presence) => presence.command_line(),
+            }
+        }
+    }
+
+    /// The command lines a user-environment activation's emissions become.
+    trait UserInvocations {
+        fn local_profile_invocation(&self, home: &Path) -> CommandLine;
+
+        fn local_activate_invocation(&self) -> CommandLine;
+
+        fn remote_profile_invocation(&self) -> std::result::Result<CommandLine, String>;
+
+        fn remote_activate_invocation(&self) -> std::result::Result<CommandLine, String>;
+    }
+
+    impl UserInvocations for UserEnvironmentActivation {
+        fn local_profile_invocation(&self, home: &Path) -> CommandLine {
+            self.local_profile_emission(home).command_line()
+        }
+
+        fn local_activate_invocation(&self) -> CommandLine {
+            self.local_activate_emission().command_line()
+        }
+
+        fn remote_profile_invocation(&self) -> std::result::Result<CommandLine, String> {
+            self.remote_profile_emission()
+                .map(|emission| emission.command_line())
+        }
+
+        fn remote_activate_invocation(&self) -> std::result::Result<CommandLine, String> {
+            self.remote_activate_emission()
+                .map(|emission| emission.command_line())
+        }
+    }
+
+    /// Whether a registered unit is the one a detached activation awaits.
+    trait UnitNewMatching {
+        fn is_expected_unit_new(&self, name: &str) -> bool;
+    }
+
+    impl UnitNewMatching for DetachedActivationUnit {
+        fn is_expected_unit_new(&self, name: &str) -> bool {
+            emission::UnitArrival {
+                unit_name: emission::UnitName(self.name.clone()),
+            }
+            .names(name)
+        }
+    }
+
+    /// The `nix eval` command line for `.#toplevel` under one freshness.
+    fn toplevel_evaluation(freshness: emission::EvaluationFreshness) -> CommandLine {
+        emission::DerivationEvaluation {
+            flake_reference: ordinary::FlakeReference::new(".".into()),
+            deployment_output_selector: ordinary::DeploymentOutputSelector::new(
+                ordinary::FlakeAttribute::new("toplevel".into()),
+            ),
+            evaluation_freshness: freshness,
+            persisted_flake_input_override_vector: Vec::new(),
+        }
+        .command_line()
+    }
+
+    /// The local `nix build` command line for a derivation.
+    fn closure_build(derivation: &str, build_place: emission::BuildPlace) -> CommandLine {
+        emission::ClosureBuild {
+            closure_path: ordinary::ClosurePath::new(derivation.into()),
+            build_place,
+            extra_substituter_vector: Vec::new(),
+        }
+        .command_line()
+    }
 
     const STORE: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-toplevel";
 
@@ -8889,11 +8066,15 @@ mod tests {
             resolved_flake(ordinary::SourceRevisionPolicy::ResolveAndRecord),
             memory::DeployResumeStage::MaterializeHorizon,
         );
-        before_crash.set_input_overrides(vec![nexus::FlakeInputOverride {
-            string: "criomos".to_string(),
-            flake_input_reference: nexus::FlakeInputReference {
-                url: "path:/var/lib/lojix/inputs/criomos".to_string(),
-                nix_archive_hash: "sha256-immutable-horizon-snapshot".to_string(),
+        before_crash.set_input_overrides(vec![memory::PersistedFlakeInputOverride {
+            flake_input_name: memory::FlakeInputName("criomos".to_string()),
+            persisted_flake_input_reference: memory::PersistedFlakeInputReference {
+                flake_input_url: memory::FlakeInputUrl(
+                    "path:/var/lib/lojix/inputs/criomos".to_string(),
+                ),
+                nix_archive_hash: memory::NixArchiveHash(
+                    "sha256-immutable-horizon-snapshot".to_string(),
+                ),
             },
         }]);
         let persisted = store
@@ -8950,11 +8131,12 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         assert_eq!(pipeline.input_overrides.len(), 1);
-        assert_eq!(pipeline.input_overrides[0].string, "criomos");
+        assert_eq!(pipeline.input_overrides[0].flake_input_name.0, "criomos");
         assert_eq!(
             pipeline.input_overrides[0]
-                .flake_input_reference
-                .nix_archive_hash,
+                .persisted_flake_input_reference
+                .nix_archive_hash
+                .0,
             "sha256-immutable-horizon-snapshot"
         );
     }
@@ -9170,9 +8352,12 @@ mod tests {
 
     #[test]
     fn flake_metadata_never_writes_the_fetched_source_lock() {
-        let invocation = NixCommand::flake_metadata(
-            "github:LiGoldragon/CriomOS/0123456789abcdef0123456789abcdef01234567",
-        );
+        let invocation = emission::FlakeMetadataQuery {
+            flake_reference: ordinary::FlakeReference::new(
+                "github:LiGoldragon/CriomOS/0123456789abcdef0123456789abcdef01234567".into(),
+            ),
+        }
+        .command_line();
         assert_eq!(invocation.program(), "nix");
         assert_eq!(
             invocation.arguments,
@@ -9197,7 +8382,7 @@ mod tests {
         // `--print-out-paths` print the `.drv` path itself, so the daemon would
         // copy/activate the `.drv` and activation could never succeed (Unit C
         // live e2e). The `^*` output selector pins the realised output path.
-        let invocation = NixCommand::build_closure(DERIVATION, &[]);
+        let invocation = closure_build(DERIVATION, emission::BuildPlace::DaemonStore);
         assert_eq!(invocation.program(), "nix");
         let argv = invocation.joined_arguments();
         assert!(argv.contains("--print-out-paths"), "{argv}");
@@ -9219,7 +8404,10 @@ mod tests {
     #[test]
     fn remote_build_uses_the_exact_request_builder_spec_and_disables_local_fallback() {
         let builder_spec = "ssh-ng://fixture-builder.invalid x86_64-linux - 4 2 k1";
-        let invocation = NixCommand::build_closure_remote(DERIVATION, builder_spec, &[]);
+        let invocation = closure_build(
+            DERIVATION,
+            emission::BuildPlace::Offloaded(ordinary::NixBuilderSpec::new(builder_spec.into())),
+        );
         assert_eq!(invocation.program(), "nix");
         let argv = invocation.joined_arguments();
         assert!(
@@ -9267,7 +8455,7 @@ mod tests {
 
     #[test]
     fn copy_from_dispatcher_uses_to_only_with_substitute() {
-        let copy = ClosureCopy::from_command(&copy_command())
+        let copy = ClosureTransfer::from_command(&copy_command())
             .expect("local build copies from the dispatcher store");
         let invocation = copy.invocation();
         assert_eq!(invocation.program(), "nix");
@@ -9286,7 +8474,7 @@ mod tests {
         let mut command = copy_command();
         command.deployment_transport.nix_store_uri =
             nexus::NixStoreUri::new("ssh-ng://bird@zeus.example:2222?compress=true".into());
-        let copy = ClosureCopy::from_command(&command).expect("copy transport");
+        let copy = ClosureTransfer::from_command(&command).expect("copy transport");
         let invocation = copy.invocation();
         let argv = invocation.joined_arguments();
         assert!(argv.contains("--substitute-on-destination"), "{argv}");
@@ -9302,7 +8490,7 @@ mod tests {
         let mut command = copy_command();
         command.deployment_transport.nix_store_uri =
             nexus::NixStoreUri::new("ssh-ng://root@zeus.example".into());
-        let copy = ClosureCopy::from_command(&command).expect("copy transport");
+        let copy = ClosureTransfer::from_command(&command).expect("copy transport");
         let invocation = copy.invocation();
         let argv = invocation.joined_arguments();
         assert!(argv.contains("--to ssh-ng://root@zeus.example"), "{argv}");
@@ -9506,14 +8694,7 @@ mod tests {
             activation.detached_self_activation().is_some(),
             "self-host Switch must take the detached shape"
         );
-        let invocation = activation.detached_invocation(
-            &activation.self_switch_unit_name(),
-            activation.self_switch_script(
-                activation
-                    .detached_self_activation()
-                    .expect("detached self activation"),
-            ),
-        );
+        let invocation = activation.self_switch_emission().command_line();
         assert_eq!(invocation.program(), "ssh");
         let argv = invocation.joined_arguments();
         assert!(argv.contains("systemd-run"), "PID-1-owned unit: {argv}");
@@ -9547,14 +8728,7 @@ mod tests {
             activation.detached_self_activation().is_some(),
             "same-host TestActivation must survive the service replacement"
         );
-        let invocation = activation.retained_detached_invocation(
-            &activation.self_switch_unit_name(),
-            activation.self_switch_script(
-                activation
-                    .detached_self_activation()
-                    .expect("detached self activation"),
-            ),
-        );
+        let invocation = activation.self_test_emission().command_line();
         let argv = invocation.joined_arguments();
         assert!(argv.contains("systemd-run"), "PID-1-owned unit: {argv}");
         assert!(
@@ -9923,12 +9097,7 @@ mod tests {
             command.build_target,
             nexus::BuildTarget::TargetStore(_)
         ));
-        let invocation = NixCommand::eval_drv_path(
-            ".#toplevel",
-            &[],
-            &command.build_target,
-            EvalRefresh::ForceRefresh,
-        );
+        let invocation = command.evaluation().command_line();
         let argv = invocation.joined_arguments();
         assert!(
             !argv.contains("--store") && !argv.contains("--eval-store"),
@@ -9977,8 +9146,8 @@ mod tests {
         let realization = target_store_realization(
             "root@fixture-target.invalid",
             vec![nexus::ExtraSubstituter {
-                url: "https://cache.fixture.invalid".to_string(),
-                public_key: "cache.fixture.invalid-1:key".to_string(),
+                first_string: "https://cache.fixture.invalid".to_string(),
+                second_string: "cache.fixture.invalid-1:key".to_string(),
             }],
         );
         let invocation = realization.build_invocation();
@@ -10061,7 +9230,7 @@ mod tests {
         let command =
             pipeline.copy_closure_command(ordinary::ClosurePath::new(STORE.into()), &daemon_host());
         assert_eq!(command.closure_origin, nexus::ClosureOrigin::TargetStore);
-        let argv = ClosureCopy::from_command(&command)
+        let argv = ClosureTransfer::from_command(&command)
             .expect("copy transport")
             .invocation()
             .joined_arguments();
@@ -10077,7 +9246,7 @@ mod tests {
         let command =
             pipeline.copy_closure_command(ordinary::ClosurePath::new(STORE.into()), &node());
         assert_eq!(command.closure_origin, nexus::ClosureOrigin::DaemonStore);
-        let argv = ClosureCopy::from_command(&command)
+        let argv = ClosureTransfer::from_command(&command)
             .expect("copy transport")
             .invocation()
             .joined_arguments();
@@ -10149,7 +9318,7 @@ mod tests {
 
     #[test]
     fn build_closure_stays_local_and_selects_the_realised_output() {
-        let invocation = NixCommand::build_closure(DERIVATION, &[]);
+        let invocation = closure_build(DERIVATION, emission::BuildPlace::DaemonStore);
         assert_eq!(invocation.program(), "nix");
         let argv = invocation.joined_arguments();
         assert!(
@@ -10205,9 +9374,7 @@ mod tests {
 
     #[test]
     fn local_eval_never_redirects_over_ssh_ng() {
-        let store = nexus::BuildTarget::Local;
-        let invocation =
-            NixCommand::eval_drv_path(".#toplevel", &[], &store, EvalRefresh::ForceRefresh);
+        let invocation = toplevel_evaluation(emission::EvaluationFreshness::Refreshed);
         assert_eq!(invocation.program(), "nix");
         let argv = invocation.joined_arguments();
         assert!(
@@ -10225,9 +9392,7 @@ mod tests {
         // (bead primary-8sv6): no `--refresh`, so a re-deploy of the same rev
         // serves the cached evaluation instead of re-evaluating the whole tree.
         // The `--raw` flag and `.drvPath` selector are unaffected.
-        let store = nexus::BuildTarget::Local;
-        let invocation =
-            NixCommand::eval_drv_path(".#toplevel", &[], &store, EvalRefresh::TrustImmutablePin);
+        let invocation = toplevel_evaluation(emission::EvaluationFreshness::TrustingPin);
         let argv = invocation.joined_arguments();
         assert!(
             !argv.contains("--refresh"),
@@ -10249,16 +9414,25 @@ mod tests {
         let pinned = "github:LiGoldragon/CriomOS?rev=0123456789abcdef0123456789abcdef01234567";
         let mutable = "github:LiGoldragon/CriomOS";
         assert_eq!(
-            EvalRefresh::for_source(ordinary::SourceRevisionPolicy::RequireImmutable, pinned),
-            EvalRefresh::TrustImmutablePin
+            emission::EvaluationFreshness::for_source(
+                ordinary::SourceRevisionPolicy::RequireImmutable,
+                pinned
+            ),
+            emission::EvaluationFreshness::TrustingPin
         );
         assert_eq!(
-            EvalRefresh::for_source(ordinary::SourceRevisionPolicy::RequireImmutable, mutable),
-            EvalRefresh::ForceRefresh
+            emission::EvaluationFreshness::for_source(
+                ordinary::SourceRevisionPolicy::RequireImmutable,
+                mutable
+            ),
+            emission::EvaluationFreshness::Refreshed
         );
         assert_eq!(
-            EvalRefresh::for_source(ordinary::SourceRevisionPolicy::ResolveAndRecord, pinned),
-            EvalRefresh::ForceRefresh
+            emission::EvaluationFreshness::for_source(
+                ordinary::SourceRevisionPolicy::ResolveAndRecord,
+                pinned
+            ),
+            emission::EvaluationFreshness::Refreshed
         );
     }
 
@@ -10267,12 +9441,7 @@ mod tests {
         // A daemon-host target (`Local`) keeps the host-local eval — its store
         // already holds everything the config references, and a store redirect
         // would be wrong. No `--store` / `--eval-store` flags are added.
-        let invocation = NixCommand::eval_drv_path(
-            ".#toplevel",
-            &[],
-            &nexus::BuildTarget::Local,
-            EvalRefresh::ForceRefresh,
-        );
+        let invocation = toplevel_evaluation(emission::EvaluationFreshness::Refreshed);
         let argv = invocation.joined_arguments();
         assert!(
             !argv.contains("--store"),
@@ -10291,11 +9460,16 @@ mod tests {
         // machine; the eval stays host-local (the `.drv` is instantiated against
         // the daemon host's store, matching `build_closure_remote`). So a Remote
         // eval adds no `--store` / `--eval-store` flags at all.
-        let target = nexus::BuildTarget::Remote(nexus::NixBuilderSpec::new(
+        let mut pipeline = host_pipeline(ordinary::HostDeployAction::ScheduleBootOnce);
+        pipeline.builder = Some(ordinary::NixBuilderSpec::new(
             "ssh-ng://fixture-builder.invalid x86_64-linux - 4 2 k1".to_string(),
         ));
-        let invocation =
-            NixCommand::eval_drv_path(".#toplevel", &[], &target, EvalRefresh::ForceRefresh);
+        let command = pipeline.nix_eval_command(&node());
+        assert!(matches!(
+            command.build_target,
+            nexus::BuildTarget::Remote(_)
+        ));
+        let invocation = command.evaluation().command_line();
         let argv = invocation.joined_arguments();
         assert!(
             !argv.contains("--store"),
@@ -10305,7 +9479,7 @@ mod tests {
             !argv.contains("--eval-store"),
             "remote eval adds no eval-store: {argv}"
         );
-        assert!(argv.ends_with(".#toplevel.drvPath"), "{argv}");
+        assert!(argv.ends_with(".drvPath"), "{argv}");
     }
 
     #[test]
@@ -10327,7 +9501,10 @@ mod tests {
              bootctl set-oneshot \"$NEW\"\n\
              echo \"boot-once: oneshot=$NEW persistent-default=$OLD (=running generation)\"\n",
         );
-        assert_eq!(activation.boot_once_script(), expected);
+        assert_eq!(
+            emission::TransientScript::BootOnce(activation.closure_path.clone()).script(),
+            expected
+        );
     }
 
     // ---- Step 3: user-environment activation argv ----
@@ -10468,15 +9645,19 @@ mod tests {
             meta::UserEnvironmentAction::ActivateNow,
             "li@fixture.invalid",
         );
-        activation.store_path = "/fixture/path with spaces'$literal".to_string();
+        activation.closure_path =
+            ordinary::ClosurePath::new("/fixture/path with spaces'$literal".to_string());
         let invocation = activation
             .remote_activate_invocation()
             .expect("remote invocation");
         let expected = activation.local_activate_invocation();
         let command = invocation.arguments.last().expect("SSH command");
-        assert!(command.contains(
-            &ShellArgument::new(format!("{}/activate", activation.store_path)).to_command_text()
-        ));
+        assert!(
+            command.contains(
+                &ShellArgument(&format!("{}/activate", activation.closure_path.payload()))
+                    .to_command_text()
+            )
+        );
         assert!(command.contains("--expand-environment=no"));
         assert_eq!(expected.arguments.last().map(String::as_str), Some("1"));
     }
@@ -10496,12 +9677,20 @@ mod tests {
                 "li@fixture.invalid",
             );
             let invocation = activation.local_activate_invocation();
-            let invocation = NixCommand::new("systemd-run", invocation.arguments);
-            let result = runtime.block_on(invocation.run(&execution));
+            let invocation = CommandLine {
+                program: "systemd-run".into(),
+                arguments: invocation.arguments,
+            };
+            let running = execution.clone();
+            let result = runtime.block_on(async {
+                tokio::task::spawn_blocking(move || running.run(&invocation))
+                    .await
+                    .expect("runner thread")
+            });
             if status == 0 {
                 assert_eq!(result.expect("success stdout"), "activation stdout");
             } else {
-                let failure = result.expect_err("runner failure");
+                let failure = StageFailure::from(result.expect_err("runner failure"));
                 assert!(format!("{failure:?}").contains("23"));
                 assert!(
                     failure
@@ -10805,14 +9994,31 @@ mod tests {
 
     #[test]
     fn a_main_process_killed_by_a_signal_has_no_exit_code() {
-        let killed = ProcessEnd::from_main_process(2, 9).expect("CLD_KILLED");
+        let killed =
+            <emission::ProcessEnd as crate::translator::MainProcessReading>::from_main_process(
+                2, 9,
+            )
+            .expect("CLD_KILLED");
         assert_eq!(killed.exit_code(), None);
         assert_eq!(killed.statement(), "killed by signal 9");
-        let dumped = ProcessEnd::from_main_process(3, 6).expect("CLD_DUMPED");
+        let dumped =
+            <emission::ProcessEnd as crate::translator::MainProcessReading>::from_main_process(
+                3, 6,
+            )
+            .expect("CLD_DUMPED");
         assert_eq!(dumped.statement(), "killed by signal 6, core dumped");
-        let exited = ProcessEnd::from_main_process(1, 4).expect("CLD_EXITED");
+        let exited =
+            <emission::ProcessEnd as crate::translator::MainProcessReading>::from_main_process(
+                1, 4,
+            )
+            .expect("CLD_EXITED");
         assert_eq!(exited.exit_code(), Some(4));
-        assert_eq!(ProcessEnd::from_main_process(0, 0), None);
+        assert_eq!(
+            <emission::ProcessEnd as crate::translator::MainProcessReading>::from_main_process(
+                0, 0
+            ),
+            None
+        );
     }
 
     /// A fake `ssh` answering `journalctl` with `journal`, in a fresh program
@@ -10850,13 +10056,16 @@ mod tests {
     fn a_detached_test_failure_carries_its_main_process_end_and_journal() {
         let (directory, execution) = journal_execution("switch-to-configuration: unit sshd failed");
         let unit = detached_test_unit();
-        let main = ProcessEnd::from_main_process(2, 15);
+        let main =
+            <emission::ProcessEnd as crate::translator::MainProcessReading>::from_main_process(
+                2, 15,
+            );
         let failure = DetachedActivationFailure {
             unit_name: unit.name.clone(),
             active_state: "failed".to_string(),
             result: format!(
                 "systemd reported Result=signal; main process {}",
-                main.expect("signal").statement()
+                main.clone().expect("signal").statement()
             ),
             process_end_option: main,
             reported_outputs: Vec::new(),
@@ -10908,5 +10117,346 @@ mod tests {
             "{detail}"
         );
         assert!(evidence.failed_command_option.is_some());
+    }
+
+    // ---- Every emission's argv equals what 0.11.0 at 23f88f2 ran ----
+    //
+    // `tests/fixtures/emission-argv.txt` was written by 23f88f2's own
+    // `NixCommand` builders, from the inputs below, before the emissions
+    // replaced them. Each line is a label, the program and the argument
+    // vector, the last two in Rust's debug form so a script's newlines and
+    // quotes are compared exactly.
+
+    const RECORDED_DERIVATION: &str = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-toplevel.drv";
+    const RECORDED_OUTPUT: &str = "/nix/store/cccccccccccccccccccccccccccccccc-toplevel";
+
+    fn recorded_substituters() -> Vec<nexus::ExtraSubstituter> {
+        vec![
+            nexus::ExtraSubstituter {
+                first_string: "https://cache.one.invalid".into(),
+                second_string: "cache.one.invalid-1:AAAA".into(),
+            },
+            nexus::ExtraSubstituter {
+                first_string: "https://cache.two.invalid".into(),
+                second_string: "cache.two.invalid-1:BBBB".into(),
+            },
+        ]
+    }
+
+    fn recorded_override(name: &str, url: &str, hash: &str) -> memory::PersistedFlakeInputOverride {
+        memory::PersistedFlakeInputOverride {
+            flake_input_name: memory::FlakeInputName(name.into()),
+            persisted_flake_input_reference: memory::PersistedFlakeInputReference {
+                flake_input_url: memory::FlakeInputUrl(url.into()),
+                nix_archive_hash: memory::NixArchiveHash(hash.into()),
+            },
+        }
+    }
+
+    fn recorded_evaluation(
+        freshness: emission::EvaluationFreshness,
+        overrides: Vec<memory::PersistedFlakeInputOverride>,
+    ) -> emission::DerivationEvaluation {
+        emission::DerivationEvaluation {
+            flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
+            deployment_output_selector: ordinary::DeploymentOutputSelector::new(
+                ordinary::FlakeAttribute::new(
+                    "nixosConfigurations.node-1.config.system.build.toplevel".into(),
+                ),
+            ),
+            evaluation_freshness: freshness,
+            persisted_flake_input_override_vector: overrides,
+        }
+    }
+
+    fn recorded_closure_build(
+        build_place: emission::BuildPlace,
+        substituters: Vec<nexus::ExtraSubstituter>,
+    ) -> emission::ClosureBuild {
+        emission::ClosureBuild {
+            closure_path: ordinary::ClosurePath::new(RECORDED_DERIVATION.into()),
+            build_place,
+            extra_substituter_vector: substituters,
+        }
+    }
+
+    fn recorded_realization(
+        login: &str,
+        substituters: Vec<nexus::ExtraSubstituter>,
+    ) -> TargetStoreRealization {
+        let build = nexus::TargetStoreBuild {
+            deployment_transport: nexus::DeploymentTransport {
+                nix_store_uri: nexus::NixStoreUri::new(
+                    "ssh-ng://root@fixture-target.invalid".into(),
+                ),
+                ssh_destination: nexus::SshDestination::new(login.into()),
+            },
+            node_name: node(),
+            operator_node: daemon_host(),
+            ignored_builder_option: None,
+        };
+        let command = nexus::NixBuildCommand {
+            generation_identifier: ordinary::GenerationIdentifier::new(7),
+            closure_path: ordinary::ClosurePath::new(RECORDED_DERIVATION.into()),
+            build_target: nexus::BuildTarget::TargetStore(build.clone()),
+            extra_substituter_vector: substituters,
+        };
+        TargetStoreRealization::from_command(&command, &build).expect("realization")
+    }
+
+    fn emitted_command_lines() -> Vec<(String, CommandLine)> {
+        let mut lines: Vec<(String, CommandLine)> = Vec::new();
+        let mut line =
+            |label: &str, command_line: CommandLine| lines.push((label.into(), command_line));
+        line(
+            "flake-metadata github",
+            emission::FlakeMetadataQuery {
+                flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
+            }
+            .command_line(),
+        );
+        line(
+            "flake-metadata pinned",
+            emission::FlakeMetadataQuery {
+                flake_reference: ordinary::FlakeReference::new(
+                    "git+https://example.invalid/repo?rev=0123456789abcdef0123456789abcdef01234567"
+                        .into(),
+                ),
+            }
+            .command_line(),
+        );
+        line(
+            "eval refresh bare",
+            recorded_evaluation(emission::EvaluationFreshness::Refreshed, Vec::new())
+                .command_line(),
+        );
+        line(
+            "eval pinned overridden",
+            recorded_evaluation(
+                emission::EvaluationFreshness::TrustingPin,
+                vec![
+                    recorded_override(
+                        "horizon",
+                        "path:/var/lib/lojix/generated/alpha/node-1/complete-host/horizon",
+                        "sha256-AAAA%2BBBB%2FCCCC%3D",
+                    ),
+                    recorded_override(
+                        "system",
+                        "path:/var/lib/lojix/generated/alpha/node-1/complete-host/system",
+                        "sha256-DDDD%3D",
+                    ),
+                ],
+            )
+            .command_line(),
+        );
+        line(
+            "hash-path",
+            emission::InputHashing {
+                input_directory: emission::InputDirectory(
+                    "/var/lib/lojix/generated/alpha/node-1/complete-host/horizon".into(),
+                ),
+            }
+            .command_line(),
+        );
+        line(
+            "build local bare",
+            recorded_closure_build(emission::BuildPlace::DaemonStore, Vec::new()).command_line(),
+        );
+        line(
+            "build local substituted",
+            recorded_closure_build(emission::BuildPlace::DaemonStore, recorded_substituters())
+                .command_line(),
+        );
+        line(
+            "build remote",
+            recorded_closure_build(
+                emission::BuildPlace::Offloaded(ordinary::NixBuilderSpec::new(
+                    "ssh-ng://builder.invalid x86_64-linux - 8 1".into(),
+                )),
+                recorded_substituters()[..1].to_vec(),
+            )
+            .command_line(),
+        );
+        line(
+            "check build",
+            emission::CheckBuild {
+                flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
+                deployment_output_selector: fixture_test_profile().deployment_output_selector,
+            }
+            .command_line(),
+        );
+        for (login, label) in [
+            ("root@fixture-target.invalid", "root"),
+            ("fixture-login@fixture-target.invalid", "login"),
+        ] {
+            let realization = recorded_realization(
+                login,
+                if label == "root" {
+                    Vec::new()
+                } else {
+                    recorded_substituters()
+                },
+            );
+            line(
+                &format!("target-store {label} derivation-copy"),
+                realization.derivation_copy_invocation(),
+            );
+            line(
+                &format!("target-store {label} build"),
+                realization.build_invocation(),
+            );
+            line(
+                &format!("target-store {label} gc-root"),
+                realization.gc_root_invocation(RECORDED_OUTPUT),
+            );
+        }
+        line(
+            "copy daemon-store",
+            ClosureTransfer::from_command(&copy_command())
+                .expect("copy")
+                .invocation(),
+        );
+        let mut presence = copy_command();
+        presence.closure_origin = nexus::ClosureOrigin::TargetStore;
+        line(
+            "copy target-store",
+            ClosureTransfer::from_command(&presence)
+                .expect("copy")
+                .invocation(),
+        );
+        for (action, label) in [
+            (ordinary::HostDeployAction::SetBootProfile, "boot"),
+            (ordinary::HostDeployAction::ActivateNow, "switch"),
+            (ordinary::HostDeployAction::TestActivation, "test"),
+        ] {
+            line(
+                &format!("host {label}"),
+                host_activation(action).ssh_invocation().expect("simple"),
+            );
+        }
+        let boot = host_activation(ordinary::HostDeployAction::SetBootProfile);
+        line(
+            "host clear-efi-default",
+            boot.step_clear_efi_default_invocation(),
+        );
+        line(
+            "host clear-efi-oneshot",
+            boot.step_clear_efi_oneshot_invocation(),
+        );
+        let boot_once = host_activation(ordinary::HostDeployAction::ScheduleBootOnce);
+        line(
+            "host boot-once",
+            boot_once.boot_once_emission().command_line(),
+        );
+        let self_switch =
+            host_activation_on_host(ordinary::HostDeployAction::ActivateNow, Some(node()));
+        line(
+            "host self-switch",
+            self_switch.self_switch_emission().command_line(),
+        );
+        let self_test =
+            host_activation_on_host(ordinary::HostDeployAction::TestActivation, Some(node()));
+        line(
+            "host self-test",
+            self_test.self_test_emission().command_line(),
+        );
+        line(
+            "journal boot-once",
+            UnitJournal::new(boot_once.unit_name(), boot_once.target.clone())
+                .query()
+                .command_line(),
+        );
+        line(
+            "journal self-switch",
+            UnitJournal::new(
+                self_switch.self_switch_unit_name(),
+                self_switch.target.clone(),
+            )
+            .query()
+            .command_line(),
+        );
+        let matched = user_environment_activation(
+            meta::UserEnvironmentAction::ActivateNow,
+            "li@fixture.invalid",
+        );
+        let mediated = user_environment_activation(
+            meta::UserEnvironmentAction::ActivateNow,
+            "root@fixture.invalid",
+        );
+        line(
+            "user local-profile",
+            matched.local_profile_invocation(Path::new("/home/li")),
+        );
+        line("user local-activate", matched.local_activate_invocation());
+        line(
+            "user remote-profile matched",
+            matched.remote_profile_invocation().expect("matched"),
+        );
+        line(
+            "user remote-activate matched",
+            matched.remote_activate_invocation().expect("matched"),
+        );
+        line(
+            "user remote-profile mediated",
+            mediated.remote_profile_invocation().expect("mediated"),
+        );
+        line(
+            "user remote-activate mediated",
+            mediated.remote_activate_invocation().expect("mediated"),
+        );
+        line("hostname", emission::ReadShortHostName {}.command_line());
+        line(
+            "collect-garbage",
+            emission::GarbageCollection {
+                node_name: ordinary::NodeName::new("node-1".into()),
+            }
+            .command_line(),
+        );
+        line(
+            "test-vm bring-up",
+            nexus::BringUpTestVmCommand {
+                cluster_name: cluster(),
+                node: ordinary::NodeName::new("guest-1".into()),
+                host: node(),
+                deployment_transport: nexus_fixture_transport(),
+                closure_path: ordinary::ClosurePath::new(RECORDED_OUTPUT.into()),
+                string: "10.0.0.7".into(),
+            }
+            .emission()
+            .expect("bring up")
+            .command_line(),
+        );
+        line(
+            "test-vm tear-down",
+            nexus::TearDownTestVmCommand {
+                cluster_name: cluster(),
+                node: ordinary::NodeName::new("guest-1".into()),
+                host: node(),
+                deployment_transport: nexus_fixture_transport(),
+            }
+            .emission()
+            .expect("tear down")
+            .command_line(),
+        );
+        lines
+    }
+
+    #[test]
+    fn every_emission_runs_the_argv_23f88f2_ran_for_the_same_inputs() {
+        let recorded = include_str!("../tests/fixtures/emission-argv.txt");
+        let emitted: String = emitted_command_lines()
+            .into_iter()
+            .map(|(label, command_line)| {
+                format!(
+                    "{label}\t{:?}\t{:?}\n",
+                    command_line.program, command_line.arguments
+                )
+            })
+            .collect();
+        assert_eq!(recorded.lines().count(), 37);
+        for (recorded_line, emitted_line) in recorded.lines().zip(emitted.lines()) {
+            assert_eq!(recorded_line, emitted_line);
+        }
+        assert_eq!(emitted, recorded);
     }
 }

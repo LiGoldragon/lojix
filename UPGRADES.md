@@ -128,6 +128,20 @@ A deploy pipeline is driven by Lojix's own runner, at most 32 steps as before,
 in place of `triad-runtime`'s; triad-runtime now serves the two sockets
 alone. Nothing a peer sees changes.
 
+Every external call the deploy and test pipelines make is an emission
+generated from `ethos/emission.ethos` into `src/emission.rs`, held fresh by
+`build.rs`: the Nix evaluations, builds, copies, hashes and path checks, each
+`ssh` activation, journal read and GC root, the user-environment profile and
+activation, `hostname -s`, and the systemd D-Bus calls a detached activation
+is watched through. `src/translator.rs` holds the words of each call. Its
+`emit` is synchronous, over `std::process` and zbus's blocking API, and runs
+on a blocking thread the stage awaits. Every argv is the one the code before
+the emissions ran (`tests/fixtures/emission-argv.txt` was written by that
+code, at 23f88f2, and is compared emission by emission), and the processes
+inherit the same environment. A process whose output could not be collected is now reported
+"failed while waiting for <program>" where a failed stream read had its own
+sentence.
+
 # 0.10.5 to 0.10.6
 
 A revision: the memory format is unchanged and the store stays readable;
