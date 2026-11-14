@@ -1,11 +1,11 @@
 //! lojix deploy orchestrator runtime.
 //!
 //! The daemon owns the live generation set, the GC-roots retention tree, the
-//! append-only event log, and the container-lifecycle mirror. It drives the
-//! handwritten Nexus runner: each wire frame becomes a `NexusWork::SignalArrived`
-//! tagged by listener role, the engine decides the next step, and the deploy
-//! pipeline runs as a chain of effect continuations. The CLI is only a
-//! text-to-Signal adapter for this daemon.
+//! append-only event log, and the container-lifecycle mirror. Each wire frame
+//! is restored as its contract's `Input` and answered through the generated
+//! dispatch, `input.answer(&answerer)`; an admitted deploy or test runs on its
+//! own actor as a chain of effect continuations through the handwritten
+//! runner. The CLI is only a text-to-Signal adapter for this daemon.
 //!
 //! Durable `memory-engine`-backed state backs the handwritten runtime model,
 //! while the daemon socket shell is actor-native. Daemon state — the live
@@ -66,7 +66,7 @@ pub trait Payload {
 pub type NexusConfiguration = signal_lojix::LojixNexusConfiguration;
 pub type NexusConfigurationState = nexus::ConfigurationState<NexusConfiguration>;
 
-pub mod adapters;
+pub mod answering;
 #[cfg(feature = "tools")]
 pub mod bootstrap;
 pub mod client;

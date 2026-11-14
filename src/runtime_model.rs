@@ -4,10 +4,8 @@
 //! itself, and every record the store keeps is generated from
 //! `ethos/memory.ethos` into `crate::memory`; both are re-exported here under
 //! the names the runtime has always used. What stays declared here is the
-//! engine's own decision plane, its memory reads and writes and their
-//! outcomes, its ingress and egress, and the few twins whose shape differs
-//! from the contract's: Generation and its listing, the deploy submission
-//! with its Horizon definition inside, and the engine's five-way Selection.
+//! engine's own operation plane: its memory reads and writes and their
+//! outcomes, which `operation.ethos` is to generate.
 
 pub use crate::memory::{
     BootOnceUnit, ContainerLifecycleRecord, ContainerName, ContainerState, DeployJob,
@@ -20,11 +18,12 @@ pub use crate::memory::{
     StoredDeploymentRecord, StoredTestRun, TransitionIntentState, TransitionOrdinal,
 };
 pub use meta_signal_lojix::{
-    AcceptedTest, AppliedPin, AppliedRetire, AppliedUnpin, DeployHandle, DeployRefusalReason,
-    ExtraSubstituter, NodeSelection, PinRejectionReason, PinRequest, QuickCheck, RefusedDeploy,
-    RejectedDeploy, RejectedPin, RejectedRetire, RejectedTest, RejectedUnpin,
-    RetireRejectionReason, RetireRequest, TestRejectionReason, TestRequest, TestRun,
-    UnpinRejectionReason, UnpinRequest,
+    AcceptedTest, ActualizedDeploySubmission, AppliedPin, AppliedRetire, AppliedUnpin,
+    DeployHandle, DeployRefusalReason, DeploySubmission, ExtraSubstituter, HostDeployment,
+    NodeSelection, PinRejectionReason, PinRequest, QuickCheck, RefusedDeploy, RejectedDeploy,
+    RejectedPin, RejectedRetire, RejectedTest, RejectedUnpin, RetireRejectionReason, RetireRequest,
+    TestRejectionReason, TestRequest, TestRun, UnpinRejectionReason, UnpinRequest,
+    UserEnvironmentDeployment,
 };
 pub use signal_lojix::{
     ActivationBackend, ActivationEffect, AdmissionMarker, CacheRetentionTransition,
@@ -35,16 +34,16 @@ pub use signal_lojix::{
     DeploymentPhase, DeploymentPhaseEvent, DeploymentRecord, DeploymentRequestIdentity,
     DeploymentTerminal, DeploymentTerminalReason, DeploymentTransport, DeploymentWatch,
     DetailTruncated, EventLogPage, EventLogPosition, EventLogRange, ExitCode, FailedCommand,
-    FailureDetail, FailureEvidence, FailureStage, FlakeAttribute, FlakeReference,
-    GenerationArtifact, GenerationIdentifier, GenerationLookup, GenerationSlot, HostComposition,
-    HostDeployAction, HostSelection, ImmutableRevision, NixBuilderSpec, NixStoreUri, NixSystem,
-    NodeName, NodeSelector, PinLabel, ProposalSource, QueryRejectionReason, RejectedQuery,
-    RejectedUnwatch, RejectedWatch, RequestedDeploymentAction, SecretsDirectory, SecretsInput,
-    SourceRevisionPolicy, SshDestination, StateDigest, SubscriptionClose, SubscriptionClosed,
-    SubscriptionOpened, SubscriptionToken, TerminalMarker, TestExecutionProfile, TestMode,
-    TestOutcome, TestRunIdentifier, TestRunListing, TestRunLookup, TestRunPhase, TestRunRecord,
-    TransitionMarker, UnwatchRejectionReason, UserEnvironmentAction, UserName,
-    WatchRejectionReason,
+    FailureDetail, FailureEvidence, FailureStage, FlakeAttribute, FlakeReference, Generation,
+    GenerationArtifact, GenerationIdentifier, GenerationListing, GenerationLookup, GenerationSlot,
+    HostComposition, HostDeployAction, HostSelection, ImmutableRevision, NixBuilderSpec,
+    NixStoreUri, NixSystem, NodeName, NodeSelector, PinLabel, ProposalSource, QueryRejectionReason,
+    RejectedQuery, RejectedUnwatch, RejectedWatch, RequestedDeploymentAction, SecretsDirectory,
+    SecretsInput, Selection, SourceRevisionPolicy, SshDestination, StateDigest, StoreFailure,
+    SubscriptionClose, SubscriptionClosed, SubscriptionOpened, SubscriptionToken, TerminalMarker,
+    TestExecutionProfile, TestMode, TestOutcome, TestRunIdentifier, TestRunListing, TestRunLookup,
+    TestRunPhase, TestRunRecord, TransitionMarker, UnwatchRejectionReason, UserEnvironmentAction,
+    UserName, WatchRejectionReason,
 };
 
 /// A generated contract newtype, or a contract struct of one field, read
@@ -143,68 +142,6 @@ impl From<TestRunRecord> for StoredTestRun {
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum Selection {
-    ByNode(NodeSelector),
-    ByGeneration(GenerationLookup),
-    ByDeployment(DeploymentLookup),
-    ByEventLog(EventLogRange),
-    ByTestRun(TestRunLookup),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct Generation {
-    pub generation_identifier: GenerationIdentifier,
-    pub deployment_identifier: DeploymentIdentifier,
-    pub cluster_name: ClusterName,
-    pub node_name: NodeName,
-    pub generation_artifact: GenerationArtifact,
-    pub activation_effect: ActivationEffect,
-    pub generation_slot: GenerationSlot,
-    pub closure_path: ClosurePath,
-    pub immutable_revision_option: Option<ImmutableRevision>,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct GenerationListing {
-    pub generation_vector: Vec<Generation>,
-    pub deployment_record_vector: Vec<DeploymentRecord>,
-    pub database_marker: DatabaseMarker,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub struct HostDeployment {
-    pub cluster_name: ClusterName,
-    pub node_name: NodeName,
-    pub host_composition: HostComposition,
-    pub proposal_source: ProposalSource,
-    pub secrets_input: SecretsInput,
-    pub flake_reference: FlakeReference,
-    pub deployment_transport: DeploymentTransport,
-    pub deployment_input_mode: DeploymentInputMode,
-    pub horizon_definition_option: Option<horizon_lib::HorizonDefinition>,
-    pub deployment_output_selector: DeploymentOutputSelector,
-    pub activation_backend: ActivationBackend,
-    pub host_deploy_action: HostDeployAction,
-    pub source_revision_policy: SourceRevisionPolicy,
-    pub nix_builder_spec_option: Option<NixBuilderSpec>,
-    pub extra_substituter_vector: Vec<ExtraSubstituter>,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub struct UserEnvironmentDeployment {
-    pub cluster_name: ClusterName,
-    pub node_name: NodeName,
-    pub user_name: UserName,
-    pub proposal_source: ProposalSource,
-    pub secrets_input: SecretsInput,
-    pub flake_reference: FlakeReference,
-    pub deployment_transport: DeploymentTransport,
-    pub deployment_input_mode: DeploymentInputMode,
-    pub horizon_definition_option: Option<horizon_lib::HorizonDefinition>,
-    pub deployment_output_selector: DeploymentOutputSelector,
-    pub activation_backend: ActivationBackend,
-    pub user_environment_action: UserEnvironmentAction,
-    pub source_revision_policy: SourceRevisionPolicy,
-    pub nix_builder_spec_option: Option<NixBuilderSpec>,
-    pub extra_substituter_vector: Vec<ExtraSubstituter>,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum MemoryReadInput {
     QueryGenerations(Selection),
     ReadEventLog(EventLogRange),
@@ -224,7 +161,7 @@ pub enum MemoryWriteInput {
     OrdinaryConfigure(crate::NexusConfiguration),
     MetaConfigure(crate::NexusConfiguration),
     ReverseConfiguration,
-    RecordDeploySubmitted(DeploySubmission),
+    RecordDeploySubmitted(ActualizedDeploySubmission),
     RecordPhaseTransition(DeploymentPhaseEvent),
     RecordGenerationActivated(ActivationCommit),
     PinGeneration(PinRequest),
@@ -232,11 +169,6 @@ pub enum MemoryWriteInput {
     RetireGeneration(RetireRequest),
     RecordContainerTransition(ContainerTransition),
     RecordTestRun(TestRunRecord),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub enum DeploySubmission {
-    Host(HostDeployment),
-    UserEnvironment(UserEnvironmentDeployment),
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ActivationCommit {
@@ -305,59 +237,6 @@ pub enum RejectionReason {
     /// The durable write itself failed, so no record was produced.
     DurableWriteFailed,
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub enum OrdinaryIngress {
-    Configure(crate::NexusConfiguration),
-    Query(Selection),
-    WatchDeployments(DeploymentWatch),
-    Unwatch(SubscriptionClose),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub enum OrdinaryEgress {
-    Configured(ConfigurationReceipt),
-    ConfigurationRejected(ConfigurationRejection),
-    Queried(GenerationListing),
-    DeploymentEventsQueried(EventLogPage),
-    TestRunsQueried(TestRunListing),
-    Watching(SubscriptionOpened),
-    Unwatched(SubscriptionClosed),
-    QueryRejected(RejectedQuery),
-    WatchRejected(RejectedWatch),
-    UnwatchRejected(RejectedUnwatch),
-    /// The store failed under the request; the text names the failure.
-    StoreRefused(String),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub enum MetaIngress {
-    Configure(crate::NexusConfiguration),
-    ReverseConfiguration,
-    Deploy(DeploySubmission),
-    Pin(PinRequest),
-    Unpin(UnpinRequest),
-    Retire(RetireRequest),
-    Test(TestRequest),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub enum MetaEgress {
-    Configured(ConfigurationReceipt),
-    ConfigurationRejected(ConfigurationRejection),
-    ConfigurationReversed(ConfigurationReceipt),
-    DeployAccepted(DeployHandle),
-    DeployRejected(RejectedDeploy),
-    DeployRefused(RefusedDeploy),
-    DeployTerminal(DeploymentRecord),
-    Pinned(AppliedPin),
-    PinRejected(RejectedPin),
-    Unpinned(AppliedUnpin),
-    UnpinRejected(RejectedUnpin),
-    Retired(AppliedRetire),
-    RetireRejected(RejectedRetire),
-    Tested(AcceptedTest),
-    TestRejected(RejectedTest),
-    /// The store failed under the request; the text names the failure.
-    StoreRefused(String),
-}
-
 impl triad_runtime::MemoryWriteInput for MemoryWriteInput {}
 impl triad_runtime::MemoryWriteOutput for MemoryWriteOutput {}
 impl triad_runtime::MemoryReadInput for MemoryReadInput {}

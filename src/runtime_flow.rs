@@ -1,17 +1,23 @@
 //! Handwritten Nexus work, effects, and runner behavior.
 //!
 //! This is executable Rust vocabulary owned by lojix, not a projection from a
-//! schema language. Public signal values have already crossed the adapter seam
-//! before they appear here.
+//! schema language. A peer's input is answered through its contract's
+//! generated dispatch before any of this runs; what is here drives the deploy
+//! and test pipelines an admission hands to their actors.
 
 use crate::Payload;
 pub use crate::runtime_model::{
     ActivationEffect, ClosurePath, ClusterName, DeploymentIdentifier, FlakeReference,
     GenerationArtifact, GenerationIdentifier, GenerationSlot, HostComposition, HostDeployAction,
-    MemoryReadInput, MemoryReadOutput, MemoryWriteInput, MemoryWriteOutput, MetaEgress,
-    MetaIngress, NodeName, OrdinaryEgress, OrdinaryIngress, ProposalSource, SecretsInput,
-    SourceRevisionPolicy, SourceRevisionRecord, TestMode, UserEnvironmentAction, UserName,
+    MemoryReadInput, MemoryReadOutput, MemoryWriteInput, MemoryWriteOutput, NodeName,
+    ProposalSource, SecretsInput, SourceRevisionPolicy, SourceRevisionRecord, TestMode,
+    UserEnvironmentAction, UserName,
 };
+
+/// What a driven pipeline ends with: the privileged contract's own output,
+/// kept as executor evidence for the journal and tests. The peer that
+/// submitted the job already holds its admission answer.
+pub type PipelineOutput = meta_signal_lojix::Output;
 
 macro_rules! flow_newtype {
     ($name:ident, $inner:ty) => {
@@ -72,16 +78,6 @@ macro_rules! flow_text {
     };
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum SignalInput {
-    OrdinaryInput(OrdinaryIngress),
-    MetaInput(MetaIngress),
-}
-#[derive(Clone, Debug, PartialEq)]
-pub enum SignalOutput {
-    OrdinaryOutput(OrdinaryEgress),
-    MetaOutput(MetaEgress),
-}
 flow_text!(NixStoreUri);
 flow_text!(SshDestination);
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -356,7 +352,6 @@ pub enum EffectResult {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum NexusWork {
-    SignalArrived(SignalInput),
     MemoryReadCompleted(MemoryReadOutput),
     MemoryWriteCompleted(MemoryWriteOutput),
     EffectCompleted(EffectResult),
@@ -366,7 +361,9 @@ pub enum NexusAction {
     CommandMemoryRead(MemoryReadInput),
     CommandMemoryWrite(MemoryWriteInput),
     CommandEffect(EffectCommand),
-    ReplyToSignal(SignalOutput),
+    /// The pipeline has reached its end; what it ends with is evidence for
+    /// the journal and tests.
+    Finish(PipelineOutput),
     Continue(NexusWork),
 }
 
@@ -472,7 +469,7 @@ impl triad_runtime::NexusEffectCommand for EffectCommand {}
 impl triad_runtime::NexusEffectResult for EffectResult {}
 
 pub type NexusRunnerNextStep = triad_runtime::NextStep<
-    SignalOutput,
+    PipelineOutput,
     MemoryWriteInput,
     MemoryReadInput,
     EffectCommand,
@@ -480,7 +477,7 @@ pub type NexusRunnerNextStep = triad_runtime::NextStep<
 >;
 
 impl triad_runtime::NexusAction for NexusAction {
-    type Reply = SignalOutput;
+    type Reply = PipelineOutput;
     type MemoryWrite = MemoryWriteInput;
     type MemoryRead = MemoryReadInput;
     type Effect = EffectCommand;
@@ -490,7 +487,7 @@ impl triad_runtime::NexusAction for NexusAction {
         match self {
             Self::CommandMemoryWrite(input) => triad_runtime::NextStep::MemoryWrite(input),
             Self::CommandMemoryRead(input) => triad_runtime::NextStep::MemoryRead(input),
-            Self::ReplyToSignal(output) => triad_runtime::NextStep::Reply(output),
+            Self::Finish(output) => triad_runtime::NextStep::Reply(output),
             Self::CommandEffect(effect) => triad_runtime::NextStep::RunEffect(effect),
             Self::Continue(work) => triad_runtime::NextStep::Continue(work),
         }
@@ -522,7 +519,7 @@ pub trait NexusEngine: Send {
     fn budget_exhausted_reply(
         &self,
         exhausted: triad_runtime::ContinuationExhausted,
-    ) -> SignalOutput;
+    ) -> PipelineOutput;
 
     fn decide(&mut self, input: Nexus<NexusWork>) -> Nexus<NexusAction>;
 
@@ -542,7 +539,7 @@ pub trait NexusEngine: Send {
                 origin_route: origin_route.clone(),
             };
             let reply = runner.drive(&mut adapter, first_work).await;
-            NexusAction::ReplyToSignal(reply).with_origin_route(origin_route)
+            NexusAction::Finish(reply).with_origin_route(origin_route)
         }
     }
 }
@@ -553,7 +550,7 @@ struct NexusRunnerAdapter<'engine, Engine> {
 }
 
 impl<Engine: NexusEngine> triad_runtime::RunnerEngines for NexusRunnerAdapter<'_, Engine> {
-    type Reply = SignalOutput;
+    type Reply = PipelineOutput;
     type MemoryWrite = MemoryWriteInput;
     type MemoryRead = MemoryReadInput;
     type Effect = EffectCommand;

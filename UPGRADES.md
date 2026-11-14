@@ -108,6 +108,17 @@ it holds. Identifiers are the contract's signed Integer throughout; a
 negative identifier on the wire now reaches the engine and is answered as
 unknown, where the seam used to refuse the frame.
 
+The daemon answers each input through its contract's generated dispatch,
+`input.answer(&answerer)`, on both sockets. The answerer bears both
+contracts' `Answering` capabilities over the store; the engine's own ingress
+and egress enumerations, the contract-to-engine adapters, and the twins of
+contract types (Selection, Generation and its listing, the deploy submission
+with its Horizon definition inside) are gone. A deploy or test is admitted in
+its answer and handed to its actor as before; the executor's cap is a slot
+reserved at admission and freed when the pipeline ends. The replies are the
+same. A store that fails while a test is refused for capacity now answers
+`Refused.«…»`, where the daemon used to stop the test executor.
+
 # 0.10.5 to 0.10.6
 
 A revision: the memory format is unchanged and the store stays readable;

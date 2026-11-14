@@ -6,8 +6,10 @@ client. Both clients speak portable typed Signals over Unix sockets.
 
 > **Status (2026-08-04):** implemented Rust crate at the repo root.
 > The daemon uses the actor-native `triad-runtime` multi-listener for
-> two authority-tiered sockets and awaits the handwritten async Nexus
-> runner directly; child-process effects use `tokio::process`. Production
+> two authority-tiered sockets and answers each input through its
+> contract's generated dispatch, `input.answer(&answerer)`. An admitted
+> deploy or test is handed to its actor, which drives the handwritten async
+> runner; child-process effects use `tokio::process`. Production
 > host and user-environment build requests select their materialization mode
 > explicitly. `Horizon` enters a materialization effect that projects the proposal with
 > `horizon-rs`, writes generated `horizon` / `system` / `deployment`
@@ -190,11 +192,12 @@ src/
   memory.rs             # generated from ethos/memory.ethos: the stored records
   upgrade.rs            # the deploy-job family's upgrade from its 0.10.6 layout
   quarantine.rs         # the retired quarantine family, emptied at open
-  runtime_model.rs      # the engine's decision-plane nouns; contract and
-                        # stored types re-exported from where they are generated
-  adapters.rs           # the contract-to-engine seam, only where shapes differ
-  runtime_flow.rs       # hand-written Nexus effects, work, and runner logic
-  schema_runtime.rs     # async hand-written Nexus decision engine
+  answering.rs          # the generated Answering capabilities of both
+                        # contracts over the store; admission of jobs
+  runtime_model.rs      # the engine's operation plane; contract and stored
+                        # types re-exported from where they are generated
+  runtime_flow.rs       # hand-written pipeline effects, work, and runner logic
+  schema_runtime.rs     # async hand-written pipeline engine
 nexus/src/main.rs             # Datom-free daemon entry
 clients/ordinary/src/main.rs  # ordinary CLI entry
 clients/meta/src/main.rs      # privileged CLI entry
@@ -279,7 +282,7 @@ the workspace actor-systems doctrine. No zero-state holders.
   `horizon-definition.datom`, with no traversal, symlink, control, or credential-shaped
   path and content embodied as `Text<ClusterProposal>`. A closure is usable by an effect or a fresh
   durable v4 row only as a canonical immutable Nix store-item root. Public
-  adapters redact every other path and never project raw proposal sources,
+  answers redact every other path and never project raw proposal sources,
   flake references, or daemon error text.
 - The persisted Nexus configuration carries optional typed test defaults.
   Production starts from `NoTestDefaults`; tests may Configure explicit typed
@@ -297,8 +300,16 @@ the workspace actor-systems doctrine. No zero-state holders.
 - The daemon never initiates deploys on its own — every deploy
   starts from a received `DeploymentSubmission`.
 - The daemon serves connections concurrently, bounded by a permit
-  cap, and never blocks on in-progress nix builds. Deploy state is
-  per-request: each connection owns its own pipeline cursor. The
+  cap, and never blocks on in-progress nix builds. Each input is answered
+  through its contract's generated dispatch, `input.answer(&answerer)`, by
+  an answerer over the shared store; a store that cannot carry the input
+  out is answered `Refused.«<what failed>»`. A `Deploy` or `Test` is
+  admitted in its answer: a slot of its executor's cap is reserved, the
+  durable record and job row are written, and the engine holding the
+  pipeline cursor is handed to the deploy-job or test-job actor, which runs
+  the effects. Over the cap a deploy is rejected `DeploymentInFlight` and a
+  test `SubstrateUnavailable`. Deploy state is per-job: each admitted job's
+  engine owns its own pipeline cursor. The
   durable `memory-engine` Store is the only shared point and is locked
   only briefly per memory op; long nix effects hold no global lock
   (Spirit `2alg`).
@@ -309,9 +320,11 @@ the workspace actor-systems doctrine. No zero-state holders.
   coupled facts; reopen finishes only pending intent delivery.
 - An ordinary input is one frame in and one frame out; the daemon then
   closes the connection. A `WatchDeployments` keeps its connection: the
-  engine registers a watcher under the new subscription token with its
+  answer registers a watcher under the new subscription token with its
   `DeploymentWatch` filter before it reads the commit sequence it replies in
-  `DeploymentsWatched`, and the connection claims the watcher's stream. Watchers are
+  `DeploymentsWatched`, and the connection claims the watcher's stream. The
+  stream is written beside the generated dispatch, which ties no output to
+  the subscription that asked for it. Watchers are
   held in memory beside the token counter and never survive a restart.
 - The subscription bridge is downstream of the commit: the store announces a
   phase event to the watchers only after the commit that journals it, while

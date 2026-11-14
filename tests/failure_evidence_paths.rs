@@ -71,50 +71,58 @@ fn transport() -> ordinary::DeploymentTransport {
     }
 }
 
-fn user_environment_request(source: &Path) -> meta::DeploySubmission {
-    meta::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
-        cluster_name: ordinary::ClusterName::new("alpha".into()),
-        node_name: ordinary::NodeName::new(NODE.into()),
-        user_name: ordinary::UserName::new("bird".into()),
-        proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
-        secrets_input: ordinary::SecretsInput::NoSecrets,
-        flake_reference: ordinary::FlakeReference::new(FLAKE.into()),
-        deployment_transport: transport(),
-        deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
+fn user_environment_request(source: &Path) -> meta::ActualizedDeploySubmission {
+    meta::ActualizedDeploySubmission {
         horizon_definition_option: Some(common::read_horizon(source)),
-        deployment_output_selector: ordinary::DeploymentOutputSelector::new(
-            ordinary::FlakeAttribute::new("homeConfigurations.bird.activationPackage".into()),
+        deploy_submission: meta::DeploySubmission::UserEnvironment(
+            meta::UserEnvironmentDeployment {
+                cluster_name: ordinary::ClusterName::new("alpha".into()),
+                node_name: ordinary::NodeName::new(NODE.into()),
+                user_name: ordinary::UserName::new("bird".into()),
+                proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
+                secrets_input: ordinary::SecretsInput::NoSecrets,
+                flake_reference: ordinary::FlakeReference::new(FLAKE.into()),
+                deployment_transport: transport(),
+                deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
+                deployment_output_selector: ordinary::DeploymentOutputSelector::new(
+                    ordinary::FlakeAttribute::new(
+                        "homeConfigurations.bird.activationPackage".into(),
+                    ),
+                ),
+                activation_backend: ordinary::ActivationBackend::HomeManagerNixProfileV1,
+                user_environment_action: ordinary::UserEnvironmentAction::ActivateNow,
+                source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
+                nix_builder_spec_option: None,
+                extra_substituter_vector: vec![],
+            },
         ),
-        activation_backend: ordinary::ActivationBackend::HomeManagerNixProfileV1,
-        user_environment_action: ordinary::UserEnvironmentAction::ActivateNow,
-        source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-        nix_builder_spec_option: None,
-        extra_substituter_vector: vec![],
-    })
+    }
 }
 
-fn host_request(action: ordinary::HostDeployAction) -> meta::DeploySubmission {
-    meta::DeploySubmission::Host(meta::HostDeployment {
-        cluster_name: ordinary::ClusterName::new("alpha".into()),
-        node_name: ordinary::NodeName::new(NODE.into()),
-        host_composition: ordinary::HostComposition::BaseHost,
-        proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
-        secrets_input: ordinary::SecretsInput::NoSecrets,
-        flake_reference: ordinary::FlakeReference::new(FLAKE.into()),
-        deployment_transport: transport(),
-        deployment_input_mode: ordinary::DeploymentInputMode::Direct,
+fn host_request(action: ordinary::HostDeployAction) -> meta::ActualizedDeploySubmission {
+    meta::ActualizedDeploySubmission {
         horizon_definition_option: None,
-        deployment_output_selector: ordinary::DeploymentOutputSelector::new(
-            ordinary::FlakeAttribute::new(
-                "nixosConfigurations.beacon.config.system.build.toplevel".into(),
+        deploy_submission: meta::DeploySubmission::Host(meta::HostDeployment {
+            cluster_name: ordinary::ClusterName::new("alpha".into()),
+            node_name: ordinary::NodeName::new(NODE.into()),
+            host_composition: ordinary::HostComposition::BaseHost,
+            proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
+            secrets_input: ordinary::SecretsInput::NoSecrets,
+            flake_reference: ordinary::FlakeReference::new(FLAKE.into()),
+            deployment_transport: transport(),
+            deployment_input_mode: ordinary::DeploymentInputMode::Direct,
+            deployment_output_selector: ordinary::DeploymentOutputSelector::new(
+                ordinary::FlakeAttribute::new(
+                    "nixosConfigurations.beacon.config.system.build.toplevel".into(),
+                ),
             ),
-        ),
-        activation_backend: ordinary::ActivationBackend::NixosSystemdBootV1,
-        host_deploy_action: action,
-        source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-        nix_builder_spec_option: None,
-        extra_substituter_vector: vec![],
-    })
+            activation_backend: ordinary::ActivationBackend::NixosSystemdBootV1,
+            host_deploy_action: action,
+            source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
+            nix_builder_spec_option: None,
+            extra_substituter_vector: vec![],
+        }),
+    }
 }
 
 /// A Nexus running on `daemon_host`, its effects resolved in `programs`.
@@ -137,7 +145,11 @@ struct Driven {
     commands: Vec<String>,
 }
 
-async fn drive(directory: &Path, daemon_host: &str, request: meta::DeploySubmission) -> Driven {
+async fn drive(
+    directory: &Path,
+    daemon_host: &str,
+    request: meta::ActualizedDeploySubmission,
+) -> Driven {
     let programs = directory.join("programs");
     let mut engine = runtime(directory, &programs, daemon_host);
     match engine.submit_deploy(request) {

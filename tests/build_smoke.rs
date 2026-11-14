@@ -2,7 +2,6 @@
 
 use lojix::DurableStore as _;
 use lojix::Payload as _;
-use lojix::adapters::{Lowerable as _, Raisable as _};
 use lojix::schema_runtime::{DeployDriving as _, RuntimeCore as _};
 use lojix::schema_runtime::{DeploySubmissionOutcome, SchemaRuntime};
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
@@ -51,19 +50,25 @@ fn host_deploy_with_secrets(
     })
 }
 
+/// The submission an owner `Deploy` carries, as the engine receives it.
+fn submission(input: meta_signal_lojix::Input) -> meta_signal_lojix::ActualizedDeploySubmission {
+    let meta_signal_lojix::Input::Deploy(submission) = input else {
+        panic!("the fixture is a Deploy");
+    };
+    submission
+}
+
 #[test]
-fn owner_deploy_lowers_nonempty_secret_reference_without_reading_it() {
+fn owner_deploy_carries_a_nonempty_secret_reference_without_reading_it() {
     let input = host_deploy_with_secrets(
         signal_lojix::HostDeployAction::Realize,
         signal_lojix::SecretsInput::SecretsDirectory(signal_lojix::SecretsDirectory(
             "fixture-secret-directory".into(),
         )),
     );
-    let lojix::runtime_model::MetaIngress::Deploy(lojix::runtime_model::DeploySubmission::Host(
-        host,
-    )) = input.lower().expect("generated owner request lowers")
+    let lojix::runtime_model::DeploySubmission::Host(host) = submission(input).deploy_submission
     else {
-        panic!("owner Host deploy must lower to a runtime Host submission");
+        panic!("owner Host deploy is a Host submission");
     };
     assert!(matches!(
         host.secrets_input,
@@ -72,13 +77,11 @@ fn owner_deploy_lowers_nonempty_secret_reference_without_reading_it() {
 }
 
 #[test]
-fn owner_deploy_lowers_to_runtime_shape_with_explicit_no_secrets() {
+fn owner_deploy_reaches_the_engine_with_explicit_no_secrets() {
     let input = host_deploy(signal_lojix::HostDeployAction::ActivateNow);
-    let lojix::runtime_model::MetaIngress::Deploy(lojix::runtime_model::DeploySubmission::Host(
-        host,
-    )) = input.lower().expect("generated owner request lowers")
+    let lojix::runtime_model::DeploySubmission::Host(host) = submission(input).deploy_submission
     else {
-        panic!("owner Host deploy must lower to a runtime Host submission");
+        panic!("owner Host deploy is a Host submission");
     };
     assert_eq!(
         host.deployment_output_selector.payload().payload(),
@@ -91,7 +94,7 @@ fn owner_deploy_lowers_to_runtime_shape_with_explicit_no_secrets() {
 }
 
 #[test]
-fn owner_deploy_rejection_lowers_to_public_shape() {
+fn owner_deploy_rejection_is_answered_deploy_rejected() {
     let mut input = host_deploy(signal_lojix::HostDeployAction::ActivateNow);
     let meta_signal_lojix::Input::Deploy(actualized) = &mut input else {
         unreachable!()
@@ -100,18 +103,13 @@ fn owner_deploy_rejection_lowers_to_public_shape() {
         unreachable!()
     };
     host.deployment_input_mode = signal_lojix::DeploymentInputMode::Horizon;
-    let lojix::runtime_model::MetaIngress::Deploy(request) =
-        input.lower().expect("generated owner request lowers")
-    else {
-        panic!("owner Host deploy must lower to a runtime Host submission");
-    };
     let mut engine = SchemaRuntime::new();
-    let DeploySubmissionOutcome::Rejected(record) = engine.submit_deploy(request) else {
-        panic!("fixture Horizon source must produce a typed rejection");
-    };
-    lojix::runtime_model::MetaEgress::DeployRejected(record)
-        .raise()
-        .expect("typed owner rejection must match the public egress shape");
+    let outcome = engine.submit_deploy(submission(input));
+    assert!(matches!(outcome, DeploySubmissionOutcome::Rejected(_)));
+    assert!(matches!(
+        meta_signal_lojix::Output::from(outcome),
+        meta_signal_lojix::Output::DeployRejected(_)
+    ));
 }
 
 #[test]
@@ -125,12 +123,7 @@ fn owner_request_round_trips_fresh_portable_signal_bytes() {
 #[tokio::test]
 #[ignore = "hits the network and runs nix evaluation; run with --ignored"]
 async fn fixture_eval_reserves_a_durable_deployment_before_effects() {
-    let input = host_deploy(signal_lojix::HostDeployAction::Evaluate);
-    let lojix::runtime_model::MetaIngress::Deploy(request) =
-        input.lower().expect("generated owner request lowers")
-    else {
-        panic!("fixture must lower to Deploy");
-    };
+    let request = submission(host_deploy(signal_lojix::HostDeployAction::Evaluate));
     let mut engine = SchemaRuntime::new();
 
     let handle = match engine.submit_deploy(request) {

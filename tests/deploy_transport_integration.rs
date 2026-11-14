@@ -103,7 +103,7 @@ fn user_environment_request(
     source: &Path,
     nix_store_uri: &str,
     ssh_destination: &str,
-) -> meta::DeploySubmission {
+) -> meta::ActualizedDeploySubmission {
     user_environment_request_with_secrets(
         source,
         nix_store_uri,
@@ -117,24 +117,28 @@ fn user_environment_request_with_secrets(
     nix_store_uri: &str,
     ssh_destination: &str,
     secrets_input: ordinary::SecretsInput,
-) -> meta::DeploySubmission {
-    meta::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
-        cluster_name: ordinary::ClusterName::new("alpha".into()),
-        node_name: ordinary::NodeName::new(TARGET_NODE.into()),
-        user_name: ordinary::UserName::new("bird".into()),
-        proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
-        secrets_input,
-        flake_reference: ordinary::FlakeReference::new(FLAKE.into()),
-        deployment_transport: transport(nix_store_uri, ssh_destination),
-        deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
+) -> meta::ActualizedDeploySubmission {
+    meta::ActualizedDeploySubmission {
         horizon_definition_option: Some(common::read_horizon(source)),
-        deployment_output_selector: selector("packages.x86_64-linux.fixture-home"),
-        activation_backend: ordinary::ActivationBackend::HomeManagerNixProfileV1,
-        user_environment_action: meta::UserEnvironmentAction::ActivateNow,
-        source_revision_policy: meta::SourceRevisionPolicy::RequireImmutable,
-        nix_builder_spec_option: None,
-        extra_substituter_vector: Vec::new(),
-    })
+        deploy_submission: meta::DeploySubmission::UserEnvironment(
+            meta::UserEnvironmentDeployment {
+                cluster_name: ordinary::ClusterName::new("alpha".into()),
+                node_name: ordinary::NodeName::new(TARGET_NODE.into()),
+                user_name: ordinary::UserName::new("bird".into()),
+                proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
+                secrets_input,
+                flake_reference: ordinary::FlakeReference::new(FLAKE.into()),
+                deployment_transport: transport(nix_store_uri, ssh_destination),
+                deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
+                deployment_output_selector: selector("packages.x86_64-linux.fixture-home"),
+                activation_backend: ordinary::ActivationBackend::HomeManagerNixProfileV1,
+                user_environment_action: meta::UserEnvironmentAction::ActivateNow,
+                source_revision_policy: meta::SourceRevisionPolicy::RequireImmutable,
+                nix_builder_spec_option: None,
+                extra_substituter_vector: Vec::new(),
+            },
+        ),
+    }
 }
 
 fn transport(nix_store_uri: &str, ssh_destination: &str) -> ordinary::DeploymentTransport {
@@ -172,8 +176,8 @@ fn runtime_on(directory: &Path, programs: &Path, daemon_host: &str) -> SchemaRun
 
 async fn submit_and_drive(
     engine: &mut SchemaRuntime,
-    request: meta::DeploySubmission,
-) -> meta::MetaEgress {
+    request: meta::ActualizedDeploySubmission,
+) -> meta_signal_lojix::Output {
     match engine.submit_deploy(request) {
         lojix::schema_runtime::DeploySubmissionOutcome::Accepted(_) => {}
         other => panic!("fixture request was not accepted: {other:?}"),
@@ -208,7 +212,7 @@ async fn home_transport_is_local_build_then_copy_activate_and_profile_with_exact
             ),
         )
         .await,
-        meta::MetaEgress::DeployTerminal(record)
+        meta_signal_lojix::Output::DeployTerminal(record)
             if matches!(record.deployment_terminal_option, Some(meta::DeploymentTerminal::Succeeded))
     ));
 
@@ -333,7 +337,7 @@ async fn explicit_empty_secrets_directory_is_accepted_without_public_path_leakag
             ),
         )
         .await,
-        meta::MetaEgress::DeployTerminal(record)
+        meta_signal_lojix::Output::DeployTerminal(record)
             if matches!(record.deployment_terminal_option, Some(meta::DeploymentTerminal::Succeeded))
     ));
     let generated = directory
@@ -391,7 +395,7 @@ async fn invalid_explicit_secrets_inputs_fail_before_effects() {
         .await;
         assert!(matches!(
             outcome,
-            meta::MetaEgress::DeployTerminal(record)
+            meta_signal_lojix::Output::DeployTerminal(record)
                 if matches!(record.deployment_terminal_option, Some(meta::DeploymentTerminal::Failed(_)))
         ));
     }
@@ -414,7 +418,7 @@ async fn second_arbitrary_transport_flow_preserves_both_request_values() {
             user_environment_request(&source, nix_store_uri, ssh_destination),
         )
         .await,
-        meta::MetaEgress::DeployTerminal(record)
+        meta_signal_lojix::Output::DeployTerminal(record)
             if matches!(record.deployment_terminal_option, Some(meta::DeploymentTerminal::Succeeded))
     ));
 
@@ -451,7 +455,7 @@ async fn matched_user_remote_activation_runs_directly_without_runuser() {
             user_environment_request(&source, "ssh-ng://fixture-copy-matched.invalid", ssh_destination),
         )
         .await,
-        meta::MetaEgress::DeployTerminal(record)
+        meta_signal_lojix::Output::DeployTerminal(record)
             if matches!(record.deployment_terminal_option, Some(meta::DeploymentTerminal::Succeeded))
     ));
 
@@ -522,7 +526,7 @@ async fn copy_and_activation_failures_are_terminal_rejections() {
         )
         .await
         {
-            meta::MetaEgress::DeployTerminal(record) => {
+            meta_signal_lojix::Output::DeployTerminal(record) => {
                 assert_eq!(record.deployment_phase, meta::DeploymentPhase::Failed)
             }
             other => panic!("expected terminal rejection, got {other:?}"),
@@ -546,8 +550,8 @@ fn position(commands: &[String], what: &str, predicate: impl Fn(&str) -> bool) -
         .unwrap_or_else(|| panic!("no {what} in {commands:?}"))
 }
 
-fn terminal_failure(outcome: meta::MetaEgress) -> meta::DeploymentFailure {
-    let meta::MetaEgress::DeployTerminal(record) = outcome else {
+fn terminal_failure(outcome: meta_signal_lojix::Output) -> meta::DeploymentFailure {
+    let meta_signal_lojix::Output::DeployTerminal(record) = outcome else {
         panic!("expected a terminal deployment, got {outcome:?}");
     };
     let Some(meta::DeploymentTerminal::Failed(failure)) = record.deployment_terminal_option else {
@@ -573,7 +577,7 @@ async fn remote_node_builds_in_its_own_store_roots_the_output_and_skips_the_tran
             user_environment_request(&source, store_uri, destination),
         )
         .await,
-        meta::MetaEgress::DeployTerminal(record)
+        meta_signal_lojix::Output::DeployTerminal(record)
             if matches!(record.deployment_terminal_option, Some(meta::DeploymentTerminal::Succeeded))
     ));
 
@@ -670,14 +674,14 @@ async fn remote_realize_leaves_the_rooted_closure_on_the_target_and_nothing_more
         "ssh-ng://root@fixture-target.invalid",
         "root@fixture-target.invalid",
     );
-    let meta::DeploySubmission::UserEnvironment(deployment) = &mut request else {
+    let meta::DeploySubmission::UserEnvironment(deployment) = &mut request.deploy_submission else {
         unreachable!()
     };
     deployment.user_environment_action = meta::UserEnvironmentAction::Realize;
 
     assert!(matches!(
         submit_and_drive(&mut engine, request).await,
-        meta::MetaEgress::DeployTerminal(record)
+        meta_signal_lojix::Output::DeployTerminal(record)
             if matches!(record.deployment_terminal_option, Some(meta::DeploymentTerminal::Succeeded))
     ));
     let commands = command_lines(&programs);
@@ -708,7 +712,7 @@ async fn remote_node_ignores_the_request_builder() {
         "ssh-ng://root@fixture-target.invalid",
         "root@fixture-target.invalid",
     );
-    let meta::DeploySubmission::UserEnvironment(deployment) = &mut request else {
+    let meta::DeploySubmission::UserEnvironment(deployment) = &mut request.deploy_submission else {
         unreachable!()
     };
     deployment.nix_builder_spec_option =
@@ -716,7 +720,7 @@ async fn remote_node_ignores_the_request_builder() {
 
     assert!(matches!(
         submit_and_drive(&mut engine, request).await,
-        meta::MetaEgress::DeployTerminal(record)
+        meta_signal_lojix::Output::DeployTerminal(record)
             if matches!(record.deployment_terminal_option, Some(meta::DeploymentTerminal::Succeeded))
     ));
     let commands = command_lines(&programs);
@@ -749,7 +753,7 @@ async fn daemon_host_builder_still_offloads_through_the_local_client() {
         "ssh-ng://fixture-copy-a.invalid",
         "root@fixture-activate-a.invalid",
     );
-    let meta::DeploySubmission::UserEnvironment(deployment) = &mut request else {
+    let meta::DeploySubmission::UserEnvironment(deployment) = &mut request.deploy_submission else {
         unreachable!()
     };
     deployment.nix_builder_spec_option =
@@ -757,7 +761,7 @@ async fn daemon_host_builder_still_offloads_through_the_local_client() {
 
     assert!(matches!(
         submit_and_drive(&mut engine, request).await,
-        meta::MetaEgress::DeployTerminal(record)
+        meta_signal_lojix::Output::DeployTerminal(record)
             if matches!(record.deployment_terminal_option, Some(meta::DeploymentTerminal::Succeeded))
     ));
     let commands = command_lines(&programs);

@@ -68,29 +68,35 @@ fn transport(nix_store_uri: &str, ssh_destination: &str) -> ordinary::Deployment
     }
 }
 
-fn user_environment_request(source: &Path) -> meta::DeploySubmission {
-    meta::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
-        cluster_name: ordinary::ClusterName::new("alpha".into()),
-        node_name: ordinary::NodeName::new("beacon".into()),
-        user_name: ordinary::UserName::new("bird".into()),
-        proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
-        secrets_input: ordinary::SecretsInput::NoSecrets,
-        flake_reference: ordinary::FlakeReference::new(FLAKE.into()),
-        deployment_transport: transport(
-            "ssh-ng://fixture-copy.invalid",
-            "root@fixture-activate.invalid",
-        ),
-        deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
+fn user_environment_request(source: &Path) -> meta::ActualizedDeploySubmission {
+    meta::ActualizedDeploySubmission {
         horizon_definition_option: Some(common::read_horizon(source)),
-        deployment_output_selector: ordinary::DeploymentOutputSelector::new(
-            ordinary::FlakeAttribute::new("homeConfigurations.bird.activationPackage".into()),
+        deploy_submission: meta::DeploySubmission::UserEnvironment(
+            meta::UserEnvironmentDeployment {
+                cluster_name: ordinary::ClusterName::new("alpha".into()),
+                node_name: ordinary::NodeName::new("beacon".into()),
+                user_name: ordinary::UserName::new("bird".into()),
+                proposal_source: ordinary::ProposalSource::new(source.display().to_string()),
+                secrets_input: ordinary::SecretsInput::NoSecrets,
+                flake_reference: ordinary::FlakeReference::new(FLAKE.into()),
+                deployment_transport: transport(
+                    "ssh-ng://fixture-copy.invalid",
+                    "root@fixture-activate.invalid",
+                ),
+                deployment_input_mode: ordinary::DeploymentInputMode::Horizon,
+                deployment_output_selector: ordinary::DeploymentOutputSelector::new(
+                    ordinary::FlakeAttribute::new(
+                        "homeConfigurations.bird.activationPackage".into(),
+                    ),
+                ),
+                activation_backend: ordinary::ActivationBackend::HomeManagerNixProfileV1,
+                user_environment_action: ordinary::UserEnvironmentAction::ActivateNow,
+                source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
+                nix_builder_spec_option: None,
+                extra_substituter_vector: vec![],
+            },
         ),
-        activation_backend: ordinary::ActivationBackend::HomeManagerNixProfileV1,
-        user_environment_action: ordinary::UserEnvironmentAction::ActivateNow,
-        source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-        nix_builder_spec_option: None,
-        extra_substituter_vector: vec![],
-    })
+    }
 }
 
 /// A daemon running on the deployed node, so the closure is built in its own
@@ -174,9 +180,9 @@ fn terminal_failure(record: &ordinary::DeploymentRecord) -> &ordinary::Deploymen
     }
 }
 
-fn refusal(output: &meta::MetaEgress) -> &meta::RefusedDeploy {
+fn refusal(output: &meta_signal_lojix::Output) -> &meta::RefusedDeploy {
     match output {
-        meta::MetaEgress::DeployRefused(refused) => refused,
+        meta_signal_lojix::Output::DeployRefused(refused) => refused,
         other => panic!("expected an uncorrelated deploy refusal, got {other:?}"),
     }
 }
@@ -259,7 +265,7 @@ async fn an_effect_completion_with_no_deployment_behind_it_is_refused() {
     .with_origin_route(OriginRoute::new(0));
 
     let output = match engine.execute(work).await.into_root() {
-        nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => output,
+        nexus::NexusAction::Finish(output) => output,
         other => panic!("the runner must always terminate with a reply, got {other:?}"),
     };
 

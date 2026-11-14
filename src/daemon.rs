@@ -1,16 +1,16 @@
-//! The lojix daemon loop — two authority-tiered unix sockets driving the
-//! handwritten Nexus runner.
+//! The lojix daemon loop — two authority-tiered unix sockets, each input
+//! answered through its contract's generated dispatch.
 //!
-//! Resolves the port-plan §4.4 blocker by binding two `AsyncListenerSocket`s on
-//! one `AsyncMultiListenerDaemon` (the runtime's two-socket primitive), each
-//! tagged by its authority role. `handle_stream` decodes the length-prefixed wire frame
-//! for the arriving role into a `SignalInput`, then awaits
-//! `NexusEngine::execute` (which runs the `Runner` continuation loop —
-//! the deploy pipeline included), and encodes the reply back. The runtime engine
-//! is the single source of routing truth; there is no inline request `Store`.
+//! Two `AsyncListenerSocket`s are bound on one `AsyncMultiListenerDaemon` (the
+//! runtime's two-socket primitive), each tagged by its authority role. A
+//! connection's length-prefixed frame is restored as its contract's `Input`
+//! and answered with `input.answer(&answerer)`; the output is the whole reply.
+//! A deploy or test admitted there runs on its own actor. A deployment watch
+//! keeps its connection and streams each matching phase event beside the
+//! dispatch.
 
 use crate::Payload;
-use crate::runtime_flow::{Routable, Routed};
+use crate::answering::{Answerer, Answers as _};
 use crate::schema_runtime::{
     DaemonRuntime as _, DeployDriving as _, DeployJobResuming as _, DetachedActivation as _,
     DetachedObserving as _, RuntimeCore as _, TestDriving as _,
@@ -26,7 +26,9 @@ use std::time::Duration;
 use kameo::actor::{Actor, ActorRef, Spawn};
 use kameo::error::Infallible;
 use kameo::message::{Context, Message};
+use meta_signal_lojix::Answerable as _;
 use signal::{AsyncFrameReading, AsyncFrameWriting, ByteViewable, FrameBody, FrameCapacity};
+use signal_lojix::Answerable as _;
 use triad_runtime::{
     AcceptedConnection, AsyncListenerSocket, AsyncMultiConnectionRuntime, AsyncMultiListenerDaemon,
     AsyncMultiListenerDaemonError, ConnectionContext, PeerIdentity, RequestConcurrencyLimit,
@@ -93,15 +95,11 @@ enum WatchTurn {
     PeerSpoke,
 }
 
-use crate::adapters::{Lowerable as _, Raisable as _};
 use crate::deployment_watch::{
     DeploymentWatchStream, StreamsDeploymentEvents as _, WatchesDeployments as _,
 };
-use crate::runtime_flow::{self as nexus, NexusEngine};
 use crate::runtime_model as memory;
-use crate::schema_runtime::{
-    DeploySubmissionOutcome, RuntimeConfiguration, SchemaRuntime, TestSubmissionOutcome,
-};
+use crate::schema_runtime::{RuntimeConfiguration, SchemaRuntime};
 use crate::{Error, LojixNexusConfigurable as _, NexusConfiguration, Result, Store};
 
 /// Which authority-tiered socket an arriving stream belongs to. Ordinary is the
@@ -312,16 +310,11 @@ struct LojixRuntime {
     configuration: Arc<RuntimeConfiguration>,
     capacity: FrameCapacity,
     owner_authority: OwnerPeerAuthority,
-    /// The daemon-owned deploy-job executor. Its `ActorRef` lives here on the
-    /// runtime (daemon-lifetime), NOT on a connection task, so an admitted
-    /// deploy's pipeline outlives the owner connection that submitted it
-    /// (up9q): a dropped client kills only the short submit-reply task.
-    deploy_jobs: ActorRef<DeployJobs>,
-    /// The daemon-owned test-job executor (Unit 2b). Same decoupling property
-    /// as `deploy_jobs`: an admitted test's dispatch pipeline (the real
-    /// hermetic `nix build`, or the gated live cycle) outlives the owner
-    /// connection that submitted it.
-    test_jobs: ActorRef<TestJobs>,
+    /// The daemon-owned deploy-job and test-job executors. Their `ActorRef`s
+    /// live here on the runtime (daemon-lifetime), NOT on a connection task,
+    /// so an admitted job's pipeline outlives the owner connection that
+    /// submitted it (up9q): a dropped client ends only its own answer.
+    executors: JobExecutors,
 }
 
 trait RuntimeConstructible {
@@ -340,12 +333,9 @@ impl RuntimeConstructible for LojixRuntime {
     ) -> Result<Self> {
         let store = Arc::new(Store::open(state_database_path)?);
         let configuration = Arc::new(configuration);
-        let deploy_jobs = DeployJobs::start(
-            store.clone(),
-            configuration.clone(),
-            MAXIMUM_CONCURRENT_DEPLOYS,
-        )
-        .await;
+        let deploy_slots = JobSlots::with_capacity(MAXIMUM_CONCURRENT_DEPLOYS);
+        let deploy_jobs =
+            DeployJobs::start(store.clone(), configuration.clone(), deploy_slots.clone()).await;
         // Read any persisted in-flight deploy-job rows and reconcile them on
         // start (up9q durable resume scaffolding). A clean shutdown leaves no
         // rows; rows present mean a deploy was in flight when the daemon
@@ -354,19 +344,19 @@ impl RuntimeConstructible for LojixRuntime {
         // reconcile failure is non-fatal: the durable rows remain for the next
         // start, and the daemon still serves new requests.
         let _ = deploy_jobs.ask(ReconcilePersistedJobs).await;
-        let test_jobs = TestJobs::start(
-            store.clone(),
-            configuration.clone(),
-            MAXIMUM_CONCURRENT_DEPLOYS,
-        )
-        .await;
+        let test_slots = JobSlots::with_capacity(MAXIMUM_CONCURRENT_DEPLOYS);
+        let test_jobs = TestJobs::start().await;
         Ok(Self {
             store,
             configuration,
             capacity: FrameCapacity::default(),
             owner_authority: OwnerPeerAuthority::current_process(),
-            deploy_jobs,
-            test_jobs,
+            executors: JobExecutors {
+                deploy_jobs,
+                deploy_slots,
+                test_jobs,
+                test_slots,
+            },
         })
     }
 }
@@ -453,29 +443,23 @@ impl AsyncMultiConnectionRuntime for LojixRuntime {
             configuration: self.configuration.clone(),
             capacity: self.capacity,
             owner_authority: self.owner_authority,
-            deploy_jobs: self.deploy_jobs.clone(),
-            test_jobs: self.test_jobs.clone(),
+            executors: self.executors.clone(),
         };
         worker.serve(listener, connection).await
     }
 }
 
-/// One request, served on its own actor-runtime task. Builds a fresh per-request
-/// `SchemaRuntime` over a clone of the shared `Store`, so the in-flight deploy
-/// cursor is never shared across concurrent connections (intent 2alg).
+/// One request, served on its own actor-runtime task and answered by an
+/// answerer over a clone of the shared `Store`, so an admitted job's cursor
+/// is never shared across concurrent connections (intent 2alg).
 struct RequestWorker {
     store: Arc<Store>,
     configuration: Arc<RuntimeConfiguration>,
     capacity: FrameCapacity,
     owner_authority: OwnerPeerAuthority,
-    /// The daemon-owned deploy-job executor's handle. A `Deploy` request hands
-    /// the submission here and replies the accepted handle; the pipeline runs
-    /// on the actor, not this connection task.
-    deploy_jobs: ActorRef<DeployJobs>,
-    /// The daemon-owned test-job executor's handle (Unit 2b). A `Test` request
-    /// hands the submission here and replies the accepted handle; the dispatch
-    /// runs on the actor, not this connection task.
-    test_jobs: ActorRef<TestJobs>,
+    /// The job executors an admitted `Deploy` or `Test` is handed to; its
+    /// pipeline runs on the actor, not this connection task.
+    executors: JobExecutors,
 }
 
 trait RequestServable {
@@ -487,22 +471,10 @@ trait RequestServable {
         watch: DeploymentWatchStream,
     ) -> Result<()>;
     async fn serve_owner(&self, connection: &mut AcceptedConnection) -> Result<()>;
-    async fn submit_deploy(&self, request: memory::DeploySubmission) -> Result<memory::MetaEgress>;
-    async fn submit_test(&self, request: memory::TestRequest) -> Result<memory::MetaEgress>;
     async fn read_body(&self, connection: &mut AcceptedConnection) -> Result<FrameBody>;
-    async fn execute_request(
-        &self,
-        listener: ListenerRole,
-        signal_input: nexus::SignalInput,
-    ) -> Result<nexus::SignalOutput>;
-    async fn execute_with_store(
-        store: Arc<Store>,
-        configuration: Arc<RuntimeConfiguration>,
-        listener: ListenerRole,
-        signal_input: nexus::SignalInput,
-    ) -> Result<nexus::SignalOutput>;
-    fn ordinary_reply(output: nexus::SignalOutput) -> Result<memory::OrdinaryEgress>;
-    fn meta_reply(output: nexus::SignalOutput) -> Result<memory::MetaEgress>;
+    /// The answerer for this request: the shared store, and the executors an
+    /// admitted job is handed to.
+    fn answerer(&self) -> Answerer;
 }
 
 impl RequestServable for RequestWorker {
@@ -519,19 +491,12 @@ impl RequestServable for RequestWorker {
         let input = Signal::<signal_lojix::Input>::from(body.bytes().to_vec())
             .restore()
             .map_err(|fault| Error::Wire(format!("{fault:?}")))?;
-        let watches_deployments = matches!(input, signal_lojix::Input::WatchDeployments(_));
-        let output = self
-            .execute_request(
-                ListenerRole::Ordinary,
-                nexus::SignalInput::OrdinaryInput(input.lower()?),
-            )
-            .await?;
-        let reply = Self::ordinary_reply(output)?;
-        // A deployment watch the engine opened is claimed before anything else
+        let reply = input.answer(&self.answerer());
+        // A deployment watch the answer opened is claimed before anything else
         // can fail, so a watcher is never left registered with no connection:
         // the claimed stream removes it when dropped.
-        let watch = match (&reply, watches_deployments) {
-            (memory::OrdinaryEgress::Watching(opened), true) => self
+        let watch = match &reply {
+            signal_lojix::Output::DeploymentsWatched(opened) => self
                 .store
                 .deployment_watchers()
                 .claim(*opened.subscription_token.payload()),
@@ -539,10 +504,7 @@ impl RequestServable for RequestWorker {
         };
         connection
             .stream_mut()
-            .write_frame(
-                &FrameBody::from(reply.raise()?.ordinary_frame()?),
-                self.capacity,
-            )
+            .write_frame(&FrameBody::from(reply.ordinary_frame()?), self.capacity)
             .await?;
         // An ordinary input closes after its one reply; a deployment watch
         // keeps its connection and writes each matching event.
@@ -600,72 +562,14 @@ impl RequestServable for RequestWorker {
         self.owner_authority.authorize(connection.context())?;
         let body = self.read_body(connection).await?;
         let input = body.bytes().meta_request()?;
-        let input = input.lower()?;
-        // A `Deploy` decouples from this connection task: the deploy-job actor
-        // owns the pipeline, this task only submits and replies the accepted
-        // handle. Pin/Unpin/Retire are fast single writes and stay synchronous
-        // on this task (up9q surface a — only Deploy decouples).
-        let reply = match input {
-            memory::MetaIngress::Deploy(request) => self.submit_deploy(request).await?,
-            // A `Test` decouples from this connection task exactly like a
-            // `Deploy` (Unit 2b): the test-job actor owns the dispatch pipeline
-            // (the real `nix build` of the hermetic check, or the gated live
-            // cycle), this task only submits and replies the accepted handle.
-            memory::MetaIngress::Test(request) => self.submit_test(request).await?,
-            other => {
-                let output = self
-                    .execute_request(ListenerRole::Owner, nexus::SignalInput::MetaInput(other))
-                    .await?;
-                Self::meta_reply(output)?
-            }
-        };
-        let reply = reply.raise()?;
-        let frame = reply.meta_frame()?;
+        // A `Deploy` or `Test` is admitted in the answer and handed to its
+        // actor, which owns the pipeline; this task only writes the answer.
+        let frame = input.answer(&self.answerer()).meta_frame()?;
         connection
             .stream_mut()
             .write_frame(&FrameBody::from(frame), self.capacity)
             .await?;
         Ok(())
-    }
-
-    /// Submit a `Deploy` to the daemon-owned deploy-job actor and return the
-    /// immediate wire reply (up9q surface a). The actor checks the deploy-job
-    /// cap, runs the synchronous submit (issue identifier, persist the
-    /// `Submitted` job row), spawns the pipeline on the daemon runtime, and
-    /// replies the `DeployHandle` handle — all before any pipeline effect
-    /// runs. When the cap is full it replies `DeploymentInFlight`. This task's
-    /// only remaining work is writing this reply frame; dropping it (a client
-    /// disconnect) cannot cancel the spawned pipeline.
-    async fn submit_deploy(&self, request: memory::DeploySubmission) -> Result<memory::MetaEgress> {
-        match self.deploy_jobs.ask(AdmitDeploy { request }).await {
-            Ok(DeployAdmission::Accepted(accepted)) => {
-                Ok(memory::MetaEgress::DeployAccepted(accepted))
-            }
-            Ok(DeployAdmission::Rejected(rejected)) => {
-                Ok(memory::MetaEgress::DeployRejected(rejected))
-            }
-            Ok(DeployAdmission::Refused(refused)) => Ok(memory::MetaEgress::DeployRefused(refused)),
-            // The deploy-job actor is daemon-lifetime; a send error means the
-            // runtime is tearing down. Reply a typed internal rejection rather
-            // than dropping the connection without a frame.
-            Err(_) => Err(Error::UnexpectedFrame),
-        }
-    }
-
-    /// Submit a `Test` to the daemon-owned test-job actor and return the
-    /// immediate wire reply (Unit 2b, mirroring `submit_deploy`). The actor runs
-    /// the synchronous submit (lower + validate + persist the Pending row),
-    /// spawns the dispatch pipeline (the real hermetic `nix build`, or the gated
-    /// live cycle) on the daemon runtime, and replies the `AcceptedTest` handle
-    /// — all before the build runs. Dropping this task (a client disconnect)
-    /// cannot cancel the spawned pipeline; the result lands durably and is read
-    /// over the ordinary `(ByTestRun …)` query.
-    async fn submit_test(&self, request: memory::TestRequest) -> Result<memory::MetaEgress> {
-        match self.test_jobs.ask(AdmitTest { request }).await {
-            Ok(TestAdmission::Accepted(accepted)) => Ok(memory::MetaEgress::Tested(accepted)),
-            Ok(TestAdmission::Rejected(rejected)) => Ok(memory::MetaEgress::TestRejected(rejected)),
-            Err(_) => Err(Error::UnexpectedFrame),
-        }
     }
 
     async fn read_body(&self, connection: &mut AcceptedConnection) -> Result<FrameBody> {
@@ -678,91 +582,124 @@ impl RequestServable for RequestWorker {
         .map_err(Error::SignalFrame)
     }
 
-    async fn execute_request(
-        &self,
-        listener: ListenerRole,
-        signal_input: nexus::SignalInput,
-    ) -> Result<nexus::SignalOutput> {
-        Self::execute_with_store(
+    fn answerer(&self) -> Answerer {
+        Answerer::over(
             self.store.clone(),
             self.configuration.clone(),
-            listener,
-            signal_input,
+            self.executors.clone(),
         )
-        .await
+    }
+}
+
+/// A count of jobs an executor runs at once. An admission reserves a slot
+/// before it writes anything; the slot travels with the job to its actor and
+/// is freed when the job's pipeline ends, however it ends.
+#[derive(Clone)]
+pub struct JobSlots(Arc<tokio::sync::Semaphore>);
+
+/// One reserved slot, held by the pipeline it was reserved for; dropping it
+/// frees the slot.
+pub struct JobSlot {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+/// Reserving a slot without waiting: an executor at its cap refuses at once.
+pub trait JobSlotReserving {
+    fn with_capacity(capacity: usize) -> Self;
+    fn reserve(&self) -> Option<JobSlot>;
+}
+
+impl JobSlotReserving for JobSlots {
+    fn with_capacity(capacity: usize) -> Self {
+        Self(Arc::new(tokio::sync::Semaphore::new(capacity)))
     }
 
-    /// Build a per-request engine over the shared `Store` and drive it. The
-    /// runner is async, and child-process effects are awaited through
-    /// Tokio process handles rather than hidden behind a blocking-pool bridge.
-    /// The engine's in-flight cursor is local to this call, so concurrent
-    /// requests never corrupt each other's deploy state (intent 2alg).
-    async fn execute_with_store(
-        store: Arc<Store>,
-        configuration: Arc<RuntimeConfiguration>,
-        listener: ListenerRole,
-        signal_input: nexus::SignalInput,
-    ) -> Result<nexus::SignalOutput> {
-        let mut engine = SchemaRuntime::with_store_and_configuration(store, configuration);
-        let work = nexus::NexusWork::SignalArrived(signal_input)
-            .with_origin_route(nexus::OriginRoute::new(0));
-        match engine.execute(work).await.into_root() {
-            nexus::NexusAction::ReplyToSignal(output) => Ok(output),
-            // `execute` always terminates the runner with a reply; any other
-            // action escaping is a runtime invariant violation. Reply with a
-            // typed rejection on the SAME authority tier the request arrived on
-            // (audit R4), so the client decodes a real reply, not an EOF.
-            _ => Err(Error::Invariant(format!(
-                "Nexus runner terminated without a reply for {listener}"
-            ))),
+    fn reserve(&self) -> Option<JobSlot> {
+        self.0
+            .clone()
+            .try_acquire_owned()
+            .ok()
+            .map(|permit| JobSlot { _permit: permit })
+    }
+}
+
+/// The daemon's two job executors as an admission sees them: the slots it
+/// reserves before admitting, and the actors that run what it admitted.
+#[derive(Clone)]
+pub struct JobExecutors {
+    pub deploy_jobs: ActorRef<DeployJobs>,
+    pub deploy_slots: JobSlots,
+    pub test_jobs: ActorRef<TestJobs>,
+    pub test_slots: JobSlots,
+}
+
+/// Admitting a job against its executor's cap, and handing an admitted job's
+/// engine to the actor that runs it.
+pub trait JobLaunching {
+    fn reserve_deploy(&self) -> Option<JobSlot>;
+    fn reserve_test(&self) -> Option<JobSlot>;
+    fn launch_deploy(&self, engine: SchemaRuntime, slot: JobSlot);
+    fn launch_test(&self, engine: SchemaRuntime, slot: JobSlot);
+}
+
+impl JobLaunching for JobExecutors {
+    fn reserve_deploy(&self) -> Option<JobSlot> {
+        self.deploy_slots.reserve()
+    }
+
+    fn reserve_test(&self) -> Option<JobSlot> {
+        self.test_slots.reserve()
+    }
+
+    /// The deployment is already durable, its job row at `Submitted`. Should
+    /// the actor be gone, the daemon is stopping, and the next start resumes
+    /// the row.
+    fn launch_deploy(&self, engine: SchemaRuntime, slot: JobSlot) {
+        if self
+            .deploy_jobs
+            .tell(LaunchDeploy { engine, slot })
+            .try_send()
+            .is_err()
+        {
+            eprintln!("lojix-nexus: DeployNotLaunched (the deploy-job actor is gone)");
         }
     }
 
-    fn ordinary_reply(output: nexus::SignalOutput) -> Result<memory::OrdinaryEgress> {
-        match output {
-            nexus::SignalOutput::OrdinaryOutput(output) => Ok(output),
-            nexus::SignalOutput::MetaOutput(_) => Err(Error::UnexpectedFrame),
-        }
-    }
-
-    fn meta_reply(output: nexus::SignalOutput) -> Result<memory::MetaEgress> {
-        match output {
-            nexus::SignalOutput::MetaOutput(output) => Ok(output),
-            nexus::SignalOutput::OrdinaryOutput(_) => Err(Error::UnexpectedFrame),
+    fn launch_test(&self, engine: SchemaRuntime, slot: JobSlot) {
+        if self
+            .test_jobs
+            .tell(LaunchTest { engine, slot })
+            .try_send()
+            .is_err()
+        {
+            eprintln!("lojix-nexus: TestNotLaunched (the test-job actor is gone)");
         }
     }
 }
 
 /// The daemon-owned deploy-job executor (up9q surface a). A kameo actor whose
 /// `ActorRef` lives on `LojixRuntime` for the daemon's whole lifetime, NOT on
-/// any connection task. It owns the deploy-job admission cap and the in-flight
-/// count; on each accepted `Deploy` it runs the synchronous submit and then
-/// launches the deploy pipeline as an independent runtime task (decoupled from
-/// the owner connection), so a dropped client cannot cancel an in-flight
-/// deploy. The per-deploy pipeline task is a daemon-owned `tokio::spawn` the
-/// actor tracks via its count; a later iteration can promote it to a supervised
-/// child actor without changing the decoupling property this actor guarantees.
+/// any connection task. Each deploy admitted by an answer is handed here with
+/// its seeded engine and its slot, and the actor launches the deploy pipeline
+/// as an independent runtime task (decoupled from the owner connection), so a
+/// dropped client cannot cancel an in-flight deploy. On start it reconciles
+/// the job rows a previous run left.
 pub struct DeployJobs {
     store: Arc<Store>,
     configuration: Arc<RuntimeConfiguration>,
-    /// Maximum concurrent deploy pipelines. Over it, `AdmitDeploy` replies
-    /// `DeploymentInFlight` (a real `DeployRejectionReason`).
-    cap: usize,
-    /// Pipelines currently running. Incremented on admit, decremented when the
-    /// pipeline task reports `DeployCompleted`. Single-writer (the actor), so
-    /// the cap check and the increment are atomic with no shared lock.
-    active_count: usize,
+    /// The deploy slots this executor shares with admission; a resumed job
+    /// takes one as an admitted job does.
+    slots: JobSlots,
 }
 
 trait DeployProcessable {
     async fn start(
         store: Arc<Store>,
         configuration: Arc<RuntimeConfiguration>,
-        cap: usize,
+        slots: JobSlots,
     ) -> ActorRef<DeployJobs>;
-    fn at_capacity(&self) -> bool;
-    fn launch_pipeline(&self, engine: SchemaRuntime, jobs: ActorRef<DeployJobs>);
-    async fn reconcile_persisted_jobs(&mut self, actor: ActorRef<DeployJobs>);
+    fn launch_pipeline(&self, engine: SchemaRuntime, slot: JobSlot);
+    async fn reconcile_persisted_jobs(&mut self);
     fn daemon_host_system_closure() -> Option<String>;
     fn persist_reconciled_self_switch(
         &self,
@@ -776,36 +713,32 @@ impl DeployProcessable for DeployJobs {
     async fn start(
         store: Arc<Store>,
         configuration: Arc<RuntimeConfiguration>,
-        cap: usize,
+        slots: JobSlots,
     ) -> ActorRef<Self> {
-        let actor = Self::spawn(Self {
-            store,
-            configuration,
-            cap,
-            active_count: 0,
-        });
+        let actor = Self::spawn_with_mailbox(
+            Self {
+                store,
+                configuration,
+                slots,
+            },
+            kameo::mailbox::unbounded(),
+        );
         actor.wait_for_startup().await;
         actor
     }
 
-    fn at_capacity(&self) -> bool {
-        self.active_count >= self.cap
-    }
-
     /// Launch one admitted deploy's pipeline as an independent daemon runtime
     /// task and return immediately. The task owns the seeded engine and drives
-    /// the full effect chain to completion, then reports `DeployCompleted` so
-    /// the actor frees a cap slot. Because the task is spawned on the runtime
-    /// (not the owner connection's task), dropping the connection — or the
-    /// short submit-reply task — never cancels it. THIS is the decoupling.
-    fn launch_pipeline(&self, mut engine: SchemaRuntime, jobs: ActorRef<DeployJobs>) {
+    /// the full effect chain to completion, holding its slot until then.
+    /// Because the task is spawned on the runtime (not the owner connection's
+    /// task), dropping the connection never cancels it. THIS is the
+    /// decoupling.
+    fn launch_pipeline(&self, mut engine: SchemaRuntime, slot: JobSlot) {
         tokio::spawn(async move {
             let terminal = engine.drive_submitted_deploy().await;
             let _ = terminal;
             eprintln!("lojix deploy pipeline reached a terminal state");
-            // Free the cap slot. `tell` is safe: `DeployCompleted` has an
-            // infallible `()` reply, so it cannot crash the actor.
-            let _ = jobs.tell(DeployCompleted).await;
+            drop(slot);
         });
     }
 
@@ -818,7 +751,7 @@ impl DeployProcessable for DeployJobs {
     /// so this start path computes and (for terminal rows) clears, leaving live
     /// resumption to S5. Pre-activation rows are dropped here so they do not
     /// wedge the cap; they are re-submittable by the operator.
-    async fn reconcile_persisted_jobs(&mut self, actor: ActorRef<DeployJobs>) {
+    async fn reconcile_persisted_jobs(&mut self) {
         let Ok(jobs) = self.store.deploy_jobs() else {
             return;
         };
@@ -944,17 +877,16 @@ impl DeployProcessable for DeployJobs {
                     // row so the operator sees the in-flight activation.
                 }
                 crate::schema_runtime::DeployJobResumption::RestartPipeline => {
-                    if self.at_capacity() {
+                    let Some(slot) = self.slots.reserve() else {
                         continue;
-                    }
+                    };
                     let mut engine = SchemaRuntime::with_store_and_configuration(
                         self.store.clone(),
                         self.configuration.clone(),
                     );
                     match engine.resume_deploy_job(job) {
                         Ok(true) => {
-                            self.active_count += 1;
-                            self.launch_pipeline(engine, actor.clone());
+                            self.launch_pipeline(engine, slot);
                         }
                         Ok(false) => {
                             let _ = self.store.retract_deploy_job(deployment_identifier);
@@ -1030,75 +962,22 @@ impl Actor for DeployJobs {
     }
 }
 
-/// Submit a `Deploy` to the executor: check the cap, run the synchronous
-/// submit, and on accept launch the pipeline. The reply is the immediate
-/// admission verdict.
-pub struct AdmitDeploy {
-    pub request: memory::DeploySubmission,
+/// An admitted deploy, handed to the executor with the engine that holds its
+/// cursor and the slot reserved for it.
+pub struct LaunchDeploy {
+    engine: SchemaRuntime,
+    slot: JobSlot,
 }
 
-/// The immediate admission verdict for an `AdmitDeploy` — the wire reply the
-/// daemon sends the owner connection before any pipeline effect runs.
-#[derive(Debug, Clone, PartialEq, Eq, kameo::Reply)]
-pub enum DeployAdmission {
-    Accepted(memory::DeployHandle),
-    Rejected(memory::RejectedDeploy),
-    /// Refused with no deployment to name — see `DeploySubmissionOutcome`.
-    Refused(memory::RefusedDeploy),
-}
-
-impl From<DeploySubmissionOutcome> for DeployAdmission {
-    fn from(outcome: DeploySubmissionOutcome) -> Self {
-        match outcome {
-            DeploySubmissionOutcome::Accepted(accepted) => Self::Accepted(accepted),
-            DeploySubmissionOutcome::Rejected(rejected) => Self::Rejected(rejected),
-            DeploySubmissionOutcome::Refused(refused) => Self::Refused(refused),
-        }
-    }
-}
-
-impl Message<AdmitDeploy> for DeployJobs {
-    type Reply = DeployAdmission;
-
-    async fn handle(
-        &mut self,
-        message: AdmitDeploy,
-        context: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        if self.at_capacity() {
-            let engine = SchemaRuntime::with_store_and_configuration(
-                self.store.clone(),
-                self.configuration.clone(),
-            );
-            return engine.reject_deployment_in_flight(message.request).into();
-        }
-        let mut engine = SchemaRuntime::with_store_and_configuration(
-            self.store.clone(),
-            self.configuration.clone(),
-        );
-        match engine.submit_deploy(message.request) {
-            DeploySubmissionOutcome::Accepted(accepted) => {
-                self.active_count += 1;
-                self.launch_pipeline(engine, context.actor_ref().clone());
-                DeployAdmission::Accepted(accepted)
-            }
-            rejected => rejected.into(),
-        }
-    }
-}
-
-/// One deploy pipeline finished (success or failure). Frees a cap slot.
-pub struct DeployCompleted;
-
-impl Message<DeployCompleted> for DeployJobs {
+impl Message<LaunchDeploy> for DeployJobs {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        _message: DeployCompleted,
+        message: LaunchDeploy,
         _context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.active_count = self.active_count.saturating_sub(1);
+        self.launch_pipeline(message.engine, message.slot);
     }
 }
 
@@ -1111,10 +990,78 @@ impl Message<ReconcilePersistedJobs> for DeployJobs {
     async fn handle(
         &mut self,
         _message: ReconcilePersistedJobs,
-        context: &mut Context<Self, Self::Reply>,
+        _context: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.reconcile_persisted_jobs(context.actor_ref().clone())
-            .await;
+        self.reconcile_persisted_jobs().await;
+    }
+}
+
+/// The daemon-owned TEST-job executor (Unit 2b, the test analogue of
+/// [`DeployJobs`]). A kameo actor whose `ActorRef` lives on `LojixRuntime` for
+/// the daemon's whole lifetime, NOT on any connection task. Each test admitted
+/// by an answer is handed here with its seeded engine and its slot, and the
+/// actor launches the dispatch pipeline — the real hermetic `nix build` of
+/// `vm-<node>`, or the gated live cycle — as an independent runtime task, so a
+/// dropped client cannot cancel an in-flight test. The pipeline rewrites the
+/// durable row to a terminal `Passed`/`Failed`, read over `QueryTestRuns`.
+pub struct TestJobs;
+
+trait TestProcessable {
+    async fn start() -> ActorRef<TestJobs>;
+    fn launch_pipeline(&self, engine: SchemaRuntime, slot: JobSlot);
+}
+
+impl TestProcessable for TestJobs {
+    async fn start() -> ActorRef<Self> {
+        let actor = Self::spawn_with_mailbox(Self, kameo::mailbox::unbounded());
+        actor.wait_for_startup().await;
+        actor
+    }
+
+    /// Launch one admitted test's dispatch pipeline as an independent daemon
+    /// runtime task and return immediately. The task owns the seeded engine,
+    /// drives the real dispatch (`drive_submitted_test`) to its terminal
+    /// outcome, and holds its slot until then. Because the task is spawned on
+    /// the runtime (not the owner connection's task), dropping the connection
+    /// never cancels it — the decoupling.
+    fn launch_pipeline(&self, mut engine: SchemaRuntime, slot: JobSlot) {
+        tokio::spawn(async move {
+            let terminal = engine.drive_submitted_test().await;
+            let _ = terminal;
+            eprintln!("lojix test pipeline reached a terminal state");
+            drop(slot);
+        });
+    }
+}
+
+impl Actor for TestJobs {
+    type Args = Self;
+    type Error = Infallible;
+
+    async fn on_start(
+        jobs: Self::Args,
+        _actor_reference: ActorRef<Self>,
+    ) -> std::result::Result<Self, Self::Error> {
+        Ok(jobs)
+    }
+}
+
+/// An admitted test, handed to the executor with the engine that holds its
+/// cursor and the slot reserved for it.
+pub struct LaunchTest {
+    engine: SchemaRuntime,
+    slot: JobSlot,
+}
+
+impl Message<LaunchTest> for TestJobs {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        message: LaunchTest,
+        _context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.launch_pipeline(message.engine, message.slot);
     }
 }
 
@@ -1127,33 +1074,38 @@ mod tests {
     const CLOSURE: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-self-switch";
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 
-    fn self_switch_submission() -> memory::DeploySubmission {
-        memory::DeploySubmission::Host(memory::HostDeployment {
-            cluster_name: ordinary::ClusterName::new("fixture-cluster".into()),
-            node_name: ordinary::NodeName::new("fixture-daemon".into()),
-            host_composition: ordinary::HostComposition::CompleteHost,
-            proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
-            secrets_input: memory::SecretsInput::NoSecrets,
-            flake_reference: ordinary::FlakeReference::new(format!(
-                "github:LiGoldragon/CriomOS?rev={REVISION}"
-            )),
-            deployment_transport: memory::DeploymentTransport {
-                nix_store_uri: memory::NixStoreUri::new("ssh-ng://fixture-copy.invalid".into()),
-                ssh_destination: memory::SshDestination::new("root@fixture-daemon.invalid".into()),
-            },
-            deployment_input_mode: memory::DeploymentInputMode::Direct,
+    fn self_switch_submission() -> memory::ActualizedDeploySubmission {
+        memory::ActualizedDeploySubmission {
             horizon_definition_option: None,
-            deployment_output_selector: memory::DeploymentOutputSelector::new(
-                memory::FlakeAttribute::new(
-                    "nixosConfigurations.fixture-daemon.config.system.build.toplevel".to_string(),
+            deploy_submission: memory::DeploySubmission::Host(memory::HostDeployment {
+                cluster_name: ordinary::ClusterName::new("fixture-cluster".into()),
+                node_name: ordinary::NodeName::new("fixture-daemon".into()),
+                host_composition: ordinary::HostComposition::CompleteHost,
+                proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
+                secrets_input: memory::SecretsInput::NoSecrets,
+                flake_reference: ordinary::FlakeReference::new(format!(
+                    "github:LiGoldragon/CriomOS?rev={REVISION}"
+                )),
+                deployment_transport: memory::DeploymentTransport {
+                    nix_store_uri: memory::NixStoreUri::new("ssh-ng://fixture-copy.invalid".into()),
+                    ssh_destination: memory::SshDestination::new(
+                        "root@fixture-daemon.invalid".into(),
+                    ),
+                },
+                deployment_input_mode: memory::DeploymentInputMode::Direct,
+                deployment_output_selector: memory::DeploymentOutputSelector::new(
+                    memory::FlakeAttribute::new(
+                        "nixosConfigurations.fixture-daemon.config.system.build.toplevel"
+                            .to_string(),
+                    ),
                 ),
-            ),
-            activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
-            host_deploy_action: ordinary::HostDeployAction::ActivateNow,
-            source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
-            nix_builder_spec_option: None,
-            extra_substituter_vector: Vec::new(),
-        })
+                activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
+                host_deploy_action: ordinary::HostDeployAction::ActivateNow,
+                source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
+                nix_builder_spec_option: None,
+                extra_substituter_vector: Vec::new(),
+            }),
+        }
     }
 
     fn self_switch_job() -> memory::DeployJob {
@@ -1191,9 +1143,7 @@ mod tests {
             persisted_flake_input_override_vector: Vec::new(),
             deploy_resume_stage: memory::DeployResumeStage::ResolveFlakeAuth,
             phase_receipt_option: None,
-            actualized_deploy_submission_option: Some(
-                meta_signal_lojix::ActualizedDeploySubmission::from(self_switch_submission()),
-            ),
+            actualized_deploy_submission_option: Some(self_switch_submission()),
         }
     }
 
@@ -1267,8 +1217,7 @@ mod tests {
         let successor = DeployJobs {
             store: store.clone(),
             configuration: Arc::new(RuntimeConfiguration::test_default()),
-            cap: 1,
-            active_count: 0,
+            slots: JobSlots::with_capacity(1),
         };
         successor.persist_reconciled_self_switch(deployment_identifier, generation, root);
 
@@ -1312,150 +1261,5 @@ mod tests {
             )
         ));
         assert!(store.deploy_jobs().expect("reconciled cursor").is_empty());
-    }
-}
-
-/// The daemon-owned TEST-job executor (Unit 2b, the test analogue of
-/// [`DeployJobs`]). A kameo actor whose `ActorRef` lives on `LojixRuntime` for
-/// the daemon's whole lifetime, NOT on any connection task. On each accepted
-/// `Test` it runs the synchronous submit (lower + validate + persist the
-/// Pending row), then launches the dispatch pipeline — the real hermetic
-/// `nix build` of `vm-<node>`, or the gated live cycle — as an independent
-/// runtime task, so a dropped client cannot cancel an in-flight test. The
-/// pipeline rewrites the durable row to a terminal `Passed`/`Failed`, read over
-/// the ordinary `(ByTestRun …)` query.
-pub struct TestJobs {
-    store: Arc<Store>,
-    configuration: Arc<RuntimeConfiguration>,
-    cap: usize,
-    active_count: usize,
-}
-
-trait TestProcessable {
-    async fn start(
-        store: Arc<Store>,
-        configuration: Arc<RuntimeConfiguration>,
-        cap: usize,
-    ) -> ActorRef<TestJobs>;
-    fn at_capacity(&self) -> bool;
-    fn substrate_unavailable_rejection(&self) -> memory::RejectedTest;
-    fn launch_pipeline(&self, engine: SchemaRuntime, jobs: ActorRef<TestJobs>);
-}
-
-impl TestProcessable for TestJobs {
-    async fn start(
-        store: Arc<Store>,
-        configuration: Arc<RuntimeConfiguration>,
-        cap: usize,
-    ) -> ActorRef<Self> {
-        let actor = Self::spawn(Self {
-            store,
-            configuration,
-            cap,
-            active_count: 0,
-        });
-        actor.wait_for_startup().await;
-        actor
-    }
-
-    fn at_capacity(&self) -> bool {
-        self.active_count >= self.cap
-    }
-
-    fn substrate_unavailable_rejection(&self) -> memory::RejectedTest {
-        let commit_sequence = self
-            .store
-            .commit_sequence()
-            .expect("read durable state marker for test rejection");
-        memory::RejectedTest {
-            test_rejection_reason: memory::TestRejectionReason::SubstrateUnavailable,
-            database_marker: memory::DatabaseMarker {
-                commit_sequence: memory::CommitSequence::new(commit_sequence),
-                state_digest: memory::StateDigest::new(commit_sequence),
-            },
-        }
-    }
-
-    /// Launch one admitted test's dispatch pipeline as an independent daemon
-    /// runtime task and return immediately. The task owns the seeded engine and
-    /// drives the real dispatch (`drive_submitted_test`) to its terminal
-    /// outcome, then reports `TestCompleted` so the actor frees a cap slot.
-    /// Because the task is spawned on the runtime (not the owner connection's
-    /// task), dropping the connection never cancels it — the decoupling.
-    fn launch_pipeline(&self, mut engine: SchemaRuntime, jobs: ActorRef<TestJobs>) {
-        tokio::spawn(async move {
-            let terminal = engine.drive_submitted_test().await;
-            let _ = terminal;
-            eprintln!("lojix test pipeline reached a terminal state");
-            let _ = jobs.tell(TestCompleted).await;
-        });
-    }
-}
-
-impl Actor for TestJobs {
-    type Args = Self;
-    type Error = Infallible;
-
-    async fn on_start(
-        jobs: Self::Args,
-        _actor_reference: ActorRef<Self>,
-    ) -> std::result::Result<Self, Self::Error> {
-        Ok(jobs)
-    }
-}
-
-/// Submit a `Test` to the executor: check the cap, run the synchronous submit,
-/// and on accept launch the dispatch pipeline. The reply is the immediate
-/// admission verdict the daemon sends the owner connection.
-pub struct AdmitTest {
-    pub request: memory::TestRequest,
-}
-
-/// The immediate admission verdict for an `AdmitTest` — the wire reply the
-/// daemon sends before any dispatch effect runs.
-#[derive(Debug, Clone, PartialEq, Eq, kameo::Reply)]
-pub enum TestAdmission {
-    Accepted(memory::AcceptedTest),
-    Rejected(memory::RejectedTest),
-}
-
-impl Message<AdmitTest> for TestJobs {
-    type Reply = TestAdmission;
-
-    async fn handle(
-        &mut self,
-        message: AdmitTest,
-        context: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        if self.at_capacity() {
-            return TestAdmission::Rejected(self.substrate_unavailable_rejection());
-        }
-        let mut engine = SchemaRuntime::with_store_and_configuration(
-            self.store.clone(),
-            self.configuration.clone(),
-        );
-        match engine.submit_test(message.request).await {
-            TestSubmissionOutcome::Accepted(accepted) => {
-                self.active_count += 1;
-                self.launch_pipeline(engine, context.actor_ref().clone());
-                TestAdmission::Accepted(accepted)
-            }
-            TestSubmissionOutcome::Rejected(rejected) => TestAdmission::Rejected(rejected),
-        }
-    }
-}
-
-/// One test dispatch finished (success or failure). Frees a cap slot.
-pub struct TestCompleted;
-
-impl Message<TestCompleted> for TestJobs {
-    type Reply = ();
-
-    async fn handle(
-        &mut self,
-        _message: TestCompleted,
-        _context: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        self.active_count = self.active_count.saturating_sub(1);
     }
 }

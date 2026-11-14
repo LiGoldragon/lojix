@@ -35,7 +35,6 @@ use zbus::proxy::{Builder as ProxyBuilder, CacheProperties, SignalStream};
 use zbus::zvariant::OwnedObjectPath;
 use zbus::{Connection, Proxy};
 
-use crate::deployment_watch::WatchesDeployments as _;
 use crate::runtime_flow::{self as nexus, NexusEngine};
 use crate::runtime_model as memory;
 
@@ -390,22 +389,17 @@ impl Witnessing for StageFailure {
     }
 }
 
-// The engine has no public-contract nouns. These two aliases name the private
-// ingress/egress roots the engine reasons in; no wire type crosses this module
-// boundary.
+// The two vocabularies the engine reads the runtime model through. A driven
+// pipeline ends with the privileged contract's own output.
 mod ordinary {
     pub use crate::runtime_model::*;
-
-    pub type Input = OrdinaryIngress;
-    pub type Output = OrdinaryEgress;
 }
 
 mod meta {
     pub use crate::runtime_model::*;
 
-    pub type Input = MetaIngress;
-    pub type Output = MetaEgress;
-    pub type DeployRequest = DeploySubmission;
+    pub type Output = crate::runtime_flow::PipelineOutput;
+    pub type DeployRequest = ActualizedDeploySubmission;
 
     /// Private classification used only while lowering a failed deploy into a
     /// correlated local `DeploymentRecord`. It is never a wire type.
@@ -707,16 +701,13 @@ impl From<&crate::TestDefaults> for TestDefaults {
     }
 }
 
-/// Which single-write meta mutation is in flight, so a `WriteRejected` from the
-/// MEMORY engine routes back to the matching typed rejection reply
-/// (`PinRejected` / `UnpinRejected` / `RetireRejected` / `DeployRejected`).
-/// Deploy is multi-step and additionally tracked by `active_deploy`.
+/// Which pipeline is in flight, so a `WriteRejected` from the MEMORY engine
+/// routes back to the matching typed rejection (`DeployRejected` or
+/// `TestRejected`). Deploy is additionally tracked by `active_deploy`, and a
+/// test by `active_test`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MetaOperation {
     Deploy,
-    Pin,
-    Unpin,
-    Retire,
     Test,
 }
 
@@ -1436,7 +1427,7 @@ pub struct DeployPipeline {
     /// this real receipt to enter the runner continuation, never a zero or
     /// predicted marker.
     phase_receipt: Option<memory::PhaseReceipt>,
-    submission: memory::DeploySubmission,
+    submission: memory::ActualizedDeploySubmission,
 }
 
 /// The deploy pipeline cursor. Each value names the stage that has just
@@ -1788,14 +1779,14 @@ impl FlakeMetadataReading for NixFlakeMetadata {
 /// far, and the effect command each next step needs.
 trait DeployCursor {
     fn deployment_request_identity(
-        submission: &memory::DeploySubmission,
+        submission: &memory::ActualizedDeploySubmission,
     ) -> memory::DeploymentRequestIdentity;
 
     fn from_submission(
         deployment_identifier: ordinary::DeploymentIdentifier,
         generation_identifier: ordinary::GenerationIdentifier,
         accepted_marker: ordinary::DatabaseMarker,
-        submission: memory::DeploySubmission,
+        submission: memory::ActualizedDeploySubmission,
     ) -> Self
     where
         Self: Sized;
@@ -1891,9 +1882,9 @@ trait DeployCursor {
 
 impl DeployCursor for DeployPipeline {
     fn deployment_request_identity(
-        submission: &memory::DeploySubmission,
+        submission: &memory::ActualizedDeploySubmission,
     ) -> memory::DeploymentRequestIdentity {
-        match submission {
+        match &submission.deploy_submission {
             memory::DeploySubmission::Host(deployment) => memory::DeploymentRequestIdentity {
                 deployment_environment: memory::DeploymentEnvironment::HostEnvironment,
                 cluster_name: deployment.cluster_name.clone(),
@@ -1941,10 +1932,11 @@ impl DeployCursor for DeployPipeline {
         deployment_identifier: ordinary::DeploymentIdentifier,
         generation_identifier: ordinary::GenerationIdentifier,
         accepted_marker: ordinary::DatabaseMarker,
-        submission: memory::DeploySubmission,
+        submission: memory::ActualizedDeploySubmission,
     ) -> Self {
         let durable_submission = submission.clone();
-        match submission {
+        let horizon_definition_option = submission.horizon_definition_option;
+        match submission.deploy_submission {
             memory::DeploySubmission::Host(deployment) => Self {
                 deployment_identifier,
                 generation_identifier,
@@ -1960,7 +1952,7 @@ impl DeployCursor for DeployPipeline {
                 flake: deployment.flake_reference,
                 deployment_transport: deployment.deployment_transport,
                 deployment_input_mode: deployment.deployment_input_mode,
-                horizon_definition_option: deployment.horizon_definition_option,
+                horizon_definition_option,
                 deployment_output_selector: deployment.deployment_output_selector,
                 activation_backend: deployment.activation_backend,
                 action: DeployAction::Host(deployment.host_deploy_action),
@@ -1991,7 +1983,7 @@ impl DeployCursor for DeployPipeline {
                 flake: deployment.flake_reference,
                 deployment_transport: deployment.deployment_transport,
                 deployment_input_mode: deployment.deployment_input_mode,
-                horizon_definition_option: deployment.horizon_definition_option,
+                horizon_definition_option,
                 deployment_output_selector: deployment.deployment_output_selector,
                 activation_backend: deployment.activation_backend,
                 action: DeployAction::UserEnvironment {
@@ -2327,9 +2319,7 @@ impl DeployCursor for DeployPipeline {
                 .collect(),
             deploy_resume_stage: self.resume_stage.clone(),
             phase_receipt_option: self.phase_receipt.clone(),
-            actualized_deploy_submission_option: Some(
-                meta_signal_lojix::ActualizedDeploySubmission::from(self.submission.clone()),
-            ),
+            actualized_deploy_submission_option: Some(self.submission.clone()),
         }
     }
 }
@@ -2597,7 +2587,7 @@ impl Default for SchemaRuntime {
 /// vocabulary. A reason with no meaning in a verb's domain is that verb's
 /// internal error — never a domain word that would tell the operator something
 /// false.
-trait RejectionVocabulary {
+pub(crate) trait RejectionVocabulary {
     fn test_reason(self) -> meta::TestRejectionReason;
 
     fn pin_reason(self) -> meta::PinRejectionReason;
@@ -2840,10 +2830,6 @@ impl GenerationSelecting for ordinary::Selection {
             ordinary::Selection::ByDeployment(lookup) => {
                 *lookup.payload() == live.deployment_identifier
             }
-            ordinary::Selection::ByEventLog(_) => true,
-            // A test-run selection never reads the generation set — it is
-            // routed to QueryTestRuns before reaching here (decide_ordinary_input).
-            ordinary::Selection::ByTestRun(_) => false,
         }
     }
 
@@ -2866,8 +2852,6 @@ impl GenerationSelecting for ordinary::Selection {
             ordinary::Selection::ByDeployment(lookup) => {
                 *lookup.payload() == record.deployment_identifier
             }
-            ordinary::Selection::ByEventLog(_) => true,
-            ordinary::Selection::ByTestRun(_) => false,
         }
     }
 }
@@ -2909,9 +2893,8 @@ impl DeployAdmission for meta::DeployRequest {
     }
 
     fn unsupported_deploy_reason(&self) -> Option<meta::DeployRejectionReason> {
-        let request = self;
-        match request {
-            meta::DeployRequest::Host(deployment) => {
+        match &self.deploy_submission {
+            meta::DeploySubmission::Host(deployment) => {
                 let supported = matches!(
                     deployment.host_deploy_action,
                     ordinary::HostDeployAction::Evaluate
@@ -2923,7 +2906,7 @@ impl DeployAdmission for meta::DeployRequest {
                 );
                 (!supported).then_some(meta::DeployRejectionReason::UnsupportedDeployAction)
             }
-            meta::DeployRequest::UserEnvironment(deployment) => {
+            meta::DeploySubmission::UserEnvironment(deployment) => {
                 let supported = matches!(
                     deployment.user_environment_action,
                     meta::UserEnvironmentAction::Realize
@@ -2936,13 +2919,12 @@ impl DeployAdmission for meta::DeployRequest {
     }
 
     fn source_revision_policy_rejection(&self) -> Option<meta::DeployRejectionReason> {
-        let request = self;
-        let (policy, flake) = match request {
-            meta::DeployRequest::Host(deployment) => (
+        let (policy, flake) = match &self.deploy_submission {
+            meta::DeploySubmission::Host(deployment) => (
                 deployment.source_revision_policy.clone(),
                 deployment.flake_reference.payload(),
             ),
-            meta::DeployRequest::UserEnvironment(deployment) => (
+            meta::DeploySubmission::UserEnvironment(deployment) => (
                 deployment.source_revision_policy.clone(),
                 deployment.flake_reference.payload(),
             ),
@@ -2962,16 +2944,15 @@ impl DeployAdmission for meta::DeployRequest {
     /// later effects may use the strings verbatim without a fallback or a
     /// cluster/node-derived repair.
     fn deployment_routing_rejection(&self) -> Option<meta::DeployRejectionReason> {
-        let request = self;
-        let (transport, selector, backend, action, builder) = match request {
-            meta::DeployRequest::Host(deployment) => (
+        let (transport, selector, backend, action, builder) = match &self.deploy_submission {
+            meta::DeploySubmission::Host(deployment) => (
                 &deployment.deployment_transport,
                 &deployment.deployment_output_selector,
                 deployment.activation_backend.clone(),
                 true,
                 deployment.nix_builder_spec_option.as_ref(),
             ),
-            meta::DeployRequest::UserEnvironment(deployment) => (
+            meta::DeploySubmission::UserEnvironment(deployment) => (
                 &deployment.deployment_transport,
                 &deployment.deployment_output_selector,
                 deployment.activation_backend.clone(),
@@ -3004,9 +2985,9 @@ impl DeployAdmission for meta::DeployRequest {
             ),
         });
         let valid_transport = target.is_ok();
-        let valid_user_environment_authority = match request {
-            meta::DeployRequest::Host(_) => true,
-            meta::DeployRequest::UserEnvironment(deployment) => {
+        let valid_user_environment_authority = match &self.deploy_submission {
+            meta::DeploySubmission::Host(_) => true,
+            meta::DeploySubmission::UserEnvironment(deployment) => {
                 if matches!(
                     deployment.user_environment_action,
                     meta::UserEnvironmentAction::Realize
@@ -3037,19 +3018,17 @@ impl DeployAdmission for meta::DeployRequest {
     /// selected input mode consumes it, and prove the target projection before
     /// admitting any effect.
     fn proposal_source_rejection(&self) -> Option<meta::DeployRejectionReason> {
-        let request = self;
-        let (mode, definition, node) = match request {
-            meta::DeployRequest::Host(deployment) => (
+        let (mode, node) = match &self.deploy_submission {
+            meta::DeploySubmission::Host(deployment) => (
                 deployment.deployment_input_mode.clone(),
-                deployment.horizon_definition_option.as_ref(),
                 &deployment.node_name,
             ),
-            meta::DeployRequest::UserEnvironment(deployment) => (
+            meta::DeploySubmission::UserEnvironment(deployment) => (
                 deployment.deployment_input_mode.clone(),
-                deployment.horizon_definition_option.as_ref(),
                 &deployment.node_name,
             ),
         };
+        let definition = self.horizon_definition_option.as_ref();
         match (mode, definition) {
             (memory::DeploymentInputMode::Direct, None) => None,
             (memory::DeploymentInputMode::Horizon, Some(definition))
@@ -3079,7 +3058,7 @@ impl ReadMiss for memory::MemoryReadOutput {
 
 impl From<meta::Output> for nexus::NexusAction {
     fn from(output: meta::Output) -> Self {
-        Self::ReplyToSignal(nexus::SignalOutput::MetaOutput(output))
+        Self::Finish(output)
     }
 }
 
@@ -3216,7 +3195,7 @@ impl RuntimeCore for SchemaRuntime {
     async fn drive_to_terminal(&mut self, mut action: nexus::NexusAction) -> meta::Output {
         loop {
             match action {
-                nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => {
+                nexus::NexusAction::Finish(output) => {
                     return output;
                 }
                 nexus::NexusAction::CommandMemoryWrite(input) => {
@@ -3237,45 +3216,10 @@ impl RuntimeCore for SchemaRuntime {
     }
 }
 
-/// What the engine decides to do with an arriving signal or a completed step.
-/// Deciding is pure: it reads durable state and answers with the next action,
-/// and every refusal it can give is a word of the contract rather than a
-/// string.
-pub(crate) trait SignalDeciding {
-    fn decide_signal_arrival(&mut self, input: nexus::SignalInput) -> nexus::NexusAction;
-
-    fn decide_ordinary_input(&mut self, input: ordinary::Input) -> nexus::NexusAction;
-
-    /// Issue a subscription token and reply `Watching`. The deployment watch
-    /// is registered with its filter before the commit sequence is read, so
-    /// every phase event committed after that sequence reaches it; the
-    /// connection that carried it claims the watcher's stream.
-    fn open_subscription(
-        &mut self,
-        deployment_watch: ordinary::DeploymentWatch,
-    ) -> nexus::NexusAction;
-
-    /// End a live deployment watch, which closes the connection serving it.
-    /// A token issued and no longer live is already closed; any other token
-    /// is unknown.
-    fn close_subscription(&mut self, close: ordinary::SubscriptionClose) -> nexus::NexusAction;
-
-    fn decide_meta_input(&mut self, input: meta::Input) -> nexus::NexusAction;
-
-    /// Synchronously SUBMIT a `Test` request (report 54, Unit 2b): lower it to
-    /// resolved targets through `TestDefaults`, validate host-set membership,
-    /// record the FIRST target's Pending row, set the in-flight cursor, and
-    /// reply `AcceptedTest`. The REAL hermetic/live dispatch runs on the
-    /// decoupled executor (`drive_submitted_test`), which rewrites the row to a
-    /// terminal `Passed`/`Failed` — never a faked pass.
-    ///
-    /// The `(Check …)` shorthand fills cluster/host/mode from the configured
-    /// `TestDefaults`; `(Run …)` carries them explicitly. Multi-target fan-out
-    /// (`(Nodes [a b])`/`All`) records this submit's first target and returns
-    /// the remaining targets so the daemon's executor admits one TestRun per
-    /// node (the daemon loops `submit_test` per resolved run).
-    fn decide_test(&mut self, request: meta::TestRequest) -> nexus::NexusAction;
-
+/// What the engine decides to do with a completed pipeline step. Deciding is
+/// pure: it reads durable state and answers with the next action, and every
+/// refusal it can give is a word of the contract rather than a string.
+pub(crate) trait PipelineDeciding {
     /// Lower + validate one `Test` request to its resolved targets. Rejects an
     /// unconfigured daemon (`NoTestDefaults`), an empty resolution
     /// (`NodeUnknown` — a bare `All` on an unconfigured/empty cluster, or
@@ -3290,8 +3234,6 @@ pub(crate) trait SignalDeciding {
     ) -> std::result::Result<Vec<ResolvedTestRun>, meta::TestRejectionReason>;
 
     fn test_rejection(&self, reason: meta::TestRejectionReason) -> meta::RejectedTest;
-
-    fn decide_read_completion(&mut self, output: memory::MemoryReadOutput) -> nexus::NexusAction;
 
     fn decide_write_completion(&mut self, output: memory::MemoryWriteOutput) -> nexus::NexusAction;
 
@@ -3309,14 +3251,14 @@ pub(crate) trait SignalDeciding {
 
     fn decide_effect_completion(&mut self, result: nexus::EffectResult) -> nexus::NexusAction;
 
-    fn reject_active_or_meta(&mut self, report: memory::RejectionReport) -> nexus::NexusAction;
+    fn reject_active_pipeline(&mut self, report: memory::RejectionReport) -> nexus::NexusAction;
 
     /// Reject a request only after allocating and terminalizing its durable
     /// correlation record. This is the rejection analogue of admission: no
     /// caller can receive a deploy rejection with a synthetic identifier.
     fn reject_submission(
         &self,
-        submission: memory::DeploySubmission,
+        submission: memory::ActualizedDeploySubmission,
         reason: meta::DeployRejectionReason,
     ) -> DeploySubmissionOutcome;
 
@@ -3351,163 +3293,7 @@ pub(crate) trait SignalDeciding {
     ) -> meta::RefusedDeploy;
 }
 
-impl SignalDeciding for SchemaRuntime {
-    fn decide_signal_arrival(&mut self, input: nexus::SignalInput) -> nexus::NexusAction {
-        match input {
-            nexus::SignalInput::OrdinaryInput(input) => self.decide_ordinary_input(input),
-            nexus::SignalInput::MetaInput(input) => self.decide_meta_input(input),
-        }
-    }
-
-    fn decide_ordinary_input(&mut self, input: ordinary::Input) -> nexus::NexusAction {
-        match input {
-            ordinary::Input::Configure(configuration) => nexus::NexusAction::CommandMemoryWrite(
-                memory::MemoryWriteInput::OrdinaryConfigure(configuration),
-            ),
-            ordinary::Input::Query(selection) => {
-                // A (ByTestRun …) selection reads the durable test-run table;
-                // every other selection reads the generation set. Routing here
-                // keeps one Query verb covering both read planes (report 54).
-                match selection {
-                    ordinary::Selection::ByTestRun(lookup) => {
-                        nexus::NexusAction::CommandMemoryRead(
-                            memory::MemoryReadInput::QueryTestRuns(lookup),
-                        )
-                    }
-                    ordinary::Selection::ByEventLog(range) => {
-                        nexus::NexusAction::CommandMemoryRead(
-                            memory::MemoryReadInput::ReadEventLog(range),
-                        )
-                    }
-                    selection => nexus::NexusAction::CommandMemoryRead(
-                        memory::MemoryReadInput::QueryGenerations(selection),
-                    ),
-                }
-            }
-            ordinary::Input::WatchDeployments(deployment_watch) => {
-                self.open_subscription(deployment_watch)
-            }
-            ordinary::Input::Unwatch(close) => self.close_subscription(close),
-        }
-    }
-
-    fn open_subscription(
-        &mut self,
-        deployment_watch: ordinary::DeploymentWatch,
-    ) -> nexus::NexusAction {
-        let subscription_token = self.store.next_subscription_token();
-        self.store
-            .deployment_watchers()
-            .register(subscription_token, deployment_watch);
-        let reply = match self.store.commit_sequence() {
-            Ok(commit_sequence) => ordinary::Output::Watching(ordinary::SubscriptionOpened {
-                subscription_token: ordinary::SubscriptionToken::new(subscription_token),
-                commit_sequence: ordinary::CommitSequence::new(commit_sequence),
-            }),
-            Err(_) => {
-                self.store.deployment_watchers().end(subscription_token);
-                ordinary::Output::WatchRejected(ordinary::RejectedWatch::new(
-                    ordinary::WatchRejectionReason::StreamUnavailable,
-                ))
-            }
-        };
-        nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
-    }
-
-    fn close_subscription(&mut self, close: ordinary::SubscriptionClose) -> nexus::NexusAction {
-        let subscription_token = close.into_payload();
-        let token = *subscription_token.payload();
-        let reply = if self.store.deployment_watchers().end(token) {
-            ordinary::Output::Unwatched(ordinary::SubscriptionClosed::new(subscription_token))
-        } else {
-            let unwatch_rejection_reason = if self.store.subscription_token_issued(token) {
-                ordinary::UnwatchRejectionReason::SubscriptionAlreadyClosed
-            } else {
-                ordinary::UnwatchRejectionReason::SubscriptionTokenUnknown
-            };
-            ordinary::Output::UnwatchRejected(ordinary::RejectedUnwatch {
-                unwatch_rejection_reason,
-                subscription_token,
-            })
-        };
-        nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
-    }
-
-    fn decide_meta_input(&mut self, input: meta::Input) -> nexus::NexusAction {
-        match input {
-            meta::Input::Configure(configuration) => nexus::NexusAction::CommandMemoryWrite(
-                memory::MemoryWriteInput::MetaConfigure(configuration),
-            ),
-            meta::Input::ReverseConfiguration => nexus::NexusAction::CommandMemoryWrite(
-                memory::MemoryWriteInput::ReverseConfiguration,
-            ),
-            meta::Input::Deploy(request) => {
-                // A preflight refusal happens before admission, so there is no
-                // in-flight cursor to terminalize. `reject_submission`
-                // allocates the correlation record first, exactly as
-                // `submit_deploy` does, so the peer is never handed a
-                // rejection with no deployment behind it.
-                if let Some(reason) = request.submission_rejection() {
-                    return nexus::NexusAction::from(
-                        match self.reject_submission(request, reason) {
-                            DeploySubmissionOutcome::Rejected(rejected) => {
-                                meta::Output::DeployRejected(rejected)
-                            }
-                            DeploySubmissionOutcome::Refused(refused) => {
-                                meta::Output::DeployRefused(refused)
-                            }
-                            DeploySubmissionOutcome::Accepted(accepted) => {
-                                meta::Output::DeployAccepted(accepted)
-                            }
-                        },
-                    );
-                }
-                self.active_operation = Some(MetaOperation::Deploy);
-                nexus::NexusAction::CommandMemoryWrite(
-                    memory::MemoryWriteInput::RecordDeploySubmitted(request),
-                )
-            }
-            meta::Input::Pin(request) => {
-                self.active_operation = Some(MetaOperation::Pin);
-                nexus::NexusAction::CommandMemoryWrite(memory::MemoryWriteInput::PinGeneration(
-                    request,
-                ))
-            }
-            meta::Input::Unpin(request) => {
-                self.active_operation = Some(MetaOperation::Unpin);
-                nexus::NexusAction::CommandMemoryWrite(memory::MemoryWriteInput::UnpinGeneration(
-                    request,
-                ))
-            }
-            meta::Input::Retire(request) => {
-                self.active_operation = Some(MetaOperation::Retire);
-                nexus::NexusAction::CommandMemoryWrite(memory::MemoryWriteInput::RetireGeneration(
-                    request,
-                ))
-            }
-            meta::Input::Test(request) => self.decide_test(request),
-        }
-    }
-
-    fn decide_test(&mut self, request: meta::TestRequest) -> nexus::NexusAction {
-        match self.resolve_and_validate(request) {
-            Ok(mut resolved) => {
-                let run = resolved.remove(0);
-                self.active_operation = Some(MetaOperation::Test);
-                let identifier = ordinary::TestRunIdentifier::new(
-                    self.store.next_test_run_identifier().unwrap_or(1),
-                );
-                self.active_test = Some(TestPipeline::accepted(run.clone(), identifier));
-                nexus::NexusAction::CommandMemoryWrite(memory::MemoryWriteInput::RecordTestRun(
-                    run.pending_record(identifier),
-                ))
-            }
-            Err(reason) => {
-                nexus::NexusAction::from(meta::Output::TestRejected(self.test_rejection(reason)))
-            }
-        }
-    }
-
+impl PipelineDeciding for SchemaRuntime {
     fn resolve_and_validate(
         &self,
         request: meta::TestRequest,
@@ -3553,51 +3339,8 @@ impl SignalDeciding for SchemaRuntime {
         }
     }
 
-    fn decide_read_completion(&mut self, output: memory::MemoryReadOutput) -> nexus::NexusAction {
-        let reply = match output {
-            memory::MemoryReadOutput::GenerationsQueried(listing) => {
-                ordinary::Output::Queried(listing)
-            }
-            memory::MemoryReadOutput::TestRunsQueried(listing) => {
-                ordinary::Output::TestRunsQueried(listing)
-            }
-            memory::MemoryReadOutput::EventLogRead(page) => {
-                ordinary::Output::DeploymentEventsQueried(page)
-            }
-            memory::MemoryReadOutput::ReadMissed(report) => {
-                ordinary::Output::QueryRejected(ordinary::RejectedQuery {
-                    query_rejection_reason: ordinary::QueryRejectionReason::GenerationUnknown,
-                    database_marker: report.database_marker,
-                })
-            }
-            memory::MemoryReadOutput::StoreRefused(detail) => {
-                ordinary::Output::StoreRefused(detail)
-            }
-        };
-        nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(reply))
-    }
-
     fn decide_write_completion(&mut self, output: memory::MemoryWriteOutput) -> nexus::NexusAction {
         match output {
-            memory::MemoryWriteOutput::OrdinaryConfigured(receipt) => {
-                nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(
-                    ordinary::Output::Configured(receipt),
-                ))
-            }
-            memory::MemoryWriteOutput::MetaConfigured(receipt) => {
-                nexus::NexusAction::from(meta::Output::Configured(receipt))
-            }
-            memory::MemoryWriteOutput::ConfigurationReversed(receipt) => {
-                nexus::NexusAction::from(meta::Output::ConfigurationReversed(receipt))
-            }
-            memory::MemoryWriteOutput::OrdinaryConfigurationRejected(rejection) => {
-                nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::OrdinaryOutput(
-                    ordinary::Output::ConfigurationRejected(rejection),
-                ))
-            }
-            memory::MemoryWriteOutput::MetaConfigurationRejected(rejection) => {
-                nexus::NexusAction::from(meta::Output::ConfigurationRejected(rejection))
-            }
             memory::MemoryWriteOutput::DeploySubmitted(accepted) => {
                 self.begin_deploy_pipeline(accepted)
             }
@@ -3609,31 +3352,32 @@ impl SignalDeciding for SchemaRuntime {
                     &"an activation committed with no correlated cursor",
                 )),
             },
-            memory::MemoryWriteOutput::GenerationPinned(applied) => {
-                self.active_operation = None;
-                nexus::NexusAction::from(meta::Output::Pinned(applied))
-            }
-            memory::MemoryWriteOutput::GenerationUnpinned(applied) => {
-                self.active_operation = None;
-                nexus::NexusAction::from(meta::Output::Unpinned(applied))
-            }
-            memory::MemoryWriteOutput::GenerationRetired(applied) => {
-                self.active_operation = None;
-                nexus::NexusAction::from(meta::Output::Retired(applied))
-            }
             memory::MemoryWriteOutput::ContainerRecorded(_) => self.advance_after_phase(),
             memory::MemoryWriteOutput::TestRunRecorded(accepted) => {
-                // The accepted SUBMIT reply. `active_operation` is cleared (the
-                // synchronous submit is done) but `active_test` stays set: the
-                // decoupled executor (`drive_submitted_test`) re-enters to run
-                // the real dispatch and rewrite the row to a terminal outcome.
                 self.active_operation = None;
                 nexus::NexusAction::from(meta::Output::Tested(accepted))
             }
-            memory::MemoryWriteOutput::WriteRejected(report) => self.reject_active_or_meta(report),
+            memory::MemoryWriteOutput::WriteRejected(report) => self.reject_active_pipeline(report),
             memory::MemoryWriteOutput::StoreRefused(detail) => {
                 self.active_operation = None;
-                nexus::NexusAction::from(meta::Output::StoreRefused(detail))
+                nexus::NexusAction::from(meta::Output::Refused(memory::StoreFailure(detail)))
+            }
+            // Configuration, pin, unpin and retire are answered where the
+            // input arrives, and no pipeline makes those writes; one reaching
+            // a pipeline has no deployment to name.
+            unasked @ (memory::MemoryWriteOutput::OrdinaryConfigured(_)
+            | memory::MemoryWriteOutput::MetaConfigured(_)
+            | memory::MemoryWriteOutput::ConfigurationReversed(_)
+            | memory::MemoryWriteOutput::OrdinaryConfigurationRejected(_)
+            | memory::MemoryWriteOutput::MetaConfigurationRejected(_)
+            | memory::MemoryWriteOutput::GenerationPinned(_)
+            | memory::MemoryWriteOutput::GenerationUnpinned(_)
+            | memory::MemoryWriteOutput::GenerationRetired(_)) => {
+                self.active_operation = None;
+                nexus::NexusAction::from(self.refuse_deploy(
+                    memory::DeployRefusalReason::NoCorrelatedDeployment,
+                    &format!("a pipeline received a write it never makes: {unasked:?}"),
+                ))
             }
         }
     }
@@ -3865,7 +3609,7 @@ impl SignalDeciding for SchemaRuntime {
         }
     }
 
-    fn reject_active_or_meta(&mut self, report: memory::RejectionReport) -> nexus::NexusAction {
+    fn reject_active_pipeline(&mut self, report: memory::RejectionReport) -> nexus::NexusAction {
         // A write rejection aborts any in-flight deploy and replies a typed
         // meta rejection for the operation in flight, carrying the rejection
         // reason and current marker. The deploy cursor is read BEFORE it is
@@ -3888,18 +3632,6 @@ impl SignalDeciding for SchemaRuntime {
                     &format!("write rejected: {:?}", report.rejection_reason),
                 ),
             },
-            MetaOperation::Pin => meta::Output::PinRejected(meta::RejectedPin {
-                pin_rejection_reason: (report.rejection_reason).pin_reason(),
-                database_marker: marker,
-            }),
-            MetaOperation::Unpin => meta::Output::UnpinRejected(meta::RejectedUnpin {
-                unpin_rejection_reason: (report.rejection_reason).unpin_reason(),
-                database_marker: marker,
-            }),
-            MetaOperation::Retire => meta::Output::RetireRejected(meta::RejectedRetire {
-                retire_rejection_reason: (report.rejection_reason).retire_reason(),
-                database_marker: marker,
-            }),
             MetaOperation::Test => meta::Output::TestRejected(meta::RejectedTest {
                 test_rejection_reason: (report.rejection_reason).test_reason(),
                 database_marker: marker,
@@ -3910,7 +3642,7 @@ impl SignalDeciding for SchemaRuntime {
 
     fn reject_submission(
         &self,
-        submission: memory::DeploySubmission,
+        submission: memory::ActualizedDeploySubmission,
         reason: meta::DeployRejectionReason,
     ) -> DeploySubmissionOutcome {
         let identity = DeployPipeline::deployment_request_identity(&submission);
@@ -3987,7 +3719,7 @@ pub trait DeployDriving {
     /// is created, so a full queue still cannot return an anonymous rejection.
     fn reject_deployment_in_flight(
         &self,
-        request: memory::DeploySubmission,
+        request: memory::ActualizedDeploySubmission,
     ) -> DeploySubmissionOutcome;
 
     /// Run ONLY the synchronous submit step of a `Deploy` (up9q surface a): the
@@ -4077,7 +3809,7 @@ impl DeployDriving for SchemaRuntime {
 
     fn reject_deployment_in_flight(
         &self,
-        request: memory::DeploySubmission,
+        request: memory::ActualizedDeploySubmission,
     ) -> DeploySubmissionOutcome {
         self.reject_submission(request, meta::DeployRejectionReason::DeploymentInFlight)
     }
@@ -4110,11 +3842,7 @@ impl DeployDriving for SchemaRuntime {
 
     fn resume_deploy_job(&mut self, job: memory::DeployJob) -> Result<bool> {
         let persisted_phase = job.deploy_job_phase;
-        let Some(submission) = job
-            .actualized_deploy_submission_option
-            .clone()
-            .map(memory::DeploySubmission::from)
-        else {
+        let Some(submission) = job.actualized_deploy_submission_option.clone() else {
             return Ok(false);
         };
         if job
@@ -4296,9 +4024,7 @@ impl DeployDriving for SchemaRuntime {
         let work = match pipeline.resume_stage {
             memory::DeployResumeStage::FinishDeployment => {
                 return match self.finish_deploy_pipeline(&pipeline) {
-                    nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => {
-                        output
-                    }
+                    nexus::NexusAction::Finish(output) => output,
                     _ => self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError),
                 };
@@ -4360,7 +4086,7 @@ impl DeployDriving for SchemaRuntime {
         }
         .with_origin_route(nexus::OriginRoute::new(0));
         match self.execute(work).await.into_root() {
-            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => output,
+            nexus::NexusAction::Finish(output) => output,
             _ => self.deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError),
         }
     }
@@ -4711,7 +4437,7 @@ pub trait TestDriving {
     /// left set on `self` so the daemon hands this engine to the test-job actor,
     /// which drives the dispatch via [`Self::drive_submitted_test`]. The
     /// hermetic build / live cycle does NOT run here.
-    async fn submit_test(&mut self, request: meta::TestRequest) -> TestSubmissionOutcome;
+    fn submit_test(&mut self, request: meta::TestRequest) -> TestSubmissionOutcome;
 
     /// Drive an already-submitted test's REAL dispatch to its terminal outcome
     /// (Unit 2b, the daemon-owned executor body — mirrors
@@ -4755,25 +4481,29 @@ pub trait TestDriving {
 }
 
 impl TestDriving for SchemaRuntime {
-    async fn submit_test(&mut self, request: meta::TestRequest) -> TestSubmissionOutcome {
-        let work = nexus::NexusWork::SignalArrived(nexus::SignalInput::MetaInput(
-            meta::Input::Test(request),
-        ))
-        .with_origin_route(nexus::OriginRoute::new(0));
-        match self.execute(work).await.into_root() {
-            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
-                meta::Output::Tested(accepted),
-            )) => {
-                // Stamp the accepted marker onto the cursor so the terminal
-                // outcome reply carries the acceptance marker (like deploy).
-                if let Some(pipeline) = self.active_test.as_mut() {
-                    pipeline.accepted_marker = accepted.database_marker.clone();
-                }
+    fn submit_test(&mut self, request: meta::TestRequest) -> TestSubmissionOutcome {
+        let run = match self.resolve_and_validate(request) {
+            Ok(mut resolved) => resolved.remove(0),
+            Err(reason) => return TestSubmissionOutcome::Rejected(self.test_rejection(reason)),
+        };
+        let identifier =
+            ordinary::TestRunIdentifier::new(self.store.next_test_run_identifier().unwrap_or(1));
+        let mut pipeline = TestPipeline::accepted(run.clone(), identifier);
+        match self.record_test_run(run.pending_record(identifier)) {
+            memory::MemoryWriteOutput::TestRunRecorded(accepted) => {
+                // The terminal outcome carries the acceptance marker, as a
+                // deploy's does; the cursor stays set for the executor, which
+                // runs the real dispatch and rewrites the row to its outcome.
+                pipeline.accepted_marker = accepted.database_marker.clone();
+                self.active_test = Some(pipeline);
                 TestSubmissionOutcome::Accepted(accepted)
             }
-            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
-                meta::Output::TestRejected(rejected),
-            )) => TestSubmissionOutcome::Rejected(rejected),
+            memory::MemoryWriteOutput::WriteRejected(report) => {
+                TestSubmissionOutcome::Rejected(meta::RejectedTest {
+                    test_rejection_reason: (report.rejection_reason).test_reason(),
+                    database_marker: report.database_marker,
+                })
+            }
             _ => TestSubmissionOutcome::Rejected(
                 self.test_rejection(meta::TestRejectionReason::InternalError),
             ),
@@ -4891,7 +4621,7 @@ pub(crate) trait MemoryApplying {
 
     fn record_deploy_submitted(
         &mut self,
-        submission: memory::DeploySubmission,
+        submission: memory::ActualizedDeploySubmission,
     ) -> memory::MemoryWriteOutput;
 
     fn record_phase_transition(
@@ -4920,7 +4650,7 @@ pub(crate) trait MemoryApplying {
     /// re-locks, so it is safe to call while the store guard is still held.
     /// A durable write that could not be made. The cause goes to the daemon
     /// journal; the typed rejection travels back through
-    /// [`Self::reject_active_or_meta`], which answers the peer in the
+    /// [`Self::reject_active_pipeline`], which answers the peer in the
     /// vocabulary of whatever operation was in flight. Reading the commit
     /// sequence is best-effort: the store that just refused a write may
     /// equally refuse to report its sequence.
@@ -5011,7 +4741,7 @@ impl MemoryApplying for SchemaRuntime {
 
     fn record_deploy_submitted(
         &mut self,
-        submission: memory::DeploySubmission,
+        submission: memory::ActualizedDeploySubmission,
     ) -> memory::MemoryWriteOutput {
         // Identifier reservation, correlation-record creation, and the
         // restart cursor share one durable commit.  The public admission
@@ -5389,10 +5119,17 @@ impl MemoryObserving for SchemaRuntime {
                 .test_run_identifier
                 .cmp(&left.test_run_record.test_run_identifier)
         });
+        // A closure path is shown only when it is a canonical store item root.
         memory::MemoryReadOutput::TestRunsQueried(ordinary::TestRunListing {
             test_run_record_vector: matching
                 .into_iter()
                 .map(ordinary::TestRunRecord::from)
+                .map(|record| ordinary::TestRunRecord {
+                    closure_path_option: record.closure_path_option.filter(|path| {
+                        NixStorePath::from(path.payload().as_str()).is_canonical_item_root()
+                    }),
+                    ..record
+                })
                 .collect(),
             database_marker: memory::DatabaseMarker::at_commit(commit_sequence),
         })
@@ -5438,6 +5175,10 @@ impl MemoryObserving for SchemaRuntime {
         live: &memory::LiveGeneration,
         deployment_records: &[memory::DeploymentRecord],
     ) -> ordinary::Generation {
+        // A closure path is shown only when it is a canonical store item root.
+        let closure_path_option = NixStorePath::from(live.closure_path.payload().as_str())
+            .is_canonical_item_root()
+            .then(|| live.closure_path.clone());
         ordinary::Generation {
             generation_identifier: live.generation_identifier,
             deployment_identifier: live.deployment_identifier,
@@ -5446,7 +5187,7 @@ impl MemoryObserving for SchemaRuntime {
             generation_artifact: live.generation_artifact.clone(),
             activation_effect: live.activation_effect.clone(),
             generation_slot: live.generation_slot.clone(),
-            closure_path: live.closure_path.clone(),
+            closure_path_option,
             immutable_revision_option: deployment_records
                 .iter()
                 .find(|record| record.deployment_identifier == live.deployment_identifier)
@@ -8571,11 +8312,11 @@ impl nexus::NexusEngine for SchemaRuntime {
     fn budget_exhausted_reply(
         &self,
         _exhausted: triad_runtime::ContinuationExhausted,
-    ) -> nexus::SignalOutput {
-        nexus::SignalOutput::MetaOutput(self.refuse_deploy(
+    ) -> nexus::PipelineOutput {
+        self.refuse_deploy(
             memory::DeployRefusalReason::ContinuationBudgetExhausted,
             &"the Nexus runner exhausted its continuation budget",
-        ))
+        )
     }
 
     fn decide(
@@ -8584,8 +8325,15 @@ impl nexus::NexusEngine for SchemaRuntime {
     ) -> nexus::nexus::Nexus<nexus::nexus::Action> {
         let origin_route = input.origin_route();
         let action = match input.into_root() {
-            nexus::NexusWork::SignalArrived(input) => self.decide_signal_arrival(input),
-            nexus::NexusWork::MemoryReadCompleted(output) => self.decide_read_completion(output),
+            // A read is answered where its input arrives; no pipeline reads
+            // through the runner, so a read completing on one has no
+            // deployment to name.
+            nexus::NexusWork::MemoryReadCompleted(output) => {
+                nexus::NexusAction::from(self.refuse_deploy(
+                    memory::DeployRefusalReason::NoCorrelatedDeployment,
+                    &format!("a pipeline received a read it never makes: {output:?}"),
+                ))
+            }
             nexus::NexusWork::MemoryWriteCompleted(output) => self.decide_write_completion(output),
             nexus::NexusWork::EffectCompleted(result) => self.decide_effect_completion(result),
         };
@@ -8605,24 +8353,26 @@ mod tests {
 
     const STORE: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-toplevel";
 
-    fn host_submission(action: ordinary::HostDeployAction) -> memory::DeploySubmission {
-        memory::DeploySubmission::Host(meta::HostDeployment {
-            cluster_name: ordinary::ClusterName::new("alpha".into()),
-            node_name: ordinary::NodeName::new("node-1".into()),
-            host_composition: ordinary::HostComposition::BaseHost,
-            proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
-            secrets_input: memory::SecretsInput::NoSecrets,
-            flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
-            deployment_transport: fixture_transport(),
-            deployment_input_mode: memory::DeploymentInputMode::Direct,
+    fn host_submission(action: ordinary::HostDeployAction) -> memory::ActualizedDeploySubmission {
+        memory::ActualizedDeploySubmission {
             horizon_definition_option: None,
-            deployment_output_selector: fixture_output_selector(),
-            activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
-            host_deploy_action: action,
-            source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-            nix_builder_spec_option: None,
-            extra_substituter_vector: Vec::new(),
-        })
+            deploy_submission: memory::DeploySubmission::Host(meta::HostDeployment {
+                cluster_name: ordinary::ClusterName::new("alpha".into()),
+                node_name: ordinary::NodeName::new("node-1".into()),
+                host_composition: ordinary::HostComposition::BaseHost,
+                proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
+                secrets_input: memory::SecretsInput::NoSecrets,
+                flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
+                deployment_transport: fixture_transport(),
+                deployment_input_mode: memory::DeploymentInputMode::Direct,
+                deployment_output_selector: fixture_output_selector(),
+                activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
+                host_deploy_action: action,
+                source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
+                nix_builder_spec_option: None,
+                extra_substituter_vector: Vec::new(),
+            }),
+        }
     }
 
     fn host_pipeline(action: ordinary::HostDeployAction) -> DeployPipeline {
@@ -8634,24 +8384,28 @@ mod tests {
         )
     }
 
-    fn user_submission() -> memory::DeploySubmission {
-        memory::DeploySubmission::UserEnvironment(meta::UserEnvironmentDeployment {
-            cluster_name: ordinary::ClusterName::new("fixture-cluster".into()),
-            node_name: ordinary::NodeName::new("fixture-daemon".into()),
-            user_name: ordinary::UserName::new("fixture-user".into()),
-            proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
-            secrets_input: memory::SecretsInput::NoSecrets,
-            flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
-            deployment_transport: fixture_transport(),
-            deployment_input_mode: memory::DeploymentInputMode::Direct,
+    fn user_submission() -> memory::ActualizedDeploySubmission {
+        memory::ActualizedDeploySubmission {
             horizon_definition_option: None,
-            deployment_output_selector: fixture_output_selector(),
-            activation_backend: memory::ActivationBackend::HomeManagerNixProfileV1,
-            user_environment_action: meta::UserEnvironmentAction::ActivateNow,
-            source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-            nix_builder_spec_option: None,
-            extra_substituter_vector: Vec::new(),
-        })
+            deploy_submission: memory::DeploySubmission::UserEnvironment(
+                meta::UserEnvironmentDeployment {
+                    cluster_name: ordinary::ClusterName::new("fixture-cluster".into()),
+                    node_name: ordinary::NodeName::new("fixture-daemon".into()),
+                    user_name: ordinary::UserName::new("fixture-user".into()),
+                    proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
+                    secrets_input: memory::SecretsInput::NoSecrets,
+                    flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
+                    deployment_transport: fixture_transport(),
+                    deployment_input_mode: memory::DeploymentInputMode::Direct,
+                    deployment_output_selector: fixture_output_selector(),
+                    activation_backend: memory::ActivationBackend::HomeManagerNixProfileV1,
+                    user_environment_action: meta::UserEnvironmentAction::ActivateNow,
+                    source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
+                    nix_builder_spec_option: None,
+                    extra_substituter_vector: Vec::new(),
+                },
+            ),
+        }
     }
 
     fn source_revision(policy: ordinary::SourceRevisionPolicy) -> ordinary::SourceRevisionRecord {
@@ -8751,9 +8505,7 @@ mod tests {
         engine.set_stage(DeployStage::BuildingRecorded);
 
         match engine.advance_after_phase() {
-            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
-                meta::Output::DeployTerminal(_record),
-            )) => {}
+            nexus::NexusAction::Finish(meta::Output::DeployTerminal(_record)) => {}
             other => panic!("expected correlated failed deployment, got {other:?}"),
         }
     }
@@ -8778,23 +8530,25 @@ mod tests {
     }
 
     fn deployment_request(policy: meta::SourceRevisionPolicy, flake: &str) -> meta::DeployRequest {
-        meta::DeployRequest::Host(meta::HostDeployment {
-            cluster_name: cluster(),
-            node_name: node(),
-            host_composition: ordinary::HostComposition::BaseHost,
-            proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
-            secrets_input: memory::SecretsInput::NoSecrets,
-            flake_reference: ordinary::FlakeReference::new(flake.into()),
-            deployment_transport: fixture_transport(),
-            deployment_input_mode: memory::DeploymentInputMode::Direct,
+        meta::DeployRequest {
             horizon_definition_option: None,
-            deployment_output_selector: fixture_output_selector(),
-            activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
-            host_deploy_action: ordinary::HostDeployAction::Evaluate,
-            source_revision_policy: policy,
-            nix_builder_spec_option: None,
-            extra_substituter_vector: Vec::new(),
-        })
+            deploy_submission: meta::DeploySubmission::Host(meta::HostDeployment {
+                cluster_name: cluster(),
+                node_name: node(),
+                host_composition: ordinary::HostComposition::BaseHost,
+                proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
+                secrets_input: memory::SecretsInput::NoSecrets,
+                flake_reference: ordinary::FlakeReference::new(flake.into()),
+                deployment_transport: fixture_transport(),
+                deployment_input_mode: memory::DeploymentInputMode::Direct,
+                deployment_output_selector: fixture_output_selector(),
+                activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
+                host_deploy_action: ordinary::HostDeployAction::Evaluate,
+                source_revision_policy: policy,
+                nix_builder_spec_option: None,
+                extra_substituter_vector: Vec::new(),
+            }),
+        }
     }
 
     #[test]
@@ -8853,7 +8607,7 @@ mod tests {
             meta::SourceRevisionPolicy::ResolveAndRecord,
             "github:owner/repo",
         );
-        let meta::DeployRequest::Host(deployment) = &mut request else {
+        let meta::DeploySubmission::Host(deployment) = &mut request.deploy_submission else {
             unreachable!("fixture is a host deploy")
         };
         deployment.deployment_transport.ssh_destination =
@@ -8863,12 +8617,7 @@ mod tests {
             Some(meta::DeployRejectionReason::InvalidDeploymentRouting)
         );
         let mut runtime = SchemaRuntime::new();
-        let outcome = runtime.submit_deploy(match request {
-            meta::DeployRequest::Host(deployment) => memory::DeploySubmission::Host(deployment),
-            meta::DeployRequest::UserEnvironment(deployment) => {
-                memory::DeploySubmission::UserEnvironment(deployment)
-            }
-        });
+        let outcome = runtime.submit_deploy(request);
         let DeploySubmissionOutcome::Rejected(rejected) = outcome else {
             panic!("invalid routing must reject")
         };
@@ -8969,7 +8718,7 @@ mod tests {
             meta::SourceRevisionPolicy::ResolveAndRecord,
             "github:owner/repo",
         );
-        let meta::DeployRequest::Host(deployment) = &mut request else {
+        let meta::DeploySubmission::Host(deployment) = &mut request.deploy_submission else {
             unreachable!()
         };
         deployment.deployment_input_mode = memory::DeploymentInputMode::Horizon;
@@ -9035,9 +8784,7 @@ mod tests {
         match engine.decide_effect_completion(nexus::EffectResult::FlakeResolved(
             nexus::ResolvedFlake::new(source),
         )) {
-            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
-                meta::Output::DeployTerminal(record),
-            )) => {
+            nexus::NexusAction::Finish(meta::Output::DeployTerminal(record)) => {
                 assert!(matches!(
                     record.deployment_terminal_option,
                     Some(memory::DeploymentTerminal::Failed(
@@ -9070,9 +8817,7 @@ mod tests {
                 closure_path: unsafe_path.clone(),
             },
         )) {
-            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
-                meta::Output::DeployTerminal(record),
-            )) => assert!(matches!(
+            nexus::NexusAction::Finish(meta::Output::DeployTerminal(record)) => assert!(matches!(
                 record.deployment_terminal_option,
                 Some(memory::DeploymentTerminal::Failed(
                     memory::DeploymentFailure {
@@ -9096,9 +8841,7 @@ mod tests {
                 closure_path: unsafe_path,
             },
         )) {
-            nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(
-                meta::Output::DeployTerminal(record),
-            )) => assert!(matches!(
+            nexus::NexusAction::Finish(meta::Output::DeployTerminal(record)) => assert!(matches!(
                 record.deployment_terminal_option,
                 Some(memory::DeploymentTerminal::Failed(
                     memory::DeploymentFailure {
@@ -9422,8 +9165,8 @@ mod tests {
                     .generation_vector
                     .first()
                     .expect("generation")
-                    .closure_path,
-                ordinary::ClosurePath::new(STORE.into())
+                    .closure_path_option,
+                Some(ordinary::ClosurePath::new(STORE.into()))
             ),
             other => panic!("expected GenerationsQueried, got {other:?}"),
         }
@@ -9439,23 +9182,25 @@ mod tests {
             ordinary::HostDeployAction::TestActivation,
             ordinary::HostDeployAction::ScheduleBootOnce,
         ] {
-            let request = meta::DeployRequest::Host(meta::HostDeployment {
-                cluster_name: cluster(),
-                node_name: node(),
-                host_composition: ordinary::HostComposition::BaseHost,
-                proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
-                secrets_input: memory::SecretsInput::NoSecrets,
-                flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
-                deployment_transport: fixture_transport(),
-                deployment_input_mode: memory::DeploymentInputMode::Direct,
+            let request = meta::DeployRequest {
                 horizon_definition_option: None,
-                deployment_output_selector: fixture_output_selector(),
-                activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
-                host_deploy_action: action.clone(),
-                source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-                nix_builder_spec_option: None,
-                extra_substituter_vector: Vec::new(),
-            });
+                deploy_submission: meta::DeploySubmission::Host(meta::HostDeployment {
+                    cluster_name: cluster(),
+                    node_name: node(),
+                    host_composition: ordinary::HostComposition::BaseHost,
+                    proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
+                    secrets_input: memory::SecretsInput::NoSecrets,
+                    flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
+                    deployment_transport: fixture_transport(),
+                    deployment_input_mode: memory::DeploymentInputMode::Direct,
+                    deployment_output_selector: fixture_output_selector(),
+                    activation_backend: memory::ActivationBackend::NixosSystemdBootV1,
+                    host_deploy_action: action.clone(),
+                    source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
+                    nix_builder_spec_option: None,
+                    extra_substituter_vector: Vec::new(),
+                }),
+            };
             assert!(
                 request.unsupported_deploy_reason().is_none(),
                 "Host {action:?} should be supported"
@@ -9466,23 +9211,27 @@ mod tests {
             meta::UserEnvironmentAction::SetProfile,
             meta::UserEnvironmentAction::ActivateNow,
         ] {
-            let request = meta::DeployRequest::UserEnvironment(meta::UserEnvironmentDeployment {
-                cluster_name: cluster(),
-                node_name: node(),
-                user_name: ordinary::UserName::new("li".into()),
-                proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
-                secrets_input: memory::SecretsInput::NoSecrets,
-                flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
-                deployment_transport: fixture_transport(),
-                deployment_input_mode: memory::DeploymentInputMode::Direct,
+            let request = meta::DeployRequest {
                 horizon_definition_option: None,
-                deployment_output_selector: fixture_output_selector(),
-                activation_backend: memory::ActivationBackend::HomeManagerNixProfileV1,
-                user_environment_action: mode.clone(),
-                source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
-                nix_builder_spec_option: None,
-                extra_substituter_vector: Vec::new(),
-            });
+                deploy_submission: meta::DeploySubmission::UserEnvironment(
+                    meta::UserEnvironmentDeployment {
+                        cluster_name: cluster(),
+                        node_name: node(),
+                        user_name: ordinary::UserName::new("li".into()),
+                        proposal_source: ordinary::ProposalSource::new("/dev/null".into()),
+                        secrets_input: memory::SecretsInput::NoSecrets,
+                        flake_reference: ordinary::FlakeReference::new("github:owner/repo".into()),
+                        deployment_transport: fixture_transport(),
+                        deployment_input_mode: memory::DeploymentInputMode::Direct,
+                        deployment_output_selector: fixture_output_selector(),
+                        activation_backend: memory::ActivationBackend::HomeManagerNixProfileV1,
+                        user_environment_action: mode.clone(),
+                        source_revision_policy: meta::SourceRevisionPolicy::ResolveAndRecord,
+                        nix_builder_spec_option: None,
+                        extra_substituter_vector: Vec::new(),
+                    },
+                ),
+            };
             assert!(
                 request.unsupported_deploy_reason().is_none(),
                 "User environment {mode:?} should be supported"
@@ -9935,11 +9684,9 @@ mod tests {
             persisted_flake_input_override_vector: Vec::new(),
             deploy_resume_stage: memory::DeployResumeStage::ResolveFlakeAuth,
             phase_receipt_option: None,
-            actualized_deploy_submission_option: Some(
-                meta_signal_lojix::ActualizedDeploySubmission::from(host_submission(
-                    ordinary::HostDeployAction::ActivateNow,
-                )),
-            ),
+            actualized_deploy_submission_option: Some(host_submission(
+                ordinary::HostDeployAction::ActivateNow,
+            )),
         }
     }
 
@@ -10023,9 +9770,7 @@ mod tests {
         // reason, but it never runs the detached self-switch protocol.
         let mut job = interrupted_self_switch_job(Some("/nix/store/aaaaaaaa-system"));
         job.actualized_deploy_submission_option =
-            Some(meta_signal_lojix::ActualizedDeploySubmission::from(
-                host_submission(ordinary::HostDeployAction::SetBootProfile),
-            ));
+            Some(host_submission(ordinary::HostDeployAction::SetBootProfile));
         assert!(
             job.self_switch_activation_record(Some("/nix/store/aaaaaaaa-system"))
                 .is_none()
@@ -10038,9 +9783,7 @@ mod tests {
         // coincidental closure string, but no user submission owns the host
         // system profile. It must remain for normal S5 reconciliation.
         let mut job = interrupted_self_switch_job(Some("/nix/store/aaaaaaaa-system"));
-        job.actualized_deploy_submission_option = Some(
-            meta_signal_lojix::ActualizedDeploySubmission::from(user_submission()),
-        );
+        job.actualized_deploy_submission_option = Some(user_submission());
         assert!(
             job.self_switch_activation_record(Some("/nix/store/aaaaaaaa-system"))
                 .is_none()
