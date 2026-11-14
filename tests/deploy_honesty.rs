@@ -251,16 +251,14 @@ async fn an_effect_completion_with_no_deployment_behind_it_is_refused() {
     let directory = tempfile::tempdir().expect("tempdir");
     let mut engine = empty_runtime(directory.path());
 
-    let work = nexus::NexusWork::EffectCompleted(nexus::EffectResult::EffectFailed(
-        nexus::EffectFailure {
-            effect_stage: nexus::EffectStage::CopyClosure,
-            failure_evidence: ordinary::FailureEvidence {
-                failed_command_option: None,
-                failure_detail: ordinary::FailureDetail::new("an effect nobody asked for".into()),
-                detail_truncated: ordinary::DetailTruncated(false),
-            },
+    let work = nexus::Outcome::EffectFailed(nexus::EffectFailure {
+        effect_stage: nexus::EffectStage::CopyClosure,
+        failure_evidence: ordinary::FailureEvidence {
+            failed_command_option: None,
+            failure_detail: ordinary::FailureDetail::new("an effect nobody asked for".into()),
+            detail_truncated: ordinary::DetailTruncated(false),
         },
-    ));
+    });
 
     let output = engine.drive(work).await;
 

@@ -450,25 +450,55 @@ pub enum UnitArrivalOutcome {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct ActiveState(pub PropertyReading);
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct ServiceResult(pub PropertyReading);
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct UnitState {
-    pub active_state: ActiveState,
-    pub service_result: ServiceResult,
+    pub active_state_reading: ActiveStateReading,
+    pub service_result_reading: ServiceResultReading,
     pub process_end_option: std::option::Option<ProcessEnd>,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum PropertyReading {
-    Read(String),
+pub enum ActiveStateReading {
+    Read(ActiveState),
     Unreadable(BusFault),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum ServiceResultReading {
+    Read(ServiceResult),
+    Unreadable(BusFault),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum ActiveState {
+    Active,
+    Reloading,
+    Inactive,
+    Failed,
+    Activating,
+    Deactivating,
+    Maintenance,
+    Refreshing,
+    Unrecognized(String),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum ServiceResult {
+    Success,
+    Resources,
+    Protocol,
+    Timeout,
+    ExitCode,
+    Signal,
+    CoreDump,
+    Watchdog,
+    StartLimitHit,
+    OomKill,
+    ExecCondition,
+    Unrecognized(String),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

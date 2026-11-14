@@ -20,19 +20,19 @@ use zbus::proxy::CacheProperties;
 use zbus::zvariant::OwnedObjectPath;
 
 use crate::emission::{
-    ActiveState, BootEntry, BootEntryClearing, BuildPlace, BusCallOutcome, BusFault, CallOutcome,
-    CheckBuild, ClosureBuild, ClosureCopy, ClosurePresence, CollectedPaths, ConfigurationSwitch,
-    DerivationCopy, DerivationEvaluation, Emittable, EvaluationFreshness, ExitStatus,
-    FlakeMetadata, FlakeMetadataOutcome, FlakeMetadataQuery, GarbageCollection, GarbageOutcome,
-    GcRootDirectory, HashOutcome, HostNameOutcome, InputHashing, JournalOutcome, JournalText,
-    LocalHomeActivation, LocalHomeProfile, MetadataFault, OsFault, PathOutcome, PrintedPath,
-    ProcessEnd, ProcessEnding, ProcessFailure, ProcessFault, PropertyReading, ReadShortHostName,
+    ActiveState, ActiveStateReading, BootEntry, BootEntryClearing, BuildPlace, BusCallOutcome,
+    BusFault, CallOutcome, CheckBuild, ClosureBuild, ClosureCopy, ClosurePresence, CollectedPaths,
+    ConfigurationSwitch, DerivationCopy, DerivationEvaluation, Emittable, EvaluationFreshness,
+    ExitStatus, FlakeMetadata, FlakeMetadataOutcome, FlakeMetadataQuery, GarbageCollection,
+    GarbageOutcome, GcRootDirectory, HashOutcome, HostNameOutcome, InputHashing, JournalOutcome,
+    JournalText, LocalHomeActivation, LocalHomeProfile, MetadataFault, OsFault, PathOutcome,
+    PrintedPath, ProcessEnd, ProcessEnding, ProcessFailure, ProcessFault, ReadShortHostName,
     RemoteHomeActivation, RemoteHomeLogin, RemoteHomeProfile, RetainedUnitDispatch, ServiceResult,
-    SignalEnd, SignalNumber, SriHash, Stderr, Stdout, SubscribeUnitNew, SwitchAction,
-    TargetStoreBuild, TargetStoreRooting, TestVmBringUp, TestVmTearDown, TransientScript,
-    TransientUnitRun, UnitArrival, UnitArrivalOutcome, UnitJournalQuery, UnitLookup,
-    UnitLookupOutcome, UnitState, UnitStateQuery, UnitStateWatch, UnitStateWatchOutcome, UnitStop,
-    WaitStatus,
+    ServiceResultReading, SignalEnd, SignalNumber, SriHash, Stderr, Stdout, SubscribeUnitNew,
+    SwitchAction, TargetStoreBuild, TargetStoreRooting, TestVmBringUp, TestVmTearDown,
+    TransientScript, TransientUnitRun, UnitArrival, UnitArrivalOutcome, UnitJournalQuery,
+    UnitLookup, UnitLookupOutcome, UnitState, UnitStateQuery, UnitStateWatch,
+    UnitStateWatchOutcome, UnitStop, WaitStatus,
 };
 use crate::schema_runtime::{EffectExecution, ProgramResolution as _};
 
@@ -1054,28 +1054,29 @@ impl Emittable<SystemdBus> for UnitStateQuery {
             .as_ref()
             .filter(|watched| watched.name == self.unit_name.0)
         else {
-            let unknown = || {
-                PropertyReading::Unreadable(BusFault(format!(
-                    "{} was not found on the bus",
-                    self.unit_name.0
-                )))
-            };
+            let unknown = || BusFault(format!("{} was not found on the bus", self.unit_name.0));
             return UnitState {
-                active_state: ActiveState(unknown()),
-                service_result: ServiceResult(unknown()),
+                active_state_reading: ActiveStateReading::Unreadable(unknown()),
+                service_result_reading: ServiceResultReading::Unreadable(unknown()),
                 process_end_option: None,
             };
         };
-        let reading =
-            |proxy: &Proxy<'static>, property: &str| match proxy.get_property::<String>(property) {
-                Ok(value) => PropertyReading::Read(value),
-                Err(error) => PropertyReading::Unreadable(BusFault(error.to_string())),
-            };
+        let word = |proxy: &Proxy<'static>, property: &str| {
+            proxy
+                .get_property::<String>(property)
+                .map_err(|error| BusFault(error.to_string()))
+        };
         let main_code = watched.service.get_property::<i32>("ExecMainCode");
         let main_status = watched.service.get_property::<i32>("ExecMainStatus");
         UnitState {
-            active_state: ActiveState(reading(&watched.unit, "ActiveState")),
-            service_result: ServiceResult(reading(&watched.service, "Result")),
+            active_state_reading: match word(&watched.unit, "ActiveState") {
+                Ok(word) => ActiveStateReading::Read(ActiveState::from_systemd_word(word)),
+                Err(fault) => ActiveStateReading::Unreadable(fault),
+            },
+            service_result_reading: match word(&watched.service, "Result") {
+                Ok(word) => ServiceResultReading::Read(ServiceResult::from_systemd_word(word)),
+                Err(fault) => ServiceResultReading::Unreadable(fault),
+            },
             process_end_option: match (main_code, main_status) {
                 (Ok(code), Ok(status)) => ProcessEnd::from_main_process(code, status),
                 _ => None,
@@ -1113,6 +1114,81 @@ impl Emittable<SystemdBus> for UnitStop {
         match stopped {
             Ok(()) => BusCallOutcome::Answered,
             Err(fault) => BusCallOutcome::Refused(BusFault(fault)),
+        }
+    }
+}
+
+/// A systemd property value Lojix reads as one of systemd's own words: the
+/// unit's `ActiveState` and its service `Result`. A word systemd sends that is
+/// not in its documented list is kept as the text it sent.
+pub(crate) trait SystemdWord {
+    fn from_systemd_word(word: String) -> Self;
+
+    fn systemd_word(&self) -> &str;
+}
+
+impl SystemdWord for ActiveState {
+    fn from_systemd_word(word: String) -> Self {
+        match word.as_str() {
+            "active" => Self::Active,
+            "reloading" => Self::Reloading,
+            "inactive" => Self::Inactive,
+            "failed" => Self::Failed,
+            "activating" => Self::Activating,
+            "deactivating" => Self::Deactivating,
+            "maintenance" => Self::Maintenance,
+            "refreshing" => Self::Refreshing,
+            _ => Self::Unrecognized(word),
+        }
+    }
+
+    fn systemd_word(&self) -> &str {
+        match self {
+            Self::Active => "active",
+            Self::Reloading => "reloading",
+            Self::Inactive => "inactive",
+            Self::Failed => "failed",
+            Self::Activating => "activating",
+            Self::Deactivating => "deactivating",
+            Self::Maintenance => "maintenance",
+            Self::Refreshing => "refreshing",
+            Self::Unrecognized(word) => word,
+        }
+    }
+}
+
+impl SystemdWord for ServiceResult {
+    fn from_systemd_word(word: String) -> Self {
+        match word.as_str() {
+            "success" => Self::Success,
+            "resources" => Self::Resources,
+            "protocol" => Self::Protocol,
+            "timeout" => Self::Timeout,
+            "exit-code" => Self::ExitCode,
+            "signal" => Self::Signal,
+            "core-dump" => Self::CoreDump,
+            "watchdog" => Self::Watchdog,
+            "start-limit-hit" => Self::StartLimitHit,
+            "oom-kill" => Self::OomKill,
+            "exec-condition" => Self::ExecCondition,
+            _ => Self::Unrecognized(word),
+        }
+    }
+
+    fn systemd_word(&self) -> &str {
+        match self {
+            Self::Success => "success",
+            Self::Resources => "resources",
+            Self::Protocol => "protocol",
+            Self::Timeout => "timeout",
+            Self::ExitCode => "exit-code",
+            Self::Signal => "signal",
+            Self::CoreDump => "core-dump",
+            Self::Watchdog => "watchdog",
+            Self::StartLimitHit => "start-limit-hit",
+            Self::OomKill => "oom-kill",
+            Self::ExecCondition => "exec-condition",
+            Self::Unrecognized(word) => word,
         }
     }
 }

@@ -1,24 +1,37 @@
-; What the Lojix Nexus does to its Memory: eleven writes and three reads,
-; each one operation, and the outcome each comes to. A peer's input is
-; answered through its contract's dispatch, which applies the operation it
-; needs; a deploy or test pipeline applies the writes its stages record.
+; What the Lojix Nexus attempts: eleven writes and three reads of its
+; Memory, and the ten stages of a deploy or test pipeline, each one
+; operation, and the outcome each comes to. A peer's input is answered
+; through its contract's dispatch, which applies the Memory operation it
+; needs; a deploy or test pipeline attempts its stages and applies the
+; writes its stages record.
 ;
-; The operations follow the running code: the writes first, in the order
-; they were declared, then the reads. The outcomes name what each operation
-; came to; the configuration rejections, a write the store rejected, a read
-; that missed, and a store that failed under either stand after them. The
-; behaviour that applies each operation is hand-written beside it, in
-; schema_runtime.rs.
+; The Memory operations follow the running code: the writes first, in the
+; order they were declared, then the reads. The stages follow after them,
+; each named as the doing: an attempt composes the emissions it needs, from
+; ethos/emission.ethos, and ends in its outcome or in EffectFailed, the
+; outcome every stage shares. The outcomes name what each operation came
+; to; the configuration rejections, a write the store rejected, a read
+; that missed, and a store that failed under either stand after the Memory
+; outcomes. The behaviour that carries out each operation is hand-written
+; beside it, in schema_runtime.rs: the Memory operations synchronously, the
+; stages awaiting their emissions.
 Operation
 
 [ signal_lojix:[ LojixNexusConfiguration DeploymentPhaseEvent TestRunRecord Selection
                  EventLogRange TestRunLookup ConfigurationReceipt ConfigurationRejection
                  GenerationListing EventLogPage TestRunListing StoreFailure DatabaseMarker
                  GenerationIdentifier ClusterName NodeName DeploymentEnvironment GenerationSlot
-                 ClosurePath EventLogPosition ]
+                 ClosurePath EventLogPosition FlakeReference SourceRevisionPolicy UserName
+                 SecretsInput GenerationArtifact DeploymentOutputSelector NixBuilderSpec
+                 DeploymentTransport DeploymentIdentifier ActivationEffect ActivationBackend
+                 HostDeployAction UserEnvironmentAction TestExecutionProfile FailureEvidence ]
   meta_signal_lojix:[ ActualizedDeploySubmission PinRequest UnpinRequest RetireRequest
-                      DeployHandle AppliedPin AppliedUnpin AppliedRetire AcceptedTest ]
-  :crate:memory:[ PhaseReceipt SourceRevisionRecord ContainerName ContainerState ] ]
+                      DeployHandle AppliedPin AppliedUnpin AppliedRetire AcceptedTest
+                      ExtraSubstituter ]
+  horizon_lib:[ HorizonDefinition ]
+  :crate:memory:[ PhaseReceipt SourceRevisionRecord ContainerName ContainerState
+                  PersistedFlakeInputOverride ]
+  :crate:emission:[ OperatorNode GuestNode GuestAddress CollectedPaths ] ]
 
 [ OrdinaryConfigure.LojixNexusConfiguration
   MetaConfigure.LojixNexusConfiguration
@@ -33,7 +46,17 @@ Operation
   RecordTestRun.TestRunRecord
   QueryGenerations.Selection
   ReadEventLog.EventLogRange
-  QueryTestRuns.TestRunLookup ]
+  QueryTestRuns.TestRunLookup
+  ResolvingFlake.FlakeAuthRequest
+  MaterializingHorizon.HorizonMaterializationCommand
+  EvaluatingClosure.NixEvalCommand
+  BuildingClosure.NixBuildCommand
+  CopyingClosure.CopyClosureCommand
+  ActivatingGeneration.ActivateGenerationCommand
+  CollectingGarbage.PathInfoGcCommand
+  BuildingHermeticCheck.HermeticCheckCommand
+  BringingUpTestVm.BringUpTestVmCommand
+  TearingDownTestVm.TearDownTestVmCommand ]
 
 [ OrdinaryConfigured.ConfigurationReceipt
   MetaConfigured.ConfigurationReceipt
@@ -53,7 +76,19 @@ Operation
   TestRunsQueried.TestRunListing
   WriteRejected.RejectionReport
   ReadMissed.RejectionReport
-  StoreRefused.StoreFailure ]
+  StoreRefused.StoreFailure
+  FlakeResolved.ResolvedFlake
+  HorizonMaterialized.MaterializedInputs
+  ClosureEvaluated.EvaluatedClosure
+  ClosureBuilt.BuiltClosure
+  ClosureCopied.CopiedClosure
+  ActivationCompleted.ActivatedGeneration
+  DetachedTestActivationDispatched
+  PathsCollected.GarbageCollected
+  HermeticCheckBuilt.CheckBuilt
+  TestVmStarted.TestVmBroughtUp
+  TestVmStopped.TestVmTornDown
+  EffectFailed.EffectFailure ]
 
 [ ActivationCommit.{ GenerationIdentifier ClusterName NodeName DeploymentEnvironment GenerationSlot ClosurePath SourceRevisionRecord }
   ContainerTransition.{ ClusterName NodeName ContainerName ContainerState }
@@ -62,4 +97,41 @@ Operation
   RejectionReport.{ RejectionReason DatabaseMarker }
   RejectionReason.[ GenerationUnknown NodeUnknown ClusterUnknown PlanNotApproved PinLabelInUse
                     PinLabelUnknown GenerationActive GenerationPinned EventLogPositionOutOfRange
-                    ProposalSourceUnreachable DurableWriteFailed ] ]
+                    ProposalSourceUnreachable DurableWriteFailed ]
+
+  FlakeAuthRequest.{ FlakeReference SourceRevisionPolicy }
+  ResolvedFlake.SourceRevisionRecord
+  HorizonMaterializationCommand.{ ClusterName NodeName HorizonDefinition SecretsInput MaterializationShape }
+  MaterializationShape.[ CompleteHost BaseHost UserEnvironment.UserEnvironmentMaterialization ]
+  UserEnvironmentMaterialization.UserName
+  MaterializedInputs.Vector<PersistedFlakeInputOverride>
+  NixEvalCommand.{ GenerationIdentifier ClusterName NodeName GenerationArtifact FlakeReference
+                   SourceRevisionRecord DeploymentOutputSelector Vector<PersistedFlakeInputOverride>
+                   BuildTarget }
+  BuildTarget.[ Local Remote.NixBuilderSpec TargetStore.TargetStoreBuild ]
+  TargetStoreBuild.{ DeploymentTransport NodeName OperatorNode Option<IgnoredBuilder> }
+  IgnoredBuilder.NixBuilderSpec
+  EvaluatedClosure.{ GenerationIdentifier ClosurePath }
+  NixBuildCommand.{ GenerationIdentifier ClosurePath BuildTarget Vector<ExtraSubstituter> }
+  BuiltClosure.{ GenerationIdentifier ClosurePath }
+  CopyClosureCommand.{ GenerationIdentifier NodeName DeploymentTransport ClosurePath ClosureOrigin }
+  ClosureOrigin.[ DaemonStore TargetStore ]
+  CopiedClosure.{ GenerationIdentifier NodeName ClosurePath }
+  ActivateGenerationCommand.{ DeploymentIdentifier GenerationIdentifier ClusterName NodeName
+                              DeploymentTransport ClosurePath ActivationEffect ActivationBackend
+                              ActivationProfile }
+  ActivationProfile.[ Host.HostDeployAction UserEnvironment.UserEnvironmentActivationProfile ]
+  UserEnvironmentActivationProfile.{ UserEnvironmentAction UserName }
+  ActivatedGeneration.{ GenerationIdentifier NodeName GenerationSlot }
+  PathInfoGcCommand.{ ClusterName NodeName }
+  GarbageCollected.{ ClusterName NodeName CollectedPaths }
+  HermeticCheckCommand.{ ClusterName NodeName FlakeReference TestExecutionProfile }
+  CheckBuilt.{ ClusterName NodeName ClosurePath }
+  BringUpTestVmCommand.{ ClusterName GuestNode TestVmHost DeploymentTransport ClosurePath GuestAddress }
+  TearDownTestVmCommand.{ ClusterName GuestNode TestVmHost DeploymentTransport }
+  TestVmHost.NodeName
+  TestVmBroughtUp.{ ClusterName GuestNode TestVmHost }
+  TestVmTornDown.{ ClusterName GuestNode TestVmHost }
+  EffectFailure.{ EffectStage FailureEvidence }
+  EffectStage.[ FlakeAuth MaterializeHorizon Eval Build CopyClosure Activate Gc HermeticCheck
+                BringUpTestVm TearDownTestVm ] ]

@@ -3,8 +3,11 @@
 ; observed. A command line is a type: an emission names what is asked, a
 ; field per argument, and the translator, in src/translator.rs, is the one
 ; place that holds the words of the call, a process's program and argv or a
-; systemd D-Bus method. A String stands only where nothing narrower is
-; known: a path Lojix generated, a unit's name, the text a process printed.
+; systemd D-Bus method. A path or a name Lojix forms is its own newtype over
+; a String; a bare String stands only for text the world wrote, what a
+; process printed or a fault reported. A unit's ActiveState and its service
+; Result are systemd's documented values, each with the value systemd may
+; add later kept as the text it sent.
 ;
 ; The process emissions run under the effect execution, which says where a
 ; program comes from; the D-Bus emissions run on one system-bus session that
@@ -143,6 +146,11 @@ Emission
   BusFault.String
   UnitLookupOutcome.[ Found NoSuchUnit Refused.BusFault ]
   UnitArrivalOutcome.[ Arrived StreamEnded Refused.BusFault ]
-  UnitState.{ ActiveState.PropertyReading ServiceResult.PropertyReading Option<ProcessEnd> }
-  PropertyReading.[ Read.String Unreadable.BusFault ]
+  UnitState.{ ActiveStateReading ServiceResultReading Option<ProcessEnd> }
+  ActiveStateReading.[ Read.ActiveState Unreadable.BusFault ]
+  ServiceResultReading.[ Read.ServiceResult Unreadable.BusFault ]
+  ActiveState.[ Active Reloading Inactive Failed Activating Deactivating Maintenance Refreshing
+                Unrecognized.String ]
+  ServiceResult.[ Success Resources Protocol Timeout ExitCode Signal CoreDump Watchdog
+                  StartLimitHit OomKill ExecCondition Unrecognized.String ]
   UnitStateWatchOutcome.[ Changed StreamEnded ] ]

@@ -1,14 +1,15 @@
 //! Hand-implemented `SchemaRuntime` noun — the engine a peer's input is
 //! answered through and an admitted deploy or test pipeline is driven by.
 //!
-//! `Operating::operate` applies one generated `Operation` to the store and
-//! answers its `Outcome`. A deploy pipeline is a chain of effects — resolve
+//! `Operating::operate` applies one generated Memory `Operation` to the store
+//! and answers its `Outcome`. A deploy pipeline is a chain of stages — resolve
 //! the flake, materialize Horizon inputs, eval, build, copy, activate — with a
-//! phase recorded between stages; `NexusEngine::decide` picks the next action
-//! from the last step's result and `NexusEngine::drive` carries it out until
-//! the pipeline finishes. `run_effect` composes each stage's emissions,
-//! generated from `ethos/emission.ethos`, and awaits each on a blocking thread;
-//! the translator in `translator.rs` holds every word of the calls.
+//! phase recorded between them; each stage is an `Operation` too, an attempt.
+//! `NexusEngine::decide` picks the next operation from the last outcome and
+//! `NexusEngine::attempt` carries it out until the pipeline finishes. A stage
+//! composes its emissions, generated from `ethos/emission.ethos`, and awaits
+//! each on a blocking thread; the translator in `translator.rs` holds every
+//! word of the calls.
 
 use crate::inspected_text::{
     CredentialBearing, InspectedText, NixStorePath, OfferedPath, PathAdmission, PercentEncodedText,
@@ -29,7 +30,7 @@ use horizon_lib::{Horizon, HorizonDefinition, Projecting};
 use crate::emission;
 use crate::runtime_flow::{self as nexus, NexusEngine as _};
 use crate::runtime_model as memory;
-use crate::translator::{Emitting as _, GcRootNaming as _, SystemdBus};
+use crate::translator::{Emitting as _, GcRootNaming as _, SystemdBus, SystemdWord as _};
 
 /// A local activation-login noun. Horizon projects users as public strings;
 /// Lojix validates the command-bearing login independently before it reaches
@@ -807,22 +808,22 @@ impl TestRunCommands for ResolvedTestRun {
     fn bring_up_command(&self, runner: ordinary::ClosurePath) -> nexus::BringUpTestVmCommand {
         nexus::BringUpTestVmCommand {
             cluster_name: self.cluster.clone(),
-            node: self.node.clone(),
-            host: self.host.clone(),
+            guest_node: emission::GuestNode(self.node.clone()),
+            test_vm_host: nexus::TestVmHost(self.host.clone()),
             deployment_transport: self
                 .nexus_test_execution_profile()
                 .deployment_transport_option
                 .expect("live test transport is validated before dispatch"),
             closure_path: runner,
-            string: String::new(),
+            guest_address: emission::GuestAddress(String::new()),
         }
     }
 
     fn tear_down_command(&self) -> nexus::TearDownTestVmCommand {
         nexus::TearDownTestVmCommand {
             cluster_name: self.cluster.clone(),
-            node: self.node.clone(),
-            host: self.host.clone(),
+            guest_node: emission::GuestNode(self.node.clone()),
+            test_vm_host: nexus::TestVmHost(self.host.clone()),
             deployment_transport: self
                 .nexus_test_execution_profile()
                 .deployment_transport_option
@@ -1840,8 +1841,8 @@ impl DeployCursor for DeployPipeline {
             return nexus::BuildTarget::TargetStore(nexus::TargetStoreBuild {
                 deployment_transport: self.effect_transport(),
                 node_name: self.node_name.clone(),
-                operator_node: daemon_host.clone(),
-                ignored_builder_option: builder_option,
+                operator_node: emission::OperatorNode(daemon_host.clone()),
+                ignored_builder_option: builder_option.map(nexus::IgnoredBuilder),
             });
         }
         match builder_option {
@@ -1920,7 +1921,7 @@ impl DeployCursor for DeployPipeline {
                     self.deployment_output_selector.payload().payload().clone(),
                 ),
             ),
-            flake_input_override_vector: self.input_overrides.clone(),
+            persisted_flake_input_override_vector: self.input_overrides.clone(),
             // Evaluation always stays in the daemon host's own store, whatever
             // the build target: an ssh-ng evaluation store can deadlock in
             // remote transport (lojix 0.3.9). Only the build moves.
@@ -2962,12 +2963,8 @@ impl RuntimeCore for SchemaRuntime {
                     return output;
                 }
                 nexus::NexusAction::Operate(operation) => {
-                    let outcome = self.operate(operation);
+                    let outcome = self.attempt(operation).await;
                     action = self.decide_outcome(outcome);
-                }
-                nexus::NexusAction::CommandEffect(command) => {
-                    let result = self.run_effect(command).await;
-                    action = self.decide_test_effect_completion(result);
                 }
             }
         }
@@ -3005,9 +3002,9 @@ pub(crate) trait PipelineDeciding {
     /// between bring-up and teardown is unimplemented, so the bracket cannot
     /// pass. A Live run is rejected at submit (`LiveNotYetEnabled`), so this
     /// honest live terminal is the belt to that submit-time gate.
-    fn decide_test_effect_completion(&mut self, result: nexus::EffectResult) -> nexus::NexusAction;
+    fn decide_test_effect_completion(&mut self, result: memory::Outcome) -> nexus::NexusAction;
 
-    fn decide_effect_completion(&mut self, result: nexus::EffectResult) -> nexus::NexusAction;
+    fn decide_effect_completion(&mut self, result: memory::Outcome) -> nexus::NexusAction;
 
     fn reject_active_pipeline(&mut self, report: memory::RejectionReport) -> nexus::NexusAction;
 
@@ -3144,17 +3141,34 @@ impl PipelineDeciding for SchemaRuntime {
                 memory::DeployRefusalReason::NoCorrelatedDeployment,
                 &format!("a pipeline received a read it never makes: {unasked:?}"),
             )),
+            // A stage's outcome goes to the pipeline that attempted it: the
+            // test pipeline while one is active, else the deploy pipeline.
+            stage @ (memory::Outcome::FlakeResolved(_)
+            | memory::Outcome::HorizonMaterialized(_)
+            | memory::Outcome::ClosureEvaluated(_)
+            | memory::Outcome::ClosureBuilt(_)
+            | memory::Outcome::ClosureCopied(_)
+            | memory::Outcome::ActivationCompleted(_)
+            | memory::Outcome::DetachedTestActivationDispatched
+            | memory::Outcome::PathsCollected(_)
+            | memory::Outcome::HermeticCheckBuilt(_)
+            | memory::Outcome::TestVmStarted(_)
+            | memory::Outcome::TestVmStopped(_)
+            | memory::Outcome::EffectFailed(_)) => match self.active_test {
+                Some(_) => self.decide_test_effect_completion(stage),
+                None => self.decide_effect_completion(stage),
+            },
         }
     }
 
-    fn decide_test_effect_completion(&mut self, result: nexus::EffectResult) -> nexus::NexusAction {
+    fn decide_test_effect_completion(&mut self, result: memory::Outcome) -> nexus::NexusAction {
         let Some(pipeline) = self.active_test.clone() else {
             return nexus::NexusAction::from(meta::Output::TestRejected(
                 self.test_rejection(meta::TestRejectionReason::InternalError),
             ));
         };
         match result {
-            nexus::EffectResult::HermeticCheckBuilt(built) => {
+            memory::Outcome::HermeticCheckBuilt(built) => {
                 // Real nix build succeeded: the out-path is the realised check
                 // closure. Record Completed/Passed with it — the durable proof.
                 self.record_test_terminal(
@@ -3164,18 +3178,18 @@ impl PipelineDeciding for SchemaRuntime {
                     Some(built.closure_path),
                 )
             }
-            nexus::EffectResult::TestVmStarted(_) => {
+            memory::Outcome::TestVmStarted(_) => {
                 self.record_container(&pipeline, memory::ContainerState::Started);
                 self.set_test_stage(TestStage::BroughtUp);
                 // The deploy-into-VM + assert chain runs here in a live run
                 // (gated). BUILT path advances straight to teardown so the
                 // bracket is provably constructed end-to-end.
                 self.set_test_stage(TestStage::Asserted);
-                nexus::NexusAction::CommandEffect(nexus::EffectCommand::TearDownTestVm(
+                nexus::NexusAction::Operate(memory::Operation::TearingDownTestVm(
                     pipeline.run.tear_down_command(),
                 ))
             }
-            nexus::EffectResult::TestVmStopped(_) => {
+            memory::Outcome::TestVmStopped(_) => {
                 self.record_container(&pipeline, memory::ContainerState::Stopped);
                 // Honest LIVE terminal (report 54 Unit 2b fix 1): the bring-up →
                 // teardown bracket ran, but the deploy-into-VM + assert chain
@@ -3192,7 +3206,7 @@ impl PipelineDeciding for SchemaRuntime {
                     None,
                 )
             }
-            nexus::EffectResult::EffectFailed(failure) => self.fail_test_pipeline(failure),
+            memory::Outcome::EffectFailed(failure) => self.fail_test_pipeline(failure),
             // No other effect result belongs to a test dispatch; treat it as an
             // internal invariant failure rather than a misleading pass.
             _ => self.fail_test_pipeline(nexus::EffectFailure {
@@ -3205,14 +3219,14 @@ impl PipelineDeciding for SchemaRuntime {
         }
     }
 
-    fn decide_effect_completion(&mut self, result: nexus::EffectResult) -> nexus::NexusAction {
+    fn decide_effect_completion(&mut self, result: memory::Outcome) -> nexus::NexusAction {
         let Some(pipeline) = self.active_deploy.clone() else {
             // An effect completed with no deployment behind it. There is no
             // record to name and none is invented; the refusal says which
             // stage reported what, in the journal, and names itself on the
             // wire.
             let cause = match &result {
-                nexus::EffectResult::EffectFailed(failure) => format!(
+                memory::Outcome::EffectFailed(failure) => format!(
                     "{:?}: {}",
                     failure.effect_stage,
                     failure.failure_evidence.failure_detail.payload()
@@ -3224,7 +3238,7 @@ impl PipelineDeciding for SchemaRuntime {
             );
         };
         match result {
-            nexus::EffectResult::FlakeResolved(resolved) => {
+            memory::Outcome::FlakeResolved(resolved) => {
                 let next_stage = if pipeline.needs_horizon_materialization() {
                     memory::DeployResumeStage::MaterializeHorizon
                 } else {
@@ -3243,7 +3257,7 @@ impl PipelineDeciding for SchemaRuntime {
                     );
                 }
                 if pipeline.needs_horizon_materialization() {
-                    nexus::NexusAction::CommandEffect(nexus::EffectCommand::MaterializeHorizon(
+                    nexus::NexusAction::Operate(memory::Operation::MaterializingHorizon(
                         pipeline.horizon_materialization_command(),
                     ))
                 } else {
@@ -3252,11 +3266,11 @@ impl PipelineDeciding for SchemaRuntime {
                     self.record_phase(ordinary::DeploymentPhase::Building)
                 }
             }
-            nexus::EffectResult::HorizonMaterialized(inputs) => {
+            memory::Outcome::HorizonMaterialized(inputs) => {
                 self.set_input_overrides(inputs.into_payload());
                 self.record_phase(ordinary::DeploymentPhase::Building)
             }
-            nexus::EffectResult::ClosureEvaluated(evaluated) => {
+            memory::Outcome::ClosureEvaluated(evaluated) => {
                 if !self.set_closure_path(evaluated.closure_path.clone()) {
                     return self.fail_pipeline(
                         pipeline,
@@ -3274,7 +3288,7 @@ impl PipelineDeciding for SchemaRuntime {
                         memory::DeployJobPhase::Building,
                         memory::DeployResumeStage::NixBuild,
                     );
-                    nexus::NexusAction::CommandEffect(nexus::EffectCommand::NixBuild(
+                    nexus::NexusAction::Operate(memory::Operation::BuildingClosure(
                         pipeline.nix_build_command(
                             evaluated.closure_path,
                             self.configuration.daemon_host(),
@@ -3290,7 +3304,7 @@ impl PipelineDeciding for SchemaRuntime {
                     self.finish_deploy_pipeline(&pipeline)
                 }
             }
-            nexus::EffectResult::ClosureBuilt(built) => {
+            memory::Outcome::ClosureBuilt(built) => {
                 if !self.set_closure_path(built.closure_path.clone()) {
                     return self.fail_pipeline(
                         pipeline,
@@ -3308,7 +3322,7 @@ impl PipelineDeciding for SchemaRuntime {
                         memory::DeployJobPhase::Built,
                         memory::DeployResumeStage::CopyClosure,
                     );
-                    nexus::NexusAction::CommandEffect(nexus::EffectCommand::CopyClosure(
+                    nexus::NexusAction::Operate(memory::Operation::CopyingClosure(
                         pipeline.copy_closure_command(
                             built.closure_path,
                             self.configuration.daemon_host(),
@@ -3325,12 +3339,12 @@ impl PipelineDeciding for SchemaRuntime {
                     self.finish_deploy_pipeline(&pipeline)
                 }
             }
-            nexus::EffectResult::ClosureCopied(_) => {
+            memory::Outcome::ClosureCopied(_) => {
                 // Record Copying (stage BuildingRecorded). The phase write hops
                 // back through advance_after_phase, which fires ActivateGeneration.
                 self.record_phase(ordinary::DeploymentPhase::Copying)
             }
-            nexus::EffectResult::GenerationActivated(activated) => {
+            memory::Outcome::ActivationCompleted(activated) => {
                 // Record Activated (stage CopyingRecorded). The phase write hops
                 // back through advance_after_phase, which fires the
                 // RecordGenerationActivated write that commits the live set. The
@@ -3339,7 +3353,7 @@ impl PipelineDeciding for SchemaRuntime {
                 self.set_activation_slot(activated.generation_slot);
                 self.record_phase(ordinary::DeploymentPhase::Activated)
             }
-            nexus::EffectResult::DetachedTestActivationDispatched => {
+            memory::Outcome::DetachedTestActivationDispatched => {
                 // The dispatch acknowledgement is not a terminal deployment
                 // outcome. PID 1 retains the exact test unit; the private
                 // observer terminalizes an observed result, while a replaced
@@ -3352,15 +3366,15 @@ impl PipelineDeciding for SchemaRuntime {
                 self.active_deploy = None;
                 nexus::NexusAction::from(meta::Output::DeployAccepted(accepted))
             }
-            nexus::EffectResult::PathsCollected(_) => self.finish_deploy_pipeline(&pipeline),
+            memory::Outcome::PathsCollected(_) => self.finish_deploy_pipeline(&pipeline),
             // The test-dispatch effect results never reach the DEPLOY effect
             // router — `drive_submitted_test` routes them through
             // `decide_test_effect_completion`. One arriving here is an internal
             // invariant failure, surfaced as a deploy failure rather than a
             // misleading success.
-            nexus::EffectResult::HermeticCheckBuilt(_)
-            | nexus::EffectResult::TestVmStarted(_)
-            | nexus::EffectResult::TestVmStopped(_) => self.fail_pipeline(
+            memory::Outcome::HermeticCheckBuilt(_)
+            | memory::Outcome::TestVmStarted(_)
+            | memory::Outcome::TestVmStopped(_) => self.fail_pipeline(
                 pipeline,
                 nexus::EffectFailure {
                     effect_stage: nexus::EffectStage::Build,
@@ -3370,7 +3384,13 @@ impl PipelineDeciding for SchemaRuntime {
                     .witness(),
                 },
             ),
-            nexus::EffectResult::EffectFailed(failure) => self.fail_pipeline(pipeline, failure),
+            memory::Outcome::EffectFailed(failure) => self.fail_pipeline(pipeline, failure),
+            // `decide_outcome` sends only stage outcomes here; a Memory
+            // outcome reaching the stage router names no stage it can follow.
+            unrouted => nexus::NexusAction::from(self.refuse_deploy(
+                memory::DeployRefusalReason::NoCorrelatedDeployment,
+                &format!("a Memory outcome reached the stage router: {unrouted:?}"),
+            )),
         }
     }
 
@@ -3528,7 +3548,7 @@ pub trait DeployDriving {
 
     /// Capture a closure only after validating it at the typed effect ingress.
     /// This is intentionally independent of Nix-command parsing: an injected
-    /// `EffectResult` must not reach a later build, copy, or activation command.
+    /// stage outcome must not reach a later build, copy, or activation command.
     fn set_closure_path(&mut self, closure_path: ordinary::ClosurePath) -> bool;
 
     fn set_input_overrides(&mut self, overrides: Vec<memory::PersistedFlakeInputOverride>);
@@ -3777,46 +3797,44 @@ impl DeployDriving for SchemaRuntime {
                 };
             }
             memory::DeployResumeStage::ResolveFlakeAuth => {
-                nexus::NexusWork::Operated(memory::Outcome::DeploySubmitted(accepted))
+                memory::Outcome::DeploySubmitted(accepted)
             }
             memory::DeployResumeStage::MaterializeHorizon => {
                 let Some(revision) = pipeline.source_revision.clone() else {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
-                nexus::NexusWork::EffectCompleted(nexus::EffectResult::from(revision))
+                memory::Outcome::FlakeResolved(nexus::ResolvedFlake(revision))
             }
-            memory::DeployResumeStage::RecordBuilding => nexus::NexusWork::EffectCompleted(
-                nexus::EffectResult::from(pipeline.input_overrides.clone()),
+            memory::DeployResumeStage::RecordBuilding => memory::Outcome::HorizonMaterialized(
+                nexus::MaterializedInputs(pipeline.input_overrides.clone()),
             ),
             memory::DeployResumeStage::NixEval => {
                 let Some(receipt) = pipeline.phase_receipt.clone() else {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
-                nexus::NexusWork::Operated(memory::Outcome::PhaseRecorded(receipt))
+                memory::Outcome::PhaseRecorded(receipt)
             }
             memory::DeployResumeStage::NixBuild => {
                 let Some(closure_path) = pipeline.closure_path.clone() else {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
-                nexus::NexusWork::EffectCompleted(nexus::EffectResult::from(
-                    nexus::EvaluatedClosure {
-                        generation_identifier: pipeline.generation_identifier,
-                        closure_path,
-                    },
-                ))
+                memory::Outcome::ClosureEvaluated(nexus::EvaluatedClosure {
+                    generation_identifier: pipeline.generation_identifier,
+                    closure_path,
+                })
             }
             memory::DeployResumeStage::CopyClosure => {
                 let Some(closure_path) = pipeline.closure_path.clone() else {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
-                nexus::NexusWork::EffectCompleted(nexus::EffectResult::from(nexus::BuiltClosure {
+                memory::Outcome::ClosureBuilt(nexus::BuiltClosure {
                     generation_identifier: pipeline.generation_identifier,
                     closure_path,
-                }))
+                })
             }
             memory::DeployResumeStage::ActivateGeneration
             | memory::DeployResumeStage::RecordGenerationActivated => {
@@ -3824,7 +3842,7 @@ impl DeployDriving for SchemaRuntime {
                     return self
                         .deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError);
                 };
-                nexus::NexusWork::Operated(memory::Outcome::PhaseRecorded(receipt))
+                memory::Outcome::PhaseRecorded(receipt)
             }
         };
         self.drive(work).await
@@ -3839,7 +3857,7 @@ impl DeployDriving for SchemaRuntime {
         };
         // First effect of the chain: resolve the flake against the proposal
         // source. Subsequent effects are emitted from `decide_effect_completion`.
-        nexus::NexusAction::CommandEffect(nexus::EffectCommand::ResolveFlakeAuth(
+        nexus::NexusAction::Operate(memory::Operation::ResolvingFlake(
             pipeline.flake_auth_request(),
         ))
     }
@@ -3857,7 +3875,7 @@ impl DeployDriving for SchemaRuntime {
         match pipeline.stage {
             DeployStage::Submitted => {
                 self.set_stage(DeployStage::BuildingRecorded);
-                nexus::NexusAction::CommandEffect(nexus::EffectCommand::NixEval(
+                nexus::NexusAction::Operate(memory::Operation::EvaluatingClosure(
                     pipeline.nix_eval_command(self.configuration.daemon_host()),
                 ))
             }
@@ -3906,7 +3924,7 @@ impl DeployDriving for SchemaRuntime {
                 // than blindly re-activating. There is no Activating event-log
                 // phase today; the job row is the resume cursor for this window.
                 self.persist_job_phase(memory::DeployJobPhase::Activating);
-                nexus::NexusAction::CommandEffect(nexus::EffectCommand::ActivateGeneration(
+                nexus::NexusAction::Operate(memory::Operation::ActivatingGeneration(
                     pipeline.activate_generation_command(closure_path),
                 ))
             }
@@ -4254,24 +4272,24 @@ impl TestDriving for SchemaRuntime {
         self.active_operation = Some(MetaOperation::Test);
         let first_effect = match pipeline.run.profile.test_mode {
             ordinary::TestMode::Hermetic => {
-                nexus::EffectCommand::HermeticCheck(pipeline.run.hermetic_check_command())
+                memory::Operation::BuildingHermeticCheck(pipeline.run.hermetic_check_command())
             }
             // LIVE is BUILT but not run live here (gated). The bring-up effect
-            // is constructed and dispatched; `run_effect` for the live effects
+            // is constructed and dispatched; the attempt of the live stages
             // is the host-untouched user-namespace path (report 51 §3). A live
             // run is psyche-gated, so the daemon-integration proof exercises
             // Hermetic; this constructs the live first effect honestly.
-            ordinary::TestMode::Live => nexus::EffectCommand::BringUpTestVm(
+            ordinary::TestMode::Live => memory::Operation::BringingUpTestVm(
                 pipeline
                     .run
                     .bring_up_command(ordinary::ClosurePath::new(String::new())),
             ),
         };
-        // The cursor's first effect is fired directly through `run_effect` and
+        // The cursor's first stage is attempted directly and its outcome
         // routed by `decide_test_effect_completion`, then `drive_to_terminal`
         // threads any further continuation hops to the terminal outcome write.
-        let result = self.run_effect(first_effect).await;
-        let action = self.decide_test_effect_completion(result);
+        let outcome = self.attempt(first_effect).await;
+        let action = self.decide_test_effect_completion(outcome);
         self.drive_to_terminal(action).await
     }
 
@@ -4364,6 +4382,23 @@ impl Operating for SchemaRuntime {
             memory::Operation::QueryGenerations(selection) => self.query_generations(selection),
             memory::Operation::ReadEventLog(range) => self.read_event_log(range),
             memory::Operation::QueryTestRuns(lookup) => self.query_test_runs(lookup),
+            // A stage awaits its emissions, so it is attempted by a pipeline
+            // through `NexusEngine::attempt` and never applied here.
+            memory::Operation::ResolvingFlake(_)
+            | memory::Operation::MaterializingHorizon(_)
+            | memory::Operation::EvaluatingClosure(_)
+            | memory::Operation::BuildingClosure(_)
+            | memory::Operation::CopyingClosure(_)
+            | memory::Operation::ActivatingGeneration(_)
+            | memory::Operation::CollectingGarbage(_)
+            | memory::Operation::BuildingHermeticCheck(_)
+            | memory::Operation::BringingUpTestVm(_)
+            | memory::Operation::TearingDownTestVm(_) => {
+                memory::Outcome::StoreRefused(memory::StoreFailure(
+                    "a pipeline stage is attempted by its pipeline, not applied to the store"
+                        .to_string(),
+                ))
+            }
         }
     }
 }
@@ -4946,33 +4981,32 @@ impl MemoryObserving for SchemaRuntime {
 /// emissions its stage needs, awaits each on a blocking thread, and
 /// classifies a failure into the stage the pipeline understands.
 pub(crate) trait EffectRunning {
-    async fn resolve_flake_auth(&self, request: nexus::FlakeAuthRequest) -> nexus::EffectResult;
+    async fn resolve_flake_auth(&self, request: nexus::FlakeAuthRequest) -> memory::Outcome;
 
     async fn run_horizon_materialization(
         &self,
         command: nexus::HorizonMaterializationCommand,
-    ) -> nexus::EffectResult;
+    ) -> memory::Outcome;
 
-    async fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> nexus::EffectResult;
+    async fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> memory::Outcome;
 
-    async fn run_nix_build(&self, command: nexus::NixBuildCommand) -> nexus::EffectResult;
+    async fn run_nix_build(&self, command: nexus::NixBuildCommand) -> memory::Outcome;
 
-    async fn run_copy_closure(&self, command: nexus::CopyClosureCommand) -> nexus::EffectResult;
+    async fn run_copy_closure(&self, command: nexus::CopyClosureCommand) -> memory::Outcome;
 
     async fn run_activate_generation(
         &self,
         command: nexus::ActivateGenerationCommand,
-    ) -> nexus::EffectResult;
+    ) -> memory::Outcome;
 
-    async fn run_path_info_gc(&self, command: nexus::PathInfoGcCommand) -> nexus::EffectResult;
+    async fn run_path_info_gc(&self, command: nexus::PathInfoGcCommand) -> memory::Outcome;
 
     /// The real hermetic check effect builds the exact profile selector. Exit
     /// 0 plus an out-path produces `HermeticCheckBuilt`; a non-zero exit
     /// produces `EffectFailed(HermeticCheck)`. The selected check owns its
     /// sandboxed VM, so this is a pure build with zero host effect. The outcome
     /// is the actual Nix build result.
-    async fn run_hermetic_check(&self, command: nexus::HermeticCheckCommand)
-    -> nexus::EffectResult;
+    async fn run_hermetic_check(&self, command: nexus::HermeticCheckCommand) -> memory::Outcome;
 
     /// The live bring-up effect. BUILT
     /// here, NOT run live (the first Prometheus cycle is psyche-gated): the
@@ -4982,24 +5016,19 @@ pub(crate) trait EffectRunning {
     /// private user network namespace on the resolved vmhost. The gated build
     /// path returns `TestVmBroughtUp` so the bracket is provably constructed
     /// end-to-end without touching a real host.
-    async fn run_bring_up_test_vm(
-        &self,
-        command: nexus::BringUpTestVmCommand,
-    ) -> nexus::EffectResult;
+    async fn run_bring_up_test_vm(&self, command: nexus::BringUpTestVmCommand) -> memory::Outcome;
 
     /// The LIVE teardown effect (Unit 2b). BUILT here, NOT run live: constructs
     /// the `systemctl --user stop` emission that, on a live run, stops the user
     /// units so the tap + route vanish with the namespace (host netns
     /// byte-identical). Returns `TestVmTornDown` for the gated build path.
-    async fn run_tear_down_test_vm(
-        &self,
-        command: nexus::TearDownTestVmCommand,
-    ) -> nexus::EffectResult;
+    async fn run_tear_down_test_vm(&self, command: nexus::TearDownTestVmCommand)
+    -> memory::Outcome;
 
     fn effect_failed(
         stage: nexus::EffectStage,
         reported: impl Into<StageFailure>,
-    ) -> nexus::EffectResult;
+    ) -> memory::Outcome;
 
     /// The `TargetStore` arm of the build effect: derivation copy, build in
     /// the target's store, target-side GC root, in that order.
@@ -5007,11 +5036,11 @@ pub(crate) trait EffectRunning {
         &self,
         command: &nexus::NixBuildCommand,
         build: &nexus::TargetStoreBuild,
-    ) -> nexus::EffectResult;
+    ) -> memory::Outcome;
 }
 
 impl EffectRunning for SchemaRuntime {
-    async fn resolve_flake_auth(&self, request: nexus::FlakeAuthRequest) -> nexus::EffectResult {
+    async fn resolve_flake_auth(&self, request: nexus::FlakeAuthRequest) -> memory::Outcome {
         // Resolve the flake metadata to a locked revision through Nix. The
         // typed SourceRevisionRecord produced here is carried through the
         // eval/build path, event log, deploy-job row, and live-generation state.
@@ -5024,7 +5053,7 @@ impl EffectRunning for SchemaRuntime {
             .await
         {
             emission::FlakeMetadataOutcome::Read(metadata) => {
-                nexus::EffectResult::FlakeResolved(nexus::ResolvedFlake::new(
+                memory::Outcome::FlakeResolved(nexus::ResolvedFlake::new(
                     metadata
                         .source_revision(request.source_revision_policy, request.flake_reference),
                 ))
@@ -5042,7 +5071,7 @@ impl EffectRunning for SchemaRuntime {
     async fn run_horizon_materialization(
         &self,
         command: nexus::HorizonMaterializationCommand,
-    ) -> nexus::EffectResult {
+    ) -> memory::Outcome {
         let materialization = HorizonMaterialization {
             configuration: self.configuration.as_ref().clone(),
             command,
@@ -5051,12 +5080,12 @@ impl EffectRunning for SchemaRuntime {
             .run(self.configuration.effect_execution())
             .await
         {
-            Ok(inputs) => nexus::EffectResult::HorizonMaterialized(inputs),
+            Ok(inputs) => memory::Outcome::HorizonMaterialized(inputs),
             Err(detail) => Self::effect_failed(nexus::EffectStage::MaterializeHorizon, detail),
         }
     }
 
-    async fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> nexus::EffectResult {
+    async fn run_nix_eval(&self, command: nexus::NixEvalCommand) -> memory::Outcome {
         match self
             .configuration
             .effect_execution()
@@ -5071,7 +5100,7 @@ impl EffectRunning for SchemaRuntime {
                         "nix eval returned a noncanonical closure path".to_string(),
                     );
                 }
-                nexus::EffectResult::ClosureEvaluated(nexus::EvaluatedClosure {
+                memory::Outcome::ClosureEvaluated(nexus::EvaluatedClosure {
                     generation_identifier: command.generation_identifier,
                     closure_path: ordinary::ClosurePath::new(closure_path),
                 })
@@ -5082,7 +5111,7 @@ impl EffectRunning for SchemaRuntime {
         }
     }
 
-    async fn run_nix_build(&self, command: nexus::NixBuildCommand) -> nexus::EffectResult {
+    async fn run_nix_build(&self, command: nexus::NixBuildCommand) -> memory::Outcome {
         // A daemon-host deployment realizes in the authenticated local Lojix
         // context; an explicit builder still uses the local Nix client and
         // imports its result locally, and the copy stage transports it. Any
@@ -5119,7 +5148,7 @@ impl EffectRunning for SchemaRuntime {
                         "nix build returned a noncanonical closure path".to_string(),
                     );
                 }
-                nexus::EffectResult::ClosureBuilt(nexus::BuiltClosure {
+                memory::Outcome::ClosureBuilt(nexus::BuiltClosure {
                     generation_identifier: command.generation_identifier,
                     closure_path: ordinary::ClosurePath::new(closure_path),
                 })
@@ -5134,7 +5163,7 @@ impl EffectRunning for SchemaRuntime {
         &self,
         command: &nexus::NixBuildCommand,
         build: &nexus::TargetStoreBuild,
-    ) -> nexus::EffectResult {
+    ) -> memory::Outcome {
         let realization = match TargetStoreRealization::from_command(command, build) {
             Ok(realization) => realization,
             Err(detail) => return Self::effect_failed(nexus::EffectStage::Build, detail),
@@ -5143,7 +5172,7 @@ impl EffectRunning for SchemaRuntime {
             eprintln!(
                 "lojix-nexus: BuilderIgnored.{{ {} TargetStore «{}» }}",
                 build.node_name.payload(),
-                builder.payload(),
+                builder.0.payload(),
             );
         }
         match realization.run(self.configuration.effect_execution()).await {
@@ -5155,7 +5184,7 @@ impl EffectRunning for SchemaRuntime {
                     closure_path,
                     realization.gc_root_text(),
                 );
-                nexus::EffectResult::ClosureBuilt(nexus::BuiltClosure {
+                memory::Outcome::ClosureBuilt(nexus::BuiltClosure {
                     generation_identifier: command.generation_identifier,
                     closure_path: ordinary::ClosurePath::new(closure_path),
                 })
@@ -5164,13 +5193,13 @@ impl EffectRunning for SchemaRuntime {
         }
     }
 
-    async fn run_copy_closure(&self, command: nexus::CopyClosureCommand) -> nexus::EffectResult {
+    async fn run_copy_closure(&self, command: nexus::CopyClosureCommand) -> memory::Outcome {
         let transfer = match ClosureTransfer::from_command(&command) {
             Ok(transfer) => transfer,
             Err(detail) => return Self::effect_failed(nexus::EffectStage::CopyClosure, detail),
         };
         match transfer.run(self.configuration.effect_execution()).await {
-            Ok(()) => nexus::EffectResult::ClosureCopied(nexus::CopiedClosure {
+            Ok(()) => memory::Outcome::ClosureCopied(nexus::CopiedClosure {
                 generation_identifier: command.generation_identifier,
                 node_name: command.node_name,
                 closure_path: command.closure_path,
@@ -5182,7 +5211,7 @@ impl EffectRunning for SchemaRuntime {
     async fn run_activate_generation(
         &self,
         command: nexus::ActivateGenerationCommand,
-    ) -> nexus::EffectResult {
+    ) -> memory::Outcome {
         let slot = command.activation_effect.activation_slot();
         let activation =
             match Activation::from_command(&command, Some(self.configuration.daemon_host())) {
@@ -5209,9 +5238,9 @@ impl EffectRunning for SchemaRuntime {
                     *command.deployment_identifier.payload(),
                     self.configuration.effect_execution().clone(),
                 );
-                nexus::EffectResult::DetachedTestActivationDispatched
+                memory::Outcome::DetachedTestActivationDispatched
             }
-            Ok(()) => nexus::EffectResult::GenerationActivated(nexus::ActivatedGeneration {
+            Ok(()) => memory::Outcome::ActivationCompleted(nexus::ActivatedGeneration {
                 generation_identifier: command.generation_identifier,
                 node_name: command.node_name,
                 generation_slot: slot,
@@ -5220,7 +5249,7 @@ impl EffectRunning for SchemaRuntime {
         }
     }
 
-    async fn run_path_info_gc(&self, command: nexus::PathInfoGcCommand) -> nexus::EffectResult {
+    async fn run_path_info_gc(&self, command: nexus::PathInfoGcCommand) -> memory::Outcome {
         match self
             .configuration
             .effect_execution()
@@ -5230,10 +5259,10 @@ impl EffectRunning for SchemaRuntime {
             .await
         {
             emission::GarbageOutcome::Collected(collected) => {
-                nexus::EffectResult::PathsCollected(nexus::GarbageCollected {
+                memory::Outcome::PathsCollected(nexus::GarbageCollected {
                     cluster_name: command.cluster_name,
                     node_name: command.node_name,
-                    integer: collected.0 as u64,
+                    collected_paths: collected,
                 })
             }
             emission::GarbageOutcome::Failed(failure) => {
@@ -5242,10 +5271,7 @@ impl EffectRunning for SchemaRuntime {
         }
     }
 
-    async fn run_hermetic_check(
-        &self,
-        command: nexus::HermeticCheckCommand,
-    ) -> nexus::EffectResult {
+    async fn run_hermetic_check(&self, command: nexus::HermeticCheckCommand) -> memory::Outcome {
         match self
             .configuration
             .effect_execution()
@@ -5266,7 +5292,7 @@ impl EffectRunning for SchemaRuntime {
                         "nix hermetic check returned a noncanonical closure path",
                     );
                 }
-                nexus::EffectResult::HermeticCheckBuilt(nexus::CheckBuilt {
+                memory::Outcome::HermeticCheckBuilt(nexus::CheckBuilt {
                     cluster_name: command.cluster_name,
                     node_name: command.node_name,
                     closure_path: ordinary::ClosurePath::new(closure_path),
@@ -5278,42 +5304,39 @@ impl EffectRunning for SchemaRuntime {
         }
     }
 
-    async fn run_bring_up_test_vm(
-        &self,
-        command: nexus::BringUpTestVmCommand,
-    ) -> nexus::EffectResult {
+    async fn run_bring_up_test_vm(&self, command: nexus::BringUpTestVmCommand) -> memory::Outcome {
         // The emission is CONSTRUCTED (the host-untouched user-namespace
         // call) but not emitted — a live run is gated. Constructing it proves
         // the call's shape; emitting it is the on-host effect a live run makes.
         if let Err(detail) = command.emission() {
             return Self::effect_failed(nexus::EffectStage::BringUpTestVm, detail);
         }
-        nexus::EffectResult::TestVmStarted(nexus::TestVmBroughtUp {
+        memory::Outcome::TestVmStarted(nexus::TestVmBroughtUp {
             cluster_name: command.cluster_name,
-            node: command.node,
-            host: command.host,
+            guest_node: command.guest_node,
+            test_vm_host: command.test_vm_host,
         })
     }
 
     async fn run_tear_down_test_vm(
         &self,
         command: nexus::TearDownTestVmCommand,
-    ) -> nexus::EffectResult {
+    ) -> memory::Outcome {
         if let Err(detail) = command.emission() {
             return Self::effect_failed(nexus::EffectStage::TearDownTestVm, detail);
         }
-        nexus::EffectResult::TestVmStopped(nexus::TestVmTornDown {
+        memory::Outcome::TestVmStopped(nexus::TestVmTornDown {
             cluster_name: command.cluster_name,
-            node: command.node,
-            host: command.host,
+            guest_node: command.guest_node,
+            test_vm_host: command.test_vm_host,
         })
     }
 
     fn effect_failed(
         stage: nexus::EffectStage,
         reported: impl Into<StageFailure>,
-    ) -> nexus::EffectResult {
-        nexus::EffectResult::EffectFailed(nexus::EffectFailure {
+    ) -> memory::Outcome {
+        memory::Outcome::EffectFailed(nexus::EffectFailure {
             effect_stage: stage,
             failure_evidence: reported.into().witness(),
         })
@@ -5335,9 +5358,9 @@ impl TestVmEmitting for nexus::BringUpTestVmCommand {
         let target = SshTarget::from_transport(&self.deployment_transport)?;
         Ok(emission::TestVmBringUp {
             ssh_destination: target.ssh_destination,
-            guest_node: emission::GuestNode(self.node.clone()),
+            guest_node: self.guest_node.clone(),
             closure_path: self.closure_path.clone(),
-            guest_address: emission::GuestAddress(self.string.clone()),
+            guest_address: self.guest_address.clone(),
         })
     }
 }
@@ -5349,7 +5372,7 @@ impl TestVmEmitting for nexus::TearDownTestVmCommand {
         let target = SshTarget::from_transport(&self.deployment_transport)?;
         Ok(emission::TestVmTearDown {
             ssh_destination: target.ssh_destination,
-            guest_node: emission::GuestNode(self.node.clone()),
+            guest_node: self.guest_node.clone(),
         })
     }
 }
@@ -5372,7 +5395,9 @@ impl Evaluating for nexus::NixEvalCommand {
                 self.source_revision_record.source_revision_policy.clone(),
                 self.flake_reference.payload(),
             ),
-            persisted_flake_input_override_vector: self.flake_input_override_vector.clone(),
+            persisted_flake_input_override_vector: self
+                .persisted_flake_input_override_vector
+                .clone(),
         }
     }
 }
@@ -6166,7 +6191,7 @@ impl TargetStoreRealizing for TargetStoreRealization {
             rooting: emission::TargetStoreRooting {
                 ssh_destination: target.ssh_destination,
                 gc_root_directory,
-                operator_node: emission::OperatorNode(build.operator_node.clone()),
+                operator_node: build.operator_node.clone(),
                 generation_identifier: command.generation_identifier,
                 closure_path: command.closure_path.clone(),
             },
@@ -6819,26 +6844,39 @@ impl DetachedActivation for DetachedActivationUnit {
     }
 
     fn classify(&self, state: emission::UnitState) -> DetachedActivationOutcome {
-        let reading = |reading: emission::PropertyReading| match reading {
-            emission::PropertyReading::Read(value) => Ok(value),
-            emission::PropertyReading::Unreadable(fault) => Err(fault.0),
+        let active = match state.active_state_reading {
+            emission::ActiveStateReading::Read(active_state) => Ok(active_state),
+            emission::ActiveStateReading::Unreadable(fault) => Err(fault.0),
         };
-        let active = reading(state.active_state.0);
-        let result = reading(state.service_result.0);
+        let result = match state.service_result_reading {
+            emission::ServiceResultReading::Read(service_result) => Ok(service_result),
+            emission::ServiceResultReading::Unreadable(fault) => Err(fault.0),
+        };
         eprintln!(
-            "lojix detached test activation observer state active={active:?} result={result:?}"
+            "lojix detached test activation observer state active={:?} result={:?}",
+            active
+                .as_ref()
+                .map(|active_state| active_state.systemd_word()),
+            result
+                .as_ref()
+                .map(|service_result| service_result.systemd_word()),
         );
-        match (active.as_deref(), result.as_deref()) {
-            (Ok("active"), Ok("success")) => DetachedActivationOutcome::Succeeded,
-            (Ok("activating" | "reloading"), _) => DetachedActivationOutcome::Running,
-            (Ok("active"), _) => DetachedActivationOutcome::Running,
+        match (&active, &result) {
+            (Ok(emission::ActiveState::Active), Ok(emission::ServiceResult::Success)) => {
+                DetachedActivationOutcome::Succeeded
+            }
+            (Ok(emission::ActiveState::Activating | emission::ActiveState::Reloading), _) => {
+                DetachedActivationOutcome::Running
+            }
+            (Ok(emission::ActiveState::Active), _) => DetachedActivationOutcome::Running,
             (Ok(active_state), _) => {
+                let active_state = active_state.systemd_word();
                 // What PID 1 said is the whole evidence for this failure —
                 // keep it rather than printing it and terminalizing a generic
                 // reason.
                 let process_end_option = state.process_end_option;
                 let reported = match &result {
-                    Ok(result) => format!("systemd reported Result={result}"),
+                    Ok(result) => format!("systemd reported Result={}", result.systemd_word()),
                     Err(error) => format!(
                         "systemd reported ActiveState={active_state}, Result unreadable: {error}"
                     ),
@@ -7245,28 +7283,29 @@ impl Effect for UserEnvironmentActivation {
 }
 
 impl nexus::NexusEngine for SchemaRuntime {
-    async fn run_effect(&mut self, input: nexus::EffectCommand) -> nexus::EffectResult {
-        match input {
-            nexus::EffectCommand::ResolveFlakeAuth(request) => {
-                self.resolve_flake_auth(request).await
-            }
-            nexus::EffectCommand::MaterializeHorizon(command) => {
+    async fn attempt(&mut self, operation: memory::Operation) -> memory::Outcome {
+        match operation {
+            memory::Operation::ResolvingFlake(request) => self.resolve_flake_auth(request).await,
+            memory::Operation::MaterializingHorizon(command) => {
                 self.run_horizon_materialization(command).await
             }
-            nexus::EffectCommand::NixEval(command) => self.run_nix_eval(command).await,
-            nexus::EffectCommand::NixBuild(command) => self.run_nix_build(command).await,
-            nexus::EffectCommand::CopyClosure(command) => self.run_copy_closure(command).await,
-            nexus::EffectCommand::ActivateGeneration(command) => {
+            memory::Operation::EvaluatingClosure(command) => self.run_nix_eval(command).await,
+            memory::Operation::BuildingClosure(command) => self.run_nix_build(command).await,
+            memory::Operation::CopyingClosure(command) => self.run_copy_closure(command).await,
+            memory::Operation::ActivatingGeneration(command) => {
                 self.run_activate_generation(command).await
             }
-            nexus::EffectCommand::PathInfoGc(command) => self.run_path_info_gc(command).await,
-            nexus::EffectCommand::HermeticCheck(command) => self.run_hermetic_check(command).await,
-            nexus::EffectCommand::BringUpTestVm(command) => {
+            memory::Operation::CollectingGarbage(command) => self.run_path_info_gc(command).await,
+            memory::Operation::BuildingHermeticCheck(command) => {
+                self.run_hermetic_check(command).await
+            }
+            memory::Operation::BringingUpTestVm(command) => {
                 self.run_bring_up_test_vm(command).await
             }
-            nexus::EffectCommand::TearDownTestVm(command) => {
+            memory::Operation::TearingDownTestVm(command) => {
                 self.run_tear_down_test_vm(command).await
             }
+            memory_operation => self.operate(memory_operation),
         }
     }
 
@@ -7277,11 +7316,8 @@ impl nexus::NexusEngine for SchemaRuntime {
         )
     }
 
-    fn decide(&mut self, input: nexus::NexusWork) -> nexus::NexusAction {
-        match input {
-            nexus::NexusWork::Operated(outcome) => self.decide_outcome(outcome),
-            nexus::NexusWork::EffectCompleted(result) => self.decide_effect_completion(result),
-        }
+    fn decide(&mut self, outcome: memory::Outcome) -> nexus::NexusAction {
+        self.decide_outcome(outcome)
     }
 }
 
@@ -7587,9 +7623,7 @@ mod tests {
         engine.set_stage(DeployStage::BuildingRecorded);
 
         match engine.advance_after_phase() {
-            nexus::NexusAction::CommandEffect(nexus::EffectCommand::ActivateGeneration(
-                command,
-            )) => {
+            nexus::NexusAction::Operate(memory::Operation::ActivatingGeneration(command)) => {
                 assert_eq!(command.closure_path, built);
                 assert!(!command.closure_path.payload().is_empty());
             }
@@ -7887,7 +7921,7 @@ mod tests {
         ));
         let mut source = source_revision(ordinary::SourceRevisionPolicy::ResolveAndRecord);
         source.resolved_revision = memory::ResolvedRevision("sha256-unproven-nar-hash".to_string());
-        match engine.decide_effect_completion(nexus::EffectResult::FlakeResolved(
+        match engine.decide_effect_completion(memory::Outcome::FlakeResolved(
             nexus::ResolvedFlake::new(source),
         )) {
             nexus::NexusAction::Finish(meta::Output::DeployTerminal(record)) => {
@@ -7917,7 +7951,7 @@ mod tests {
             evaluated.record_deploy_submitted(host_submission(ordinary::HostDeployAction::Realize)),
             memory::Outcome::DeploySubmitted(_)
         ));
-        match evaluated.decide_effect_completion(nexus::EffectResult::ClosureEvaluated(
+        match evaluated.decide_effect_completion(memory::Outcome::ClosureEvaluated(
             nexus::EvaluatedClosure {
                 generation_identifier: ordinary::GenerationIdentifier::new(1),
                 closure_path: unsafe_path.clone(),
@@ -7941,12 +7975,10 @@ mod tests {
             built.record_deploy_submitted(host_submission(ordinary::HostDeployAction::ActivateNow)),
             memory::Outcome::DeploySubmitted(_)
         ));
-        match built.decide_effect_completion(nexus::EffectResult::ClosureBuilt(
-            nexus::BuiltClosure {
-                generation_identifier: ordinary::GenerationIdentifier::new(1),
-                closure_path: unsafe_path,
-            },
-        )) {
+        match built.decide_effect_completion(memory::Outcome::ClosureBuilt(nexus::BuiltClosure {
+            generation_identifier: ordinary::GenerationIdentifier::new(1),
+            closure_path: unsafe_path,
+        })) {
             nexus::NexusAction::Finish(meta::Output::DeployTerminal(record)) => assert!(matches!(
                 record.deployment_terminal_option,
                 Some(memory::DeploymentTerminal::Failed(
@@ -8034,7 +8066,7 @@ mod tests {
             ),
         ] {
             match result {
-                nexus::EffectResult::EffectFailed(failure) => {
+                memory::Outcome::EffectFailed(failure) => {
                     assert_eq!(failure.effect_stage, stage);
                     assert!(
                         !failure
@@ -9013,7 +9045,7 @@ mod tests {
             "fixture-login@fixture-activate.invalid"
         );
         assert_eq!(build.node_name, node());
-        assert_eq!(build.operator_node, daemon_host());
+        assert_eq!(build.operator_node, emission::OperatorNode(daemon_host()));
         assert!(build.ignored_builder_option.is_none());
     }
 
@@ -9065,7 +9097,7 @@ mod tests {
             build
                 .ignored_builder_option
                 .as_ref()
-                .map(|builder| builder.payload().as_str()),
+                .map(|builder| builder.0.payload().as_str()),
             Some(FIXTURE_BUILDER)
         );
         let realization = TargetStoreRealization::from_command(
@@ -9118,7 +9150,7 @@ mod tests {
                 ssh_destination: nexus::SshDestination::new(ssh_destination.into()),
             },
             node_name: node(),
-            operator_node: daemon_host(),
+            operator_node: emission::OperatorNode(daemon_host()),
             ignored_builder_option: None,
         };
         let command = nexus::NixBuildCommand {
@@ -9212,7 +9244,7 @@ mod tests {
         let build = nexus::TargetStoreBuild {
             deployment_transport: nexus_fixture_transport(),
             node_name: node(),
-            operator_node: daemon_host(),
+            operator_node: emission::OperatorNode(daemon_host()),
             ignored_builder_option: None,
         };
         let command = nexus::NixBuildCommand {
@@ -9296,7 +9328,7 @@ mod tests {
         for _ in 0..2 {
             let result = runtime.block_on(engine.run_nix_build(command.clone()));
             assert!(
-                matches!(&result, nexus::EffectResult::ClosureBuilt(built)
+                matches!(&result, memory::Outcome::ClosureBuilt(built)
                     if built.closure_path.payload() == STORE),
                 "{result:?}"
             );
@@ -10192,7 +10224,7 @@ mod tests {
                 ssh_destination: nexus::SshDestination::new(login.into()),
             },
             node_name: node(),
-            operator_node: daemon_host(),
+            operator_node: emission::OperatorNode(daemon_host()),
             ignored_builder_option: None,
         };
         let command = nexus::NixBuildCommand {
@@ -10416,11 +10448,11 @@ mod tests {
             "test-vm bring-up",
             nexus::BringUpTestVmCommand {
                 cluster_name: cluster(),
-                node: ordinary::NodeName::new("guest-1".into()),
-                host: node(),
+                guest_node: emission::GuestNode(ordinary::NodeName::new("guest-1".into())),
+                test_vm_host: nexus::TestVmHost(node()),
                 deployment_transport: nexus_fixture_transport(),
                 closure_path: ordinary::ClosurePath::new(RECORDED_OUTPUT.into()),
-                string: "10.0.0.7".into(),
+                guest_address: emission::GuestAddress("10.0.0.7".into()),
             }
             .emission()
             .expect("bring up")
@@ -10430,8 +10462,8 @@ mod tests {
             "test-vm tear-down",
             nexus::TearDownTestVmCommand {
                 cluster_name: cluster(),
-                node: ordinary::NodeName::new("guest-1".into()),
-                host: node(),
+                guest_node: emission::GuestNode(ordinary::NodeName::new("guest-1".into())),
+                test_vm_host: nexus::TestVmHost(node()),
                 deployment_transport: nexus_fixture_transport(),
             }
             .emission()

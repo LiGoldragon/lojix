@@ -144,6 +144,17 @@ before; a child process that emission started keeps running. A process whose out
 "failed while waiting for <program>" where a failed stream read had its own
 sentence.
 
+The ten pipeline stages are operations too, attempts in
+`ethos/operation.ethos` each named as the doing: `ResolvingFlake`,
+`MaterializingHorizon`, `EvaluatingClosure`, `BuildingClosure`,
+`CopyingClosure`, `ActivatingGeneration`, `CollectingGarbage`,
+`BuildingHermeticCheck`, `BringingUpTestVm` and `TearingDownTestVm`, with the
+outcome each ends in and `EffectFailed` the one they share. The hand-written
+effect command and result enumerations are gone; a pipeline attempts one
+`Operation` at a time and decides on its `Outcome`. A unit's `ActiveState`
+and its service `Result` are read as systemd's own values, an undocumented one
+kept as the text systemd sent. Nothing a peer sees changes.
+
 # 0.10.5 to 0.10.6
 
 A revision: the memory format is unchanged and the store stays readable;

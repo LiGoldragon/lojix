@@ -197,15 +197,16 @@ src/
   answering.rs          # the generated Answering capabilities of both
                         # contracts over the store; admission of jobs
   operation.rs          # generated from ethos/operation.ethos: the Memory
-                        # operations and the outcomes they come to
+                        # operations, the pipeline stages as attempts, and
+                        # the outcomes they come to
   runtime_model.rs      # contract, stored and operation types re-exported
                         # from where they are generated
   emission.rs           # generated from ethos/emission.ethos: every
                         # external call and the outcome observed
   translator.rs         # the one place holding the words of each call:
                         # argv, scripts, systemd D-Bus methods
-  runtime_flow.rs       # hand-written pipeline stages, work, and the
-                        # pipeline runner (NexusEngine::drive)
+  runtime_flow.rs       # the pipeline runner (NexusEngine::drive) and the
+                        # action a pipeline decides next
   schema_runtime.rs     # async hand-written pipeline engine
 nexus/src/main.rs             # Datom-free daemon entry
 clients/ordinary/src/main.rs  # ordinary CLI entry

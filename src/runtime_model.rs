@@ -2,11 +2,12 @@
 //!
 //! Every value whose shape a contract declares is the generated contract type
 //! itself; every record the store keeps is generated from `ethos/memory.ethos`
-//! into `crate::memory`; and every operation the engine applies to its Memory,
-//! with the outcome it comes to, is generated from `ethos/operation.ethos`
-//! into `crate::operation`. All three are re-exported here under the names the
-//! runtime reads them by. What stays here is the one capability the runtime
-//! reads a carried value through, and the conversions into stored records.
+//! into `crate::memory`; and every operation the engine attempts, a Memory
+//! operation or a pipeline stage, with the outcome it comes to, is generated
+//! from `ethos/operation.ethos` into `crate::operation`. All three are
+//! re-exported here under the names the runtime reads them by. What stays
+//! here is the one capability the runtime reads a carried value through, and
+//! the conversions into stored records.
 
 pub use crate::memory::{
     BootOnceUnit, ContainerLifecycleRecord, ContainerName, ContainerState, DeployJob,
@@ -19,8 +20,14 @@ pub use crate::memory::{
     StoredDeploymentRecord, StoredTestRun, TransitionIntentState, TransitionOrdinal,
 };
 pub use crate::operation::{
-    ActivationCommit, AppliedActivation, ContainerReceipt, ContainerTransition, Operation, Outcome,
-    RejectionReason, RejectionReport,
+    ActivateGenerationCommand, ActivatedGeneration, ActivationCommit, ActivationProfile,
+    AppliedActivation, BringUpTestVmCommand, BuildTarget, BuiltClosure, CheckBuilt, ClosureOrigin,
+    ContainerReceipt, ContainerTransition, CopiedClosure, CopyClosureCommand, EffectFailure,
+    EffectStage, EvaluatedClosure, FlakeAuthRequest, GarbageCollected, HermeticCheckCommand,
+    HorizonMaterializationCommand, IgnoredBuilder, MaterializationShape, MaterializedInputs,
+    NixBuildCommand, NixEvalCommand, Operation, Outcome, PathInfoGcCommand, RejectionReason,
+    RejectionReport, ResolvedFlake, TargetStoreBuild, TearDownTestVmCommand, TestVmBroughtUp,
+    TestVmHost, TestVmTornDown, UserEnvironmentActivationProfile, UserEnvironmentMaterialization,
 };
 pub use meta_signal_lojix::{
     AcceptedTest, ActualizedDeploySubmission, AppliedPin, AppliedRetire, AppliedUnpin,
@@ -134,6 +141,9 @@ carried!(OutboxRetryCount, i64);
 carried!(TransitionOrdinal, i64);
 carried!(RequestedReference, FlakeReference);
 carried!(ResolvedReference, FlakeReference);
+carried!(ResolvedFlake, SourceRevisionRecord);
+carried!(UserEnvironmentMaterialization, UserName);
+carried!(MaterializedInputs, Vec<PersistedFlakeInputOverride>);
 
 impl From<DeploymentRecord> for StoredDeploymentRecord {
     fn from(deployment_record: DeploymentRecord) -> Self {
