@@ -369,14 +369,6 @@ pub enum NexusAction {
     ReplyToSignal(SignalOutput),
     Continue(NexusWork),
 }
-#[derive(Clone, Debug, PartialEq)]
-pub enum Input {
-    Work(NexusWork),
-}
-#[derive(Clone, Debug, PartialEq)]
-pub enum Output {
-    Action(NexusAction),
-}
 
 /// A value that knows which connection it belongs to once it is told. Work
 /// arriving from a socket and the action answering it are the same kind of

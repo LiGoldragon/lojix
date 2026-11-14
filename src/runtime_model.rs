@@ -869,11 +869,6 @@ pub enum MetaEgress {
     Tested(AcceptedTest),
     TestRejected(RejectedTest),
 }
-runtime_newtype!(LiveSetTable, Vec<LiveGeneration>);
-runtime_newtype!(DeploymentRecordTable, Vec<DeploymentRecord>);
-runtime_newtype!(IdentifierAllocationTable, Vec<IdentifierAllocation>);
-runtime_newtype!(DeploymentOutboxTable, Vec<DeploymentOutboxRecord>);
-runtime_newtype!(PendingTransitionIntentTable, Vec<PendingTransitionIntent>);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct LiveGeneration {
     pub deployment_identifier: DeploymentIdentifier,
@@ -887,7 +882,6 @@ pub struct LiveGeneration {
     pub closure_path: ClosurePath,
     pub source_revision_record: SourceRevisionRecord,
 }
-runtime_newtype!(GcRootsTable, Vec<GcRoot>);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct GcRoot {
     pub generation_identifier: GenerationIdentifier,
@@ -897,7 +891,6 @@ pub struct GcRoot {
     pub closure_path: ClosurePath,
     pub optional_pin_label: Option<PinLabel>,
 }
-runtime_newtype!(EventLogTable, Vec<EventLogEntry>);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct EventLogEntry {
     pub event_log_position: EventLogPosition,
@@ -909,7 +902,6 @@ pub enum LoggedEvent {
     CacheRetention(CacheRetentionTransitionEvent),
     Container(ContainerLifecycleRecord),
 }
-runtime_newtype!(ContainerLifecycleTable, Vec<ContainerLifecycleRecord>);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ContainerLifecycleRecord {
     pub cluster_name: ClusterName,
@@ -974,7 +966,6 @@ pub enum DeployJobPhase {
     Activated,
     Failed,
 }
-runtime_newtype!(TestRunTable, Vec<StoredTestRun>);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct StoredTestRun {
     pub test_run_identifier: TestRunIdentifier,
@@ -985,16 +976,6 @@ pub struct StoredTestRun {
     pub test_run_phase: TestRunPhase,
     pub test_outcome: TestOutcome,
     pub optional_closure_path: Option<ClosurePath>,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub enum Input {
-    Read(MemoryReadInput),
-    Write(MemoryWriteInput),
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub enum Output {
-    ReadCompleted(MemoryReadOutput),
-    WriteCompleted(MemoryWriteOutput),
 }
 
 impl triad_runtime::MemoryWriteInput for MemoryWriteInput {}
