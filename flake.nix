@@ -379,6 +379,36 @@
                 fi
                 exec runuser -u "$login" -- env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS /bin/sh -c "$command"
               '';
+              sessionDriver = pkgs.writeScriptBin "lojix-session-driver" ''
+                #!${pkgs.python3}/bin/python3
+                import os, signal, subprocess, sys
+                def expired(*_):
+                    raise TimeoutError("deployment watch did not reach a terminal")
+                signal.signal(signal.SIGALRM, expired)
+                signal.alarm(120)
+                user, login, expected = sys.argv[1:]
+                env = dict(os.environ, LOJIX_ORDINARY_SOCKET="/run/lojix/ordinary.sock", LOJIX_OWNER_SOCKET="/run/lojix/meta.sock")
+                client = "${package}/bin/lojix"
+                watch = subprocess.Popen([client, "WatchDeployments.{ None Some.fixture-cluster Some.atlas }"], env=env, stdout=subprocess.PIPE, text=True)
+                try:
+                    opened = watch.stdout.readline()
+                    print(opened, end="", flush=True)
+                    assert opened.startswith("Watching."), opened
+                    request = "Deploy.UserEnvironment.{ fixture-cluster atlas " + user + " /var/lib/lojix/horizon-definition.datom NoSecrets github:fixture-owner/fixture-flake?ref=main { ssh-ng://fixture.invalid " + login + "@fixture.invalid } Direct { checks.fixture-a } HomeManagerNixProfileV1 ActivateNow ResolveAndRecord None [] }"
+                    admitted = subprocess.run(["${package}/bin/lojix-meta", request], env=env, capture_output=True, text=True, check=True)
+                    print(admitted.stdout, end="", flush=True)
+                    assert admitted.stdout.startswith("DeployAccepted."), admitted.stdout
+                    for event in watch.stdout:
+                        print(event, end="", flush=True)
+                        if any(marker in event for marker in ["Some.Succeeded", "Some.Failed.", "Some.Rejected."]):
+                            assert expected in event, event
+                            break
+                    else:
+                        raise AssertionError("watch ended before deployment terminal")
+                finally:
+                    watch.terminate()
+                    watch.wait(timeout=10)
+              '';
             in
             pkgs.testers.nixosTest {
               name = "lojix-user-activation-session";
@@ -402,6 +432,7 @@
                   fake-nix
                   fake-ssh
                   pkgs.nix
+                  sessionDriver
                 ];
                 systemd.services.lojix = {
                   wantedBy = [ "multi-user.target" ];
@@ -428,16 +459,15 @@
                 machine.wait_for_unit("user@1201.service")
                 machine.wait_for_unit("user@1407.service")
                 for user in ["alpha", "beta", "absent"]:
-                    machine.succeed("install -d -o " + user + " -g users /home/" + user + "/.local/state/nix/profiles")
+                    machine.succeed("install -d -o " + user + " -g users " + " ".join("/home/" + user + suffix for suffix in ["/.local", "/.local/state", "/.local/state/nix", "/.local/state/nix/profiles"]))
 
                 cli = "LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix "
-                meta = "LOJIX_OWNER_SOCKET=/run/lojix/meta.sock ${package}/bin/lojix-meta "
                 machine.succeed(cli + "'Configure.{ /run/lojix/ordinary.sock 432 /run/lojix/meta.sock 384 /var/lib/lojix atlas NoTestDefaults }'")
-                for deployment, user, login in [(1, "alpha", "alpha"), (2, "beta", "root"), (3, "absent", "root")]:
-                    request = "Deploy.UserEnvironment.{ fixture-cluster atlas " + user + " /var/lib/lojix/horizon-definition.datom NoSecrets github:fixture-owner/fixture-flake?ref=main { ssh-ng://fixture.invalid " + login + "@fixture.invalid } Direct { checks.fixture-a } HomeManagerNixProfileV1 ActivateNow ResolveAndRecord None [] }"
-                    machine.succeed(meta + "'" + request + "' | grep -F DeployAccepted")
-                    terminal = "Succeeded" if user != "absent" else "ActivationFailed"
-                    machine.wait_until_succeeds(cli + "'Query.ByDeployment.{ " + str(deployment) + " }' | grep -F " + terminal)
+                machine.succeed("systemctl restart lojix.service")
+                machine.wait_for_unit("lojix.service")
+                for user, login in [("alpha", "alpha"), ("beta", "root"), ("absent", "root")]:
+                    terminal = "Some.Succeeded" if user != "absent" else "ActivationFailed"
+                    machine.succeed("${sessionDriver}/bin/lojix-session-driver " + user + " " + login + " " + terminal)
                     if user != "absent":
                         uid = "1201" if user == "alpha" else "1407"
                         assert machine.succeed("cat /home/" + user + "/activation-uid").strip() == uid
