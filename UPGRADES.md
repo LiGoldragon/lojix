@@ -6,7 +6,7 @@ User activation binds its systemd client to the effective target account.
 Inside the local user context, matched SSH login, or root-mediated target
 login, Lojix queries logind RuntimePath for `id -u`, then sets
 XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS from that directory. Inherited
-session variables are replaced. An unavailable user session fails before
+session variables are replaced and passed explicitly to the private service. An unavailable user session fails before
 Home Manager or profile publication. The private transient service, driver
 version 1 and activation-before-profile ordering stay unchanged.
 
