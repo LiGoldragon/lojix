@@ -297,13 +297,13 @@
             src = source;
           };
 
-          no-free-functions =
-            pkgs.runCommand "lojix-no-free-functions" { src = lawSource; }
-              (builtins.readFile ./checks/no-free-functions.sh);
+          no-free-functions = pkgs.runCommand "lojix-no-free-functions" { src = lawSource; } (
+            builtins.readFile ./checks/no-free-functions.sh
+          );
 
-          no-inherent-methods =
-            pkgs.runCommand "lojix-no-inherent-methods" { src = lawSource; }
-              (builtins.readFile ./checks/no-inherent-methods.sh);
+          no-inherent-methods = pkgs.runCommand "lojix-no-inherent-methods" { src = lawSource; } (
+            builtins.readFile ./checks/no-inherent-methods.sh
+          );
 
           clippy = craneLib.cargoClippy (
             commonArguments
@@ -338,6 +338,113 @@
               machine.wait_until_succeeds("! kill -0 $(cat /run/lojix-retained-waiter.pid)")
             '';
           };
+
+          user-activation-session =
+            let
+              package = self.packages.${system}.default;
+              candidate = pkgs.runCommand "lojix-session-candidate" { } ''
+                mkdir -p "$out"
+                cat > "$out/activate" <<'SCRIPT'
+                #!${pkgs.runtimeShell}
+                set -eu
+                test "$1" = --driver-version
+                test "$2" = 1
+                test "$TMPDIR" = /tmp
+                test "$XDG_RUNTIME_DIR" = "/run/user/$(id -u)"
+                test "$DBUS_SESSION_BUS_ADDRESS" = "unix:path=$XDG_RUNTIME_DIR/bus"
+                systemctl --user show-environment >/dev/null
+                printf '%s\n' "$(id -u)" > "$HOME/activation-uid"
+                printf 'private\n' > /tmp/lojix-private-session-witness
+                SCRIPT
+                chmod +x "$out/activate"
+              '';
+              fake-nix = pkgs.writeShellScriptBin "nix" ''
+                case "$1" in
+                  flake) printf '%s\n' '{"url":"github:fixture-owner/fixture-flake?ref=main","locked":{"rev":"0123456789abcdef0123456789abcdef01234567"}}' ;;
+                  eval) printf '%s\n' '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-session.drv' ;;
+                  build) printf '%s\n' '${candidate}' ;;
+                  copy) exit 0 ;;
+                  *) exit 89 ;;
+                esac
+              '';
+              fake-ssh = pkgs.writeShellScriptBin "ssh" ''
+                for argument in "$@"; do
+                  case "$argument" in
+                    *@fixture.invalid) login="''${argument%@fixture.invalid}" ;;
+                  esac
+                  command="$argument"
+                done
+                if [ "$login" = root ]; then
+                  exec /bin/sh -c "$command"
+                fi
+                exec runuser -u "$login" -- env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS /bin/sh -c "$command"
+              '';
+            in
+            pkgs.testers.nixosTest {
+              name = "lojix-user-activation-session";
+              nodes.machine = { ... }: {
+                users.users.alpha = {
+                  isNormalUser = true;
+                  uid = 1201;
+                  linger = true;
+                };
+                users.users.beta = {
+                  isNormalUser = true;
+                  uid = 1407;
+                  linger = true;
+                };
+                users.users.absent = {
+                  isNormalUser = true;
+                  uid = 1609;
+                };
+                environment.systemPackages = [
+                  package
+                  fake-nix
+                  fake-ssh
+                  pkgs.nix
+                ];
+                systemd.services.lojix = {
+                  wantedBy = [ "multi-user.target" ];
+                  path = [
+                    fake-nix
+                    fake-ssh
+                    pkgs.systemd
+                    pkgs.coreutils
+                    pkgs.util-linux
+                    pkgs.nix
+                  ];
+                  environment.XDG_STATE_HOME = "/var/lib/lojix";
+                  environment.DBUS_SESSION_BUS_ADDRESS = "unix:path=/wrong/bus";
+                  serviceConfig.ExecStart = "${package}/bin/lojix-nexus";
+                  preStart = ''
+                    mkdir -p /var/lib/lojix
+                    install -m 0644 ${horizonDefinition}/horizon-definition.datom /var/lib/lojix/horizon-definition.datom
+                  '';
+                };
+              };
+              testScript = ''
+                start_all()
+                machine.wait_for_unit("lojix.service")
+                machine.wait_for_unit("user@1201.service")
+                machine.wait_for_unit("user@1407.service")
+                cli = "LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix "
+                meta = "LOJIX_OWNER_SOCKET=/run/lojix/meta.sock ${package}/bin/lojix-meta "
+                machine.succeed(cli + "'Configure.{ /run/lojix/ordinary.sock 432 /run/lojix/meta.sock 384 /var/lib/lojix atlas NoTestDefaults }'")
+                for deployment, user, login in [(1, "alpha", "alpha"), (2, "beta", "root"), (3, "absent", "root")]:
+                    request = "Deploy.UserEnvironment.{ fixture-cluster atlas " + user + " /var/lib/lojix/horizon-definition.datom NoSecrets github:fixture-owner/fixture-flake?ref=main { ssh-ng://fixture.invalid " + login + "@fixture.invalid } Direct { checks.fixture-a } HomeManagerNixProfileV1 ActivateNow ResolveAndRecord None [] }"
+                    machine.succeed(meta + "'" + request + "' | grep -F DeployAccepted")
+                    terminal = "Succeeded" if user != "absent" else "ActivationFailed"
+                    machine.wait_until_succeeds(cli + "'Query.ByDeployment.{ " + str(deployment) + " }' | grep -F " + terminal)
+                    if user != "absent":
+                        uid = "1201" if user == "alpha" else "1407"
+                        assert machine.succeed("cat /home/" + user + "/activation-uid").strip() == uid
+                        assert machine.succeed("readlink -f /home/" + user + "/.local/state/nix/profiles/home-manager").strip() == "${candidate}"
+                    else:
+                        machine.fail("test -e /home/absent/activation-uid")
+                        machine.fail("test -e /home/absent/.local/state/nix/profiles/home-manager")
+                machine.fail("test -e /tmp/lojix-private-session-witness")
+              '';
+            };
 
           # What an activation prints inside a `systemd-run --collect --wait`
           # unit goes to that unit's journal, not to the caller, and the

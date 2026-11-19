@@ -1,5 +1,19 @@
 # Upgrades
 
+# 0.10.6 to 0.10.7
+
+User activation binds its systemd client to the effective target account.
+Inside the local user context, matched SSH login, or root-mediated target
+login, Lojix queries logind RuntimePath for `id -u`, then sets
+XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS from that directory. Inherited
+session variables are replaced. An unavailable user session fails before
+Home Manager or profile publication. The private transient service, driver
+version 1 and activation-before-profile ordering stay unchanged.
+
+The wire and stored layouts are unchanged; no migration or matching-client
+upgrade is required. Upgrade the daemon through the normal declarative
+consumer pin and deployment.
+
 # 0.10.5 to 0.10.6
 
 A revision: the memory format is unchanged and the store stays readable;

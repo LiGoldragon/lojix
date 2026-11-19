@@ -7896,6 +7896,10 @@ trait UserEnvironmentActivating {
 
     fn local_activate_invocation(&self) -> NixCommand;
 
+    /// The private service payload, before binding its client to the effective
+    /// target account's logind runtime directory and user bus.
+    fn transient_activate_invocation(&self) -> NixCommand;
+
     fn remote_profile_invocation(&self) -> std::result::Result<NixCommand, String>;
 
     fn remote_activate_invocation(&self) -> std::result::Result<NixCommand, String>;
@@ -7910,18 +7914,9 @@ trait UserEnvironmentActivating {
     /// deploy works even when that account has no SSH login while preserving the
     /// profile's user-owned state.
     ///
-    /// Drop through a login (`runuser --login`), not a bare privilege drop. The
-    /// root SSH session's environment — `XDG_RUNTIME_DIR` and
-    /// `DBUS_SESSION_BUS_ADDRESS` (`/run/user/0`), `NIX_PROFILES`,
-    /// `XDG_DATA_DIRS`, `XDG_CONFIG_DIRS`, … — otherwise survives into the target
-    /// context and points Home Manager's activation at root-owned runtime and
-    /// profile paths; its `mkdir`, `dconf`, and systemd-reload steps then fail
-    /// with permission errors. A login rebuilds the environment from the target
-    /// account: correct `HOME`, `USER`, `LOGNAME`, and the target's own profile
-    /// and runtime paths, so activation runs as a clean session of that user
-    /// (its systemd reload reaches the target's live `/run/user/<uid>` session).
-    /// The login also resolves the account's home natively, obviating a manual
-    /// `getent` lookup.
+    /// A login reconstructs HOME and the account's profile environment.
+    /// Activation binds the user bus afterwards, inside this target identity;
+    /// a noninteractive login need not furnish session-bus variables.
     fn root_mediated_invocation(&self, command: ShellCommand) -> NixCommand;
 
     async fn run_profile(
@@ -7959,6 +7954,28 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
     }
 
     fn local_activate_invocation(&self) -> NixCommand {
+        let invocation = self.transient_activate_invocation();
+        let mut arguments = vec![
+            "-eu".to_string(),
+            "-c".to_string(),
+            r#"user_id=$(id -u)
+XDG_RUNTIME_DIR=$(loginctl show-user "$user_id" --property=RuntimePath --value)
+if [ -z "$XDG_RUNTIME_DIR" ]; then
+    printf 'No runtime directory for target user %s\n' "$user_id" >&2
+    exit 1
+fi
+DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+exec "$@""#
+                .to_string(),
+            "lojix-user-activation".to_string(),
+            invocation.program,
+        ];
+        arguments.extend(invocation.arguments);
+        NixCommand::new("/bin/sh", arguments)
+    }
+
+    fn transient_activate_invocation(&self) -> NixCommand {
         NixCommand::new(
             "/run/current-system/sw/bin/systemd-run",
             vec![
@@ -10683,7 +10700,7 @@ mod tests {
             meta::UserEnvironmentAction::ActivateNow,
             "li@fixture.invalid",
         );
-        let invocation = activation.local_activate_invocation();
+        let invocation = activation.transient_activate_invocation();
         assert_eq!(invocation.program, "/run/current-system/sw/bin/systemd-run");
         assert_eq!(
             invocation.arguments,
@@ -10724,6 +10741,76 @@ mod tests {
     }
 
     #[test]
+    fn user_environment_session_uses_effective_identity_not_inherited_environment() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().expect("session fixture");
+        let invocation = user_environment_activation(
+            meta::UserEnvironmentAction::ActivateNow,
+            "li@fixture.invalid",
+        )
+        .local_activate_invocation();
+        for user_id in ["1201", "1407"] {
+            for inherited in [None, Some("/run/user/wrong")] {
+                for (name, script) in [
+                    (
+                        "id",
+                        format!(
+                            "#!/bin/sh\n[ \"$1\" = -u ] || exit 91\nprintf '%s\\n' {user_id}\n"
+                        ),
+                    ),
+                    (
+                        "loginctl",
+                        format!(
+                            "#!/bin/sh\n[ \"$*\" = 'show-user {user_id} --property=RuntimePath --value' ] || exit 92\nprintf '/fixture/runtime/{user_id}\\n'\n"
+                        ),
+                    ),
+                ] {
+                    let path = directory.path().join(name);
+                    fs::write(&path, script).expect("fixture script");
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                        .expect("executable");
+                }
+                let mut arguments = invocation.arguments[..4].to_vec();
+                arguments.extend([
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    r#"printf '%s\n%s\n' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS"; exit 23"#
+                        .to_string(),
+                ]);
+                let mut command = std::process::Command::new(&invocation.program);
+                command
+                    .args(arguments)
+                    .env("PATH", directory.path())
+                    .env_remove("XDG_RUNTIME_DIR")
+                    .env_remove("DBUS_SESSION_BUS_ADDRESS");
+                if let Some(value) = inherited {
+                    command
+                        .env("XDG_RUNTIME_DIR", value)
+                        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/wrong/bus");
+                }
+                let output = command.output().expect("session wrapper");
+                assert_eq!(output.status.code(), Some(23));
+                assert_eq!(
+                    String::from_utf8(output.stdout).expect("stdout"),
+                    format!(
+                        "/fixture/runtime/{user_id}\nunix:path=/fixture/runtime/{user_id}/bus\n"
+                    )
+                );
+            }
+        }
+        let loginctl = directory.path().join("loginctl");
+        for script in ["#!/bin/sh\nexit 24\n", "#!/bin/sh\nexit 0\n"] {
+            fs::write(&loginctl, script).expect("missing session fixture");
+            let output = std::process::Command::new(&invocation.program)
+                .args(&invocation.arguments)
+                .env("PATH", directory.path())
+                .output()
+                .expect("missing session");
+            assert!(!output.status.success());
+        }
+    }
+
+    #[test]
     fn user_environment_remote_activation_quotes_closure_as_one_argument() {
         let mut activation = user_environment_activation(
             meta::UserEnvironmentAction::ActivateNow,
@@ -10735,9 +10822,12 @@ mod tests {
             .expect("remote invocation");
         let expected = activation.local_activate_invocation();
         let command = invocation.arguments.last().expect("SSH command");
-        assert!(command.contains(
-            &ShellArgument::new(format!("{}/activate", activation.store_path)).to_command_text()
-        ));
+        let local_command = std::iter::once(expected.program.clone())
+            .chain(expected.arguments.clone())
+            .map(|argument| ShellArgument::new(argument).to_command_text())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(command, &local_command);
         assert!(command.contains("--expand-environment=no"));
         assert_eq!(expected.arguments.last().map(String::as_str), Some("1"));
     }
@@ -10756,7 +10846,7 @@ mod tests {
                 meta::UserEnvironmentAction::ActivateNow,
                 "li@fixture.invalid",
             );
-            let invocation = activation.local_activate_invocation();
+            let invocation = activation.transient_activate_invocation();
             let invocation = NixCommand::new("systemd-run", invocation.arguments);
             let result = runtime.block_on(invocation.run(&execution));
             if status == 0 {
