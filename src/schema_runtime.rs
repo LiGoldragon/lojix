@@ -10750,6 +10750,11 @@ mod tests {
     fn user_environment_session_uses_effective_identity_not_inherited_environment() {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().expect("session fixture");
+        let search_path = format!(
+            "{}:{}",
+            directory.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
         let invocation = user_environment_activation(
             meta::UserEnvironmentAction::ActivateNow,
             "li@fixture.invalid",
@@ -10787,7 +10792,7 @@ mod tests {
                 let mut command = std::process::Command::new(&invocation.program);
                 command
                     .args(arguments)
-                    .env("PATH", directory.path())
+                    .env("PATH", &search_path)
                     .env_remove("XDG_RUNTIME_DIR")
                     .env_remove("DBUS_SESSION_BUS_ADDRESS");
                 if let Some(value) = inherited {
@@ -10812,7 +10817,7 @@ mod tests {
             arguments[4] = loginctl.display().to_string();
             let output = std::process::Command::new(&invocation.program)
                 .args(arguments)
-                .env("PATH", directory.path())
+                .env("PATH", &search_path)
                 .output()
                 .expect("missing session");
             assert!(!output.status.success());
