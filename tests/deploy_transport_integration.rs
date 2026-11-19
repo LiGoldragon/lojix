@@ -82,7 +82,7 @@ fn fake_programs_with(directory: &Path, failures: FakeFailures) {
     write_executable(
         &directory.join("nix"),
         &format!(
-            "#!/bin/sh\nset -eu\ndir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nprintf 'nix' >> \"$dir/commands\"\nfor arg in \"$@\"; do printf ' <%s>' \"$arg\" >> \"$dir/commands\"; done\nprintf '\\n' >> \"$dir/commands\"\ncase \"$1\" in\n  flake) printf '%s\\n' '{{\"url\":\"{FLAKE}\",\"locked\":{{\"rev\":\"{REVISION}\"}}}}' ;;\n  hash) printf '%s\\n' 'sha256-transport-test=' ;;\n  eval) printf '%s\\n' '{DERIVATION}' ;;\n  build) printf '%s\\n' '{OUTPUT}' ;;\n  {copy_failure}\n  {presence_failure}\nesac\n"
+            "#!/bin/sh\nset -eu\ndir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nrecord=$(mktemp \"$dir/command.XXXXXX\")\nprintf '%s\\000' nix \"$@\" > \"$record\"\nprintf '%s\\n' \"$record\" >> \"$dir/commands\"\ncase \"$1\" in\n  flake) printf '%s\\n' '{{\"url\":\"{FLAKE}\",\"locked\":{{\"rev\":\"{REVISION}\"}}}}' ;;\n  hash) printf '%s\\n' 'sha256-transport-test=' ;;\n  eval) printf '%s\\n' '{DERIVATION}' ;;\n  build) printf '%s\\n' '{OUTPUT}' ;;\n  {copy_failure}\n  {presence_failure}\nesac\n"
         ),
     );
     let fail_activation = failures.activation;
@@ -94,7 +94,7 @@ fn fake_programs_with(directory: &Path, failures: FakeFailures) {
     write_executable(
         &directory.join("ssh"),
         &format!(
-            "#!/bin/sh\nset -eu\ndir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nprintf 'ssh' >> \"$dir/commands\"\nfor arg in \"$@\"; do printf ' <%s>' \"$arg\" >> \"$dir/commands\"; done\nprintf '\\n' >> \"$dir/commands\"\n{activation_failure}exit 0\n"
+            "#!/bin/sh\nset -eu\ndir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nrecord=$(mktemp \"$dir/command.XXXXXX\")\nprintf '%s\\000' ssh \"$@\" > \"$record\"\nprintf '%s\\n' \"$record\" >> \"$dir/commands\"\n{activation_failure}exit 0\n"
         ),
     );
 }
@@ -181,12 +181,58 @@ async fn submit_and_drive(
     engine.drive_submitted_deploy().await
 }
 
-fn command_lines(programs: &Path) -> Vec<String> {
+/// Each invocation owns one NUL-separated argv file. The ordered index holds
+/// only its path, so embedded newlines and empty arguments remain data.
+fn command_arguments(programs: &Path) -> Vec<Vec<String>> {
     fs::read_to_string(programs.join("commands"))
-        .expect("read fake command log")
+        .expect("read fake command index")
         .lines()
-        .map(str::to_owned)
+        .map(|record| {
+            fs::read_to_string(record)
+                .expect("read fake argv record")
+                .split_terminator('\0')
+                .map(str::to_owned)
+                .collect()
+        })
         .collect()
+}
+
+fn command_lines(programs: &Path) -> Vec<String> {
+    command_arguments(programs)
+        .into_iter()
+        .map(|arguments| {
+            let mut arguments = arguments.into_iter();
+            let mut command = arguments.next().expect("program");
+            for argument in arguments {
+                command.push_str(&format!(" <{argument}>"));
+            }
+            command
+        })
+        .collect()
+}
+
+#[test]
+fn fake_transport_preserves_multiline_and_empty_argument_boundaries() {
+    let directory = tempfile::tempdir().expect("argv fixture");
+    fake_programs(directory.path(), false, false);
+    let arguments = [
+        "-o",
+        "BatchMode=yes",
+        "bird@fixture.invalid",
+        "echo first\necho second",
+        "",
+        "a <b>\\c",
+    ];
+    let output = std::process::Command::new(directory.path().join("ssh"))
+        .args(arguments)
+        .output()
+        .expect("record fake SSH invocation");
+    assert!(output.status.success());
+    let expected: Vec<String> = std::iter::once("ssh")
+        .chain(arguments)
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(command_arguments(directory.path()), vec![expected]);
 }
 
 #[tokio::test]

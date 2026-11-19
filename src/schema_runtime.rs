@@ -7958,18 +7958,17 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
         let mut arguments = vec![
             "-eu".to_string(),
             "-c".to_string(),
-            concat!(
-                "user_id=$(id -u); ",
-                "XDG_RUNTIME_DIR=$(\"$1\" show-user \"$user_id\" --property=RuntimePath --value); ",
-                "shift; ",
-                "if [ -z \"$XDG_RUNTIME_DIR\" ]; then ",
-                "printf 'No runtime directory for target user %s\\n' \"$user_id\" >&2; ",
-                "exit 1; fi; ",
-                "DBUS_SESSION_BUS_ADDRESS=\"unix:path=$XDG_RUNTIME_DIR/bus\"; ",
-                "export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS; ",
-                "exec \"$@\"",
-            )
-            .to_string(),
+            r#"user_id=$(id -u)
+XDG_RUNTIME_DIR=$("$1" show-user "$user_id" --property=RuntimePath --value)
+shift
+if [ -z "$XDG_RUNTIME_DIR" ]; then
+    printf 'No runtime directory for target user %s\n' "$user_id" >&2
+    exit 1
+fi
+DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+exec "$@""#
+                .to_string(),
             "lojix-user-activation".to_string(),
             "/run/current-system/sw/bin/loginctl".to_string(),
             invocation.program,
