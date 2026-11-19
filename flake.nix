@@ -423,29 +423,29 @@
                 };
               };
               testScript = ''
-                  start_all()
-                  machine.wait_for_unit("lojix.service")
-                  machine.wait_for_unit("user@1201.service")
-                  machine.wait_for_unit("user@1407.service")
+                start_all()
+                machine.wait_for_unit("lojix.service")
+                machine.wait_for_unit("user@1201.service")
+                machine.wait_for_unit("user@1407.service")
                 for user in ["alpha", "beta", "absent"]:
                     machine.succeed("install -d -o " + user + " -g users /home/" + user + "/.local/state/nix/profiles")
 
-                  cli = "LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix "
-                  meta = "LOJIX_OWNER_SOCKET=/run/lojix/meta.sock ${package}/bin/lojix-meta "
-                  machine.succeed(cli + "'Configure.{ /run/lojix/ordinary.sock 432 /run/lojix/meta.sock 384 /var/lib/lojix atlas NoTestDefaults }'")
-                  for deployment, user, login in [(1, "alpha", "alpha"), (2, "beta", "root"), (3, "absent", "root")]:
-                      request = "Deploy.UserEnvironment.{ fixture-cluster atlas " + user + " /var/lib/lojix/horizon-definition.datom NoSecrets github:fixture-owner/fixture-flake?ref=main { ssh-ng://fixture.invalid " + login + "@fixture.invalid } Direct { checks.fixture-a } HomeManagerNixProfileV1 ActivateNow ResolveAndRecord None [] }"
-                      machine.succeed(meta + "'" + request + "' | grep -F DeployAccepted")
-                      terminal = "Succeeded" if user != "absent" else "ActivationFailed"
-                      machine.wait_until_succeeds(cli + "'Query.ByDeployment.{ " + str(deployment) + " }' | grep -F " + terminal)
-                      if user != "absent":
-                          uid = "1201" if user == "alpha" else "1407"
-                          assert machine.succeed("cat /home/" + user + "/activation-uid").strip() == uid
-                          assert machine.succeed("readlink -f /home/" + user + "/.local/state/nix/profiles/home-manager").strip() == "${candidate}"
-                      else:
-                          machine.fail("test -e /home/absent/activation-uid")
-                          machine.fail("test -e /home/absent/.local/state/nix/profiles/home-manager")
-                  machine.fail("test -e /tmp/lojix-private-session-witness")
+                cli = "LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix "
+                meta = "LOJIX_OWNER_SOCKET=/run/lojix/meta.sock ${package}/bin/lojix-meta "
+                machine.succeed(cli + "'Configure.{ /run/lojix/ordinary.sock 432 /run/lojix/meta.sock 384 /var/lib/lojix atlas NoTestDefaults }'")
+                for deployment, user, login in [(1, "alpha", "alpha"), (2, "beta", "root"), (3, "absent", "root")]:
+                    request = "Deploy.UserEnvironment.{ fixture-cluster atlas " + user + " /var/lib/lojix/horizon-definition.datom NoSecrets github:fixture-owner/fixture-flake?ref=main { ssh-ng://fixture.invalid " + login + "@fixture.invalid } Direct { checks.fixture-a } HomeManagerNixProfileV1 ActivateNow ResolveAndRecord None [] }"
+                    machine.succeed(meta + "'" + request + "' | grep -F DeployAccepted")
+                    terminal = "Succeeded" if user != "absent" else "ActivationFailed"
+                    machine.wait_until_succeeds(cli + "'Query.ByDeployment.{ " + str(deployment) + " }' | grep -F " + terminal)
+                    if user != "absent":
+                        uid = "1201" if user == "alpha" else "1407"
+                        assert machine.succeed("cat /home/" + user + "/activation-uid").strip() == uid
+                        assert machine.succeed("readlink -f /home/" + user + "/.local/state/nix/profiles/home-manager").strip() == "${candidate}"
+                    else:
+                        machine.fail("test -e /home/absent/activation-uid")
+                        machine.fail("test -e /home/absent/.local/state/nix/profiles/home-manager")
+                machine.fail("test -e /tmp/lojix-private-session-witness")
               '';
             };
 
