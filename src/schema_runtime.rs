@@ -7959,7 +7959,8 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
             "-eu".to_string(),
             "-c".to_string(),
             r#"user_id=$(id -u)
-XDG_RUNTIME_DIR=$(loginctl show-user "$user_id" --property=RuntimePath --value)
+XDG_RUNTIME_DIR=$("$1" show-user "$user_id" --property=RuntimePath --value)
+shift
 if [ -z "$XDG_RUNTIME_DIR" ]; then
     printf 'No runtime directory for target user %s\n' "$user_id" >&2
     exit 1
@@ -7969,6 +7970,7 @@ export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
 exec "$@""#
                 .to_string(),
             "lojix-user-activation".to_string(),
+            "/run/current-system/sw/bin/loginctl".to_string(),
             invocation.program,
         ];
         arguments.extend(invocation.arguments);
@@ -10775,6 +10777,7 @@ mod tests {
                         .expect("executable");
                 }
                 let mut arguments = invocation.arguments[..4].to_vec();
+                arguments.push(directory.path().join("loginctl").display().to_string());
                 arguments.extend([
                     "/bin/sh".to_string(),
                     "-c".to_string(),
@@ -10805,8 +10808,10 @@ mod tests {
         let loginctl = directory.path().join("loginctl");
         for script in ["#!/bin/sh\nexit 24\n", "#!/bin/sh\nexit 0\n"] {
             fs::write(&loginctl, script).expect("missing session fixture");
+            let mut arguments = invocation.arguments.clone();
+            arguments[4] = loginctl.display().to_string();
             let output = std::process::Command::new(&invocation.program)
-                .args(&invocation.arguments)
+                .args(arguments)
                 .env("PATH", directory.path())
                 .output()
                 .expect("missing session");
