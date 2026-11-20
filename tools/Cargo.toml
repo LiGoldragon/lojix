@@ -27,7 +27,7 @@ path = "src/lojix-bootstrap.rs"
 
 [dependencies]
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "4dff16b4f7412febc3b71aac8b49680cd20988cb" }
-horizon-lib = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "b742558940a4bf8aab16c5511320c0371278efe4", package = "horizon-lib" }
+horizon-lib = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "f3cba638c4aec38186d622c863254d5e70f555f7", package = "horizon-lib" }
 lojix = { path = "..", features = ["tools"] }
 thiserror = "2"
 
@@ -36,5 +36,5 @@ unsafe_code = "forbid"
 
 [dev-dependencies]
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3" }
-signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "18e33dab94f6ec748fc8ad0ec8fc579d70bfbbc3" }
+signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "7d19bf6728b156660ecf2ab2ebaed97d89bca9f1" }
 tempfile = "3"
