@@ -7387,7 +7387,7 @@ pub(crate) struct DetachedActivationRecord {
 }
 
 /// One observed unit outcome and the deployment whose retained receipt it is.
-pub(crate) struct DetachedDeploymentCompletion {
+pub(crate) struct DetachedDeploymentObservation {
     pub(crate) store: Arc<Store>,
     pub(crate) deployment_identifier: ordinary::DeploymentIdentifier,
     pub(crate) outcome: DetachedActivationOutcome,
@@ -7396,7 +7396,7 @@ pub(crate) struct DetachedDeploymentCompletion {
 
 /// Commit an observed terminal outcome before releasing PID 1's receipt.
 pub(crate) trait DetachedDeploymentRecording {
-    async fn finish_deployment(&self, completion: DetachedDeploymentCompletion);
+    async fn finish_deployment(&self, completion: DetachedDeploymentObservation);
 }
 
 /// What PID 1 reported about a detached activation transient: its
@@ -7478,6 +7478,49 @@ pub(crate) enum DetachedActivationOutcome {
     Failed(DetachedActivationFailure),
     Missing,
     Running,
+}
+
+/// PID 1's state snapshot of an accepted activation unit.
+struct DetachedActivationState {
+    unit_name: String,
+    active_state: String,
+    result: String,
+    optional_process_end: Option<ProcessEnd>,
+}
+
+trait ActivationUnitOutcome {
+    fn outcome(self) -> DetachedActivationOutcome;
+}
+
+impl ActivationUnitOutcome for DetachedActivationState {
+    fn outcome(self) -> DetachedActivationOutcome {
+        match self.active_state.as_str() {
+            "activating" | "reloading" | "deactivating" => {
+                return DetachedActivationOutcome::Running;
+            }
+            "active" | "inactive" if self.result == "success" => {
+                match self.optional_process_end {
+                    Some(ProcessEnd::Exited(0)) => return DetachedActivationOutcome::Succeeded,
+                    // Registered but not started is not an activation failure.
+                    None => return DetachedActivationOutcome::Running,
+                    Some(_) => {}
+                }
+            }
+            "active" | "inactive" | "failed" => {}
+            _ => return DetachedActivationOutcome::Missing,
+        }
+        let reported = format!("systemd reported Result={}", self.result);
+        DetachedActivationOutcome::Failed(DetachedActivationFailure {
+            unit_name: self.unit_name,
+            active_state: self.active_state,
+            result: match self.optional_process_end {
+                Some(end) => format!("{reported}; main process {}", end.statement()),
+                None => reported,
+            },
+            optional_process_end: self.optional_process_end,
+            reported_outputs: Vec::new(),
+        })
+    }
 }
 
 /// The transient systemd unit a same-host activation is handed to, and what is
@@ -7650,40 +7693,19 @@ impl DetachedActivation for DetachedActivationUnit {
     }
 
     async fn classify(&self, proxy: &DetachedActivationProxies<'_>) -> DetachedActivationOutcome {
-        let active = proxy.unit.get_property::<String>("ActiveState").await;
-        let result = proxy.service.get_property::<String>("Result").await;
-        eprintln!("lojix detached activation observer state active={active:?} result={result:?}");
-        match (active.as_deref(), result.as_deref()) {
-            (Ok("active"), Ok("success")) => match proxy.main_process_end().await {
-                Some(ProcessEnd::Exited(0)) => DetachedActivationOutcome::Succeeded,
-                _ => DetachedActivationOutcome::Missing,
-            },
-            (Ok("activating" | "reloading"), _) => DetachedActivationOutcome::Running,
-            (Ok("active"), _) => DetachedActivationOutcome::Running,
-            (Ok(state), _) => {
-                // What PID 1 said is the whole evidence for this failure —
-                // keep it rather than printing it and terminalizing a generic
-                // reason.
-                let optional_process_end = proxy.main_process_end().await;
-                let reported = match result {
-                    Ok(result) => format!("systemd reported Result={result}"),
-                    Err(error) => {
-                        format!("systemd reported ActiveState={state}, Result unreadable: {error}")
-                    }
-                };
-                DetachedActivationOutcome::Failed(DetachedActivationFailure {
-                    unit_name: self.name.clone(),
-                    active_state: state.to_string(),
-                    result: match optional_process_end {
-                        Some(end) => format!("{reported}; main process {}", end.statement()),
-                        None => reported,
-                    },
-                    optional_process_end,
-                    reported_outputs: Vec::new(),
-                })
-            }
-            _ => DetachedActivationOutcome::Missing,
+        let Ok(active_state) = proxy.unit.get_property::<String>("ActiveState").await else {
+            return DetachedActivationOutcome::Missing;
+        };
+        let Ok(result) = proxy.service.get_property::<String>("Result").await else {
+            return DetachedActivationOutcome::Missing;
+        };
+        DetachedActivationState {
+            unit_name: self.name.clone(),
+            active_state,
+            result,
+            optional_process_end: proxy.main_process_end().await,
         }
+        .outcome()
     }
 
     fn vanished(&self) -> DetachedActivationFailure {
@@ -7734,7 +7756,7 @@ impl DetachedActivation for DetachedActivationUnit {
 }
 
 impl DetachedDeploymentRecording for DetachedActivationUnit {
-    async fn finish_deployment(&self, completion: DetachedDeploymentCompletion) {
+    async fn finish_deployment(&self, completion: DetachedDeploymentObservation) {
         let outcome = match completion.outcome.clone() {
             DetachedActivationOutcome::Failed(failure) => DetachedActivationOutcome::Failed(
                 self.journalled(failure, &completion.execution).await,
@@ -7855,7 +7877,7 @@ impl DetachedObserving for DetachedActivationObserver {
             );
             if let Some(outcome) = outcome {
                 self.unit
-                    .finish_deployment(DetachedDeploymentCompletion {
+                    .finish_deployment(DetachedDeploymentObservation {
                         store,
                         deployment_identifier: ordinary::DeploymentIdentifier::new(
                             deployment_identifier,
@@ -9835,6 +9857,47 @@ mod tests {
     }
 
     // ---- self-Switch is deadlock-free (PID-1-owned), report 150 ----
+
+    #[test]
+    fn accepted_unit_waits_for_its_main_process_and_final_state() {
+        for active_state in ["inactive", "activating", "deactivating"] {
+            assert_eq!(
+                DetachedActivationState {
+                    unit_name: "fixture.service".to_string(),
+                    active_state: active_state.to_string(),
+                    result: "success".to_string(),
+                    optional_process_end: None,
+                }
+                .outcome(),
+                DetachedActivationOutcome::Running
+            );
+        }
+        for active_state in ["active", "inactive"] {
+            assert_eq!(
+                DetachedActivationState {
+                    unit_name: "fixture.service".to_string(),
+                    active_state: active_state.to_string(),
+                    result: "success".to_string(),
+                    optional_process_end: Some(ProcessEnd::Exited(0)),
+                }
+                .outcome(),
+                DetachedActivationOutcome::Succeeded
+            );
+        }
+        assert!(matches!(
+            DetachedActivationState {
+                unit_name: "fixture.service".to_string(),
+                active_state: "failed".to_string(),
+                result: "signal".to_string(),
+                optional_process_end: Some(ProcessEnd::Signalled {
+                    signal: 15,
+                    core_dumped: false
+                }),
+            }
+            .outcome(),
+            DetachedActivationOutcome::Failed(_)
+        ));
+    }
 
     #[test]
     fn reported_step_preserves_command_stderr_and_nonzero_exit() {
