@@ -1,3 +1,18 @@
+# User synchronization Horizon archive boundary
+
+The Unison user-schema closure adds a final synchronization vector to every
+Horizon UserDefinition. Every authored user record carries the new vector,
+including an empty one, and the Nexus plus both clients move together. There
+is no old-form decoder or stored-row conversion in this release.
+
+Use the existing quarantine-on-open policy. Before starting the new closure,
+the operator verifies that no deployment job is in flight. Unreadable earlier
+rows stay on disk as evidence in the quarantined-row family; the rollout
+receipt names their count and location. Earlier deploy history held in those
+rows stops being served. Any configuration previously served from those rows
+is submitted again in the new layout before the first deployment requiring it.
+The source package/test pass alone does not establish these runtime conditions.
+
 # Upgrades
 
 # 0.10.5 to 0.10.6
