@@ -297,13 +297,13 @@
             src = source;
           };
 
-          no-free-functions =
-            pkgs.runCommand "lojix-no-free-functions" { src = lawSource; }
-              (builtins.readFile ./checks/no-free-functions.sh);
+          no-free-functions = pkgs.runCommand "lojix-no-free-functions" { src = lawSource; } (
+            builtins.readFile ./checks/no-free-functions.sh
+          );
 
-          no-inherent-methods =
-            pkgs.runCommand "lojix-no-inherent-methods" { src = lawSource; }
-              (builtins.readFile ./checks/no-inherent-methods.sh);
+          no-inherent-methods = pkgs.runCommand "lojix-no-inherent-methods" { src = lawSource; } (
+            builtins.readFile ./checks/no-inherent-methods.sh
+          );
 
           clippy = craneLib.cargoClippy (
             commonArguments
@@ -370,6 +370,11 @@
           # a presence-only copy stage, and an ignored builder. Real Nix and
           # SSH between two machines; see the file for the one fake boundary.
           target-store-realization = import ./checks/target-store-realization.nix {
+            inherit pkgs horizonDefinition;
+            package = self.packages.${system}.default;
+          };
+
+          same-host-activation-recovery = import ./checks/same-host-activation-recovery.nix {
             inherit pkgs horizonDefinition;
             package = self.packages.${system}.default;
           };
@@ -457,8 +462,6 @@
                 machine.wait_until_succeeds("test \"$(systemctl show lojix.service --property=InvocationID --value)\" != '" + predecessor_invocation + "'")
                 machine.wait_for_unit("lojix.service")
                 machine.wait_until_succeeds("test -S /run/lojix/ordinary.sock && test -S /run/lojix/meta.sock")
-                machine.wait_until_succeeds("systemctl show lojix-self-switch-deploy-1.service --property=Result --value | grep -Fx success")
-                machine.log(machine.succeed("systemctl show lojix-self-switch-deploy-1.service --property=LoadState --property=ActiveState --property=SubState --property=Result"))
                 machine.succeed("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Query.ByDeployment.{ 1 }' >/run/lojix-deployment-before-wait")
                 machine.log(machine.succeed("cat /run/lojix-deployment-before-wait"))
                 machine.log(machine.succeed("journalctl -u lojix.service --since '2 minutes ago' --no-pager"))
