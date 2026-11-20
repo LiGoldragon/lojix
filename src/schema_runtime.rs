@@ -6499,7 +6499,7 @@ impl CommandJournal for ShellCommand {
         let label = ShellArgument::new(command.clone()).to_command_text();
         format!(
             "printf 'activation step started command=%s\\n' {label} >&2\n\
-             if {command}; then\n\
+             if SYSTEMD_LOG_TARGET=console {command}; then\n\
                printf 'activation step completed command=%s exit=0\\n' {label} >&2\n\
              else\n\
                status=$?\n\
@@ -7642,7 +7642,7 @@ impl DetachedActivation for DetachedActivationUnit {
             .map_err(|error| format!("address detached activation service path: {error}"))?
             .interface("org.freedesktop.systemd1.Service")
             .map_err(|error| format!("address detached activation service interface: {error}"))?
-            .cache_properties(CacheProperties::Yes)
+            .cache_properties(CacheProperties::No)
             .build()
             .await
             .map_err(|error| format!("open detached activation service: {error}"))?;
