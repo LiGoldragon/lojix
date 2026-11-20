@@ -347,7 +347,7 @@ pub enum EffectResult {
     /// A same-host TestActivation has been handed to PID 1. Its terminal
     /// outcome belongs to the private retained-unit observer rather than this
     /// foreground runner, which the candidate may replace.
-    DetachedTestActivationDispatched,
+    DetachedActivationDispatched,
     PathsCollected(GarbageCollected),
     HermeticCheckBuilt(CheckBuilt),
     TestVmStarted(TestVmBroughtUp),
