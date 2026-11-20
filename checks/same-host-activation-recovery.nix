@@ -56,18 +56,20 @@ let
     assert match, opening
     with open("/run/activation-watch-ready", "w") as ready:
         ready.write(opening)
+    terminal_event = None
     try:
         for event in process.stdout:
             if re.search(r"DeploymentPhaseObserved\.\{\s*" + identifier + r"\s", event) and (
                 "Some.Succeeded" in event or "Some.Failed." in event):
-                with open("/run/activation-terminal", "w") as terminal:
-                    terminal.write(event)
+                terminal_event = event
                 break
         else:
             raise AssertionError("watch ended before the terminal event")
     finally:
         subprocess.run([client, "Unwatch.{ " + match.group(1) + " }"], check=True)
         process.wait()
+    with open("/run/activation-terminal", "w") as terminal:
+        terminal.write(terminal_event)
   '';
 in
 pkgs.testers.nixosTest {
@@ -89,7 +91,6 @@ pkgs.testers.nixosTest {
         StateDirectory = "lojix";
         Environment = [
           "HOME=/root"
-          "LOJIX_CONFIGURATION=/run/lojix-startup.rkyv"
           "PATH=${
             pkgs.lib.makeBinPath [
               fakeNix
@@ -104,7 +105,6 @@ pkgs.testers.nixosTest {
       preStart = ''
         mkdir -p /run/lojix
         install -m 0644 ${horizonDefinition}/horizon-definition.datom /var/lib/lojix/horizon-definition.datom
-        ${package}/bin/lojix-write-configuration 'ConfigurationWriteRequest.{/run/lojix/ordinary.sock 432 /run/lojix/meta.sock 384 /var/lib/lojix /var/lib/lojix/configured-lojix-store.db atlas TestDefaults.{fixture-cluster atlas Hermetic github:fixture-owner/fixture-flake x86_64-linux checks.fixture-a /var/lib/lojix/horizon-definition.datom} /run/lojix-startup.rkyv}'
       '';
     };
   };
@@ -121,6 +121,9 @@ pkgs.testers.nixosTest {
         return machine.succeed("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Query.ByDeployment.{ " + str(identifier) + " }'")
 
     ready()
+    machine.succeed("LOJIX_ORDINARY_SOCKET=/run/lojix/ordinary.sock ${package}/bin/lojix 'Configure.{ /run/lojix/ordinary.sock 432 /run/lojix/meta.sock 384 /var/lib/lojix atlas NoTestDefaults }' | grep -F Configured")
+    machine.succeed("systemctl restart lojix.service")
+    ready()
     # Each request reaches a held candidate only after the real profile write.
     # Killing the admitting daemon must neither kill that unit nor turn the
     # profile match into a public Succeeded.
@@ -132,7 +135,12 @@ pkgs.testers.nixosTest {
         request = "Deploy.Host.{ fixture-cluster atlas BaseHost /var/lib/lojix/horizon-definition.datom NoSecrets github:fixture-owner/fixture-flake?ref=main { ssh-ng://fixture-copy.invalid root@fixture-activate.invalid } Direct { checks.fixture-a } NixosSystemdBootV1 ActivateNow ResolveAndRecord None [] }"
         admission = machine.succeed("LOJIX_OWNER_SOCKET=/run/lojix/meta.sock ${package}/bin/lojix-meta " + json.dumps(request))
         assert "DeployAccepted.{ " + str(identifier) + " " in admission, admission
-        machine.succeed("timeout ${toString completionTimeout} cat /run/activation-entered")
+        try:
+            machine.succeed("timeout ${toString completionTimeout} cat /run/activation-entered")
+        except Exception:
+            machine.log(query(identifier))
+            machine.log(machine.succeed("journalctl -u lojix.service -u lojix-self-switch-deploy-" + str(identifier) + ".service --no-pager -o cat"))
+            raise
         assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == "${candidate}"
         before = query(identifier)
         assert "Succeeded" not in before and "Failed" not in before, before
