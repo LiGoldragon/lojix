@@ -824,7 +824,7 @@ impl DeployProcessable for DeployJobs {
                         | crate::schema_runtime::DetachedActivationOutcome::Failed(_)),
                     )) => {
                         unit.finish_deployment(
-                            crate::schema_runtime::DetachedDeploymentCompletion {
+                            crate::schema_runtime::DetachedDeploymentObservation {
                                 store: self.store.clone(),
                                 deployment_identifier: job.deployment_identifier.clone(),
                                 outcome,
@@ -1126,7 +1126,7 @@ mod tests {
             crate::schema_runtime::DetachedActivationOutcome::Running,
             crate::schema_runtime::DetachedActivationOutcome::Missing,
         ] {
-            unit.finish_deployment(crate::schema_runtime::DetachedDeploymentCompletion {
+            unit.finish_deployment(crate::schema_runtime::DetachedDeploymentObservation {
                 store: store.clone(),
                 deployment_identifier: job.deployment_identifier.clone(),
                 outcome,
@@ -1150,7 +1150,7 @@ mod tests {
             );
             assert_eq!(store.deploy_jobs().expect("retained job").len(), 1);
         }
-        unit.finish_deployment(crate::schema_runtime::DetachedDeploymentCompletion {
+        unit.finish_deployment(crate::schema_runtime::DetachedDeploymentObservation {
             store: store.clone(),
             deployment_identifier: job.deployment_identifier.clone(),
             outcome: crate::schema_runtime::DetachedActivationOutcome::Succeeded,
