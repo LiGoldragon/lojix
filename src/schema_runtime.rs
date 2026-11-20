@@ -7218,10 +7218,18 @@ impl HostActivating for HostActivation {
     ) -> std::result::Result<(), StageFailure> {
         let unit_name = self.self_switch_unit_name();
         let script = self.self_switch_script(activation);
-        self.retained_detached_invocation(&unit_name, script)
+        match self
+            .retained_detached_invocation(&unit_name, script)
             .run(execution)
             .await
-            .map(|_| ())
+        {
+            Ok(_) => Ok(()),
+            Err(failure) => Err(failure.with_output(
+                UnitJournal::new(unit_name, self.target.clone())
+                    .tail(execution)
+                    .await,
+            )),
+        }
     }
 
     fn retained_detached_invocation(&self, unit_name: &str, script: String) -> NixCommand {
@@ -9985,11 +9993,11 @@ mod tests {
             job.resumption(),
             DeployJobResumption::PollActivationUnit { unit: None }
         );
-        // The live system profile resolves to exactly this job's closure — the
-        // witness of a completed host switch.
+        // Reconstruction preserves the requested artifact. Only an observed
+        // successful final unit exit authorizes committing this prepared data.
         let DetachedActivationRecord { generation, root } = job
             .activation_record()
-            .expect("a completed self-switch whose system profile matches records");
+            .expect("prepared state of the saved host-switch request");
         assert_eq!(*generation.generation_identifier.payload(), 72);
         assert_eq!(*generation.deployment_identifier.payload(), 72);
         assert_eq!(
@@ -10002,7 +10010,7 @@ mod tests {
         );
         assert_eq!(
             generation.generation_artifact,
-            ordinary::GenerationArtifact::CompleteHost
+            ordinary::GenerationArtifact::BaseHost
         );
         assert_eq!(
             generation.closure_path.payload(),
