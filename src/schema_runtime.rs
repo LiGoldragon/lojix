@@ -7654,27 +7654,17 @@ impl DetachedActivation for DetachedActivationUnit {
         let result = proxy.service.get_property::<String>("Result").await;
         eprintln!("lojix detached activation observer state active={active:?} result={result:?}");
         match (active.as_deref(), result.as_deref()) {
-            (Ok("active"), Ok("success")) => {
-                match (
-                    proxy.service.get_property::<i32>("ExecMainCode").await,
-                    proxy.service.get_property::<i32>("ExecMainStatus").await,
-                ) {
-                    (Ok(1), Ok(0)) => DetachedActivationOutcome::Succeeded,
-                    _ => DetachedActivationOutcome::Missing,
-                }
-            }
+            (Ok("active"), Ok("success")) => match proxy.main_process_end().await {
+                Some(ProcessEnd::Exited(0)) => DetachedActivationOutcome::Succeeded,
+                _ => DetachedActivationOutcome::Missing,
+            },
             (Ok("activating" | "reloading"), _) => DetachedActivationOutcome::Running,
             (Ok("active"), _) => DetachedActivationOutcome::Running,
             (Ok(state), _) => {
                 // What PID 1 said is the whole evidence for this failure —
                 // keep it rather than printing it and terminalizing a generic
                 // reason.
-                let main_code = proxy.service.get_property::<i32>("ExecMainCode").await;
-                let main_status = proxy.service.get_property::<i32>("ExecMainStatus").await;
-                let optional_process_end = match (main_code, main_status) {
-                    (Ok(code), Ok(status)) => ProcessEnd::from_main_process(code, status),
-                    _ => None,
-                };
+                let optional_process_end = proxy.main_process_end().await;
                 let reported = match result {
                     Ok(result) => format!("systemd reported Result={result}"),
                     Err(error) => {
@@ -7933,6 +7923,27 @@ impl DetachedObserving for DetachedActivationObserver {
 pub(crate) struct DetachedActivationProxies<'a> {
     unit: Proxy<'a>,
     service: Proxy<'a>,
+}
+
+/// Read the main process's recorded end, without inferring one from unit state.
+trait MainProcessObservation {
+    async fn main_process_end(&self) -> Option<ProcessEnd>;
+}
+
+impl MainProcessObservation for DetachedActivationProxies<'_> {
+    async fn main_process_end(&self) -> Option<ProcessEnd> {
+        let code = self
+            .service
+            .get_property::<i32>("ExecMainCode")
+            .await
+            .ok()?;
+        let status = self
+            .service
+            .get_property::<i32>("ExecMainStatus")
+            .await
+            .ok()?;
+        ProcessEnd::from_main_process(code, status)
+    }
 }
 
 /// User-environment activation on the target. A request explicitly logged in as
