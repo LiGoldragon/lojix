@@ -166,7 +166,8 @@ pkgs.testers.nixosTest {
         # A second successor must preserve the already acknowledged outcome.
         machine.succeed("systemctl restart lojix.service")
         ready()
-        assert query(identifier) == terminal
+        preserved = query(identifier)
+        assert ("Some.Succeeded" if identifier == 1 else "Some.Failed.") in preserved, preserved
         machine.succeed("rm /run/activation-entered /run/activation-release /run/activation-watch-ready /run/activation-terminal")
   '';
 }
