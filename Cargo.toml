@@ -29,7 +29,7 @@ name = "lojix"
 path = "src/lib.rs"
 
 [dependencies]
-horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "e723ce117104557a6eb88555008a68627adae313", package = "horizon-lib", default-features = false }
+horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "78d3979c910a39b62d8c6805f4577df109a6c516", package = "horizon-lib", default-features = false }
 datom-codec       = { git = "https://github.com/LiGoldragon/datom-codec", rev = "4dff16b4f7412febc3b71aac8b49680cd20988cb", optional = true }
 protos            = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3", optional = true }
 kameo             = "0.20"
