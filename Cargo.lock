@@ -391,7 +391,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -600,7 +600,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 [[package]]
 name = "horizon-lib"
 version = "0.17.1"
-source = "git+https://github.com/LiGoldragon/horizon-rs?rev=78d3979c910a39b62d8c6805f4577df109a6c516#78d3979c910a39b62d8c6805f4577df109a6c516"
+source = "git+https://github.com/LiGoldragon/horizon-rs?rev=b742558940a4bf8aab16c5511320c0371278efe4#b742558940a4bf8aab16c5511320c0371278efe4"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -800,7 +800,7 @@ dependencies = [
 [[package]]
 name = "meta-signal-lojix"
 version = "0.12.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-lojix?rev=9872d5795446d487b8e349dca2fc50c15c142f2c#9872d5795446d487b8e349dca2fc50c15c142f2c"
+source = "git+https://github.com/LiGoldragon/meta-signal-lojix?rev=03a21340a2c2b0eec542b7117db85438184d5fe3#03a21340a2c2b0eec542b7117db85438184d5fe3"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -1100,7 +1100,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1236,7 +1236,7 @@ dependencies = [
 [[package]]
 name = "signal-lojix"
 version = "0.11.0"
-source = "git+https://github.com/LiGoldragon/signal-lojix?rev=a1d88feb28bf098dbc206489c1994ec118500ac7#a1d88feb28bf098dbc206489c1994ec118500ac7"
+source = "git+https://github.com/LiGoldragon/signal-lojix?rev=18e33dab94f6ec748fc8ad0ec8fc579d70bfbbc3#18e33dab94f6ec748fc8ad0ec8fc579d70bfbbc3"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -1315,7 +1315,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
