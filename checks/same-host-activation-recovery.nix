@@ -82,12 +82,14 @@ pkgs.testers.nixosTest {
     ];
     systemd.services.lojix = {
       wantedBy = [ "multi-user.target" ];
+      unitConfig.StartLimitIntervalSec = 0;
       serviceConfig = {
         ExecStart = "${package}/bin/lojix-nexus";
         Restart = "always";
         StateDirectory = "lojix";
         Environment = [
           "HOME=/root"
+          "LOJIX_CONFIGURATION=/run/lojix-startup.rkyv"
           "PATH=${
             pkgs.lib.makeBinPath [
               fakeNix
@@ -102,6 +104,7 @@ pkgs.testers.nixosTest {
       preStart = ''
         mkdir -p /run/lojix
         install -m 0644 ${horizonDefinition}/horizon-definition.datom /var/lib/lojix/horizon-definition.datom
+        ${package}/bin/lojix-write-configuration 'ConfigurationWriteRequest.{/run/lojix/ordinary.sock 432 /run/lojix/meta.sock 384 /var/lib/lojix /var/lib/lojix/configured-lojix-store.db atlas TestDefaults.{fixture-cluster atlas Hermetic github:fixture-owner/fixture-flake x86_64-linux checks.fixture-a /var/lib/lojix/horizon-definition.datom} /run/lojix-startup.rkyv}'
       '';
     };
   };
@@ -110,10 +113,6 @@ pkgs.testers.nixosTest {
 
     start_all()
     machine.wait_for_unit("lojix.service")
-    machine.succeed("systemctl stop lojix.service")
-    machine.succeed("${package}/bin/lojix-write-configuration 'ConfigurationWriteRequest.{/run/lojix/ordinary.sock 432 /run/lojix/meta.sock 384 /var/lib/lojix /var/lib/lojix/configured-lojix-store.db atlas TestDefaults.{fixture-cluster atlas Hermetic github:fixture-owner/fixture-flake x86_64-linux checks.fixture-a /var/lib/lojix/horizon-definition.datom} /run/lojix-startup.rkyv}'")
-    machine.succeed("mkdir -p /etc/systemd/system/lojix.service.d; printf '%s\n' '[Service]' 'Environment=LOJIX_CONFIGURATION=/run/lojix-startup.rkyv' >/etc/systemd/system/lojix.service.d/configuration.conf")
-    machine.succeed("systemctl daemon-reload; systemctl start lojix.service")
 
     def ready():
         machine.succeed("timeout ${toString completionTimeout} ${pkgs.python3}/bin/python ${socketReady}")
