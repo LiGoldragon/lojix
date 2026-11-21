@@ -271,7 +271,7 @@ mod tests {
             generation_client.input(),
             meta_signal_lojix::Query::Retire(RetirementRequest::Generation(
                 GenerationRetirement { generation_identifier, .. }
-            )) if *generation_identifier == 37.into()
+            )) if *generation_identifier == 37
         ));
 
         let user_environment = ClientQuery::Retire(RetirementRequest::UserEnvironment(

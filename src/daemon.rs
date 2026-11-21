@@ -13,7 +13,8 @@ use crate::Payload;
 use crate::runtime_flow::{Routable, Routed};
 use crate::schema_runtime::{
     DaemonRuntime as _, DeployDriving as _, DeployJobResuming as _, DetachedActivation as _,
-    DetachedDeploymentRecording as _, DetachedObserving as _, RuntimeCore as _, TestDriving as _,
+    DetachedDeploymentRecording as _, DetachedObserving as _, RetirementFailure as _,
+    RuntimeCore as _, TestDriving as _, UserEnvironmentRetirementIdentity as _,
 };
 use crate::{DeploymentLedger as _, DurableStore as _, NexusPersistable as _};
 use std::fmt::{Display, Formatter};
@@ -970,7 +971,7 @@ impl DeployProcessable for DeployJobs {
             for job in retirements {
                 let deployment_identifier = *job.deployment_identifier.payload();
                 let terminal = crate::runtime_model::DeploymentTerminal::Failed(
-                    crate::schema_runtime::interrupted_retirement_failure(),
+                    crate::runtime_model::DeploymentFailure::interrupted_after_restart(),
                 );
                 if let Err(error) = self
                     .store
@@ -1075,7 +1076,9 @@ impl Message<AdmitUserEnvironmentRetirement> for DeployJobs {
                 self.configuration.clone(),
             );
             let identity =
-                crate::schema_runtime::user_environment_retirement_identity(&message.request);
+                crate::runtime_model::DeploymentRequestIdentity::from_user_environment_retirement(
+                    &message.request,
+                );
             return match self.store.reject_deployment_request(
                 identity,
                 crate::runtime_model::DeploymentTerminal::Rejected(

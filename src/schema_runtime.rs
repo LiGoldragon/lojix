@@ -1433,33 +1433,58 @@ pub struct DeployPipeline {
     submission: memory::DeploySubmission,
 }
 
-pub(crate) fn user_environment_retirement_identity(
-    request: &memory::UserEnvironmentRetirement,
-) -> memory::DeploymentRequestIdentity {
-    memory::DeploymentRequestIdentity {
-        deployment_environment: memory::DeploymentEnvironment::UserEnvironment(
-            request.user_name.clone(),
-        ),
-        cluster_name: request.cluster_name.clone(),
-        node_name: request.node_name.clone(),
-        generation_artifact: ordinary::GenerationArtifact::UserEnvironment,
-        requested_deployment_action: ordinary::RequestedDeploymentAction::UserEnvironmentRetirement,
-        activation_effect: ordinary::ActivationEffect::UserEnvironmentRetirement,
-        source_revision_policy: ordinary::SourceRevisionPolicy::NoFlakeSource,
-        optional_immutable_revision: None,
+/// The durable identity owned by a user-environment retirement request.
+pub(crate) trait UserEnvironmentRetirementIdentity {
+    fn from_user_environment_retirement(request: &memory::UserEnvironmentRetirement) -> Self
+    where
+        Self: Sized;
+}
+
+impl UserEnvironmentRetirementIdentity for memory::DeploymentRequestIdentity {
+    fn from_user_environment_retirement(request: &memory::UserEnvironmentRetirement) -> Self {
+        Self {
+            deployment_environment: memory::DeploymentEnvironment::UserEnvironment(
+                request.user_name.clone(),
+            ),
+            cluster_name: request.cluster_name.clone(),
+            node_name: request.node_name.clone(),
+            generation_artifact: ordinary::GenerationArtifact::UserEnvironment,
+            requested_deployment_action:
+                ordinary::RequestedDeploymentAction::UserEnvironmentRetirement,
+            activation_effect: ordinary::ActivationEffect::UserEnvironmentRetirement,
+            source_revision_policy: ordinary::SourceRevisionPolicy::NoFlakeSource,
+            optional_immutable_revision: None,
+        }
     }
 }
 
-pub(crate) fn interrupted_retirement_failure() -> memory::DeploymentFailure {
-    memory::DeploymentFailure {
-        deployment_failure_stage: memory::DeploymentFailureStage::Daemon,
-        deployment_terminal_reason: memory::DeploymentTerminalReason::EnvironmentRetirementFailed,
-        optional_failure_evidence: Some(
-            StageFailure::from(
-                "daemon restarted before retirement reached a terminal state; target state was not replayed",
-            )
-            .witness(),
-        ),
+/// The one terminal failure recorded when startup finds an interrupted
+/// retirement. Keeping the constructors on the durable failure type makes the
+/// exact outcome vocabulary explicit at its owner.
+pub(crate) trait RetirementFailure {
+    fn from_stage_failure(failure: StageFailure) -> Self
+    where
+        Self: Sized;
+
+    fn interrupted_after_restart() -> Self
+    where
+        Self: Sized;
+}
+
+impl RetirementFailure for memory::DeploymentFailure {
+    fn from_stage_failure(failure: StageFailure) -> Self {
+        Self {
+            deployment_failure_stage: memory::DeploymentFailureStage::Daemon,
+            deployment_terminal_reason:
+                memory::DeploymentTerminalReason::EnvironmentRetirementFailed,
+            optional_failure_evidence: Some(failure.witness()),
+        }
+    }
+
+    fn interrupted_after_restart() -> Self {
+        Self::from_stage_failure(StageFailure::from(
+            "daemon restarted before retirement reached a terminal state; target state was not replayed",
+        ))
     }
 }
 
@@ -4165,7 +4190,8 @@ impl DeployDriving for SchemaRuntime {
         &mut self,
         request: memory::UserEnvironmentRetirement,
     ) -> DeploySubmissionOutcome {
-        let identity = user_environment_retirement_identity(&request);
+        let identity =
+            memory::DeploymentRequestIdentity::from_user_environment_retirement(&request);
         let job = memory::UserEnvironmentRetirementJob {
             deployment_identifier: ordinary::DeploymentIdentifier::new(0),
             generation_identifier: ordinary::GenerationIdentifier::new(0),
@@ -4473,12 +4499,13 @@ impl DeployDriving for SchemaRuntime {
             }) {
             Ok(job) => job,
             Err(error) => {
-                return retirement_terminal_output(
-                    &self.store,
+                return self.store.retirement_terminal_output(
                     deployment_identifier,
-                    memory::DeploymentTerminal::Failed(retirement_failure(StageFailure::from(
-                        format!("could not read retirement job: {error}"),
-                    ))),
+                    memory::DeploymentTerminal::Failed(
+                        memory::DeploymentFailure::from_stage_failure(StageFailure::from(format!(
+                            "could not read retirement job: {error}"
+                        ))),
+                    ),
                 );
             }
         };
@@ -4487,55 +4514,55 @@ impl DeployDriving for SchemaRuntime {
                 .into_iter()
                 .find(|record| *record.deployment_identifier.payload() == deployment_identifier),
             Err(error) => {
-                return retirement_terminal_output(
-                    &self.store,
+                return self.store.retirement_terminal_output(
                     deployment_identifier,
-                    memory::DeploymentTerminal::Failed(retirement_failure(StageFailure::from(
-                        format!("could not verify retirement identity: {error}"),
-                    ))),
+                    memory::DeploymentTerminal::Failed(
+                        memory::DeploymentFailure::from_stage_failure(StageFailure::from(format!(
+                            "could not verify retirement identity: {error}"
+                        ))),
+                    ),
                 );
             }
         };
         let Some(record) = record else {
-            return retirement_terminal_output(
-                &self.store,
+            return self.store.retirement_terminal_output(
                 deployment_identifier,
-                memory::DeploymentTerminal::Failed(retirement_failure(StageFailure::from(
-                    "accepted retirement has no retained deployment identity",
-                ))),
+                memory::DeploymentTerminal::Failed(memory::DeploymentFailure::from_stage_failure(
+                    StageFailure::from("accepted retirement has no retained deployment identity"),
+                )),
             );
         };
-        let expected_identity =
-            user_environment_retirement_identity(&memory::UserEnvironmentRetirement {
+        let expected_identity = memory::DeploymentRequestIdentity::from_user_environment_retirement(
+            &memory::UserEnvironmentRetirement {
                 cluster_name: job.cluster_name.clone(),
                 node_name: job.node_name.clone(),
                 user_name: job.user_name.clone(),
                 deployment_transport: job.deployment_transport.clone(),
-            });
+            },
+        );
         if record.deployment_request_identity != expected_identity {
-            return retirement_terminal_output(
-                &self.store,
+            return self.store.retirement_terminal_output(
                 deployment_identifier,
-                memory::DeploymentTerminal::Failed(retirement_failure(StageFailure::from(
-                    "retirement job and durable deployment identity disagree",
-                ))),
+                memory::DeploymentTerminal::Failed(memory::DeploymentFailure::from_stage_failure(
+                    StageFailure::from("retirement job and durable deployment identity disagree"),
+                )),
             );
         }
-        let membership = match user_environment_retirement_membership(&self.store, &job) {
+        let membership = match self.store.user_environment_retirement_membership(&job) {
             Ok(membership) => membership,
             Err(error) => {
-                return retirement_terminal_output(
-                    &self.store,
+                return self.store.retirement_terminal_output(
                     deployment_identifier,
-                    memory::DeploymentTerminal::Failed(retirement_failure(StageFailure::from(
-                        format!("could not resolve retirement roots: {error}"),
-                    ))),
+                    memory::DeploymentTerminal::Failed(
+                        memory::DeploymentFailure::from_stage_failure(StageFailure::from(format!(
+                            "could not resolve retirement roots: {error}"
+                        ))),
+                    ),
                 );
             }
         };
         if !membership.known_environment {
-            return retirement_terminal_output(
-                &self.store,
+            return self.store.retirement_terminal_output(
                 deployment_identifier,
                 memory::DeploymentTerminal::Rejected(
                     memory::DeploymentTerminalReason::UnknownEnvironment,
@@ -4543,8 +4570,7 @@ impl DeployDriving for SchemaRuntime {
             );
         }
         if membership.pinned {
-            return retirement_terminal_output(
-                &self.store,
+            return self.store.retirement_terminal_output(
                 deployment_identifier,
                 memory::DeploymentTerminal::Rejected(
                     memory::DeploymentTerminalReason::EnvironmentPinned,
@@ -4555,8 +4581,7 @@ impl DeployDriving for SchemaRuntime {
             Ok(target) => target,
             Err(detail) => {
                 eprintln!("lojix rejected retirement routing: {detail}");
-                return retirement_terminal_output(
-                    &self.store,
+                return self.store.retirement_terminal_output(
                     deployment_identifier,
                     memory::DeploymentTerminal::Rejected(
                         memory::DeploymentTerminalReason::InvalidDeploymentRouting,
@@ -4572,8 +4597,7 @@ impl DeployDriving for SchemaRuntime {
             .await
         {
             Ok(UserEnvironmentLiveness::Live(_evidence)) => {
-                return retirement_terminal_output(
-                    &self.store,
+                return self.store.retirement_terminal_output(
                     deployment_identifier,
                     memory::DeploymentTerminal::Rejected(
                         memory::DeploymentTerminalReason::EnvironmentLive,
@@ -4582,8 +4606,7 @@ impl DeployDriving for SchemaRuntime {
             }
             Ok(UserEnvironmentLiveness::NotLive(_evidence)) => {}
             Ok(UserEnvironmentLiveness::IdentityMismatch(_evidence)) => {
-                return retirement_terminal_output(
-                    &self.store,
+                return self.store.retirement_terminal_output(
                     deployment_identifier,
                     memory::DeploymentTerminal::Rejected(
                         memory::DeploymentTerminalReason::InvalidDeploymentRouting,
@@ -4591,20 +4614,22 @@ impl DeployDriving for SchemaRuntime {
                 );
             }
             Ok(UserEnvironmentLiveness::Unknown(evidence)) => {
-                return retirement_terminal_output(
-                    &self.store,
+                return self.store.retirement_terminal_output(
                     deployment_identifier,
-                    memory::DeploymentTerminal::Failed(retirement_failure(
-                        StageFailure::from("target Home liveness evidence is ambiguous")
-                            .with_output(ReportedOutput::new("target observation", evidence)),
-                    )),
+                    memory::DeploymentTerminal::Failed(
+                        memory::DeploymentFailure::from_stage_failure(
+                            StageFailure::from("target Home liveness evidence is ambiguous")
+                                .with_output(ReportedOutput::new("target observation", evidence)),
+                        ),
+                    ),
                 );
             }
             Err(failure) => {
-                return retirement_terminal_output(
-                    &self.store,
+                return self.store.retirement_terminal_output(
                     deployment_identifier,
-                    memory::DeploymentTerminal::Failed(retirement_failure(failure)),
+                    memory::DeploymentTerminal::Failed(
+                        memory::DeploymentFailure::from_stage_failure(failure),
+                    ),
                 );
             }
         }
@@ -4617,8 +4642,7 @@ impl DeployDriving for SchemaRuntime {
         {
             Ok(UserEnvironmentRetirementRemoval::Removed) => {}
             Ok(UserEnvironmentRetirementRemoval::BecameLive(_evidence)) => {
-                return retirement_terminal_output(
-                    &self.store,
+                return self.store.retirement_terminal_output(
                     deployment_identifier,
                     memory::DeploymentTerminal::Rejected(
                         memory::DeploymentTerminalReason::EnvironmentLive,
@@ -4626,8 +4650,7 @@ impl DeployDriving for SchemaRuntime {
                 );
             }
             Ok(UserEnvironmentRetirementRemoval::IdentityMismatch(_evidence)) => {
-                return retirement_terminal_output(
-                    &self.store,
+                return self.store.retirement_terminal_output(
                     deployment_identifier,
                     memory::DeploymentTerminal::Rejected(
                         memory::DeploymentTerminalReason::InvalidDeploymentRouting,
@@ -4635,20 +4658,22 @@ impl DeployDriving for SchemaRuntime {
                 );
             }
             Ok(UserEnvironmentRetirementRemoval::Unknown(evidence)) => {
-                return retirement_terminal_output(
-                    &self.store,
+                return self.store.retirement_terminal_output(
                     deployment_identifier,
-                    memory::DeploymentTerminal::Failed(retirement_failure(
-                        StageFailure::from("locked target recheck returned ambiguous evidence")
-                            .with_output(ReportedOutput::new("target observation", evidence)),
-                    )),
+                    memory::DeploymentTerminal::Failed(
+                        memory::DeploymentFailure::from_stage_failure(
+                            StageFailure::from("locked target recheck returned ambiguous evidence")
+                                .with_output(ReportedOutput::new("target observation", evidence)),
+                        ),
+                    ),
                 );
             }
             Err(failure) => {
-                return retirement_terminal_output(
-                    &self.store,
+                return self.store.retirement_terminal_output(
                     deployment_identifier,
-                    memory::DeploymentTerminal::Failed(retirement_failure(failure)),
+                    memory::DeploymentTerminal::Failed(
+                        memory::DeploymentFailure::from_stage_failure(failure),
+                    ),
                 );
             }
         }
@@ -4709,10 +4734,8 @@ impl DeployDriving for SchemaRuntime {
                             .refuse_deploy(memory::DeployRefusalReason::DurableWriteFailed, &error),
                     }
                 } else {
-                    retirement_terminal_output(
-                        &self.store,
-                        deployment_identifier,
-                        memory::DeploymentTerminal::Failed(retirement_failure(StageFailure::from(
+                    self.store.retirement_terminal_output(deployment_identifier,
+                    memory::DeploymentTerminal::Failed(memory::DeploymentFailure::from_stage_failure(StageFailure::from(
                             format!(
                                 "target profile was removed but durable retirement finalization failed: {error}"
                             ),
@@ -8639,7 +8662,11 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
     }
 }
 
-impl UserEnvironmentActivation {
+trait ProfileCommandLocking {
+    fn locked_local_invocation(&self, invocation: NixCommand) -> NixCommand;
+}
+
+impl ProfileCommandLocking for UserEnvironmentActivation {
     fn locked_local_invocation(&self, invocation: NixCommand) -> NixCommand {
         let command = std::iter::once(invocation.program)
             .chain(invocation.arguments)
@@ -9068,89 +9095,101 @@ struct UserEnvironmentRetirementMembership {
     closure_vector: Vec<ordinary::ClosurePath>,
 }
 
-fn user_environment_retirement_membership(
-    store: &Store,
-    job: &memory::UserEnvironmentRetirementJob,
-) -> Result<UserEnvironmentRetirementMembership> {
-    let environment = memory::DeploymentEnvironment::UserEnvironment(job.user_name.clone());
-    let retained_deployments = store
-        .records::<memory::DeploymentRecord>()?
-        .into_iter()
-        .filter(|record| {
-            let identity = &record.deployment_request_identity;
-            identity.cluster_name == job.cluster_name
-                && identity.node_name == job.node_name
-                && identity.deployment_environment == environment
-                && identity.generation_artifact == ordinary::GenerationArtifact::UserEnvironment
-                && matches!(
-                    &identity.requested_deployment_action,
-                    ordinary::RequestedDeploymentAction::UserEnvironment(_)
-                )
-        })
-        .collect::<Vec<_>>();
-    let deployment_generation_ids = retained_deployments
-        .iter()
-        .map(|record| *record.generation_identifier.payload())
-        .collect::<std::collections::BTreeSet<_>>();
-    let live = store
-        .records::<memory::LiveGeneration>()?
-        .into_iter()
-        .filter(|generation| {
-            generation.cluster_name == job.cluster_name
-                && generation.node_name == job.node_name
-                && generation.deployment_environment == environment
-                && generation.generation_artifact == ordinary::GenerationArtifact::UserEnvironment
-        })
-        .collect::<Vec<_>>();
-    let roots = store
-        .records::<memory::GcRoot>()?
-        .into_iter()
-        .filter(|root| {
-            root.cluster_name == job.cluster_name
-                && root.node_name == job.node_name
-                && deployment_generation_ids.contains(root.generation_identifier.payload())
-        })
-        .collect::<Vec<_>>();
-    let mut closure_vector = live
-        .iter()
-        .map(|generation| generation.closure_path.clone())
-        .chain(roots.iter().map(|root| root.closure_path.clone()))
-        .collect::<Vec<_>>();
-    closure_vector.sort_by(|left, right| left.payload().cmp(right.payload()));
-    closure_vector.dedup_by(|left, right| left == right);
-    Ok(UserEnvironmentRetirementMembership {
-        known_environment: !live.is_empty() || !roots.is_empty(),
-        pinned: roots
-            .iter()
-            .any(|root| matches!(root.generation_slot, ordinary::GenerationSlot::Pinned)),
-        closure_vector,
-    })
+trait UserEnvironmentRetirementMembershipLookup {
+    fn user_environment_retirement_membership(
+        &self,
+        job: &memory::UserEnvironmentRetirementJob,
+    ) -> Result<UserEnvironmentRetirementMembership>;
 }
 
-fn retirement_terminal_output(
-    store: &Store,
-    deployment_identifier: u64,
-    terminal: memory::DeploymentTerminal,
-) -> meta::Output {
-    match store.terminalize_deployment(deployment_identifier, terminal) {
-        Ok(record) => meta::Output::DeployTerminal(record),
-        Err(error) => {
-            eprintln!(
-                "lojix could not terminalize user-environment retirement {deployment_identifier}: {error}"
-            );
-            meta::Output::DeployRefused(memory::RefusedDeploy {
-                deploy_refusal_reason: memory::DeployRefusalReason::DurableWriteFailed,
-                state_marker: ordinary::StateMarker::from(store.commit_sequence().unwrap_or(0)),
+impl UserEnvironmentRetirementMembershipLookup for Store {
+    fn user_environment_retirement_membership(
+        &self,
+        job: &memory::UserEnvironmentRetirementJob,
+    ) -> Result<UserEnvironmentRetirementMembership> {
+        let environment = memory::DeploymentEnvironment::UserEnvironment(job.user_name.clone());
+        let retained_deployments = self
+            .records::<memory::DeploymentRecord>()?
+            .into_iter()
+            .filter(|record| {
+                let identity = &record.deployment_request_identity;
+                identity.cluster_name == job.cluster_name
+                    && identity.node_name == job.node_name
+                    && identity.deployment_environment == environment
+                    && identity.generation_artifact == ordinary::GenerationArtifact::UserEnvironment
+                    && matches!(
+                        &identity.requested_deployment_action,
+                        ordinary::RequestedDeploymentAction::UserEnvironment(_)
+                    )
             })
-        }
+            .collect::<Vec<_>>();
+        let deployment_generation_ids = retained_deployments
+            .iter()
+            .map(|record| *record.generation_identifier.payload())
+            .collect::<std::collections::BTreeSet<_>>();
+        let live = self
+            .records::<memory::LiveGeneration>()?
+            .into_iter()
+            .filter(|generation| {
+                generation.cluster_name == job.cluster_name
+                    && generation.node_name == job.node_name
+                    && generation.deployment_environment == environment
+                    && generation.generation_artifact
+                        == ordinary::GenerationArtifact::UserEnvironment
+            })
+            .collect::<Vec<_>>();
+        let roots = self
+            .records::<memory::GcRoot>()?
+            .into_iter()
+            .filter(|root| {
+                root.cluster_name == job.cluster_name
+                    && root.node_name == job.node_name
+                    && deployment_generation_ids.contains(root.generation_identifier.payload())
+            })
+            .collect::<Vec<_>>();
+        let mut closure_vector = live
+            .iter()
+            .map(|generation| generation.closure_path.clone())
+            .chain(roots.iter().map(|root| root.closure_path.clone()))
+            .collect::<Vec<_>>();
+        closure_vector.sort_by(|left, right| left.payload().cmp(right.payload()));
+        closure_vector.dedup_by(|left, right| left == right);
+        Ok(UserEnvironmentRetirementMembership {
+            known_environment: !live.is_empty() || !roots.is_empty(),
+            pinned: roots
+                .iter()
+                .any(|root| matches!(root.generation_slot, ordinary::GenerationSlot::Pinned)),
+            closure_vector,
+        })
     }
 }
 
-fn retirement_failure(failure: StageFailure) -> memory::DeploymentFailure {
-    memory::DeploymentFailure {
-        deployment_failure_stage: memory::DeploymentFailureStage::Daemon,
-        deployment_terminal_reason: memory::DeploymentTerminalReason::EnvironmentRetirementFailed,
-        optional_failure_evidence: Some(failure.witness()),
+trait UserEnvironmentRetirementTerminalizing {
+    fn retirement_terminal_output(
+        &self,
+        deployment_identifier: u64,
+        terminal: memory::DeploymentTerminal,
+    ) -> meta::Output;
+}
+
+impl UserEnvironmentRetirementTerminalizing for Store {
+    fn retirement_terminal_output(
+        &self,
+        deployment_identifier: u64,
+        terminal: memory::DeploymentTerminal,
+    ) -> meta::Output {
+        match self.terminalize_deployment(deployment_identifier, terminal) {
+            Ok(record) => meta::Output::DeployTerminal(record),
+            Err(error) => {
+                eprintln!(
+                    "lojix could not terminalize user-environment retirement {deployment_identifier}: {error}"
+                );
+                meta::Output::DeployRefused(memory::RefusedDeploy {
+                    deploy_refusal_reason: memory::DeployRefusalReason::DurableWriteFailed,
+                    state_marker: ordinary::StateMarker::from(self.commit_sequence().unwrap_or(0)),
+                })
+            }
+        }
     }
 }
 /// A typed `nix` / `nix-store` invocation. Holds the program name and its
