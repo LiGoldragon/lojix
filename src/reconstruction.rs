@@ -22,6 +22,7 @@ use rkyv::rancor;
 use crate::runtime_model::{
     ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, DeploymentRecord, EventLogEntry,
     GcRoot, IdentifierAllocation, LiveGeneration, PendingTransitionIntent, StoredTestRun,
+    UserEnvironmentRetirementJob,
 };
 use crate::{
     DurableStore as _, Error, InlineDatomArguments as _, LegacyConfigurationArchivable as _,
@@ -431,6 +432,7 @@ impl StoreLayouts for LojixCatalog {
             PendingTransitionIntent::family_identity(),
             crate::NexusConfigurationRecord::family_identity(),
             crate::quarantine::QuarantinedRow::family_identity(),
+            UserEnvironmentRetirementJob::family_identity(),
             (
                 "legacy-deployment-event-quarantine".to_string(),
                 "LegacyDeploymentEventQuarantineFamily".to_string(),

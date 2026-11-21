@@ -124,6 +124,7 @@ runtime_newtype!(StateDigest, u64);
 pub enum SourceRevisionPolicy {
     RequireImmutable,
     ResolveAndRecord,
+    NoFlakeSource,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
 pub enum GenerationArtifact {
@@ -138,6 +139,7 @@ pub enum ActivationEffect {
     TestActivation,
     BootOnceProfile,
     ProfileOnly,
+    UserEnvironmentRetirement,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
 pub enum GenerationSlot {
@@ -240,6 +242,7 @@ pub enum DeploymentEnvironment {
 pub enum RequestedDeploymentAction {
     Host(HostDeployAction),
     UserEnvironment(UserEnvironmentAction),
+    UserEnvironmentRetirement,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
 pub enum DeploymentLifecycle {
@@ -280,6 +283,10 @@ pub enum DeploymentTerminalReason {
     EvaluationFailed,
     BuildFailed,
     ClosureCopyFailed,
+    UnknownEnvironment,
+    EnvironmentLive,
+    EnvironmentPinned,
+    EnvironmentRetirementFailed,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DeploymentFailure {
@@ -559,6 +566,13 @@ pub struct RetireRequest {
     pub generation_identifier: GenerationIdentifier,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UserEnvironmentRetirement {
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub user_name: UserName,
+    pub deployment_transport: DeploymentTransport,
+}
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DeployHandle {
     pub deployment_identifier: DeploymentIdentifier,
     pub state_marker: StateMarker,
@@ -620,6 +634,7 @@ pub enum MemoryWriteInput {
     PinGeneration(PinRequest),
     UnpinGeneration(UnpinRequest),
     RetireGeneration(RetireRequest),
+    RecordUserEnvironmentRetirement(UserEnvironmentRetirement),
     RecordContainerTransition(ContainerTransition),
     RecordTestRun(TestRunRecord),
 }
@@ -667,6 +682,9 @@ pub enum MemoryWriteOutput {
     GenerationPinned(AppliedPin),
     GenerationUnpinned(AppliedUnpin),
     GenerationRetired(AppliedRetire),
+    UserEnvironmentRetirementSubmitted(DeployHandle),
+    UserEnvironmentRetirementRejected(RejectedDeploy),
+    UserEnvironmentRetirementRefused(RefusedDeploy),
     ContainerRecorded(ContainerReceipt),
     TestRunRecorded(AcceptedTest),
     WriteRejected(RejectionReport),
@@ -706,6 +724,7 @@ pub enum RejectionReason {
     ProposalSourceUnreachable,
     /// The durable write itself failed, so no record was produced.
     DurableWriteFailed,
+    EnvironmentRetirementInFlight,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
 pub enum QueryRejectionReason {
@@ -743,6 +762,7 @@ pub enum PinRejectionReason {
     PinLabelInUse,
     PinSlotExhausted,
     InternalError,
+    EnvironmentRetirementInFlight,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
 pub enum UnpinRejectionReason {
@@ -750,6 +770,7 @@ pub enum UnpinRejectionReason {
     NodeUnknown,
     GenerationNotPinned,
     InternalError,
+    EnvironmentRetirementInFlight,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
 pub enum RetireRejectionReason {
@@ -758,6 +779,7 @@ pub enum RetireRejectionReason {
     GenerationActive,
     GenerationPinned,
     InternalError,
+    EnvironmentRetirementInFlight,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
 pub enum TestRejectionReason {
@@ -849,6 +871,7 @@ pub enum MetaIngress {
     Pin(PinRequest),
     Unpin(UnpinRequest),
     Retire(RetireRequest),
+    RetireUserEnvironment(UserEnvironmentRetirement),
     Test(TestRequest),
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
@@ -873,6 +896,10 @@ runtime_newtype!(LiveSetTable, Vec<LiveGeneration>);
 runtime_newtype!(DeploymentRecordTable, Vec<DeploymentRecord>);
 runtime_newtype!(IdentifierAllocationTable, Vec<IdentifierAllocation>);
 runtime_newtype!(DeploymentOutboxTable, Vec<DeploymentOutboxRecord>);
+runtime_newtype!(
+    UserEnvironmentRetirementJobTable,
+    Vec<UserEnvironmentRetirementJob>
+);
 runtime_newtype!(PendingTransitionIntentTable, Vec<PendingTransitionIntent>);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct LiveGeneration {
@@ -963,6 +990,15 @@ pub struct DeployJob {
     pub deploy_resume_stage: DeployResumeStage,
     pub optional_phase_receipt: Option<PhaseReceipt>,
     pub optional_deploy_submission: Option<DeploySubmission>,
+}
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UserEnvironmentRetirementJob {
+    pub deployment_identifier: DeploymentIdentifier,
+    pub generation_identifier: GenerationIdentifier,
+    pub cluster_name: ClusterName,
+    pub node_name: NodeName,
+    pub user_name: UserName,
+    pub deployment_transport: DeploymentTransport,
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Copy)]
 pub enum DeployJobPhase {

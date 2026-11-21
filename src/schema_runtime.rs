@@ -18,7 +18,7 @@ use crate::inspected_text::{
 use crate::runtime_flow::{Routable, Routed};
 use crate::{
     DeploymentLedger as _, DurableStore as _, EventHistory as _, GenerationLedger as _,
-    IdentifierAllocating as _, NexusPersistable as _, TestRunLedger as _,
+    IdentifierAllocating as _, NexusPersistable as _, TestRunLedger as _, TransitionJournal as _,
 };
 use crate::{HorizonArchitecture as _, SourceRevisionText as _};
 use crate::{Named as _, Payload};
@@ -1433,6 +1433,36 @@ pub struct DeployPipeline {
     submission: memory::DeploySubmission,
 }
 
+pub(crate) fn user_environment_retirement_identity(
+    request: &memory::UserEnvironmentRetirement,
+) -> memory::DeploymentRequestIdentity {
+    memory::DeploymentRequestIdentity {
+        deployment_environment: memory::DeploymentEnvironment::UserEnvironment(
+            request.user_name.clone(),
+        ),
+        cluster_name: request.cluster_name.clone(),
+        node_name: request.node_name.clone(),
+        generation_artifact: ordinary::GenerationArtifact::UserEnvironment,
+        requested_deployment_action: ordinary::RequestedDeploymentAction::UserEnvironmentRetirement,
+        activation_effect: ordinary::ActivationEffect::UserEnvironmentRetirement,
+        source_revision_policy: ordinary::SourceRevisionPolicy::NoFlakeSource,
+        optional_immutable_revision: None,
+    }
+}
+
+pub(crate) fn interrupted_retirement_failure() -> memory::DeploymentFailure {
+    memory::DeploymentFailure {
+        deployment_failure_stage: memory::DeploymentFailureStage::Daemon,
+        deployment_terminal_reason: memory::DeploymentTerminalReason::EnvironmentRetirementFailed,
+        optional_failure_evidence: Some(
+            StageFailure::from(
+                "daemon restarted before retirement reached a terminal state; target state was not replayed",
+            )
+            .witness(),
+        ),
+    }
+}
+
 /// The deploy pipeline cursor. Each value names the stage that has just
 /// completed; after a phase-transition write commits, `advance_after_phase`
 /// reads it to emit the next effect (or the final activation-record write).
@@ -2603,6 +2633,9 @@ impl RejectionVocabulary for memory::RejectionReason {
             }
             memory::RejectionReason::NodeUnknown => meta::PinRejectionReason::NodeUnknown,
             memory::RejectionReason::PinLabelInUse => meta::PinRejectionReason::PinLabelInUse,
+            memory::RejectionReason::EnvironmentRetirementInFlight => {
+                meta::PinRejectionReason::EnvironmentRetirementInFlight
+            }
             _ => meta::PinRejectionReason::InternalError,
         }
     }
@@ -2614,6 +2647,9 @@ impl RejectionVocabulary for memory::RejectionReason {
             memory::RejectionReason::NodeUnknown => meta::UnpinRejectionReason::NodeUnknown,
             memory::RejectionReason::GenerationUnknown => {
                 meta::UnpinRejectionReason::GenerationNotPinned
+            }
+            memory::RejectionReason::EnvironmentRetirementInFlight => {
+                meta::UnpinRejectionReason::EnvironmentRetirementInFlight
             }
             // A reason with no unpin-domain meaning — a failed durable write,
             // a poisoned lock — is an internal invariant failure, as it is for
@@ -2636,6 +2672,9 @@ impl RejectionVocabulary for memory::RejectionReason {
             memory::RejectionReason::GenerationPinned => {
                 meta::RetireRejectionReason::GenerationPinned
             }
+            memory::RejectionReason::EnvironmentRetirementInFlight => {
+                meta::RetireRejectionReason::EnvironmentRetirementInFlight
+            }
             _ => meta::RetireRejectionReason::InternalError,
         }
     }
@@ -2645,6 +2684,9 @@ impl RejectionVocabulary for memory::RejectionReason {
         match reason {
             memory::RejectionReason::ClusterUnknown => meta::DeployRejectionReason::ClusterUnknown,
             memory::RejectionReason::NodeUnknown => meta::DeployRejectionReason::NodeUnknown,
+            memory::RejectionReason::EnvironmentRetirementInFlight => {
+                meta::DeployRejectionReason::DeploymentInFlight
+            }
             memory::RejectionReason::ProposalSourceUnreachable => {
                 meta::DeployRejectionReason::ProposalSourceUnreachable
             }
@@ -2772,19 +2814,20 @@ impl PhaseLifecycle for ordinary::DeploymentPhase {
 
 /// Which generation slot an activation effect leaves the generation in.
 trait ActivationSlot {
-    fn activation_slot(&self) -> ordinary::GenerationSlot;
+    fn activation_slot(&self) -> Option<ordinary::GenerationSlot>;
 }
 
 impl ActivationSlot for ordinary::ActivationEffect {
-    fn activation_slot(&self) -> ordinary::GenerationSlot {
+    fn activation_slot(&self) -> Option<ordinary::GenerationSlot> {
         let activation_effect = self;
-        match activation_effect {
+        Some(match activation_effect {
             ordinary::ActivationEffect::LiveActivation => ordinary::GenerationSlot::Current,
             ordinary::ActivationEffect::BootProfile => ordinary::GenerationSlot::BootPending,
             ordinary::ActivationEffect::TestActivation => ordinary::GenerationSlot::Recent,
             ordinary::ActivationEffect::BootOnceProfile => ordinary::GenerationSlot::BootPending,
             ordinary::ActivationEffect::ProfileOnly => ordinary::GenerationSlot::Current,
-        }
+            ordinary::ActivationEffect::UserEnvironmentRetirement => return None,
+        })
     }
 }
 
@@ -2948,6 +2991,9 @@ impl DeployAdmission for meta::DeployRequest {
             meta::SourceRevisionPolicy::RequireImmutable => (!FlakeReferencePolicy::new(flake)
                 .is_immutable())
             .then_some(meta::DeployRejectionReason::FlakeReferenceMalformed),
+            meta::SourceRevisionPolicy::NoFlakeSource => {
+                Some(meta::DeployRejectionReason::UnsupportedDeployAction)
+            }
         }
     }
 
@@ -3474,6 +3520,9 @@ impl SignalDeciding for SchemaRuntime {
                     request,
                 ))
             }
+            meta::Input::RetireUserEnvironment(request) => nexus::NexusAction::CommandMemoryWrite(
+                memory::MemoryWriteInput::RecordUserEnvironmentRetirement(request),
+            ),
             meta::Input::Test(request) => self.decide_test(request),
         }
     }
@@ -3586,6 +3635,15 @@ impl SignalDeciding for SchemaRuntime {
             }
             memory::MemoryWriteOutput::DeploySubmitted(accepted) => {
                 self.begin_deploy_pipeline(accepted)
+            }
+            memory::MemoryWriteOutput::UserEnvironmentRetirementSubmitted(accepted) => {
+                nexus::NexusAction::from(meta::Output::DeployAccepted(accepted))
+            }
+            memory::MemoryWriteOutput::UserEnvironmentRetirementRejected(rejected) => {
+                nexus::NexusAction::from(meta::Output::DeployRejected(rejected))
+            }
+            memory::MemoryWriteOutput::UserEnvironmentRetirementRefused(refused) => {
+                nexus::NexusAction::from(meta::Output::DeployRefused(refused))
             }
             memory::MemoryWriteOutput::PhaseRecorded(_) => self.advance_after_phase(),
             memory::MemoryWriteOutput::GenerationActivated(_) => match self.active_deploy.clone() {
@@ -3980,6 +4038,14 @@ pub trait DeployDriving {
     /// [`DeployDriving::drive_submitted_deploy`]. The pipeline does NOT run here.
     fn submit_deploy(&mut self, request: meta::DeployRequest) -> DeploySubmissionOutcome;
 
+    /// Admit a standalone Home retirement into the shared deployment ledger.
+    /// Its distinct durable job keeps the same node-wide exclusion as normal
+    /// deploy jobs while the read-only check and exact profile-link removal run.
+    fn submit_user_environment_retirement(
+        &mut self,
+        request: memory::UserEnvironmentRetirement,
+    ) -> DeploySubmissionOutcome;
+
     /// Reconstruct an accepted deploy from its daemon-local persisted
     /// submission and correlation receipt. This never allocates a second
     /// identity or emits another Submitted event.
@@ -3996,6 +4062,13 @@ pub trait DeployDriving {
     /// and tests; the client already has its admission handle and re-observes
     /// the outcome by deployment identifier.
     async fn drive_submitted_deploy(&mut self) -> meta::Output;
+
+    /// Recheck and retire one already-admitted standalone Home. This runs in
+    /// the daemon-owned job task, never in the owner connection task.
+    async fn drive_user_environment_retirement(
+        &mut self,
+        deployment_identifier: u64,
+    ) -> meta::Output;
 
     fn begin_deploy_pipeline(&mut self, accepted: meta::DeployHandle) -> nexus::NexusAction;
 
@@ -4085,6 +4158,56 @@ impl DeployDriving for SchemaRuntime {
                 self.active_deploy = None;
                 self.reject_submission(rejected_request, meta::DeployRejectionReason::InternalError)
             }
+        }
+    }
+
+    fn submit_user_environment_retirement(
+        &mut self,
+        request: memory::UserEnvironmentRetirement,
+    ) -> DeploySubmissionOutcome {
+        let identity = user_environment_retirement_identity(&request);
+        let job = memory::UserEnvironmentRetirementJob {
+            deployment_identifier: ordinary::DeploymentIdentifier::new(0),
+            generation_identifier: ordinary::GenerationIdentifier::new(0),
+            cluster_name: request.cluster_name.clone(),
+            node_name: request.node_name.clone(),
+            user_name: request.user_name.clone(),
+            deployment_transport: request.deployment_transport.clone(),
+        };
+        match self
+            .store
+            .allocate_user_environment_retirement(identity.clone(), job)
+        {
+            Ok(record) => {
+                let Some(marker) = record.optional_admission_marker else {
+                    return DeploySubmissionOutcome::Refused(self.refusal(
+                        memory::DeployRefusalReason::DurableWriteFailed,
+                        &"an admitted retirement record carries no admission marker",
+                    ));
+                };
+                DeploySubmissionOutcome::Accepted(meta::DeployHandle {
+                    deployment_identifier: record.deployment_identifier,
+                    state_marker: marker.into_payload(),
+                })
+            }
+            Err(crate::Error::DeploymentInFlight) => {
+                match self.store.reject_deployment_request(
+                    identity,
+                    memory::DeploymentTerminal::Rejected(
+                        memory::DeploymentTerminalReason::DeploymentInFlight,
+                    ),
+                ) {
+                    Ok(record) => {
+                        DeploySubmissionOutcome::Rejected(meta::RejectedDeploy::new(record))
+                    }
+                    Err(error) => DeploySubmissionOutcome::Refused(
+                        self.refusal(memory::DeployRefusalReason::DurableWriteFailed, &error),
+                    ),
+                }
+            }
+            Err(error) => DeploySubmissionOutcome::Refused(
+                self.refusal(memory::DeployRefusalReason::DurableWriteFailed, &error),
+            ),
         }
     }
 
@@ -4329,6 +4452,274 @@ impl DeployDriving for SchemaRuntime {
         match self.execute(work).await.into_root() {
             nexus::NexusAction::ReplyToSignal(nexus::SignalOutput::MetaOutput(output)) => output,
             _ => self.deploy_rejection(&identifier, meta::DeployRejectionReason::InternalError),
+        }
+    }
+
+    async fn drive_user_environment_retirement(
+        &mut self,
+        deployment_identifier: u64,
+    ) -> meta::Output {
+        let job = match self
+            .store
+            .user_environment_retirement_jobs()
+            .and_then(|jobs| {
+                jobs.into_iter()
+                    .find(|job| *job.deployment_identifier.payload() == deployment_identifier)
+                    .ok_or_else(|| {
+                        crate::Error::Invariant(
+                            "accepted retirement lost its durable job".to_string(),
+                        )
+                    })
+            }) {
+            Ok(job) => job,
+            Err(error) => {
+                return retirement_terminal_output(
+                    &self.store,
+                    deployment_identifier,
+                    memory::DeploymentTerminal::Failed(retirement_failure(StageFailure::from(
+                        format!("could not read retirement job: {error}"),
+                    ))),
+                );
+            }
+        };
+        let record = match self.store.records::<memory::DeploymentRecord>() {
+            Ok(records) => records
+                .into_iter()
+                .find(|record| *record.deployment_identifier.payload() == deployment_identifier),
+            Err(error) => {
+                return retirement_terminal_output(
+                    &self.store,
+                    deployment_identifier,
+                    memory::DeploymentTerminal::Failed(retirement_failure(StageFailure::from(
+                        format!("could not verify retirement identity: {error}"),
+                    ))),
+                );
+            }
+        };
+        let Some(record) = record else {
+            return retirement_terminal_output(
+                &self.store,
+                deployment_identifier,
+                memory::DeploymentTerminal::Failed(retirement_failure(StageFailure::from(
+                    "accepted retirement has no retained deployment identity",
+                ))),
+            );
+        };
+        let expected_identity =
+            user_environment_retirement_identity(&memory::UserEnvironmentRetirement {
+                cluster_name: job.cluster_name.clone(),
+                node_name: job.node_name.clone(),
+                user_name: job.user_name.clone(),
+                deployment_transport: job.deployment_transport.clone(),
+            });
+        if record.deployment_request_identity != expected_identity {
+            return retirement_terminal_output(
+                &self.store,
+                deployment_identifier,
+                memory::DeploymentTerminal::Failed(retirement_failure(StageFailure::from(
+                    "retirement job and durable deployment identity disagree",
+                ))),
+            );
+        }
+        let membership = match user_environment_retirement_membership(&self.store, &job) {
+            Ok(membership) => membership,
+            Err(error) => {
+                return retirement_terminal_output(
+                    &self.store,
+                    deployment_identifier,
+                    memory::DeploymentTerminal::Failed(retirement_failure(StageFailure::from(
+                        format!("could not resolve retirement roots: {error}"),
+                    ))),
+                );
+            }
+        };
+        if !membership.known_environment {
+            return retirement_terminal_output(
+                &self.store,
+                deployment_identifier,
+                memory::DeploymentTerminal::Rejected(
+                    memory::DeploymentTerminalReason::UnknownEnvironment,
+                ),
+            );
+        }
+        if membership.pinned {
+            return retirement_terminal_output(
+                &self.store,
+                deployment_identifier,
+                memory::DeploymentTerminal::Rejected(
+                    memory::DeploymentTerminalReason::EnvironmentPinned,
+                ),
+            );
+        }
+        let target = match UserEnvironmentRetirementTarget::from_job(&job) {
+            Ok(target) => target,
+            Err(detail) => {
+                eprintln!("lojix rejected retirement routing: {detail}");
+                return retirement_terminal_output(
+                    &self.store,
+                    deployment_identifier,
+                    memory::DeploymentTerminal::Rejected(
+                        memory::DeploymentTerminalReason::InvalidDeploymentRouting,
+                    ),
+                );
+            }
+        };
+        match target
+            .inspect(
+                &membership.closure_vector,
+                self.configuration.effect_execution(),
+            )
+            .await
+        {
+            Ok(UserEnvironmentLiveness::Live(_evidence)) => {
+                return retirement_terminal_output(
+                    &self.store,
+                    deployment_identifier,
+                    memory::DeploymentTerminal::Rejected(
+                        memory::DeploymentTerminalReason::EnvironmentLive,
+                    ),
+                );
+            }
+            Ok(UserEnvironmentLiveness::NotLive(_evidence)) => {}
+            Ok(UserEnvironmentLiveness::IdentityMismatch(_evidence)) => {
+                return retirement_terminal_output(
+                    &self.store,
+                    deployment_identifier,
+                    memory::DeploymentTerminal::Rejected(
+                        memory::DeploymentTerminalReason::InvalidDeploymentRouting,
+                    ),
+                );
+            }
+            Ok(UserEnvironmentLiveness::Unknown(evidence)) => {
+                return retirement_terminal_output(
+                    &self.store,
+                    deployment_identifier,
+                    memory::DeploymentTerminal::Failed(retirement_failure(
+                        StageFailure::from("target Home liveness evidence is ambiguous")
+                            .with_output(ReportedOutput::new("target observation", evidence)),
+                    )),
+                );
+            }
+            Err(failure) => {
+                return retirement_terminal_output(
+                    &self.store,
+                    deployment_identifier,
+                    memory::DeploymentTerminal::Failed(retirement_failure(failure)),
+                );
+            }
+        }
+        match target
+            .remove_profile_generations(
+                &membership.closure_vector,
+                self.configuration.effect_execution(),
+            )
+            .await
+        {
+            Ok(UserEnvironmentRetirementRemoval::Removed) => {}
+            Ok(UserEnvironmentRetirementRemoval::BecameLive(evidence)) => {
+                return retirement_terminal_output(
+                    &self.store,
+                    deployment_identifier,
+                    memory::DeploymentTerminal::Rejected(
+                        memory::DeploymentTerminalReason::EnvironmentLive,
+                    ),
+                );
+            }
+            Ok(UserEnvironmentRetirementRemoval::IdentityMismatch(_evidence)) => {
+                return retirement_terminal_output(
+                    &self.store,
+                    deployment_identifier,
+                    memory::DeploymentTerminal::Rejected(
+                        memory::DeploymentTerminalReason::InvalidDeploymentRouting,
+                    ),
+                );
+            }
+            Ok(UserEnvironmentRetirementRemoval::Unknown(evidence)) => {
+                return retirement_terminal_output(
+                    &self.store,
+                    deployment_identifier,
+                    memory::DeploymentTerminal::Failed(retirement_failure(
+                        StageFailure::from("locked target recheck returned ambiguous evidence")
+                            .with_output(ReportedOutput::new("target observation", evidence)),
+                    )),
+                );
+            }
+            Err(failure) => {
+                return retirement_terminal_output(
+                    &self.store,
+                    deployment_identifier,
+                    memory::DeploymentTerminal::Failed(retirement_failure(failure)),
+                );
+            }
+        }
+        match self
+            .store
+            .finish_user_environment_retirement(deployment_identifier)
+        {
+            Ok(record) => meta::Output::DeployTerminal(record),
+            Err(error) => {
+                let record = self
+                    .store
+                    .records::<memory::DeploymentRecord>()
+                    .ok()
+                    .and_then(|rows| {
+                        rows.into_iter().find(|record| {
+                            *record.deployment_identifier.payload() == deployment_identifier
+                        })
+                    });
+                if record.as_ref().is_some_and(|record| {
+                    record.optional_deployment_terminal
+                        == Some(memory::DeploymentTerminal::Succeeded)
+                }) {
+                    let _ = self.store.reconcile_pending_transition_intents();
+                    match self
+                        .store
+                        .records::<memory::DeploymentRecord>()
+                        .ok()
+                        .and_then(|rows| {
+                            rows.into_iter().find(|record| {
+                                *record.deployment_identifier.payload() == deployment_identifier
+                            })
+                    }) {
+                        Some(record)
+                            if record.optional_deployment_terminal
+                                == Some(memory::DeploymentTerminal::Succeeded)
+                                && record.optional_terminal_marker.is_some() =>
+                        {
+                            meta::Output::DeployTerminal(record)
+                        }
+                        Some(record)
+                            if record.optional_deployment_terminal
+                                == Some(memory::DeploymentTerminal::Succeeded) =>
+                        {
+                            self.refuse_deploy(
+                                memory::DeployRefusalReason::DurableWriteFailed,
+                                &format!(
+                                    "retirement success intent remains unacknowledged without its terminal marker: {error}"
+                                ),
+                            )
+                        }
+                        Some(record) => self.refuse_deploy(
+                            memory::DeployRefusalReason::DurableWriteFailed,
+                            &format!(
+                                "retirement record did not acknowledge success after intent recovery: {error}; observed {record:?}"
+                            ),
+                        ),
+                        None => self
+                            .refuse_deploy(memory::DeployRefusalReason::DurableWriteFailed, &error),
+                    }
+                } else {
+                    retirement_terminal_output(
+                        &self.store,
+                        deployment_identifier,
+                        memory::DeploymentTerminal::Failed(retirement_failure(StageFailure::from(
+                            format!(
+                                "target profile was removed but durable retirement finalization failed: {error}"
+                            ),
+                        ))),
+                    )
+                }
+            }
         }
     }
 
@@ -4860,6 +5251,11 @@ pub(crate) trait MemoryApplying {
         submission: memory::DeploySubmission,
     ) -> memory::MemoryWriteOutput;
 
+    fn record_user_environment_retirement(
+        &mut self,
+        request: memory::UserEnvironmentRetirement,
+    ) -> memory::MemoryWriteOutput;
+
     fn record_phase_transition(
         &mut self,
         event: ordinary::DeploymentPhaseEvent,
@@ -4910,6 +5306,9 @@ impl MemoryApplying for SchemaRuntime {
             memory::MemoryWriteInput::ReverseConfiguration => self.reverse_meta_configuration(),
             memory::MemoryWriteInput::RecordDeploySubmitted(submission) => {
                 self.record_deploy_submitted(submission)
+            }
+            memory::MemoryWriteInput::RecordUserEnvironmentRetirement(request) => {
+                self.record_user_environment_retirement(request)
             }
             memory::MemoryWriteInput::RecordPhaseTransition(event) => {
                 self.record_phase_transition(event)
@@ -5005,6 +5404,12 @@ impl MemoryApplying for SchemaRuntime {
             // `submit_deploy` already answers a rejected write with a typed
             // rejection; this reports the real cause to the journal and takes
             // that path instead of aborting the daemon.
+            Err(crate::Error::DeploymentInFlight) => {
+                return Self::write_rejected(
+                    self.current_commit_sequence(),
+                    memory::RejectionReason::EnvironmentRetirementInFlight,
+                );
+            }
             Err(error) => return self.reject_durable_write(&error),
         };
         let Some(admission_marker) = record.optional_admission_marker.clone() else {
@@ -5029,6 +5434,23 @@ impl MemoryApplying for SchemaRuntime {
             deployment_identifier,
             state_marker: accepted_marker,
         })
+    }
+
+    fn record_user_environment_retirement(
+        &mut self,
+        request: memory::UserEnvironmentRetirement,
+    ) -> memory::MemoryWriteOutput {
+        match self.submit_user_environment_retirement(request) {
+            DeploySubmissionOutcome::Accepted(handle) => {
+                memory::MemoryWriteOutput::UserEnvironmentRetirementSubmitted(handle)
+            }
+            DeploySubmissionOutcome::Rejected(rejected) => {
+                memory::MemoryWriteOutput::UserEnvironmentRetirementRejected(rejected)
+            }
+            DeploySubmissionOutcome::Refused(refused) => {
+                memory::MemoryWriteOutput::UserEnvironmentRetirementRefused(refused)
+            }
+        }
     }
 
     fn record_phase_transition(
@@ -5149,7 +5571,12 @@ impl MemoryApplying for SchemaRuntime {
         let committed = self
             .store
             .mutate_gc_root(root)
-            .and_then(|()| self.store.commit_sequence());
+            .and_then(|outcome| match outcome {
+                crate::GenerationMutationOutcome::Applied => self.store.commit_sequence(),
+                crate::GenerationMutationOutcome::EnvironmentRetirementInFlight => {
+                    Err(crate::Error::DeploymentInFlight)
+                }
+            });
         match committed {
             Ok(commit_sequence) => memory::MemoryWriteOutput::GenerationPinned(meta::AppliedPin {
                 generation_identifier: request.generation_identifier,
@@ -5158,6 +5585,10 @@ impl MemoryApplying for SchemaRuntime {
                 to_slot: ordinary::GenerationSlot::Pinned,
                 state_marker: ordinary::StateMarker::from(commit_sequence),
             }),
+            Err(crate::Error::DeploymentInFlight) => Self::write_rejected(
+                current_sequence,
+                memory::RejectionReason::EnvironmentRetirementInFlight,
+            ),
             Err(error) => panic!("persist generation pin transition: {error}"),
         }
     }
@@ -5185,7 +5616,12 @@ impl MemoryApplying for SchemaRuntime {
         let committed = self
             .store
             .mutate_gc_root(root)
-            .and_then(|()| self.store.commit_sequence());
+            .and_then(|outcome| match outcome {
+                crate::GenerationMutationOutcome::Applied => self.store.commit_sequence(),
+                crate::GenerationMutationOutcome::EnvironmentRetirementInFlight => {
+                    Err(crate::Error::DeploymentInFlight)
+                }
+            });
         match committed {
             Ok(commit_sequence) => {
                 memory::MemoryWriteOutput::GenerationUnpinned(meta::AppliedUnpin {
@@ -5196,6 +5632,10 @@ impl MemoryApplying for SchemaRuntime {
                     state_marker: ordinary::StateMarker::from(commit_sequence),
                 })
             }
+            Err(crate::Error::DeploymentInFlight) => Self::write_rejected(
+                current_sequence,
+                memory::RejectionReason::EnvironmentRetirementInFlight,
+            ),
             Err(error) => panic!("persist generation unpin transition: {error}"),
         }
     }
@@ -5225,7 +5665,12 @@ impl MemoryApplying for SchemaRuntime {
         let committed = self
             .store
             .retract_gc_root(*request.generation_identifier.payload())
-            .and_then(|()| self.store.commit_sequence());
+            .and_then(|outcome| match outcome {
+                crate::GenerationMutationOutcome::Applied => self.store.commit_sequence(),
+                crate::GenerationMutationOutcome::EnvironmentRetirementInFlight => {
+                    Err(crate::Error::DeploymentInFlight)
+                }
+            });
         match committed {
             Ok(commit_sequence) => {
                 memory::MemoryWriteOutput::GenerationRetired(meta::AppliedRetire {
@@ -5234,6 +5679,10 @@ impl MemoryApplying for SchemaRuntime {
                     state_marker: ordinary::StateMarker::from(commit_sequence),
                 })
             }
+            Err(crate::Error::DeploymentInFlight) => Self::write_rejected(
+                current_sequence,
+                memory::RejectionReason::EnvironmentRetirementInFlight,
+            ),
             Err(error) => panic!("persist generation retirement: {error}"),
         }
     }
@@ -5672,7 +6121,12 @@ impl EffectRunning for SchemaRuntime {
         &self,
         command: nexus::ActivateGenerationCommand,
     ) -> nexus::EffectResult {
-        let slot = command.activation_effect.activation_slot();
+        let Some(slot) = command.activation_effect.activation_slot() else {
+            return Self::effect_failed(
+                nexus::EffectStage::Activate,
+                "user-environment retirement is not an activation effect".to_string(),
+            );
+        };
         let activation =
             match Activation::from_command(&command, Some(self.configuration.daemon_host())) {
                 Ok(activation) => activation,
@@ -8098,6 +8552,10 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
     }
 
     fn remote_invocation(&self, command: ShellCommand) -> std::result::Result<NixCommand, String> {
+        let command = ShellArgument::new(command.into_text()).to_command_text();
+        let command = ShellCommand::from_raw(format!(
+            "mkdir -p -- \"$HOME/.local/state/nix/profiles\" && flock -x \"$HOME/.local/state/nix/profiles/.lojix-profile-retirement.lock\" bash -c {command}"
+        ));
         match self.authority {
             RemoteUserActivationAuthority::MatchedUser => {
                 Ok(self.target.remote_invocation(command))
@@ -8134,7 +8592,7 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
         }
         let home = std::env::var("HOME")
             .map_err(|_| "HOME is unset for local home activation".to_string())?;
-        self.local_profile_invocation(Path::new(&home))
+        self.locked_local_invocation(self.local_profile_invocation(Path::new(&home)))
             .run(execution)
             .await
             .map(|_| ())
@@ -8151,7 +8609,7 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
                 .await
                 .map(|_| ());
         }
-        self.local_activate_invocation()
+        self.locked_local_invocation(self.local_activate_invocation())
             .run(execution)
             .await
             .map(|_| ())
@@ -8180,6 +8638,26 @@ impl UserEnvironmentActivating for UserEnvironmentActivation {
     }
 }
 
+impl UserEnvironmentActivation {
+    fn locked_local_invocation(&self, invocation: NixCommand) -> NixCommand {
+        let command = std::iter::once(invocation.program)
+            .chain(invocation.arguments)
+            .map(|argument| ShellArgument::new(argument).to_command_text())
+            .collect::<Vec<_>>()
+            .join(" ");
+        NixCommand::new(
+            "bash",
+            vec![
+                "-c".to_string(),
+                format!(
+                    "mkdir -p -- \"$HOME/.local/state/nix/profiles\" && flock -x \"$HOME/.local/state/nix/profiles/.lojix-profile-retirement.lock\" bash -c {}",
+                    ShellArgument::new(command).to_command_text()
+                ),
+            ],
+        )
+    }
+}
+
 impl Effect for UserEnvironmentActivation {
     type Product = ();
 
@@ -8195,6 +8673,485 @@ impl Effect for UserEnvironmentActivation {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UserEnvironmentLiveness {
+    Live(String),
+    NotLive(String),
+    IdentityMismatch(String),
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UserEnvironmentRetirementRemoval {
+    Removed,
+    BecameLive(String),
+    IdentityMismatch(String),
+    Unknown(String),
+}
+
+#[derive(Debug, Clone)]
+struct UserEnvironmentRetirementTarget {
+    target: SshTarget,
+    authority: RemoteUserActivationAuthority,
+    user: HorizonUserName,
+    node_name: ordinary::NodeName,
+}
+
+const USER_ENVIRONMENT_RETIREMENT_CHECK: &str = r#"
+set -u
+expected_node="$1"
+shift
+profile="$HOME/.local/state/nix/profiles/home-manager"
+unit_dir="$HOME/.config/systemd/user"
+known_exact() {
+  local candidate="$1" expected
+  shift
+  for expected in "$@"; do
+    [[ "$candidate" == "$expected" ]] && return 0
+  done
+  return 1
+}
+known_within() {
+  local candidate="$1" expected
+  shift
+  for expected in "$@"; do
+    [[ "$candidate" == "$expected" || "$candidate" == "$expected/"* ]] && return 0
+  done
+  return 1
+}
+home_files_path() {
+  local candidate="$1" closure references reference
+  shift
+  for closure in "$@"; do
+    references=$(nix-store --query --references "$closure" 2>/dev/null) || { unknown=1; continue; }
+    while IFS= read -r reference; do
+      case "$reference" in
+        *-home-manager-files|*-home-manager-files-*)
+          [[ "$candidate" == "$reference" || "$candidate" == "$reference/"* ]] && return 0
+          ;;
+      esac
+    done <<< "$references"
+  done
+  return 1
+}
+unknown=0
+live=0
+manager_available=0
+identity_mismatch=0
+observed_node=$(hostname -s 2>/dev/null) || { printf 'OBSERVATION target-hostname=unavailable\n'; unknown=1; observed_node=''; }
+printf 'TARGET_IDENTITY %s %s\n' "$expected_node" "${observed_node:-empty}"
+if [[ -n "$observed_node" && "$observed_node" != "$expected_node" ]]; then
+  printf 'TARGET_IDENTITY_MISMATCH expected=%s observed=%s\n' "$expected_node" "$observed_node"
+  identity_mismatch=1
+fi
+if [[ -L "$profile" ]]; then
+  profile_target=$(readlink -e -- "$profile") || { printf 'OBSERVATION profile=unresolved\n'; unknown=1; profile_target=''; }
+  if [[ -n "$profile_target" ]]; then
+    printf 'PROFILE_TARGET %s\n' "$profile_target"
+    known_exact "$profile_target" "$@" || unknown=1
+  fi
+elif [[ -e "$profile" ]]; then
+  printf 'OBSERVATION profile=not-a-symlink\n'
+  unknown=1
+else
+  printf 'OBSERVATION profile=absent\n'
+fi
+for generation in "$profile"-[0-9]*-link; do
+  [[ -L "$generation" ]] || continue
+  name=${generation##*/}
+  [[ "$name" =~ ^home-manager-[0-9]+-link$ ]] || { unknown=1; continue; }
+  target=$(readlink -e -- "$generation") || { printf 'OBSERVATION generation=unresolved:%s\n' "$name"; unknown=1; continue; }
+  printf 'GENERATION_TARGET %s %s\n' "$generation" "$target"
+  known_exact "$target" "$@" || unknown=1
+done
+for effective in "$HOME/.config/home-manager" "$HOME/.config/systemd/user"; do
+  if [[ -L "$effective" ]]; then
+    resolved=$(readlink -e -- "$effective") || { printf 'OBSERVATION effective=unresolved:%s\n' "$effective"; unknown=1; continue; }
+    printf 'EFFECTIVE_TARGET %s %s\n' "$effective" "$resolved"
+    known_within "$resolved" "$@" && live=1
+  fi
+done
+manager_state=$(systemctl --user is-system-running 2>/dev/null)
+manager_status=$?
+printf 'MANAGER_STATE %s %s\n' "$manager_status" "${manager_state:-empty}"
+case "$manager_state" in
+  offline)
+    # systemctl returns status 1 for the canonical `offline` state; only
+    # other statuses mean the observer itself was unusable.
+    if [[ "$manager_status" == 0 || "$manager_status" == 1 ]]; then manager_available=0; else unknown=1; fi
+    ;;
+  running|degraded|starting|initializing|stopping|maintenance)
+    manager_available=1
+    [[ "$manager_status" == 0 || "$manager_status" == 1 ]] || unknown=1
+    ;;
+  *) unknown=1 ;;
+esac
+if [[ -d "$unit_dir" ]]; then
+  find_status=0
+  while IFS= read -r -d '' unit_link; do
+    if [[ "$unit_link" == __LOJIX_FIND_EXIT:* ]]; then
+      find_status=${unit_link##*:}
+      break
+    fi
+    target=$(readlink -e -- "$unit_link") || { printf 'OBSERVATION unit=unresolved:%s\n' "$unit_link"; unknown=1; continue; }
+    printf 'UNIT_TARGET %s %s\n' "$unit_link" "$target"
+    if known_within "$target" "$@" || home_files_path "$target" "$@"; then
+      live=1
+    fi
+  done < <(find "$unit_dir" -type l -print0; printf '__LOJIX_FIND_EXIT:%s\0' "$?")
+  [[ "$find_status" == 0 ]] || unknown=1
+elif [[ -e "$unit_dir" ]]; then
+  unknown=1
+fi
+if (( manager_available )); then
+  units=$(systemctl --user list-units --state=active --plain --no-legend 2>/dev/null) || { unknown=1; units=''; }
+  while read -r unit _; do
+    [[ -n "$unit" ]] || continue
+    properties=$(systemctl --user show "$unit" --property=FragmentPath --property=DropInPaths --property=ExecStart --property=MainPID 2>/dev/null) || { unknown=1; continue; }
+    fragment=$(sed -n 's/^FragmentPath=//p' <<< "$properties")
+    dropins=$(sed -n 's/^DropInPaths=//p' <<< "$properties")
+    exec_start=$(sed -n 's/.*path=\([^ ;}]*\).*/\1/p' <<< "$properties")
+    main_pid=$(sed -n 's/^MainPID=//p' <<< "$properties")
+    if [[ -z "$fragment" ]]; then
+      case "$unit" in
+        *.target|*.slice|*.scope) ;;
+        *) unknown=1 ;;
+      esac
+    fi
+    unit_source_live=0
+    dropin_paths=()
+    read -r -a dropin_paths <<< "$dropins"
+    for source_path in "$fragment" "${dropin_paths[@]}"; do
+      [[ -n "$source_path" && "$source_path" != /dev/null ]] || continue
+      resolved=$(readlink -e -- "$source_path") || { printf 'OBSERVATION unit-source=unresolved:%s:%s\n' "$unit" "$source_path"; unknown=1; continue; }
+      printf 'UNIT_SOURCE %s %s\n' "$unit" "$resolved"
+      if known_within "$resolved" "$@" || home_files_path "$resolved" "$@"; then
+        live=1
+        unit_source_live=1
+      fi
+    done
+    if [[ -n "$exec_start" && "$exec_start" == /* ]]; then
+      resolved_exec=$(readlink -e -- "$exec_start") || { printf 'OBSERVATION unit-exec=unresolved:%s:%s\n' "$unit" "$exec_start"; unknown=1; resolved_exec=''; }
+      if [[ -n "$resolved_exec" ]]; then
+        printf 'UNIT_EXEC %s %s\n' "$unit" "$resolved_exec"
+        if known_within "$resolved_exec" "$@" && (( ! unit_source_live )); then
+          unknown=1
+        fi
+      fi
+    fi
+    if [[ "$main_pid" =~ ^[1-9][0-9]*$ ]]; then
+      process_exe=$(readlink -e -- "/proc/$main_pid/exe") || { printf 'OBSERVATION process-exe=unresolved:%s:%s\n' "$unit" "$main_pid"; unknown=1; process_exe=''; }
+      if [[ -n "$process_exe" ]]; then
+        printf 'PROCESS_EXE %s %s\n' "$unit" "$process_exe"
+        if known_within "$process_exe" "$@" && (( ! unit_source_live )); then
+          unknown=1
+        fi
+      fi
+    fi
+  done <<< "$units"
+fi
+if (( identity_mismatch )); then
+  printf 'VERDICT IDENTITY_MISMATCH\n'
+elif (( live )); then
+  printf 'VERDICT LIVE\n'
+elif (( unknown )); then
+  printf 'VERDICT UNKNOWN\n'
+else
+  printf 'VERDICT NOT_LIVE\n'
+fi
+"#;
+
+trait UserEnvironmentRetirementTargeting {
+    fn from_job(job: &memory::UserEnvironmentRetirementJob) -> std::result::Result<Self, String>
+    where
+        Self: Sized;
+
+    fn shell_command(
+        &self,
+        script: &str,
+        known_closures: &[ordinary::ClosurePath],
+    ) -> std::result::Result<NixCommand, String>;
+
+    async fn inspect(
+        &self,
+        known_closures: &[ordinary::ClosurePath],
+        execution: &EffectExecution,
+    ) -> std::result::Result<UserEnvironmentLiveness, StageFailure>;
+
+    async fn remove_profile_generations(
+        &self,
+        known_closures: &[ordinary::ClosurePath],
+        execution: &EffectExecution,
+    ) -> std::result::Result<UserEnvironmentRetirementRemoval, StageFailure>;
+}
+
+impl UserEnvironmentRetirementTargeting for UserEnvironmentRetirementTarget {
+    fn from_job(job: &memory::UserEnvironmentRetirementJob) -> std::result::Result<Self, String> {
+        let user = HorizonUserName::try_from(job.user_name.payload().clone())?;
+        let target = SshTarget::from_transport(&nexus::DeploymentTransport {
+            nix_store_uri: nexus::NixStoreUri::new(
+                job.deployment_transport.nix_store_uri.payload().clone(),
+            ),
+            ssh_destination: nexus::SshDestination::new(
+                job.deployment_transport.ssh_destination.payload().clone(),
+            ),
+        })?;
+        let authority = target.user_environment_activation_authority(&user);
+        if authority == RemoteUserActivationAuthority::UnprivilegedMismatch {
+            return Err(
+                "retirement SSH login must be the named user or root with runuser mediation"
+                    .to_string(),
+            );
+        }
+        Ok(Self {
+            target,
+            authority,
+            user,
+            node_name: job.node_name.clone(),
+        })
+    }
+
+    fn shell_command(
+        &self,
+        script: &str,
+        known_closures: &[ordinary::ClosurePath],
+    ) -> std::result::Result<NixCommand, String> {
+        let mut arguments = vec![
+            ShellArgument::new("bash").to_command_text(),
+            ShellArgument::new("-c").to_command_text(),
+            ShellArgument::new(script).to_command_text(),
+            ShellArgument::new("lojix-user-environment-retirement").to_command_text(),
+            ShellArgument::new(self.node_name.payload()).to_command_text(),
+        ];
+        for closure in known_closures {
+            let path = closure.payload();
+            if !NixStorePath::from(path.as_str()).is_canonical_item_root() {
+                return Err(format!("retirement closure path is not canonical: {path}"));
+            }
+            arguments.push(ShellArgument::new(path).to_command_text());
+        }
+        let command = ShellCommand::from_raw(arguments.join(" "));
+        let remote = match self.authority {
+            RemoteUserActivationAuthority::MatchedUser => self.target.remote_invocation(command),
+            RemoteUserActivationAuthority::RootMediated => {
+                let user = ShellArgument::new(self.user.as_str()).to_command_text();
+                let command = ShellArgument::new(command.into_text()).to_command_text();
+                self.target
+                    .remote_invocation(ShellCommand::from_raw(format!(
+                        "runuser --login --command {command} {user}"
+                    )))
+            }
+            RemoteUserActivationAuthority::UnprivilegedMismatch => {
+                return Err("retirement lacks user or root SSH authority".to_string());
+            }
+        };
+        Ok(remote)
+    }
+
+    async fn inspect(
+        &self,
+        known_closures: &[ordinary::ClosurePath],
+        execution: &EffectExecution,
+    ) -> std::result::Result<UserEnvironmentLiveness, StageFailure> {
+        let command = self
+            .shell_command(USER_ENVIRONMENT_RETIREMENT_CHECK, known_closures)
+            .map_err(StageFailure::from)?;
+        let output = command.run(execution).await?;
+        let verdict = output
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix("VERDICT "));
+        Ok(match verdict {
+            Some("LIVE") => UserEnvironmentLiveness::Live(output),
+            Some("NOT_LIVE") => UserEnvironmentLiveness::NotLive(output),
+            Some("IDENTITY_MISMATCH") => UserEnvironmentLiveness::IdentityMismatch(output),
+            _ => UserEnvironmentLiveness::Unknown(output),
+        })
+    }
+
+    async fn remove_profile_generations(
+        &self,
+        known_closures: &[ordinary::ClosurePath],
+        execution: &EffectExecution,
+    ) -> std::result::Result<UserEnvironmentRetirementRemoval, StageFailure> {
+        let check = ShellArgument::new(USER_ENVIRONMENT_RETIREMENT_CHECK).to_command_text();
+        let script = format!(
+            r#"
+set -eu
+profile="$HOME/.local/state/nix/profiles/home-manager"
+expected_node="$1"
+shift
+profile_dir="${{profile%/*}}"
+lock_file="$profile_dir/.lojix-profile-retirement.lock"
+[[ -f "$lock_file" ]] || {{ printf 'RETIREMENT_LOCK_MISSING\n' >&2; exit 46; }}
+exec 9<"$lock_file"
+flock -x 9
+observation=$(bash -c {check} lojix-user-environment-retirement "$expected_node" "$@")
+printf '%s\n' "$observation"
+verdict=$(printf '%s\n' "$observation" | tail -n 1)
+if [[ "$verdict" == 'VERDICT LIVE' ]]; then
+  printf 'RETIREMENT_BLOCKED LIVE\n'
+  exit 0
+elif [[ "$verdict" == 'VERDICT IDENTITY_MISMATCH' ]]; then
+  printf 'RETIREMENT_BLOCKED IDENTITY_MISMATCH\n'
+  exit 0
+elif [[ "$verdict" != 'VERDICT NOT_LIVE' ]]; then
+  printf 'RETIREMENT_BLOCKED UNKNOWN\n'
+  exit 0
+fi
+known_exact() {{
+  local candidate="$1" expected
+  shift
+  for expected in "$@"; do
+    [[ "$candidate" == "$expected" ]] && return 0
+  done
+  return 1
+}}
+# Validate the entire exact profile family before removing the first link.
+for generation in "$profile"-[0-9]*-link; do
+  [[ -L "$generation" ]] || continue
+  name=${{generation##*/}}
+  [[ "$name" =~ ^home-manager-[0-9]+-link$ ]] || {{ printf 'RETIREMENT_UNKNOWN_GENERATION %s\n' "$name" >&2; exit 42; }}
+  target=$(readlink -e -- "$generation") || {{ printf 'RETIREMENT_UNRESOLVED_GENERATION %s\n' "$name" >&2; exit 43; }}
+  known_exact "$target" "$@" || {{ printf 'RETIREMENT_UNOWNED_GENERATION %s %s\n' "$name" "$target" >&2; exit 44; }}
+done
+for generation in "$profile"-[0-9]*-link; do
+  [[ -L "$generation" ]] || continue
+  name=${{generation##*/}}
+  [[ "$name" =~ ^home-manager-[0-9]+-link$ ]] || continue
+  rm -- "$generation"
+  printf 'REMOVED_GENERATION %s\n' "$name"
+done
+if [[ -L "$profile" ]]; then
+  rm -- "$profile"
+  printf 'REMOVED_PROFILE_SELECTOR\n'
+elif [[ -e "$profile" ]]; then
+  printf 'RETIREMENT_PROFILE_NOT_A_SYMLINK\n' >&2
+  exit 45
+fi
+printf 'RETIREMENT_REMOVAL_COMPLETE\n'
+"#,
+            check = check,
+        );
+        let command = self
+            .shell_command(&script, known_closures)
+            .map_err(StageFailure::from)?;
+        let output = command.run(execution).await?;
+        if !output
+            .lines()
+            .any(|line| line == "RETIREMENT_REMOVAL_COMPLETE")
+        {
+            return match output
+                .lines()
+                .find(|line| line.starts_with("RETIREMENT_BLOCKED "))
+            {
+                Some("RETIREMENT_BLOCKED LIVE") => {
+                    Ok(UserEnvironmentRetirementRemoval::BecameLive(output))
+                }
+                Some("RETIREMENT_BLOCKED IDENTITY_MISMATCH") => {
+                    Ok(UserEnvironmentRetirementRemoval::IdentityMismatch(output))
+                }
+                Some(_) => Ok(UserEnvironmentRetirementRemoval::Unknown(output)),
+                None => Err(StageFailure::from(format!(
+                    "retirement removal command did not confirm completion: {output}"
+                ))),
+            };
+        }
+        Ok(UserEnvironmentRetirementRemoval::Removed)
+    }
+}
+#[derive(Debug, Clone)]
+struct UserEnvironmentRetirementMembership {
+    known_environment: bool,
+    pinned: bool,
+    closure_vector: Vec<ordinary::ClosurePath>,
+}
+
+fn user_environment_retirement_membership(
+    store: &Store,
+    job: &memory::UserEnvironmentRetirementJob,
+) -> Result<UserEnvironmentRetirementMembership> {
+    let environment = memory::DeploymentEnvironment::UserEnvironment(job.user_name.clone());
+    let retained_deployments = store
+        .records::<memory::DeploymentRecord>()?
+        .into_iter()
+        .filter(|record| {
+            let identity = &record.deployment_request_identity;
+            identity.cluster_name == job.cluster_name
+                && identity.node_name == job.node_name
+                && identity.deployment_environment == environment
+                && identity.generation_artifact == ordinary::GenerationArtifact::UserEnvironment
+                && matches!(
+                    &identity.requested_deployment_action,
+                    ordinary::RequestedDeploymentAction::UserEnvironment(_)
+                )
+        })
+        .collect::<Vec<_>>();
+    let deployment_generation_ids = retained_deployments
+        .iter()
+        .map(|record| *record.generation_identifier.payload())
+        .collect::<std::collections::BTreeSet<_>>();
+    let live = store
+        .records::<memory::LiveGeneration>()?
+        .into_iter()
+        .filter(|generation| {
+            generation.cluster_name == job.cluster_name
+                && generation.node_name == job.node_name
+                && generation.deployment_environment == environment
+                && generation.generation_artifact == ordinary::GenerationArtifact::UserEnvironment
+        })
+        .collect::<Vec<_>>();
+    let roots = store
+        .records::<memory::GcRoot>()?
+        .into_iter()
+        .filter(|root| {
+            root.cluster_name == job.cluster_name
+                && root.node_name == job.node_name
+                && deployment_generation_ids.contains(root.generation_identifier.payload())
+        })
+        .collect::<Vec<_>>();
+    let mut closure_vector = live
+        .iter()
+        .map(|generation| generation.closure_path.clone())
+        .chain(roots.iter().map(|root| root.closure_path.clone()))
+        .collect::<Vec<_>>();
+    closure_vector.sort_by(|left, right| left.payload().cmp(right.payload()));
+    closure_vector.dedup_by(|left, right| left == right);
+    Ok(UserEnvironmentRetirementMembership {
+        known_environment: !live.is_empty() || !roots.is_empty(),
+        pinned: roots
+            .iter()
+            .any(|root| matches!(root.generation_slot, ordinary::GenerationSlot::Pinned)),
+        closure_vector,
+    })
+}
+
+fn retirement_terminal_output(
+    store: &Store,
+    deployment_identifier: u64,
+    terminal: memory::DeploymentTerminal,
+) -> meta::Output {
+    match store.terminalize_deployment(deployment_identifier, terminal) {
+        Ok(record) => meta::Output::DeployTerminal(record),
+        Err(error) => {
+            eprintln!(
+                "lojix could not terminalize user-environment retirement {deployment_identifier}: {error}"
+            );
+            meta::Output::DeployRefused(memory::RefusedDeploy {
+                deploy_refusal_reason: memory::DeployRefusalReason::DurableWriteFailed,
+                state_marker: ordinary::StateMarker::from(store.commit_sequence().unwrap_or(0)),
+            })
+        }
+    }
+}
+
+fn retirement_failure(failure: StageFailure) -> memory::DeploymentFailure {
+    memory::DeploymentFailure {
+        deployment_failure_stage: memory::DeploymentFailureStage::Daemon,
+        deployment_terminal_reason: memory::DeploymentTerminalReason::EnvironmentRetirementFailed,
+        optional_failure_evidence: Some(failure.witness()),
+    }
+}
 /// A typed `nix` / `nix-store` invocation. Holds the program name and its
 /// argument vector so the same value can be inspected before it runs; `run`
 /// spawns it via `tokio::process::Command` and returns captured stdout or a
@@ -8764,6 +9721,281 @@ mod tests {
 
     fn fixture_output_selector() -> memory::DeploymentOutputSelector {
         memory::DeploymentOutputSelector::new(memory::FlakeAttribute::from("checks.fixture-a"))
+    }
+
+    const USER_ENVIRONMENT_CLOSURE: &str =
+        "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-home-manager-generation";
+    const USER_ENVIRONMENT_FILES: &str =
+        "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-home-manager-files";
+
+    fn fixture_retirement_target() -> UserEnvironmentRetirementTarget {
+        let target = SshTarget::from_transport(&nexus::DeploymentTransport {
+            nix_store_uri: nexus::NixStoreUri::new("ssh-ng://fixture.invalid".to_string()),
+            ssh_destination: nexus::SshDestination::new("fixture-user@fixture.invalid".to_string()),
+        })
+        .expect("fixture target");
+        let user = HorizonUserName::try_from("fixture-user".to_string()).expect("fixture user");
+        let authority = target.user_environment_activation_authority(&user);
+        UserEnvironmentRetirementTarget {
+            target,
+            authority,
+            user,
+            node_name: ordinary::NodeName::from("fixture-node"),
+        }
+    }
+
+    struct RetirementTargetFixture {
+        _directory: tempfile::TempDir,
+        execution: EffectExecution,
+        home: PathBuf,
+        bin: PathBuf,
+    }
+
+    impl RetirementTargetFixture {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let directory = tempfile::tempdir().expect("retirement fixture directory");
+            let home = directory.path().join("home");
+            let bin = directory.path().join("bin");
+            let profile_dir = home.join(".local/state/nix/profiles");
+            let unit_dir = home.join(".config/systemd/user");
+            let host_unit_source = home.join("host-driven.service");
+            fs::create_dir_all(&profile_dir).expect("profile directory");
+            fs::create_dir_all(&unit_dir).expect("unit directory");
+            fs::write(&host_unit_source, "[Service]\nExecStart=/usr/bin/sleep 1\n")
+                .expect("host-driven service source");
+            std::os::unix::fs::symlink(&host_unit_source, unit_dir.join("fixture-host.service"))
+                .expect("host-driven unit symlink");
+            fs::write(
+                profile_dir.join(".lojix-profile-retirement.lock"),
+                "fixture lock",
+            )
+            .expect("retirement lock");
+            std::os::unix::fs::symlink(USER_ENVIRONMENT_CLOSURE, profile_dir.join("home-manager"))
+                .expect("current profile selector");
+            std::os::unix::fs::symlink(
+                USER_ENVIRONMENT_CLOSURE,
+                profile_dir.join("home-manager-1-link"),
+            )
+            .expect("current profile generation");
+            std::os::unix::fs::symlink(
+                "/tmp/unrelated-profile-closure",
+                profile_dir.join("profile-1-link"),
+            )
+            .expect("unrelated profile generation");
+            fs::create_dir_all(&bin).expect("fixture bin");
+
+            let fixture_path = directory.path().to_string_lossy();
+            let real_readlink =
+                std::env::split_paths(&std::env::var_os("PATH").expect("test PATH"))
+                    .map(|directory| directory.join("readlink"))
+                    .find(|candidate| candidate.is_file())
+                    .expect("real readlink on test PATH");
+            let fake_ssh = format!(
+                "#!/bin/sh\nremote=\"$4\"\nHOME='{fixture_path}/home' PATH='{fixture_path}/bin':\"$PATH\" bash -c \"$remote\"\n"
+            );
+            Self::write_program(&bin.join("ssh"), &fake_ssh);
+            Self::write_program(
+                &bin.join("readlink"),
+                &format!(
+                    "#!/bin/sh\npath=\"$3\"\ncase \"$path\" in /nix/store/*) printf '%s\\n' \"$path\";; *) raw=$(\"{}\" -- \"$path\" 2>/dev/null) || raw=; case \"$raw\" in /nix/store/*) printf '%s\\n' \"$raw\";; *) exec '{}' -e -- \"$path\";; esac;; esac\n",
+                    real_readlink.display(),
+                    real_readlink.display()
+                ),
+            );
+            Self::write_program(
+                &bin.join("nix-store"),
+                "#!/bin/sh\ncat \"$HOME/references\"\n",
+            );
+            Self::write_program(
+                &bin.join("systemctl"),
+                "#!/bin/sh\ncase \"$*\" in *'is-system-running'*) cat \"$HOME/manager-state\"; exit \"$(cat \"$HOME/manager-status\")\";; *'list-units'*) cat \"$HOME/active-units\";; *'show'*) case \"$3\" in *.target) cat \"$HOME/target.properties\";; *) cat \"$HOME/service.properties\";; esac;; *) exit 90;; esac\n",
+            );
+            Self::write_program(
+                &bin.join("hostname"),
+                "#!/bin/sh\ncat \"$HOME/target-node\"\n",
+            );
+            fs::write(
+                home.join("references"),
+                format!("{USER_ENVIRONMENT_FILES}\n"),
+            )
+            .expect("store references");
+            fs::write(home.join("manager-state"), "offline\n").expect("manager state");
+            fs::write(home.join("manager-status"), "1\n").expect("offline manager status");
+            fs::write(home.join("target-node"), "fixture-node\n").expect("target node");
+            fs::write(home.join("active-units"), "").expect("active units");
+            fs::write(
+                home.join("service.properties"),
+                format!(
+                    "FragmentPath={}\nDropInPaths=\nExecStart=\nMainPID=0\n",
+                    host_unit_source.display()
+                ),
+            )
+            .expect("service properties");
+            fs::write(
+                home.join("target.properties"),
+                "FragmentPath=\nDropInPaths=\nExecStart=\nMainPID=0\n",
+            )
+            .expect("target properties");
+            Self {
+                _directory: directory,
+                execution: EffectExecution::test(bin.clone()),
+                home,
+                bin,
+            }
+        }
+
+        fn write_program(path: &Path, contents: &str) {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::write(path, contents).expect("write fixture program");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+                .expect("make fixture program executable");
+        }
+
+        fn active_host_manager(&self) {
+            fs::write(self.home.join("manager-state"), "running\n").expect("running manager state");
+            fs::write(self.home.join("manager-status"), "0\n").expect("manager status");
+            fs::write(
+                self.home.join("active-units"),
+                "host.target loaded active active Host target\nfixture-host.service loaded active running Host service\n",
+            )
+            .expect("active host units");
+        }
+    }
+
+    #[test]
+    fn retirement_liveness_allows_a_running_host_driven_user_manager() {
+        let fixture = RetirementTargetFixture::new();
+        fixture.active_host_manager();
+        let target = fixture_retirement_target();
+        let known = vec![ordinary::ClosurePath::from(USER_ENVIRONMENT_CLOSURE)];
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let result = runtime
+            .block_on(target.inspect(&known, &fixture.execution))
+            .expect("inspect host-driven manager");
+        match result {
+            UserEnvironmentLiveness::NotLive(evidence) => {
+                assert!(evidence.contains("MANAGER_STATE 0 running"), "{evidence}");
+                assert!(evidence.contains("VERDICT NOT_LIVE"), "{evidence}");
+            }
+            other => panic!("host-driven manager should be retireable: {other:?}"),
+        }
+        drop(fixture);
+    }
+
+    #[test]
+    fn retirement_liveness_rejects_a_live_standalone_user_service() {
+        let fixture = RetirementTargetFixture::new();
+        fixture.active_host_manager();
+        fs::write(
+            fixture.home.join("service.properties"),
+            format!(
+                "FragmentPath={USER_ENVIRONMENT_FILES}/systemd/user/home-manager.service\nDropInPaths=\nExecStart=\nMainPID=0\n"
+            ),
+        )
+        .expect("standalone service properties");
+        let target = fixture_retirement_target();
+        let known = vec![ordinary::ClosurePath::from(USER_ENVIRONMENT_CLOSURE)];
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let result = runtime
+            .block_on(target.inspect(&known, &fixture.execution))
+            .expect("inspect standalone service");
+        match result {
+            UserEnvironmentLiveness::Live(evidence) => {
+                assert!(
+                    evidence.contains(&format!(
+                        "UNIT_SOURCE fixture-host.service {USER_ENVIRONMENT_FILES}"
+                    )),
+                    "{evidence}"
+                );
+                assert!(evidence.contains("VERDICT LIVE"), "{evidence}");
+            }
+            other => panic!("standalone service must keep environment live: {other:?}"),
+        }
+        drop(fixture);
+    }
+
+    #[test]
+    fn retirement_liveness_fails_closed_on_find_and_systemctl_errors() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = RetirementTargetFixture::new();
+        let target = fixture_retirement_target();
+        let known = vec![ordinary::ClosurePath::from(USER_ENVIRONMENT_CLOSURE)];
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        RetirementTargetFixture::write_program(&fixture.bin.join("find"), "#!/bin/sh\nexit 1\n");
+        let result = runtime
+            .block_on(target.inspect(&known, &fixture.execution))
+            .expect("inspect with failed find");
+        assert!(
+            matches!(result, UserEnvironmentLiveness::Unknown(_)),
+            "{result:?}"
+        );
+
+        fs::remove_file(fixture.bin.join("find")).expect("remove fake find");
+        fs::write(
+            fixture.bin.join("systemctl"),
+            "#!/bin/sh\nprintf 'systemctl failed\\n'\nexit 1\n",
+        )
+        .expect("write failing systemctl");
+        fs::set_permissions(
+            fixture.bin.join("systemctl"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("make failing systemctl executable");
+        let result = runtime
+            .block_on(target.inspect(&known, &fixture.execution))
+            .expect("inspect with failed systemctl");
+        assert!(
+            matches!(result, UserEnvironmentLiveness::Unknown(_)),
+            "{result:?}"
+        );
+        drop(fixture);
+    }
+
+    #[test]
+    fn retirement_refuses_a_route_that_reaches_a_different_logical_node() {
+        let fixture = RetirementTargetFixture::new();
+        fs::write(fixture.home.join("target-node"), "different-node\n")
+            .expect("mismatched target identity");
+        let target = fixture_retirement_target();
+        let known = vec![ordinary::ClosurePath::from(USER_ENVIRONMENT_CLOSURE)];
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        assert!(matches!(
+            runtime.block_on(target.inspect(&known, &fixture.execution)),
+            Ok(UserEnvironmentLiveness::IdentityMismatch(_))
+        ));
+        assert!(matches!(
+            runtime.block_on(target.remove_profile_generations(&known, &fixture.execution)),
+            Ok(UserEnvironmentRetirementRemoval::IdentityMismatch(_))
+        ));
+        let profile_dir = fixture.home.join(".local/state/nix/profiles");
+        assert!(fs::symlink_metadata(profile_dir.join("home-manager")).is_ok());
+        assert!(fs::symlink_metadata(profile_dir.join("home-manager-1-link")).is_ok());
+        drop(fixture);
+    }
+
+    #[test]
+    fn retirement_removes_only_exact_profile_generation_links_after_safe_recheck() {
+        let fixture = RetirementTargetFixture::new();
+        let target = fixture_retirement_target();
+        let known = vec![ordinary::ClosurePath::from(USER_ENVIRONMENT_CLOSURE)];
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        assert!(matches!(
+            runtime.block_on(target.inspect(&known, &fixture.execution)),
+            Ok(UserEnvironmentLiveness::NotLive(_))
+        ));
+        let result = runtime
+            .block_on(target.remove_profile_generations(&known, &fixture.execution))
+            .expect("remove fixture profile");
+        assert_eq!(result, UserEnvironmentRetirementRemoval::Removed);
+        let profile_dir = fixture.home.join(".local/state/nix/profiles");
+        assert!(!profile_dir.join("home-manager").exists());
+        assert!(!profile_dir.join("home-manager-1-link").exists());
+        assert!(fs::symlink_metadata(profile_dir.join("profile-1-link")).is_ok());
+        assert!(profile_dir.join(".lojix-profile-retirement.lock").exists());
+        drop(fixture);
     }
 
     fn fixture_test_profile() -> nexus::TestExecutionProfile {
@@ -10885,9 +12117,12 @@ mod tests {
             .expect("remote invocation");
         let expected = activation.local_activate_invocation();
         let command = invocation.arguments.last().expect("SSH command");
-        assert!(command.contains(
-            &ShellArgument::new(format!("{}/activate", activation.store_path)).to_command_text()
-        ));
+        let activation_command = std::iter::once(expected.program)
+            .chain(expected.arguments.iter().cloned())
+            .map(|argument| ShellArgument::new(argument).to_command_text())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(command.contains(&ShellArgument::new(activation_command).to_command_text()));
         assert!(command.contains("--expand-environment=no"));
         assert_eq!(expected.arguments.last().map(String::as_str), Some("1"));
     }

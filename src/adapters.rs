@@ -303,7 +303,8 @@ shared_unit_enum!(ActivationEffect {
     BootOnceProfile,
     TestActivation,
     LiveActivation,
-    BootProfile
+    BootProfile,
+    UserEnvironmentRetirement
 });
 shared_unit_enum!(TestMode { Hermetic, Live });
 shared_unit_enum!(QueryRejectionReason {
@@ -314,7 +315,8 @@ shared_unit_enum!(QueryRejectionReason {
 });
 shared_unit_enum!(SourceRevisionPolicy {
     ResolveAndRecord,
-    RequireImmutable
+    RequireImmutable,
+    NoFlakeSource
 });
 shared_unit_enum!(DeploymentFailureStage {
     Build,
@@ -340,27 +342,34 @@ shared_unit_enum!(DeploymentTerminalReason {
     SubstituterUnreachable,
     EvaluationFailed,
     BuildFailed,
-    ClosureCopyFailed
+    ClosureCopyFailed,
+    UnknownEnvironment,
+    EnvironmentLive,
+    EnvironmentPinned,
+    EnvironmentRetirementFailed
 });
 owner_unit_enum!(PinRejectionReason {
     PinSlotExhausted,
     InternalError,
     NodeUnknown,
     PinLabelInUse,
-    GenerationUnknown
+    GenerationUnknown,
+    EnvironmentRetirementInFlight
 });
 owner_unit_enum!(RetireRejectionReason {
     NodeUnknown,
     GenerationUnknown,
     GenerationPinned,
     InternalError,
-    GenerationActive
+    GenerationActive,
+    EnvironmentRetirementInFlight
 });
 owner_unit_enum!(UnpinRejectionReason {
     GenerationNotPinned,
     PinLabelUnknown,
     InternalError,
-    NodeUnknown
+    NodeUnknown,
+    EnvironmentRetirementInFlight
 });
 owner_unit_enum!(DeployRefusalReason {
     ContinuationBudgetExhausted,
@@ -413,10 +422,32 @@ impl Raisable<ordinary::SecretsInput> for memory::SecretsInput {
         })
     }
 }
-shared_unary_enum!(RequestedDeploymentAction {
-    Host(ordinary::HostDeployAction => memory::HostDeployAction),
-    UserEnvironment(ordinary::UserEnvironmentAction => memory::UserEnvironmentAction)
-});
+impl Lowerable<memory::RequestedDeploymentAction> for ordinary::RequestedDeploymentAction {
+    fn lower(self) -> Result<memory::RequestedDeploymentAction, WireShapeError> {
+        Ok(match self {
+            Self::Host(value) => memory::RequestedDeploymentAction::Host(value.lower()?),
+            Self::UserEnvironment(value) => {
+                memory::RequestedDeploymentAction::UserEnvironment(value.lower()?)
+            }
+            Self::UserEnvironmentRetirement => {
+                memory::RequestedDeploymentAction::UserEnvironmentRetirement
+            }
+        })
+    }
+}
+impl Raisable<ordinary::RequestedDeploymentAction> for memory::RequestedDeploymentAction {
+    fn raise(self) -> Result<ordinary::RequestedDeploymentAction, WireShapeError> {
+        Ok(match self {
+            Self::Host(value) => ordinary::RequestedDeploymentAction::Host(value.raise()?),
+            Self::UserEnvironment(value) => {
+                ordinary::RequestedDeploymentAction::UserEnvironment(value.raise()?)
+            }
+            Self::UserEnvironmentRetirement => {
+                ordinary::RequestedDeploymentAction::UserEnvironmentRetirement
+            }
+        })
+    }
+}
 impl Lowerable<memory::TestOutcome> for ordinary::TestOutcome {
     fn lower(self) -> Result<memory::TestOutcome, WireShapeError> {
         Ok(match self {
@@ -619,7 +650,8 @@ impl Raisable<ordinary::RequestedGenerationArtifact> for memory::GenerationArtif
 
 owner_struct!(PinRequest => PinRequest { cluster_name => cluster_name, node_name => node_name, generation_identifier => generation_identifier, pin_label => pin_label });
 owner_struct!(UnpinRequest => UnpinRequest { cluster_name => cluster_name, node_name => node_name, pin_label => pin_label });
-owner_struct!(RetireRequest => RetireRequest { cluster_name => cluster_name, node_name => node_name, generation_identifier => generation_identifier });
+owner_struct!(GenerationRetirement => RetireRequest { cluster_name => cluster_name, node_name => node_name, generation_identifier => generation_identifier });
+owner_struct!(UserEnvironmentRetirement => UserEnvironmentRetirement { cluster_name => cluster_name, node_name => node_name, user_name => user_name, deployment_transport => deployment_transport });
 owner_struct!(TestRun => TestRun { cluster_name => cluster_name, node_selection => node_selection, host_selection => host_selection, test_execution_profile => test_execution_profile });
 owner_struct!(ExtraSubstituter => ExtraSubstituter { first_string => url, second_string => public_key });
 owner_struct_with_none!(HostDeployment => HostDeployment {
@@ -790,7 +822,12 @@ impl Lowerable<memory::MetaIngress> for owner::Query {
         Ok(match self {
             owner::Query::Configure(value) => memory::MetaIngress::Configure(value.lower()?),
             owner::Query::ReverseConfiguration => memory::MetaIngress::ReverseConfiguration,
-            owner::Query::Retire(value) => memory::MetaIngress::Retire(value.lower()?),
+            owner::Query::Retire(owner::RetirementRequest::Generation(value)) => {
+                memory::MetaIngress::Retire(value.lower()?)
+            }
+            owner::Query::Retire(owner::RetirementRequest::UserEnvironment(value)) => {
+                memory::MetaIngress::RetireUserEnvironment(value.lower()?)
+            }
             owner::Query::Pin(value) => memory::MetaIngress::Pin(value.lower()?),
             owner::Query::Deploy(value) => memory::MetaIngress::Deploy(value.lower()?),
             owner::Query::Test(value) => memory::MetaIngress::Test(value.lower()?),

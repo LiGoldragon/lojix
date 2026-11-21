@@ -45,6 +45,7 @@ use crate::runtime_model::{
     EventLogEntry, GcRoot, IdentifierAllocation, ImmutableRevision, LiveGeneration,
     OutboxDeliveryState, OutboxRetryCount, PendingTransitionIntent, StateDigest, StateMarker,
     StoredTestRun, TerminalMarker, TransitionIntentState, TransitionMarker, TransitionOrdinal,
+    UserEnvironmentRetirement, UserEnvironmentRetirementJob,
 };
 
 /// A named wrapper around exactly one carried value. The wrapper exists to give
@@ -324,6 +325,17 @@ impl LojixRecord for PendingTransitionIntent {
     }
 }
 
+impl LojixRecord for UserEnvironmentRetirementJob {
+    const TABLE: &'static str = "user-environment-retirement-job";
+    const FAMILY: &'static str = "UserEnvironmentRetirementJobFamily";
+    const SCHEMA_HASH: [u8; 32] = [14; 32];
+    const ROLE: &'static str = "in-flight user-environment retirement jobs";
+
+    fn table(directory: &LojixDirectory) -> TableReference<Self> {
+        directory.user_environment_retirement_jobs
+    }
+}
+
 impl LojixRecord for NexusConfigurationRecord {
     const TABLE: &'static str = "nexus-configuration";
     const FAMILY: &'static str = "NexusConfigurationFamily";
@@ -406,6 +418,9 @@ pub enum Error {
 
     #[error("runtime invariant failed: {0}")]
     Invariant(String),
+
+    #[error("a Lojix-controlled operation is already in flight on this target")]
+    DeploymentInFlight,
 
     #[error("connection closed before a complete frame arrived")]
     ConnectionClosed,
@@ -847,6 +862,7 @@ pub struct LojixDirectory {
     deployment_records: TableReference<DeploymentRecord>,
     identifier_allocation: TableReference<IdentifierAllocation>,
     deployment_outbox: TableReference<DeploymentOutboxRecord>,
+    user_environment_retirement_jobs: TableReference<UserEnvironmentRetirementJob>,
     pending_transition_intents: TableReference<PendingTransitionIntent>,
     nexus_configuration: TableReference<NexusConfigurationRecord>,
     quarantined_rows: TableReference<quarantine::QuarantinedRow>,
@@ -870,6 +886,9 @@ impl LojixTables for LojixDirectory {
             deployment_records: DeploymentRecord::register(database, path)?,
             identifier_allocation: IdentifierAllocation::register(database, path)?,
             deployment_outbox: DeploymentOutboxRecord::register(database, path)?,
+            user_environment_retirement_jobs: UserEnvironmentRetirementJob::register(
+                database, path,
+            )?,
             pending_transition_intents: PendingTransitionIntent::register(database, path)?,
             nexus_configuration: NexusConfigurationRecord::register(database, path)?,
             quarantined_rows: quarantine::QuarantinedRow::register(database, path)?,
@@ -894,6 +913,7 @@ impl FamilyDirectory for LojixDirectory {
             DeploymentRecord::TABLE => row.apply(self.deployment_records),
             IdentifierAllocation::TABLE => row.apply(self.identifier_allocation),
             DeploymentOutboxRecord::TABLE => row.apply(self.deployment_outbox),
+            UserEnvironmentRetirementJob::TABLE => row.apply(self.user_environment_retirement_jobs),
             PendingTransitionIntent::TABLE => row.apply(self.pending_transition_intents),
             NexusConfigurationRecord::TABLE => row.apply(self.nexus_configuration),
             quarantine::QuarantinedRow::TABLE => row.apply(self.quarantined_rows),
@@ -1320,6 +1340,29 @@ pub trait DeploymentLedger {
         deploy_job: DeployJob,
     ) -> Result<DeploymentRecord>;
 
+    /// Atomically admit a standalone user-environment retirement with its
+    /// exact target route. The typed identity stays in the ordinary
+    /// DeploymentRecord; the separate job carries only the route needed to
+    /// recheck and remove that profile.
+    fn allocate_user_environment_retirement(
+        &self,
+        deployment_request_identity: DeploymentRequestIdentity,
+        job: UserEnvironmentRetirementJob,
+    ) -> Result<DeploymentRecord>;
+
+    /// The in-flight retirement rows that hold the node/user exclusion until
+    /// their terminal record is acknowledged.
+    fn user_environment_retirement_jobs(&self) -> Result<Vec<UserEnvironmentRetirementJob>>;
+
+    fn retract_user_environment_retirement_job(&self, deployment_identifier: u64) -> Result<()>;
+
+    /// Atomically retract all identity-matched Lojix roots and live-set rows,
+    /// write the successful terminal intent, and remove the resume job.
+    fn finish_user_environment_retirement(
+        &self,
+        deployment_identifier: u64,
+    ) -> Result<DeploymentRecord>;
+
     /// Atomically persist the terminal correlation state and its write-ahead
     /// intent.  The job remains durable through dispatch/journal delivery and
     /// is retracted only in the same acknowledgement commit as the intent and
@@ -1466,10 +1509,16 @@ pub trait GenerationLedger {
 
     /// Overwrite one GC-root in place (a slot/label change), keyed by its
     /// generation identifier.
-    fn mutate_gc_root(&self, root: GcRoot) -> Result<()>;
+    fn mutate_gc_root(&self, root: GcRoot) -> Result<GenerationMutationOutcome>;
 
     /// Drop one GC-root by its generation identifier.
-    fn retract_gc_root(&self, generation_identifier: u64) -> Result<()>;
+    fn retract_gc_root(&self, generation_identifier: u64) -> Result<GenerationMutationOutcome>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationMutationOutcome {
+    Applied,
+    EnvironmentRetirementInFlight,
 }
 
 /// The durable record of a test run, rewritten through its phases to a
@@ -1614,6 +1663,7 @@ impl StoreIntegrity for Store {
             deployment_records: self.directory.deployment_records,
             identifier_allocation: self.directory.identifier_allocation,
             deployment_outbox: self.directory.deployment_outbox,
+            user_environment_retirement_jobs: self.directory.user_environment_retirement_jobs,
             pending_transition_intents: self.directory.pending_transition_intents,
             nexus_configuration: self.directory.nexus_configuration,
             quarantined_rows: self.directory.quarantined_rows,
@@ -2560,6 +2610,16 @@ impl DeploymentLedger for Store {
     ) -> Result<DeploymentRecord> {
         deploy_job.validate_fresh()?;
         let _write = self.lock_write()?;
+        if self
+            .user_environment_retirement_jobs()?
+            .iter()
+            .any(|retirement| {
+                retirement.cluster_name == deployment_request_identity.cluster_name
+                    && retirement.node_name == deployment_request_identity.node_name
+            })
+        {
+            return Err(Error::DeploymentInFlight);
+        }
         let allocation = self.identifier_allocation()?;
         let record = DeploymentRecord {
             deployment_identifier: allocation.next_deployment_identifier.into(),
@@ -2632,6 +2692,293 @@ impl DeploymentLedger for Store {
             .ok_or_else(|| {
                 Error::Invariant("admission record disappeared after acknowledgement".to_string())
             })
+    }
+
+    fn allocate_user_environment_retirement(
+        &self,
+        deployment_request_identity: DeploymentRequestIdentity,
+        mut job: UserEnvironmentRetirementJob,
+    ) -> Result<DeploymentRecord> {
+        if deployment_request_identity.requested_deployment_action
+            != crate::runtime_model::RequestedDeploymentAction::UserEnvironmentRetirement
+            || deployment_request_identity.deployment_environment
+                != crate::runtime_model::DeploymentEnvironment::UserEnvironment(
+                    job.user_name.clone(),
+                )
+            || deployment_request_identity.cluster_name != job.cluster_name
+            || deployment_request_identity.node_name != job.node_name
+        {
+            return Err(Error::Invariant(
+                "retirement admission job does not match its typed deployment identity".to_string(),
+            ));
+        }
+        let record = {
+            let _write = self.lock_write()?;
+            let deploy_in_flight = self.deploy_jobs()?.iter().any(|existing| {
+                existing.cluster_name == job.cluster_name && existing.node_name == job.node_name
+            });
+            let retirement_in_flight =
+                self.user_environment_retirement_jobs()?
+                    .iter()
+                    .any(|existing| {
+                        existing.cluster_name == job.cluster_name
+                            && existing.node_name == job.node_name
+                    });
+            // A durable deploy-job is the evidence that effects may still be
+            // running. Historical nonterminal correlation rows can outlive a
+            // lost/stale resume cursor (for example, Copying with no job), so
+            // they must not create an unexplained permanent node-wide wedge.
+            if deploy_in_flight || retirement_in_flight {
+                return Err(Error::DeploymentInFlight);
+            }
+
+            let allocation = self.identifier_allocation()?;
+            let record = DeploymentRecord {
+                deployment_identifier: allocation.next_deployment_identifier.into(),
+                generation_identifier: allocation.next_generation_identifier.into(),
+                deployment_request_identity,
+                optional_admission_marker: None,
+                deployment_lifecycle: DeploymentLifecycle::Submitted,
+                optional_terminal_marker: None,
+                optional_deployment_terminal: None,
+            };
+            let intent = PendingTransitionIntent {
+                deployment_identifier: record.deployment_identifier.clone(),
+                generation_identifier: record.generation_identifier.clone(),
+                cluster_name: record.deployment_request_identity.cluster_name.clone(),
+                node_name: record.deployment_request_identity.node_name.clone(),
+                deployment_phase: crate::runtime_model::DeploymentPhase::Submitted,
+                event_log_position: allocation.next_event_log_position.into(),
+                optional_immutable_revision: None,
+                optional_deployment_terminal: None,
+                transition_ordinal: TransitionOrdinal::new(0),
+                optional_transition_marker: None,
+                transition_intent_state: TransitionIntentState::Pending,
+            };
+            job.deployment_identifier = record.deployment_identifier.clone();
+            job.generation_identifier = record.generation_identifier.clone();
+            self.database.commit_atomic(
+                self.database
+                    .begin_atomic_commit()
+                    .mutate(
+                        self.directory.identifier_allocation,
+                        IdentifierAllocation {
+                            next_deployment_identifier: allocation
+                                .next_deployment_identifier
+                                .next_identifier()?,
+                            next_generation_identifier: allocation
+                                .next_generation_identifier
+                                .next_identifier()?,
+                            next_event_log_position: allocation
+                                .next_event_log_position
+                                .next_identifier()?,
+                        },
+                    )
+                    .assert(self.directory.deployment_records, record.clone())
+                    .assert(self.directory.user_environment_retirement_jobs, job)
+                    .assert(self.directory.pending_transition_intents, intent),
+            )?;
+            record
+        };
+        self.complete_pending_transition_intent(*record.deployment_identifier.payload(), 0)?;
+        self.records::<DeploymentRecord>()?
+            .into_iter()
+            .find(|existing| existing.deployment_identifier == record.deployment_identifier)
+            .ok_or_else(|| {
+                Error::Invariant(
+                    "retirement admission record disappeared after acknowledgement".to_string(),
+                )
+            })
+    }
+
+    fn user_environment_retirement_jobs(&self) -> Result<Vec<UserEnvironmentRetirementJob>> {
+        self.records::<UserEnvironmentRetirementJob>()
+    }
+
+    fn retract_user_environment_retirement_job(&self, deployment_identifier: u64) -> Result<()> {
+        let _write = self.lock_write()?;
+        if self
+            .user_environment_retirement_jobs()?
+            .iter()
+            .any(|job| *job.deployment_identifier.payload() == deployment_identifier)
+        {
+            self.database.retract(Retraction::new(
+                self.directory.user_environment_retirement_jobs,
+                RecordKey::new(deployment_identifier.to_string()),
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn finish_user_environment_retirement(
+        &self,
+        deployment_identifier: u64,
+    ) -> Result<DeploymentRecord> {
+        let ordinal = {
+            let _write = self.lock_write()?;
+            let mut record = self
+                .records::<DeploymentRecord>()?
+                .into_iter()
+                .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
+                .ok_or_else(|| Error::Invariant("retirement record is missing".to_string()))?;
+            let job = self
+                .user_environment_retirement_jobs()?
+                .into_iter()
+                .find(|job| *job.deployment_identifier.payload() == deployment_identifier)
+                .ok_or_else(|| Error::Invariant("retirement job is missing".to_string()))?;
+            let environment =
+                crate::runtime_model::DeploymentEnvironment::UserEnvironment(job.user_name.clone());
+            if record.optional_deployment_terminal.is_some()
+                || record
+                    .deployment_request_identity
+                    .requested_deployment_action
+                    != crate::runtime_model::RequestedDeploymentAction::UserEnvironmentRetirement
+                || record.deployment_request_identity.deployment_environment != environment
+                || record.deployment_request_identity.cluster_name != job.cluster_name
+                || record.deployment_request_identity.node_name != job.node_name
+            {
+                return Err(Error::Invariant(
+                    "retirement finalization disagrees with its admitted identity".to_string(),
+                ));
+            }
+            let matching_live: Vec<_> = self
+                .records::<LiveGeneration>()?
+                .into_iter()
+                .filter(|live| {
+                    live.cluster_name == job.cluster_name
+                        && live.node_name == job.node_name
+                        && live.deployment_environment == environment
+                        && live.generation_artifact
+                            == crate::runtime_model::GenerationArtifact::UserEnvironment
+                })
+                .collect();
+            // The root has no user field of its own. Attribute it only through
+            // the retained deployment identity that created that generation;
+            // closure equality and node-only selection would sweep another
+            // user's or a host deployment's root.
+            let matching_deployments: Vec<_> = self
+                .records::<DeploymentRecord>()?
+                .into_iter()
+                .filter(|candidate| {
+                    let identity = &candidate.deployment_request_identity;
+                    identity.cluster_name == job.cluster_name
+                        && identity.node_name == job.node_name
+                        && identity.deployment_environment == environment
+                        && identity.generation_artifact
+                            == crate::runtime_model::GenerationArtifact::UserEnvironment
+                        && matches!(
+                            &identity.requested_deployment_action,
+                            crate::runtime_model::RequestedDeploymentAction::UserEnvironment(_)
+                        )
+                })
+                .collect();
+            let generation_ids: std::collections::BTreeSet<_> = matching_deployments
+                .iter()
+                .map(|candidate| *candidate.generation_identifier.payload())
+                .collect();
+            let matching_roots: Vec<_> = self
+                .records::<GcRoot>()?
+                .into_iter()
+                .filter(|root| {
+                    root.cluster_name == job.cluster_name
+                        && root.node_name == job.node_name
+                        && generation_ids.contains(root.generation_identifier.payload())
+                })
+                .collect();
+            if matching_roots.iter().any(|root| {
+                matches!(
+                    root.generation_slot,
+                    crate::runtime_model::GenerationSlot::Pinned
+                )
+            }) {
+                return Err(Error::Invariant(
+                    "a pinned root appeared during user-environment retirement".to_string(),
+                ));
+            }
+            let intents = self.records::<PendingTransitionIntent>()?;
+            if intents.iter().any(|intent| {
+                *intent.deployment_identifier.payload() == deployment_identifier
+                    && !matches!(
+                        intent.transition_intent_state,
+                        TransitionIntentState::Acknowledged
+                    )
+            }) {
+                return Err(Error::Invariant(
+                    "an earlier retirement transition remains unacknowledged".to_string(),
+                ));
+            }
+            let transition_ordinal = intents
+                .iter()
+                .filter(|intent| *intent.deployment_identifier.payload() == deployment_identifier)
+                .map(|intent| *intent.transition_ordinal.payload())
+                .max()
+                .map(u64::next_identifier)
+                .transpose()?
+                .unwrap_or(0);
+            let allocation = self.identifier_allocation()?;
+            record.deployment_lifecycle = DeploymentLifecycle::Completed;
+            record.optional_terminal_marker = None;
+            record.optional_deployment_terminal = Some(DeploymentTerminal::Succeeded);
+            let intent = PendingTransitionIntent {
+                deployment_identifier: record.deployment_identifier.clone(),
+                generation_identifier: record.generation_identifier.clone(),
+                cluster_name: job.cluster_name.clone(),
+                node_name: job.node_name.clone(),
+                deployment_phase: crate::runtime_model::DeploymentPhase::Completed,
+                event_log_position: allocation.next_event_log_position.into(),
+                optional_immutable_revision: None,
+                optional_deployment_terminal: Some(DeploymentTerminal::Succeeded),
+                transition_ordinal: TransitionOrdinal::new(transition_ordinal),
+                optional_transition_marker: None,
+                transition_intent_state: TransitionIntentState::Pending,
+            };
+            let mut commit = self
+                .database
+                .begin_atomic_commit()
+                .mutate(
+                    self.directory.identifier_allocation,
+                    IdentifierAllocation {
+                        next_deployment_identifier: allocation.next_deployment_identifier,
+                        next_generation_identifier: allocation.next_generation_identifier,
+                        next_event_log_position: allocation
+                            .next_event_log_position
+                            .next_identifier()?,
+                    },
+                )
+                .mutate(self.directory.deployment_records, record)
+                .assert(self.directory.pending_transition_intents, intent);
+            for live in matching_live {
+                commit = commit.retract(
+                    self.directory.live_set,
+                    RecordKey::new(live.generation_identifier.payload().to_string()),
+                );
+            }
+            for root in matching_roots {
+                commit = commit.retract(
+                    self.directory.gc_roots,
+                    RecordKey::new(root.generation_identifier.payload().to_string()),
+                );
+            }
+            commit = commit.retract(
+                self.directory.user_environment_retirement_jobs,
+                RecordKey::new(deployment_identifier.to_string()),
+            );
+            self.database.commit_atomic(commit)?;
+            transition_ordinal
+        };
+        self.complete_pending_transition_intent(deployment_identifier, ordinal)?;
+        let record = self
+            .records::<DeploymentRecord>()?
+            .into_iter()
+            .find(|record| *record.deployment_identifier.payload() == deployment_identifier)
+            .ok_or_else(|| Error::Invariant("retirement record disappeared".to_string()))?;
+        if record.optional_terminal_marker.is_none() {
+            return Err(Error::Invariant(
+                "acknowledged retirement terminal lacks its exact marker".to_string(),
+            ));
+        }
+        self.maintain_event_history()?;
+        Ok(record)
     }
 
     fn begin_terminal_transition(
@@ -2720,6 +3067,16 @@ impl DeploymentLedger for Store {
             job.deploy_job_phase = deploy_job_phase;
             job.deploy_resume_stage = crate::runtime_model::DeployResumeStage::FinishDeployment;
             commit = commit.mutate(self.directory.deploy_jobs, job);
+        }
+        if self
+            .user_environment_retirement_jobs()?
+            .iter()
+            .any(|job| *job.deployment_identifier.payload() == deployment_identifier)
+        {
+            commit = commit.retract(
+                self.directory.user_environment_retirement_jobs,
+                RecordKey::new(deployment_identifier.to_string()),
+            );
         }
         self.database.commit_atomic(commit)?;
         Ok(transition_ordinal)
@@ -3240,21 +3597,41 @@ impl GenerationLedger for Store {
         Ok(())
     }
 
-    fn mutate_gc_root(&self, root: GcRoot) -> Result<()> {
+    fn mutate_gc_root(&self, root: GcRoot) -> Result<GenerationMutationOutcome> {
         root.validate_fresh()?;
         let _write = self.lock_write()?;
+        if self
+            .user_environment_retirement_jobs()?
+            .iter()
+            .any(|job| job.cluster_name == root.cluster_name && job.node_name == root.node_name)
+        {
+            return Ok(GenerationMutationOutcome::EnvironmentRetirementInFlight);
+        }
         self.database
             .mutate(Mutation::new(self.directory.gc_roots, root))?;
-        Ok(())
+        Ok(GenerationMutationOutcome::Applied)
     }
 
-    fn retract_gc_root(&self, generation_identifier: u64) -> Result<()> {
+    fn retract_gc_root(&self, generation_identifier: u64) -> Result<GenerationMutationOutcome> {
         let _write = self.lock_write()?;
+        let matching = self
+            .records::<GcRoot>()?
+            .into_iter()
+            .find(|root| *root.generation_identifier.payload() == generation_identifier);
+        if let Some(root) = &matching {
+            if self
+                .user_environment_retirement_jobs()?
+                .iter()
+                .any(|job| job.cluster_name == root.cluster_name && job.node_name == root.node_name)
+            {
+                return Ok(GenerationMutationOutcome::EnvironmentRetirementInFlight);
+            }
+        }
         self.database.retract(Retraction::new(
             self.directory.gc_roots,
             RecordKey::new(generation_identifier.to_string()),
         ))?;
-        Ok(())
+        Ok(GenerationMutationOutcome::Applied)
     }
 }
 
@@ -3332,6 +3709,12 @@ impl EngineRecord for ContainerLifecycleRecord {
 }
 
 impl EngineRecord for DeployJob {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.deployment_identifier.payload().to_string())
+    }
+}
+
+impl EngineRecord for UserEnvironmentRetirementJob {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.deployment_identifier.payload().to_string())
     }
@@ -3470,6 +3853,154 @@ mod transition_intent_tests {
         }
     }
 
+    fn user_environment_identity(user: &str) -> ordinary::DeploymentRequestIdentity {
+        ordinary::DeploymentRequestIdentity {
+            deployment_environment: ordinary::DeploymentEnvironment::UserEnvironment(
+                ordinary::UserName::from(user),
+            ),
+            cluster_name: ordinary::ClusterName::from("cluster"),
+            node_name: ordinary::NodeName::from("node"),
+            generation_artifact: ordinary::GenerationArtifact::UserEnvironment,
+            requested_deployment_action: ordinary::RequestedDeploymentAction::UserEnvironment(
+                ordinary::UserEnvironmentAction::ActivateNow,
+            ),
+            activation_effect: ordinary::ActivationEffect::LiveActivation,
+            source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
+            optional_immutable_revision: Some(ordinary::ImmutableRevision::new(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            )),
+        }
+    }
+
+    fn retirement_identity(user: &str) -> ordinary::DeploymentRequestIdentity {
+        ordinary::DeploymentRequestIdentity {
+            deployment_environment: ordinary::DeploymentEnvironment::UserEnvironment(
+                ordinary::UserName::from(user),
+            ),
+            cluster_name: ordinary::ClusterName::from("cluster"),
+            node_name: ordinary::NodeName::from("node"),
+            generation_artifact: ordinary::GenerationArtifact::UserEnvironment,
+            requested_deployment_action:
+                ordinary::RequestedDeploymentAction::UserEnvironmentRetirement,
+            activation_effect: ordinary::ActivationEffect::UserEnvironmentRetirement,
+            source_revision_policy: ordinary::SourceRevisionPolicy::NoFlakeSource,
+            optional_immutable_revision: None,
+        }
+    }
+
+    fn user_environment_retirement_job(user: &str) -> ordinary::UserEnvironmentRetirementJob {
+        ordinary::UserEnvironmentRetirementJob {
+            deployment_identifier: ordinary::DeploymentIdentifier::new(0),
+            generation_identifier: ordinary::GenerationIdentifier::new(0),
+            cluster_name: ordinary::ClusterName::from("cluster"),
+            node_name: ordinary::NodeName::from("node"),
+            user_name: ordinary::UserName::from(user),
+            deployment_transport: ordinary::DeploymentTransport {
+                nix_store_uri: ordinary::NixStoreUri::from("ssh-ng://fixture.invalid"),
+                ssh_destination: ordinary::SshDestination::from(format!("{user}@fixture.invalid")),
+            },
+        }
+    }
+
+    fn store_user_generation(
+        store: &Store,
+        user: &str,
+        closure: &str,
+    ) -> ordinary::DeploymentRecord {
+        let identity = user_environment_identity(user);
+        let mut job = admission_job();
+        job.cluster_name = identity.cluster_name.clone();
+        job.node_name = identity.node_name.clone();
+        job.source_revision_policy = ordinary::SourceRevisionPolicy::ResolveAndRecord;
+        let record = store
+            .allocate_deployment_record(identity.clone(), job)
+            .expect("admit user-environment generation");
+        store
+            .terminalize_deployment(
+                *record.deployment_identifier.payload(),
+                ordinary::DeploymentTerminal::Succeeded,
+            )
+            .expect("complete retained user deployment record");
+        let closure_path = ordinary::ClosurePath::from(closure);
+        let generation = ordinary::LiveGeneration {
+            deployment_identifier: record.deployment_identifier.clone(),
+            generation_identifier: record.generation_identifier.clone(),
+            cluster_name: identity.cluster_name.clone(),
+            node_name: identity.node_name.clone(),
+            deployment_environment: identity.deployment_environment.clone(),
+            generation_artifact: identity.generation_artifact,
+            activation_effect: identity.activation_effect,
+            generation_slot: ordinary::GenerationSlot::Current,
+            closure_path: closure_path.clone(),
+            source_revision_record: ordinary::SourceRevisionRecord {
+                source_revision_policy: ordinary::SourceRevisionPolicy::ResolveAndRecord,
+                requested_ref: ordinary::FlakeReference::from("github:owner/repo"),
+                resolved_ref: ordinary::FlakeReference::from(
+                    "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ),
+                string: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            },
+        };
+        let root = ordinary::GcRoot {
+            generation_identifier: record.generation_identifier.clone(),
+            cluster_name: identity.cluster_name,
+            node_name: identity.node_name,
+            generation_slot: ordinary::GenerationSlot::Current,
+            closure_path,
+            optional_pin_label: None,
+        };
+        store
+            .record_activation(generation, root)
+            .expect("record exact user activation and durable root");
+        record
+    }
+
+    fn store_host_generation(store: &Store, closure: &str) -> ordinary::DeploymentRecord {
+        let identity = admission_identity();
+        let record = store
+            .allocate_deployment_record(identity.clone(), admission_job())
+            .expect("admit host generation");
+        store
+            .terminalize_deployment(
+                *record.deployment_identifier.payload(),
+                ordinary::DeploymentTerminal::Succeeded,
+            )
+            .expect("complete retained host record");
+        let closure_path = ordinary::ClosurePath::from(closure);
+        store
+            .record_activation(
+                ordinary::LiveGeneration {
+                    deployment_identifier: record.deployment_identifier.clone(),
+                    generation_identifier: record.generation_identifier.clone(),
+                    cluster_name: identity.cluster_name.clone(),
+                    node_name: identity.node_name.clone(),
+                    deployment_environment: identity.deployment_environment.clone(),
+                    generation_artifact: identity.generation_artifact,
+                    activation_effect: identity.activation_effect,
+                    generation_slot: ordinary::GenerationSlot::Current,
+                    closure_path: closure_path.clone(),
+                    source_revision_record: ordinary::SourceRevisionRecord {
+                        source_revision_policy: ordinary::SourceRevisionPolicy::RequireImmutable,
+                        requested_ref: ordinary::FlakeReference::from("github:owner/repo"),
+                        resolved_ref: ordinary::FlakeReference::from(
+                            "github:owner/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        ),
+                        string: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                    },
+                },
+                ordinary::GcRoot {
+                    generation_identifier: record.generation_identifier.clone(),
+                    cluster_name: identity.cluster_name,
+                    node_name: identity.node_name,
+                    generation_slot: ordinary::GenerationSlot::Current,
+                    closure_path,
+                    optional_pin_label: None,
+                },
+            )
+            .expect("record host activation and durable root");
+        record
+    }
+
     #[test]
     fn fresh_job_and_gc_root_writes_reject_noncanonical_closure_paths() {
         let directory = tempfile::TempDir::new().expect("temporary store directory");
@@ -3494,6 +4025,136 @@ mod transition_intent_tests {
         };
         assert!(store.append_gc_root(root.clone()).is_err());
         assert!(store.mutate_gc_root(root).is_err());
+    }
+
+    #[test]
+    fn retirement_finalization_retracts_only_identity_matched_roots_and_current_rows() {
+        let directory = tempfile::TempDir::new().expect("temporary store directory");
+        let store = Store::open(directory.path().join("lojix.memory")).expect("open store");
+        let user_old = store_user_generation(
+            &store,
+            "fixture-user",
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-user-old",
+        );
+        let user_current = store_user_generation(
+            &store,
+            "fixture-user",
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-user-current",
+        );
+        let other_user = store_user_generation(
+            &store,
+            "other-user",
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-user-current",
+        );
+        let host = store_host_generation(
+            &store,
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-user-current",
+        );
+
+        let admitted = store
+            .allocate_user_environment_retirement(
+                retirement_identity("fixture-user"),
+                user_environment_retirement_job("fixture-user"),
+            )
+            .expect("admit retirement");
+        assert!(
+            store
+                .user_environment_retirement_jobs()
+                .expect("read retirement job")
+                .iter()
+                .any(|job| job.deployment_identifier == admitted.deployment_identifier)
+        );
+
+        let completed = store
+            .finish_user_environment_retirement(*admitted.deployment_identifier.payload())
+            .expect("atomically finalize retirement");
+        assert_eq!(
+            completed.optional_deployment_terminal,
+            Some(ordinary::DeploymentTerminal::Succeeded)
+        );
+        assert!(completed.optional_terminal_marker.is_some());
+        assert!(
+            store
+                .user_environment_retirement_jobs()
+                .expect("read retirement jobs after finalization")
+                .is_empty()
+        );
+
+        let live = store
+            .records::<ordinary::LiveGeneration>()
+            .expect("read live set");
+        let roots = store.records::<ordinary::GcRoot>().expect("read roots");
+        for retired in [&user_old, &user_current] {
+            assert!(
+                !live
+                    .iter()
+                    .any(|row| row.generation_identifier == retired.generation_identifier)
+            );
+            assert!(
+                !roots
+                    .iter()
+                    .any(|row| row.generation_identifier == retired.generation_identifier)
+            );
+        }
+        for retained in [&other_user, &host] {
+            assert!(
+                live.iter()
+                    .any(|row| row.generation_identifier == retained.generation_identifier)
+            );
+            assert!(
+                roots
+                    .iter()
+                    .any(|row| row.generation_identifier == retained.generation_identifier)
+            );
+        }
+        assert_eq!(live.len(), 2, "other user's and host Current rows remain");
+        assert_eq!(roots.len(), 2, "other user's and host roots remain");
+    }
+
+    #[test]
+    fn admitted_retirement_serializes_deploy_pin_unpin_and_generation_retire_mutations() {
+        let directory = tempfile::TempDir::new().expect("temporary store directory");
+        let store = Store::open(directory.path().join("lojix.memory")).expect("open store");
+        let generation = store_user_generation(
+            &store,
+            "fixture-user",
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-user-current",
+        );
+        store
+            .allocate_user_environment_retirement(
+                retirement_identity("fixture-user"),
+                user_environment_retirement_job("fixture-user"),
+            )
+            .expect("admit retirement");
+
+        assert!(matches!(
+            store.mutate_gc_root(ordinary::GcRoot {
+                generation_identifier: generation.generation_identifier.clone(),
+                cluster_name: ordinary::ClusterName::from("cluster"),
+                node_name: ordinary::NodeName::from("node"),
+                generation_slot: ordinary::GenerationSlot::Pinned,
+                closure_path: ordinary::ClosurePath::from(
+                    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-user-current"
+                ),
+                optional_pin_label: Some(ordinary::PinLabel::from("fixture-pin")),
+            }),
+            Ok(GenerationMutationOutcome::EnvironmentRetirementInFlight)
+        ));
+        assert!(matches!(
+            store.retract_gc_root(*generation.generation_identifier.payload()),
+            Ok(GenerationMutationOutcome::EnvironmentRetirementInFlight)
+        ));
+        assert!(matches!(
+            store.begin_admission_transition(admission_identity(), admission_job()),
+            Err(Error::DeploymentInFlight)
+        ));
+        assert!(matches!(
+            store.allocate_user_environment_retirement(
+                retirement_identity("fixture-user"),
+                user_environment_retirement_job("fixture-user"),
+            ),
+            Err(Error::DeploymentInFlight)
+        ));
     }
 
     #[test]

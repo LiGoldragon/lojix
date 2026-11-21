@@ -484,6 +484,10 @@ trait RequestServable {
     ) -> Result<()>;
     async fn serve_owner(&self, connection: &mut AcceptedConnection) -> Result<()>;
     async fn submit_deploy(&self, request: memory::DeploySubmission) -> Result<memory::MetaEgress>;
+    async fn submit_user_environment_retirement(
+        &self,
+        request: memory::UserEnvironmentRetirement,
+    ) -> Result<memory::MetaEgress>;
     async fn submit_test(&self, request: memory::TestRequest) -> Result<memory::MetaEgress>;
     async fn read_body(&self, connection: &mut AcceptedConnection) -> Result<FrameBody>;
     async fn execute_request(
@@ -597,12 +601,15 @@ impl RequestServable for RequestWorker {
         let body = self.read_body(connection).await?;
         let input = body.bytes().meta_request()?;
         let input = input.lower()?;
-        // A `Deploy` decouples from this connection task: the deploy-job actor
-        // owns the pipeline, this task only submits and replies the accepted
-        // handle. Pin/Unpin/Retire are fast single writes and stay synchronous
-        // on this task (up9q surface a — only Deploy decouples).
+        // Deploy and standalone Home retirement decouple from this connection
+        // task: the deploy-job actor owns their effects, this task only submits
+        // and replies the accepted handle. Pin/Unpin/generation Retire remain
+        // fast synchronous writes.
         let reply = match input {
             memory::MetaIngress::Deploy(request) => self.submit_deploy(request).await?,
+            memory::MetaIngress::RetireUserEnvironment(request) => {
+                self.submit_user_environment_retirement(request).await?
+            }
             // A `Test` decouples from this connection task exactly like a
             // `Deploy` (Unit 2b): the test-job actor owns the dispatch pipeline
             // (the real `nix build` of the hermetic check, or the gated live
@@ -644,6 +651,26 @@ impl RequestServable for RequestWorker {
             // The deploy-job actor is daemon-lifetime; a send error means the
             // runtime is tearing down. Reply a typed internal rejection rather
             // than dropping the connection without a frame.
+            Err(_) => Err(Error::UnexpectedFrame),
+        }
+    }
+
+    async fn submit_user_environment_retirement(
+        &self,
+        request: memory::UserEnvironmentRetirement,
+    ) -> Result<memory::MetaEgress> {
+        match self
+            .deploy_jobs
+            .ask(AdmitUserEnvironmentRetirement { request })
+            .await
+        {
+            Ok(DeployAdmission::Accepted(accepted)) => {
+                Ok(memory::MetaEgress::DeployAccepted(accepted))
+            }
+            Ok(DeployAdmission::Rejected(rejected)) => {
+                Ok(memory::MetaEgress::DeployRejected(rejected))
+            }
+            Ok(DeployAdmission::Refused(refused)) => Ok(memory::MetaEgress::DeployRefused(refused)),
             Err(_) => Err(Error::UnexpectedFrame),
         }
     }
@@ -758,6 +785,12 @@ trait DeployProcessable {
     ) -> ActorRef<DeployJobs>;
     fn at_capacity(&self) -> bool;
     fn launch_pipeline(&self, engine: SchemaRuntime, jobs: ActorRef<DeployJobs>);
+    fn launch_user_environment_retirement(
+        &self,
+        engine: SchemaRuntime,
+        deployment_identifier: u64,
+        jobs: ActorRef<DeployJobs>,
+    );
     async fn reconcile_persisted_jobs(&mut self, actor: ActorRef<DeployJobs>);
 }
 
@@ -790,10 +823,59 @@ impl DeployProcessable for DeployJobs {
     fn launch_pipeline(&self, mut engine: SchemaRuntime, jobs: ActorRef<DeployJobs>) {
         tokio::spawn(async move {
             let terminal = engine.drive_submitted_deploy().await;
-            let _ = terminal;
-            eprintln!("lojix deploy pipeline reached a terminal state");
+            match terminal {
+                memory::MetaEgress::DeployTerminal(record)
+                    if record.optional_terminal_marker.is_some() =>
+                {
+                    eprintln!(
+                        "lojix deploy {} terminal acknowledged: {:?}",
+                        record.deployment_identifier.payload(),
+                        record.optional_deployment_terminal
+                    );
+                }
+                memory::MetaEgress::DeployTerminal(record) => eprintln!(
+                    "lojix deploy {} has an unacknowledged terminal record: {:?}",
+                    record.deployment_identifier.payload(),
+                    record.optional_deployment_terminal
+                ),
+                other => eprintln!("lojix deploy pipeline produced no terminal record: {other:?}"),
+            }
             // Free the cap slot. `tell` is safe: `DeployCompleted` has an
             // infallible `()` reply, so it cannot crash the actor.
+            let _ = jobs.tell(DeployCompleted).await;
+        });
+    }
+
+    fn launch_user_environment_retirement(
+        &self,
+        mut engine: SchemaRuntime,
+        deployment_identifier: u64,
+        jobs: ActorRef<DeployJobs>,
+    ) {
+        tokio::spawn(async move {
+            let terminal = engine
+                .drive_user_environment_retirement(deployment_identifier)
+                .await;
+            match terminal {
+                memory::MetaEgress::DeployTerminal(record)
+                    if record.optional_terminal_marker.is_some() =>
+                {
+                    eprintln!(
+                        "lojix user-environment retirement {} terminal acknowledged: {:?}",
+                        record.deployment_identifier.payload(),
+                        record.optional_deployment_terminal
+                    );
+                }
+                memory::MetaEgress::DeployTerminal(record) => eprintln!(
+                    "lojix user-environment retirement {} has an unacknowledged terminal record: {:?}",
+                    record.deployment_identifier.payload(),
+                    record.optional_deployment_terminal
+                ),
+                other => eprintln!(
+                    "lojix user-environment retirement {} produced no terminal record: {other:?}",
+                    deployment_identifier
+                ),
+            }
             let _ = jobs.tell(DeployCompleted).await;
         });
     }
@@ -881,6 +963,27 @@ impl DeployProcessable for DeployJobs {
                 }
             }
         }
+        // A crash may have interrupted target-side profile removal. Resume is
+        // deliberately fail-closed: no target probe or mutation is replayed
+        // automatically, Current remains intact, and the durable operation
+        // receives an ordinary Failed terminal that invites a fresh checked
+        // retry.
+        if let Ok(retirements) = self.store.user_environment_retirement_jobs() {
+            for job in retirements {
+                let deployment_identifier = *job.deployment_identifier.payload();
+                let terminal = crate::runtime_model::DeploymentTerminal::Failed(
+                    crate::schema_runtime::interrupted_retirement_failure(),
+                );
+                if let Err(error) = self
+                    .store
+                    .terminalize_deployment(deployment_identifier, terminal)
+                {
+                    eprintln!(
+                        "lojix could not fail interrupted user-environment retirement {deployment_identifier}: {error}"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -901,6 +1004,13 @@ impl Actor for DeployJobs {
 /// admission verdict.
 pub struct AdmitDeploy {
     pub request: memory::DeploySubmission,
+}
+
+/// Admit a standalone Home retirement through the same actor and capacity
+/// boundary as deployments, then drive its checked target removal independently
+/// of the owner connection.
+pub struct AdmitUserEnvironmentRetirement {
+    pub request: memory::UserEnvironmentRetirement,
 }
 
 /// The immediate admission verdict for an `AdmitDeploy` — the wire reply the
@@ -946,6 +1056,60 @@ impl Message<AdmitDeploy> for DeployJobs {
             DeploySubmissionOutcome::Accepted(accepted) => {
                 self.active_count += 1;
                 self.launch_pipeline(engine, context.actor_ref().clone());
+                DeployAdmission::Accepted(accepted)
+            }
+            rejected => rejected.into(),
+        }
+    }
+}
+
+impl Message<AdmitUserEnvironmentRetirement> for DeployJobs {
+    type Reply = DeployAdmission;
+
+    async fn handle(
+        &mut self,
+        message: AdmitUserEnvironmentRetirement,
+        context: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self.at_capacity() {
+            let engine = SchemaRuntime::with_store_and_configuration(
+                self.store.clone(),
+                self.configuration.clone(),
+            );
+            let identity =
+                crate::schema_runtime::user_environment_retirement_identity(&message.request);
+            return match self.store.reject_deployment_request(
+                identity,
+                crate::runtime_model::DeploymentTerminal::Rejected(
+                    crate::runtime_model::DeploymentTerminalReason::DeploymentInFlight,
+                ),
+            ) {
+                Ok(record) => {
+                    DeployAdmission::Rejected(crate::runtime_model::RejectedDeploy::new(record))
+                }
+                Err(error) => {
+                    eprintln!("lojix could not record retirement capacity refusal: {error}");
+                    DeployAdmission::Refused(memory::RefusedDeploy {
+                        deploy_refusal_reason: memory::DeployRefusalReason::DurableWriteFailed,
+                        state_marker: crate::runtime_model::StateMarker::from(
+                            self.store.commit_sequence().unwrap_or(0),
+                        ),
+                    })
+                }
+            };
+        }
+        let mut engine = SchemaRuntime::with_store_and_configuration(
+            self.store.clone(),
+            self.configuration.clone(),
+        );
+        match engine.submit_user_environment_retirement(message.request) {
+            crate::schema_runtime::DeploySubmissionOutcome::Accepted(accepted) => {
+                self.active_count += 1;
+                self.launch_user_environment_retirement(
+                    engine,
+                    *accepted.deployment_identifier.payload(),
+                    context.actor_ref().clone(),
+                );
                 DeployAdmission::Accepted(accepted)
             }
             rejected => rejected.into(),

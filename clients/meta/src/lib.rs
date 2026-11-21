@@ -254,6 +254,52 @@ mod tests {
         );
     }
     #[test]
+    fn actualizes_both_retirement_clientquery_variants_without_generation_alias() {
+        use meta_signal_lojix::{
+            ClientQuery, GenerationRetirement, RetirementRequest, UserEnvironmentRetirement,
+        };
+
+        let generation = ClientQuery::Retire(RetirementRequest::Generation(GenerationRetirement {
+            cluster_name: "fixture-cluster".into(),
+            node_name: "fixture-node".into(),
+            generation_identifier: 37.into(),
+        }));
+        let generation_text = generation.datomize(vec![]).protosize().textualize();
+        let generation_client = Client::from_arguments([OsString::from(generation_text)])
+            .expect("actualize Retire.Generation client query");
+        assert!(matches!(
+            generation_client.input(),
+            meta_signal_lojix::Query::Retire(RetirementRequest::Generation(
+                GenerationRetirement { generation_identifier, .. }
+            )) if *generation_identifier == 37.into()
+        ));
+
+        let user_environment = ClientQuery::Retire(RetirementRequest::UserEnvironment(
+            UserEnvironmentRetirement {
+                cluster_name: "fixture-cluster".into(),
+                node_name: "fixture-node".into(),
+                user_name: "fixture-user".into(),
+                deployment_transport: signal_lojix::DeploymentTransport {
+                    nix_store_uri: "ssh-ng://store.invalid".into(),
+                    ssh_destination: "fixture-user@node.invalid".into(),
+                },
+            },
+        ));
+        let user_environment_text = user_environment.datomize(vec![]).protosize().textualize();
+        let user_environment_client =
+            Client::from_arguments([OsString::from(user_environment_text)])
+                .expect("actualize Retire.UserEnvironment client query");
+        assert!(matches!(
+            user_environment_client.input(),
+            meta_signal_lojix::Query::Retire(
+                RetirementRequest::UserEnvironment(UserEnvironmentRetirement {
+                    user_name,
+                    ..
+                })
+            ) if user_name == "fixture-user"
+        ));
+    }
+    #[test]
     fn rejects_non_single_inline_arguments() {
         assert!(Client::from_arguments(Vec::<OsString>::new()).is_err());
         assert!(Client::from_arguments([OsString::from("--pretty")]).is_err());

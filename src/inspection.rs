@@ -25,6 +25,7 @@ use crate::quarantine::QuarantinedRow;
 use crate::runtime_model::{
     ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, DeploymentRecord, EventLogEntry,
     GcRoot, IdentifierAllocation, LiveGeneration, PendingTransitionIntent, StoredTestRun,
+    UserEnvironmentRetirementJob,
 };
 use crate::{Error, InlineDatomArguments as _, LojixRecord, OfflineCommand, Result, ingress};
 
@@ -473,6 +474,7 @@ impl InspectionReader for StoreTableReader<'_> {
             self.inspect::<IdentifierAllocation>(),
             self.inspect::<DeploymentOutboxRecord>(),
             self.inspect::<PendingTransitionIntent>(),
+            self.inspect::<UserEnvironmentRetirementJob>(),
             self.inspect::<crate::NexusConfigurationRecord>(),
             self.inspect::<QuarantinedRow>(),
         ]

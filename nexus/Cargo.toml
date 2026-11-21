@@ -17,8 +17,8 @@ lojix-client = { path = "../clients/ordinary" }
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "4dff16b4f7412febc3b71aac8b49680cd20988cb" }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3" }
 horizon-lib = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "4d206ff2b7370a8db412c5e813ad0d60ce870599", package = "horizon-lib", features = ["datom"] }
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "2465d45aad532849a88a8b9401fa3ebfedda020c" }
-signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "c736d88ceded27f549617498f798128e577927a4" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "a21050f7fd0ed9e5d282f77c4fb0d20dda531a36" }
+signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "c012e5023f5b95bdac055f4c943414aaba4b0625" }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "f35460de930943ea1a8a972453ccf3a092a655b5", default-features = false }
 tempfile = "3"
 redb = "4"
