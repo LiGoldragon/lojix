@@ -1,3 +1,15 @@
+# 0.10.7 to 0.10.8
+
+Host activation clears EFI boot-entry overrides only when the target boot
+exposes LoaderInfo. With no Boot Loader Interface the clears are inapplicable;
+on an applicable boot a failed clear still fails the deployment.
+
+A same-host switch settles from the retained systemd unit's final process
+outcome. A matching live system profile can establish the generation, but is
+not a success receipt. The successor daemon resumes observation after a restart.
+The Horizon and Unison producer pins, Signal contracts, and stored record
+format are unchanged relative to 0.10.7.
+
 # 0.10.6 to 0.10.7
 
 Pin Horizon 0.17.2 plus matching ordinary0.11.1 and meta0.12.1 dependencies. Replica authorization validates the emitted account keys against the master identity without selecting a replica Home. Lojix behavior and contract schemas are unchanged by this dependency child. The typed Unison user-schema quarantine and resubmission transition below still applies relative to the adopted pre-Unison closure.
