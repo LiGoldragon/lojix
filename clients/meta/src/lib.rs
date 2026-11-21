@@ -299,6 +299,50 @@ mod tests {
             ) if user_name == "fixture-user"
         ));
     }
+
+    #[test]
+    fn parses_literal_retirement_cli_datoms_and_refuses_the_old_shape() {
+        use meta_signal_lojix::{
+            GenerationRetirement, Query, RetirementRequest, UserEnvironmentRetirement,
+        };
+
+        let generation = Client::from_arguments([OsString::from(
+            "Retire.Generation.{ fixture-cluster fixture-node 37 }",
+        )])
+        .expect("parse the public Retire.Generation CLI Datom");
+        assert_eq!(
+            generation.input(),
+            &Query::Retire(RetirementRequest::Generation(GenerationRetirement {
+                cluster_name: "fixture-cluster".into(),
+                node_name: "fixture-node".into(),
+                generation_identifier: 37,
+            }))
+        );
+
+        let user_environment = Client::from_arguments([OsString::from(
+            "Retire.UserEnvironment.{ fixture-cluster fixture-node fixture-user { ssh-ng://store.invalid fixture-user@node.invalid } }",
+        )])
+        .expect("parse the public Retire.UserEnvironment CLI Datom");
+        assert_eq!(
+            user_environment.input(),
+            &Query::Retire(RetirementRequest::UserEnvironment(
+                UserEnvironmentRetirement {
+                    cluster_name: "fixture-cluster".into(),
+                    node_name: "fixture-node".into(),
+                    user_name: "fixture-user".into(),
+                    deployment_transport: signal_lojix::DeploymentTransport {
+                        nix_store_uri: "ssh-ng://store.invalid".into(),
+                        ssh_destination: "fixture-user@node.invalid".into(),
+                    },
+                }
+            ))
+        );
+
+        assert!(
+            Client::from_arguments([OsString::from("Retire.{ fixture-cluster fixture-node 37 }",)])
+                .is_err()
+        );
+    }
     #[test]
     fn rejects_non_single_inline_arguments() {
         assert!(Client::from_arguments(Vec::<OsString>::new()).is_err());
