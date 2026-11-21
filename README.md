@@ -95,7 +95,16 @@ the source Memory and is not a daemon compatibility path.
 
 `lojix-inspect-store` is read-only and likewise accepts exactly one inline
 `InspectionRequest.InspectStore` Datom object, never a raw path, file, flag, or extra
-argument.
+argument. For a Field-owned frozen copy only, the old-cohort tool also accepts
+`InspectDeployJobKeys.{ /absolute/path-to-frozen-copy.memory }`. Its output is
+three space-separated fields per line: `deploy-job`, a canonical numeric
+key or `-`, and status. `Decoded` means the key matches the decoded
+deployment identifier; `deploy-job - Empty` means the registered family has
+no rows. Any other status leaves the inventory unresolved. An invalid
+nonnumeric key is suppressed. No archive body, path, or decoder error detail
+is printed in this mode. Field attests the input is a quiesced copy and
+correlates the IDs with its admission ledger; the tool does not classify
+jobs as live or stale.
 
 ## Maintained bootstrap app
 

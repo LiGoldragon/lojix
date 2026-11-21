@@ -1,6 +1,6 @@
 Library
 []
-[ InspectionRequest.[ InspectStore.InspectStore ]
+[ InspectionRequest.[ InspectStore.InspectStore InspectDeployJobKeys.InspectStore ]
   InspectStore.{ String }
   ResetStoreRequest.[ ResetStore ]
   BootstrapRequest.[ BootstrapRun.BootstrapRun ]

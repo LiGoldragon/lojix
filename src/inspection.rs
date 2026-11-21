@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use datom_codec::{Actualizing, Potential};
 use memory_engine::TableRegistration;
@@ -26,51 +26,188 @@ use crate::runtime_model::{
     ContainerLifecycleRecord, DeployJob, DeploymentOutboxRecord, DeploymentRecord, EventLogEntry,
     GcRoot, IdentifierAllocation, LiveGeneration, PendingTransitionIntent, StoredTestRun,
 };
-use crate::{Error, InlineDatomArguments as _, LojixRecord, OfflineCommand, Result, ingress};
+use crate::{
+    Error, InlineDatomArguments as _, LojixRecord, OfflineCommand, Payload as _, Result, ingress,
+};
 
 const CATALOG_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("__memory_engine_catalog");
 const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new("__memory_meta");
 const SCHEMA_VERSION_KEY: &str = "schema_version";
-pub struct StoreInspectionCommand {
-    path: PathBuf,
+pub enum StoreInspectionCommand {
+    Store(PathBuf),
+    DeployJobKeys(PathBuf),
 }
 
 impl OfflineCommand for StoreInspectionCommand {
-    type Outcome = StoreInspection;
+    type Outcome = StoreInspectionOutcome;
 
     fn from_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let text = (arguments).single_inline_datom()?;
-        let path = text.inspected_store_path()?;
-        Ok(Self {
-            path: PathBuf::from(path),
-        })
-    }
-
-    fn run(&self) -> StoreInspection {
-        StoreInspector {
-            path: self.path.clone(),
-        }
-        .inspect()
-    }
-}
-
-/// Reading the CLI's one inline operand as the request it must be.
-trait InspectionRequestText {
-    /// Decode exactly one inline current Datom `InspectStore.{ <path> }`
-    /// request and answer with the store path it names. The CLI never hands
-    /// its operand to a file-classifying component parser, so an existing
-    /// request-like path remains plain rejected text rather than input.
-    fn inspected_store_path(&self) -> Result<String>;
-}
-
-impl InspectionRequestText for str {
-    fn inspected_store_path(&self) -> Result<String> {
-        let request = Potential::<ingress::InspectionRequest>::from(self.to_owned())
+        let request = Potential::<ingress::InspectionRequest>::from(text)
             .actualize(&mut <crate::Ingress as crate::Budgeted>::budget())
             .map_err(|fault| Error::DatomRequestText(format!("{fault:?}")))?;
-        let ingress::InspectionRequest::InspectStore(ingress::InspectStore { string: path }) =
-            request;
-        Ok(path)
+        match request {
+            ingress::InspectionRequest::InspectStore(ingress::InspectStore { string }) => {
+                Ok(Self::Store(PathBuf::from(string)))
+            }
+            ingress::InspectionRequest::InspectDeployJobKeys(ingress::InspectStore { string }) => {
+                Ok(Self::DeployJobKeys(PathBuf::from(string)))
+            }
+        }
+    }
+
+    fn run(&self) -> StoreInspectionOutcome {
+        match self {
+            Self::Store(path) => StoreInspectionOutcome::Store(Box::new(
+                StoreInspector { path: path.clone() }.inspect(),
+            )),
+            Self::DeployJobKeys(path) => {
+                StoreInspectionOutcome::DeployJobKeys(path.as_path().inspect_deploy_job_keys())
+            }
+        }
+    }
+}
+
+pub enum StoreInspectionOutcome {
+    Store(Box<StoreInspection>),
+    DeployJobKeys(DeployJobKeyInspection),
+}
+
+impl std::fmt::Display for StoreInspectionOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Store(inspection) => std::fmt::Display::fmt(inspection, formatter),
+            Self::DeployJobKeys(inspection) => std::fmt::Display::fmt(inspection, formatter),
+        }
+    }
+}
+
+pub enum DeployJobKeyInspection {
+    Rows(Vec<DeployJobKeyRow>),
+    Refused(DeployJobKeyStatus),
+}
+
+pub struct DeployJobKeyRow {
+    key: Option<u64>,
+    status: DeployJobKeyStatus,
+}
+
+#[derive(Debug)]
+pub enum DeployJobKeyStatus {
+    Decoded,
+    DecodeFailed,
+    KeyMismatch,
+    InvalidKey,
+    InvalidPath,
+    OpenFailed,
+    SchemaMismatch,
+    CatalogUnreadable,
+    FamilyUnregistered,
+    ReadFailed,
+}
+
+impl std::fmt::Display for DeployJobKeyInspection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let table = DeployJob::TABLE;
+        match self {
+            Self::Rows(rows) if rows.is_empty() => writeln!(formatter, "{table} - Empty"),
+            Self::Rows(rows) => {
+                for row in rows {
+                    match row.key {
+                        Some(key) => writeln!(formatter, "{table} {key} {:?}", row.status)?,
+                        None => writeln!(formatter, "{table} - {:?}", row.status)?,
+                    }
+                }
+                Ok(())
+            }
+            Self::Refused(status) => writeln!(formatter, "{table} - {status:?}"),
+        }
+    }
+}
+
+trait InspectingDeployJobKeys {
+    fn inspect_deploy_job_keys(&self) -> DeployJobKeyInspection;
+    fn read_deploy_job_keys(&self)
+    -> std::result::Result<Vec<DeployJobKeyRow>, DeployJobKeyStatus>;
+}
+
+impl InspectingDeployJobKeys for Path {
+    fn inspect_deploy_job_keys(&self) -> DeployJobKeyInspection {
+        match self.read_deploy_job_keys() {
+            Ok(rows) => DeployJobKeyInspection::Rows(rows),
+            Err(status) => DeployJobKeyInspection::Refused(status),
+        }
+    }
+
+    fn read_deploy_job_keys(
+        &self,
+    ) -> std::result::Result<Vec<DeployJobKeyRow>, DeployJobKeyStatus> {
+        use DeployJobKeyStatus as Status;
+
+        // Custody supplies a frozen copy. The reader never opens an engine,
+        // starts a daemon, or asks redb for a write transaction.
+        if !self.is_absolute()
+            || !self
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.is_file())
+        {
+            return Err(Status::InvalidPath);
+        }
+        let database = redb::ReadOnlyDatabase::open(self).map_err(|_| Status::OpenFailed)?;
+        let read = database.begin_read().map_err(|_| Status::ReadFailed)?;
+        let metadata = read
+            .open_table(META_TABLE)
+            .map_err(|_| Status::SchemaMismatch)?;
+        if metadata
+            .get(SCHEMA_VERSION_KEY)
+            .map_err(|_| Status::SchemaMismatch)?
+            .is_none_or(|value| value.value() != u64::from(crate::LOJIX_SCHEMA_VERSION.value()))
+        {
+            return Err(Status::SchemaMismatch);
+        }
+        let catalog = read
+            .open_table(CATALOG_TABLE)
+            .map_err(|_| Status::CatalogUnreadable)?;
+        let registration = catalog
+            .get(DeployJob::TABLE)
+            .map_err(|_| Status::CatalogUnreadable)?
+            .ok_or(Status::FamilyUnregistered)?;
+        let registration =
+            rkyv::from_bytes::<TableRegistration, rancor::Error>(registration.value())
+                .map_err(|_| Status::CatalogUnreadable)?;
+        if registration.table_name() != DeployJob::TABLE
+            || registration.identity().family().as_str() != DeployJob::FAMILY
+            || registration.identity().schema_hash()
+                != memory_engine::SchemaHash::new(DeployJob::SCHEMA_HASH)
+        {
+            return Err(Status::FamilyUnregistered);
+        }
+
+        let table = match read.open_table(TableDefinition::<String, &[u8]>::new(DeployJob::TABLE)) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(_) => return Err(Status::ReadFailed),
+        };
+        let mut rows = Vec::new();
+        for row in table.iter().map_err(|_| Status::ReadFailed)? {
+            let (stored, bytes) = row.map_err(|_| Status::ReadFailed)?;
+            let entry = stored.value();
+            let key = entry
+                .parse::<u64>()
+                .ok()
+                .filter(|key| key.to_string() == entry);
+            let status = match key {
+                None => Status::InvalidKey,
+                Some(key) => match rkyv::from_bytes::<DeployJob, rancor::Error>(bytes.value()) {
+                    Ok(job) if *job.deployment_identifier.payload() == key => Status::Decoded,
+                    Ok(_) => Status::KeyMismatch,
+                    Err(_) => Status::DecodeFailed,
+                },
+            };
+            rows.push(DeployJobKeyRow { key, status });
+        }
+        rows.sort_by_key(|row| row.key);
+        Ok(rows)
     }
 }
 
