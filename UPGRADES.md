@@ -1,3 +1,7 @@
+# 0.10.6 to 0.10.7
+
+Pin Horizon 0.17.2 plus matching ordinary0.11.1 and meta0.12.1 dependencies. Replica authorization validates the emitted account keys against the master identity without selecting a replica Home. Lojix behavior and contract schemas are unchanged by this dependency child. The typed Unison user-schema quarantine and resubmission transition below still applies relative to the adopted pre-Unison closure.
+
 # User synchronization Horizon archive boundary
 
 The Unison user-schema closure adds a final synchronization vector to every

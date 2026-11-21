@@ -100,11 +100,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1795213314,
-        "narHash": "sha256-mrjR2MiwIea9TCjgnMadrqnZcrNurH1vz41RUkehX7Y=",
+        "lastModified": 1795225526,
+        "narHash": "sha256-9MHfPsl8/oLzKluDL+eCqlPeDl4lYWlGxLV1J4n7v74=",
         "owner": "LiGoldragon",
         "repo": "horizon-rs",
-        "rev": "f3cba638c4aec38186d622c863254d5e70f555f7",
+        "rev": "4d206ff2b7370a8db412c5e813ad0d60ce870599",
         "type": "github"
       },
       "original": {

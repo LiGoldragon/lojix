@@ -1,6 +1,6 @@
 [package]
 name         = "lojix"
-version      = "0.10.6"
+version      = "0.10.7"
 edition      = "2024"
 rust-version = "1.89"
 license      = "MIT OR Apache-2.0"
@@ -29,13 +29,13 @@ name = "lojix"
 path = "src/lib.rs"
 
 [dependencies]
-horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "f3cba638c4aec38186d622c863254d5e70f555f7", package = "horizon-lib", default-features = false }
+horizon-lib       = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "4d206ff2b7370a8db412c5e813ad0d60ce870599", package = "horizon-lib", default-features = false }
 datom-codec       = { git = "https://github.com/LiGoldragon/datom-codec", rev = "4dff16b4f7412febc3b71aac8b49680cd20988cb", optional = true }
 protos            = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3", optional = true }
 kameo             = "0.20"
 nexus             = { git = "https://github.com/LiGoldragon/nexus", rev = "a84bfa960c0d5c02d30048c4bbbc67dfef79a67c" }
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "7f1fe24adb5217864efe0254b90d731c916ce2c9" }
-signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "7d19bf6728b156660ecf2ab2ebaed97d89bca9f1" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "2465d45aad532849a88a8b9401fa3ebfedda020c" }
+signal-lojix      = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "c736d88ceded27f549617498f798128e577927a4" }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "f35460de930943ea1a8a972453ccf3a092a655b5", default-features = false, features = ["transport"] }
 rkyv              = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 redb              = "4"
