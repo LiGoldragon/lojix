@@ -134,6 +134,35 @@ fn user_deploy_job(user: &str) -> memory::DeployJob {
     }
 }
 
+fn user_retirement_identity(user: &str) -> memory::DeploymentRequestIdentity {
+    memory::DeploymentRequestIdentity {
+        deployment_environment: memory::DeploymentEnvironment::UserEnvironment(
+            memory::UserName::from(user),
+        ),
+        cluster_name: memory::ClusterName::from("alpha"),
+        node_name: memory::NodeName::from("beacon"),
+        generation_artifact: memory::GenerationArtifact::UserEnvironment,
+        requested_deployment_action: memory::RequestedDeploymentAction::UserEnvironmentRetirement,
+        activation_effect: memory::ActivationEffect::UserEnvironmentRetirement,
+        source_revision_policy: memory::SourceRevisionPolicy::NoFlakeSource,
+        optional_immutable_revision: None,
+    }
+}
+
+fn user_retirement_job(user: &str) -> memory::UserEnvironmentRetirementJob {
+    memory::UserEnvironmentRetirementJob {
+        deployment_identifier: memory::DeploymentIdentifier::new(0),
+        generation_identifier: memory::GenerationIdentifier::new(0),
+        cluster_name: memory::ClusterName::from("alpha"),
+        node_name: memory::NodeName::from("beacon"),
+        user_name: memory::UserName::from(user),
+        deployment_transport: memory::DeploymentTransport {
+            nix_store_uri: memory::NixStoreUri::from("ssh-ng://fixture-target.invalid"),
+            ssh_destination: memory::SshDestination::from(format!("{user}@fixture-target.invalid")),
+        },
+    }
+}
+
 fn seed_user_environment(store: &Store, user: &str, closure: &str) -> u64 {
     let identity = user_identity(user);
     let record = store
@@ -270,6 +299,18 @@ fn seed_target_home(
     }
 }
 
+fn make_target_environment_offline(targets: &Path, user: &str) {
+    let home = targets.join(user);
+    fs::write(home.join("manager-state"), "offline\n").expect("stop fixture user manager");
+    fs::write(home.join("manager-status"), "1\n").expect("record fixture offline status");
+    fs::write(home.join("active-units"), "").expect("clear fixture active units");
+    fs::write(home.join("service-properties"), "").expect("clear fixture service properties");
+    let standalone_unit = home.join(".config/systemd/user/home-manager.service");
+    if fs::symlink_metadata(&standalone_unit).is_ok() {
+        fs::remove_file(standalone_unit).expect("remove inactive standalone fixture unit");
+    }
+}
+
 fn retirement_programs(directory: &Path, targets: &Path) {
     fake_programs(directory);
     let targets = targets.display();
@@ -306,7 +347,7 @@ fn retirement_programs(directory: &Path, targets: &Path) {
     );
 }
 
-fn start_retirement_nexus() -> (RunningNexus, PathBuf, Vec<(String, u64)>) {
+fn start_retirement_nexus() -> (RunningNexus, PathBuf, Vec<(String, u64)>, u64) {
     let directory = tempfile::tempdir().expect("temporary retirement roots");
     let runtime_root = directory.path().join("runtime");
     let state_root = directory.path().join("state");
@@ -350,12 +391,17 @@ fn start_retirement_nexus() -> (RunningNexus, PathBuf, Vec<(String, u64)>) {
             "eagle".to_string(),
             seed_user_environment(&store, "eagle", EAGLE_CLOSURE),
         ),
+        (
+            "badger".to_string(),
+            seed_user_environment(&store, "badger", BIRD_CLOSURE),
+        ),
     ];
     for (user, closure, files, state) in [
         ("bird", BIRD_CLOSURE, BIRD_FILES, "host-live"),
         ("owl", OWL_CLOSURE, OWL_FILES, "live"),
         ("crane", CRANE_CLOSURE, CRANE_FILES, "unknown"),
         ("eagle", EAGLE_CLOSURE, EAGLE_FILES, "offline"),
+        ("badger", BIRD_CLOSURE, BIRD_FILES, "offline"),
     ] {
         let generation_identifier = seeded
             .iter()
@@ -380,6 +426,13 @@ fn start_retirement_nexus() -> (RunningNexus, PathBuf, Vec<(String, u64)>) {
             optional_pin_label: Some(memory::PinLabel::from("retirement-fixture")),
         })
         .expect("pin eagle root before retirement fixture");
+    let interrupted_retirement = store
+        .allocate_user_environment_retirement(
+            user_retirement_identity("badger"),
+            user_retirement_job("badger"),
+        )
+        .expect("persist interrupted retirement before starting fixture Nexus");
+    let interrupted_retirement_identifier = *interrupted_retirement.deployment_identifier.payload();
     drop(store);
 
     let mut path = OsString::from(programs.as_os_str());
@@ -416,6 +469,7 @@ fn start_retirement_nexus() -> (RunningNexus, PathBuf, Vec<(String, u64)>) {
         },
         targets,
         seeded,
+        interrupted_retirement_identifier,
     )
 }
 
@@ -666,6 +720,22 @@ fn deployment_query(nexus: &RunningNexus, identifier: i64) -> signal_lojix::Gene
     }
 }
 
+fn node_query(nexus: &RunningNexus) -> signal_lojix::GenerationListing {
+    match ordinary_exchange(
+        &nexus.ordinary_socket,
+        signal_lojix::Query::Query(signal_lojix::Selection::ByNode(
+            signal_lojix::NodeSelector {
+                cluster_name: "alpha".into(),
+                node_name: "beacon".into(),
+                requested_generation_artifact_option: None,
+            },
+        )),
+    ) {
+        signal_lojix::Response::Queried(listing) => listing,
+        other => panic!("expected ordinary by-node query response: {other:?}"),
+    }
+}
+
 fn retire_and_observe(
     nexus: &RunningNexus,
     watching: &WatchingClient,
@@ -683,8 +753,53 @@ fn retire_and_observe(
 
 #[test]
 fn owner_socket_retirement_reaches_terminal_and_ordinary_query_watch_reads_it() {
-    let (nexus, targets, seeded) = start_retirement_nexus();
+    let (nexus, targets, seeded, interrupted_retirement_identifier) = start_retirement_nexus();
     let seeded_ids: std::collections::HashMap<_, _> = seeded.iter().cloned().collect();
+    let interrupted_record = deployment_query(&nexus, interrupted_retirement_identifier as i64)
+        .deployment_record_vector
+        .into_iter()
+        .find(|record| record.deployment_identifier == interrupted_retirement_identifier as i64)
+        .expect("interrupted retirement failure remains queryable by its admitted id");
+    assert!(interrupted_record.terminal_marker_option.is_some());
+    match interrupted_record.deployment_terminal_option.as_ref() {
+        Some(signal_lojix::DeploymentTerminal::Failed(failure)) => {
+            assert_eq!(
+                failure.deployment_failure_stage,
+                signal_lojix::DeploymentFailureStage::Daemon
+            );
+            assert_eq!(
+                failure.deployment_terminal_reason,
+                signal_lojix::DeploymentTerminalReason::EnvironmentRetirementFailed
+            );
+            assert!(failure.failure_evidence_option.is_some());
+        }
+        other => panic!("startup records an interrupted failure, got {other:?}"),
+    }
+    let badger_profile = targets
+        .join("badger")
+        .join(".local/state/nix/profiles/home-manager");
+    assert!(fs::symlink_metadata(&badger_profile).is_ok());
+    assert!(
+        fs::read_to_string(nexus.directory.path().join("programs/ssh.log"))
+            .unwrap_or_default()
+            .lines()
+            .all(|destination| !destination.starts_with("badger@")),
+        "startup never probes or mutates the interrupted target"
+    );
+    let current_before_retry = node_query(&nexus);
+    assert!(
+        current_before_retry
+            .generation_vector
+            .iter()
+            .any(|generation| { generation.generation_identifier == seeded_ids["badger"] as i64 })
+    );
+    assert!(
+        fs::symlink_metadata(targets.join("badger").join(format!(
+            ".local/state/lojix/gcroots/beacon/generation-{}",
+            seeded_ids["badger"]
+        )))
+        .is_ok()
+    );
     let watching = watch(&nexus, deployment_watch("beacon"));
     let (opened, line) = next_reply(&watching, "retirement watch opening");
     let token = watching_token(&opened, &line);
@@ -793,28 +908,72 @@ fn owner_socket_retirement_reaches_terminal_and_ordinary_query_watch_reads_it() 
         !ssh_log.contains("eagle@fixture-target.invalid"),
         "the pinned environment is rejected before any target connection: {ssh_log}"
     );
+    assert!(
+        !ssh_log.contains("badger@fixture-target.invalid"),
+        "startup failure does not resume or probe a pending target operation: {ssh_log}"
+    );
 
-    let by_node = match ordinary_exchange(
-        &nexus.ordinary_socket,
-        signal_lojix::Query::Query(signal_lojix::Selection::ByNode(
-            signal_lojix::NodeSelector {
-                cluster_name: "alpha".into(),
-                node_name: "beacon".into(),
-                requested_generation_artifact_option: None,
-            },
-        )),
-    ) {
-        signal_lojix::Response::Queried(listing) => listing,
-        other => panic!("expected ordinary by-node query after retirement: {other:?}"),
-    };
+    let current_before_retry = node_query(&nexus);
+    let current_before_retry_ids: Vec<_> = current_before_retry
+        .generation_vector
+        .iter()
+        .map(|generation| generation.generation_identifier)
+        .collect();
+    assert!(!current_before_retry_ids.contains(&(seeded_ids["bird"] as i64)));
+    for user in ["owl", "crane", "eagle", "badger"] {
+        assert!(
+            current_before_retry_ids.contains(&(seeded_ids[user] as i64)),
+            "{user} remains Current before its explicit retry"
+        );
+    }
+
+    let mut retry_ids = Vec::new();
+    for user in ["owl", "crane", "badger"] {
+        make_target_environment_offline(&targets, user);
+        let (identifier, terminal) = retire_and_observe(&nexus, &watching, user);
+        assert_eq!(
+            terminal.deployment_phase,
+            signal_lojix::DeploymentPhase::Completed
+        );
+        assert_eq!(
+            terminal.deployment_terminal_option,
+            Some(signal_lojix::DeploymentTerminal::Succeeded)
+        );
+        let listing = deployment_query(&nexus, identifier);
+        let record = listing
+            .deployment_record_vector
+            .iter()
+            .find(|record| record.deployment_identifier == identifier)
+            .expect("explicit retry remains queryable by deployment id");
+        assert!(record.terminal_marker_option.is_some());
+        assert_eq!(
+            record.deployment_terminal_option,
+            Some(signal_lojix::DeploymentTerminal::Succeeded)
+        );
+        retry_ids.push(identifier);
+
+        let profile_directory = targets.join(user).join(".local/state/nix/profiles");
+        assert!(fs::symlink_metadata(profile_directory.join("home-manager")).is_err());
+        assert!(fs::symlink_metadata(profile_directory.join("home-manager-7-link")).is_err());
+        assert!(fs::symlink_metadata(profile_directory.join("profile-1-link")).is_ok());
+        let keepalive = targets.join(user).join(format!(
+            ".local/state/lojix/gcroots/beacon/generation-{}",
+            seeded_ids[user]
+        ));
+        assert!(fs::symlink_metadata(keepalive).is_ok());
+    }
+    retired_ids.extend(retry_ids);
+
+    let by_node = node_query(&nexus);
     let generation_ids: Vec<_> = by_node
         .generation_vector
         .iter()
         .map(|generation| generation.generation_identifier)
         .collect();
     assert!(!generation_ids.contains(&(seeded_ids["bird"] as i64)));
-    assert!(generation_ids.contains(&(seeded_ids["owl"] as i64)));
-    assert!(generation_ids.contains(&(seeded_ids["crane"] as i64)));
+    assert!(!generation_ids.contains(&(seeded_ids["owl"] as i64)));
+    assert!(!generation_ids.contains(&(seeded_ids["crane"] as i64)));
+    assert!(!generation_ids.contains(&(seeded_ids["badger"] as i64)));
     assert!(generation_ids.contains(&(seeded_ids["eagle"] as i64)));
     for identifier in retired_ids {
         assert!(
@@ -848,25 +1007,18 @@ fn owner_socket_retirement_reaches_terminal_and_ordinary_query_watch_reads_it() 
             .iter()
             .any(|root| *root.generation_identifier.payload() == seeded_ids["bird"])
     );
-    assert!(
-        roots
-            .iter()
-            .any(|root| *root.generation_identifier.payload() == seeded_ids["owl"]),
-        "live owl root remains; seeded ids={seeded_ids:?}, retained root ids={:?}",
-        roots
-            .iter()
-            .map(|root| *root.generation_identifier.payload())
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        roots
-            .iter()
-            .any(|root| *root.generation_identifier.payload() == seeded_ids["crane"])
-    );
     assert!(roots.iter().any(|root| {
         *root.generation_identifier.payload() == seeded_ids["eagle"]
             && root.generation_slot == memory::GenerationSlot::Pinned
     }));
+    for user in ["bird", "owl", "crane", "badger"] {
+        assert!(
+            !roots
+                .iter()
+                .any(|root| *root.generation_identifier.payload() == seeded_ids[user]),
+            "successful retirement removes {user}'s Lojix root"
+        );
+    }
 }
 
 #[test]
