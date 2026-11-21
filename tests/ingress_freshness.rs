@@ -24,7 +24,9 @@ fn string_ingress_preserves_bare_paths_and_colon_urls() {
         let request = DatomPotential::<InspectionRequest>::from(source)
             .actualize(&mut <lojix::Ingress as lojix::Budgeted>::budget())
             .expect("typed String ingress reads its canonical bare form");
-        let InspectionRequest::InspectStore(InspectStore { string }) = request;
+        let InspectionRequest::InspectStore(InspectStore { string }) = request else {
+            panic!("InspectStore input must decode to its own variant");
+        };
         assert_eq!(string, expected);
     }
 }
