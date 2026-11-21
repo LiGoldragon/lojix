@@ -9,13 +9,27 @@ Horizon UserDefinition. Every authored user record carries the new vector,
 including an empty one, and the Nexus plus both clients move together. There
 is no old-form decoder or stored-row conversion in this release.
 
-Use the existing quarantine-on-open policy. Before starting the new closure,
-the operator verifies that no deployment job is in flight. Unreadable earlier
-rows stay on disk as evidence in the quarantined-row family; the rollout
-receipt names their count and location. Earlier deploy history held in those
-rows stops being served. Any configuration previously served from those rows
-is submitted again in the new layout before the first deployment requiring it.
-The source package/test pass alone does not establish these runtime conditions.
+Use the existing quarantine-on-open policy. At the first start of the new
+closure, the self-target activation that starts it may be the one job in
+flight. The new closure running witnesses the switch; it does not turn the
+old deployment record into a terminal result. No other deployment job may
+be in flight at that boundary.
+
+First close a dead deployment by a supported terminal step where one exists.
+This release provides no operation to terminalize an individual dead job. For
+deployment 664, Field verifies that no process is working on it and identifies
+its durable row as stale. The store is left for the supported reader startup;
+no manual store edits or fabricated outcome are performed. The missing
+terminal step is tracked separately as primary-k27t.
+
+Preserve unreadable rows in the on-disk `quarantined-row` family. The rollout
+receipt records the actual count and absolute store location and names both
+the self-activation row that made the switch and any stale row, including 664
+if present. Previous history in quarantined rows may stop being served.
+Resubmit configuration formerly served from those rows in the new layout
+before its first dependent deployment. The package, daemon and both clients
+move together. A source package or test pass does not establish these runtime
+conditions.
 
 # Upgrades
 
