@@ -834,6 +834,13 @@ fn owner_socket_retirement_reaches_terminal_and_ordinary_query_watch_reads_it() 
                 signal_lojix::DeploymentTerminalReason::EnvironmentPinned,
             ),
         ),
+        (
+            "ghost",
+            signal_lojix::DeploymentPhase::Rejected,
+            signal_lojix::DeploymentTerminal::Rejected(
+                signal_lojix::DeploymentTerminalReason::UnknownEnvironment,
+            ),
+        ),
     ];
 
     let mut retired_ids = Vec::new();
@@ -875,28 +882,35 @@ fn owner_socket_retirement_reaches_terminal_and_ordinary_query_watch_reads_it() 
         assert!(record.terminal_marker_option.is_some());
         retired_ids.push(identifier);
 
-        let profile_directory = targets.join(user).join(".local/state/nix/profiles");
-        let selector = profile_directory.join("home-manager");
-        let generation = profile_directory.join("home-manager-7-link");
-        if user == "bird" {
-            assert!(fs::symlink_metadata(&selector).is_err());
-            assert!(fs::symlink_metadata(&generation).is_err());
+        if seeded_ids.contains_key(user) {
+            let profile_directory = targets.join(user).join(".local/state/nix/profiles");
+            let selector = profile_directory.join("home-manager");
+            let generation = profile_directory.join("home-manager-7-link");
+            if user == "bird" {
+                assert!(fs::symlink_metadata(&selector).is_err());
+                assert!(fs::symlink_metadata(&generation).is_err());
+            } else {
+                assert!(fs::symlink_metadata(&selector).is_ok());
+                assert!(fs::symlink_metadata(&generation).is_ok());
+            }
+            let keepalive = targets.join(user).join(format!(
+                ".local/state/lojix/gcroots/beacon/generation-{}",
+                seeded_ids[user]
+            ));
+            assert!(
+                fs::symlink_metadata(keepalive).is_ok(),
+                "retirement leaves the independently created target keepalive symlink alone"
+            );
+            assert!(
+                fs::symlink_metadata(profile_directory.join("profile-1-link")).is_ok(),
+                "retirement leaves another profile family untouched"
+            );
         } else {
-            assert!(fs::symlink_metadata(&selector).is_ok());
-            assert!(fs::symlink_metadata(&generation).is_ok());
+            assert!(
+                fs::symlink_metadata(targets.join(user)).is_err(),
+                "an unknown environment is rejected before any target path is touched"
+            );
         }
-        let keepalive = targets.join(user).join(format!(
-            ".local/state/lojix/gcroots/beacon/generation-{}",
-            seeded_ids[user]
-        ));
-        assert!(
-            fs::symlink_metadata(keepalive).is_ok(),
-            "retirement leaves the independently created target keepalive symlink alone"
-        );
-        assert!(
-            fs::symlink_metadata(profile_directory.join("profile-1-link")).is_ok(),
-            "retirement leaves another profile family untouched"
-        );
     }
 
     let ssh_log = fs::read_to_string(nexus.directory.path().join("programs/ssh.log"))
@@ -911,6 +925,10 @@ fn owner_socket_retirement_reaches_terminal_and_ordinary_query_watch_reads_it() 
     assert!(
         !ssh_log.contains("badger@fixture-target.invalid"),
         "startup failure does not resume or probe a pending target operation: {ssh_log}"
+    );
+    assert!(
+        !ssh_log.contains("ghost@fixture-target.invalid"),
+        "unknown environment is rejected before target contact: {ssh_log}"
     );
 
     let current_before_retry = node_query(&nexus);
