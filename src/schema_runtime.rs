@@ -4616,7 +4616,7 @@ impl DeployDriving for SchemaRuntime {
             .await
         {
             Ok(UserEnvironmentRetirementRemoval::Removed) => {}
-            Ok(UserEnvironmentRetirementRemoval::BecameLive(evidence)) => {
+            Ok(UserEnvironmentRetirementRemoval::BecameLive(_evidence)) => {
                 return retirement_terminal_output(
                     &self.store,
                     deployment_identifier,
@@ -8018,6 +8018,7 @@ pub(crate) trait DetachedActivation {
 
     /// What is known of a unit PID 1 no longer holds: that it is gone, and
     /// whatever its journal kept.
+    #[allow(dead_code)]
     fn vanished(&self) -> DetachedActivationFailure;
 
     /// The failure completed with the unit's journal tail, read over the
@@ -9753,8 +9754,6 @@ mod tests {
 
     impl RetirementTargetFixture {
         fn new() -> Self {
-            use std::os::unix::fs::PermissionsExt as _;
-
             let directory = tempfile::tempdir().expect("retirement fixture directory");
             let home = directory.path().join("home");
             let bin = directory.path().join("bin");

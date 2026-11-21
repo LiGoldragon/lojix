@@ -45,7 +45,7 @@ use crate::runtime_model::{
     EventLogEntry, GcRoot, IdentifierAllocation, ImmutableRevision, LiveGeneration,
     OutboxDeliveryState, OutboxRetryCount, PendingTransitionIntent, StateDigest, StateMarker,
     StoredTestRun, TerminalMarker, TransitionIntentState, TransitionMarker, TransitionOrdinal,
-    UserEnvironmentRetirement, UserEnvironmentRetirementJob,
+    UserEnvironmentRetirementJob,
 };
 
 /// A named wrapper around exactly one carried value. The wrapper exists to give
@@ -3618,14 +3618,13 @@ impl GenerationLedger for Store {
             .records::<GcRoot>()?
             .into_iter()
             .find(|root| *root.generation_identifier.payload() == generation_identifier);
-        if let Some(root) = &matching {
-            if self
+        if let Some(root) = &matching
+            && self
                 .user_environment_retirement_jobs()?
                 .iter()
                 .any(|job| job.cluster_name == root.cluster_name && job.node_name == root.node_name)
-            {
-                return Ok(GenerationMutationOutcome::EnvironmentRetirementInFlight);
-            }
+        {
+            return Ok(GenerationMutationOutcome::EnvironmentRetirementInFlight);
         }
         self.database.retract(Retraction::new(
             self.directory.gc_roots,
@@ -3801,6 +3800,63 @@ mod transition_intent_tests {
     use super::*;
     use crate::runtime_model as ordinary;
 
+    // These enums and rows describe a pre-retirement Memory archive. The
+    // retirement-only enum variants are deliberately absent, preserving the
+    // discriminants of the deployment vocabulary that existed beforehand.
+    #[allow(dead_code)]
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    enum HistoricalDeploymentEnvironment {
+        HostEnvironment,
+        UserEnvironment(ordinary::UserName),
+    }
+
+    #[allow(dead_code)]
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    enum HistoricalRequestedDeploymentAction {
+        Host(ordinary::HostDeployAction),
+        UserEnvironment(ordinary::UserEnvironmentAction),
+    }
+
+    #[allow(dead_code)]
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    enum HistoricalActivationEffect {
+        LiveActivation,
+        BootProfile,
+        TestActivation,
+        BootOnceProfile,
+        ProfileOnly,
+    }
+
+    #[allow(dead_code)]
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    enum HistoricalSourceRevisionPolicy {
+        RequireImmutable,
+        ResolveAndRecord,
+    }
+
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct HistoricalDeploymentRequestIdentity {
+        deployment_environment: HistoricalDeploymentEnvironment,
+        cluster_name: ordinary::ClusterName,
+        node_name: ordinary::NodeName,
+        generation_artifact: ordinary::GenerationArtifact,
+        requested_deployment_action: HistoricalRequestedDeploymentAction,
+        activation_effect: HistoricalActivationEffect,
+        source_revision_policy: HistoricalSourceRevisionPolicy,
+        optional_immutable_revision: Option<ordinary::ImmutableRevision>,
+    }
+
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct HistoricalDeploymentRecord {
+        deployment_identifier: ordinary::DeploymentIdentifier,
+        generation_identifier: ordinary::GenerationIdentifier,
+        deployment_request_identity: HistoricalDeploymentRequestIdentity,
+        optional_admission_marker: Option<ordinary::AdmissionMarker>,
+        deployment_lifecycle: ordinary::DeploymentLifecycle,
+        optional_terminal_marker: Option<ordinary::TerminalMarker>,
+        optional_deployment_terminal: Option<ordinary::DeploymentTerminal>,
+    }
+
     fn admission_identity() -> ordinary::DeploymentRequestIdentity {
         ordinary::DeploymentRequestIdentity {
             deployment_environment: ordinary::DeploymentEnvironment::HostEnvironment,
@@ -3900,6 +3956,94 @@ mod transition_intent_tests {
                 ssh_destination: ordinary::SshDestination::from(format!("{user}@fixture.invalid")),
             },
         }
+    }
+
+    #[test]
+    fn successor_decodes_a_pre_retirement_deployment_archive() {
+        let directory = tempfile::TempDir::new().expect("temporary Memory directory");
+        let path = directory.path().join("lojix.memory");
+        drop(Store::open(&path).expect("create disposable current Memory schema"));
+
+        let historical = HistoricalDeploymentRecord {
+            deployment_identifier: ordinary::DeploymentIdentifier::new(41),
+            generation_identifier: ordinary::GenerationIdentifier::new(73),
+            deployment_request_identity: HistoricalDeploymentRequestIdentity {
+                deployment_environment: HistoricalDeploymentEnvironment::UserEnvironment(
+                    ordinary::UserName::from("ada"),
+                ),
+                cluster_name: ordinary::ClusterName::from("alpha"),
+                node_name: ordinary::NodeName::from("beacon"),
+                generation_artifact: ordinary::GenerationArtifact::UserEnvironment,
+                requested_deployment_action: HistoricalRequestedDeploymentAction::UserEnvironment(
+                    ordinary::UserEnvironmentAction::ActivateNow,
+                ),
+                activation_effect: HistoricalActivationEffect::LiveActivation,
+                source_revision_policy: HistoricalSourceRevisionPolicy::ResolveAndRecord,
+                optional_immutable_revision: Some(ordinary::ImmutableRevision::from(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )),
+            },
+            optional_admission_marker: Some(ordinary::AdmissionMarker::from(
+                ordinary::StateMarker::from(1),
+            )),
+            deployment_lifecycle: ordinary::DeploymentLifecycle::Completed,
+            optional_terminal_marker: Some(ordinary::TerminalMarker::from(
+                ordinary::StateMarker::from(2),
+            )),
+            optional_deployment_terminal: Some(ordinary::DeploymentTerminal::Succeeded),
+        };
+        let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&historical)
+            .expect("archive historical pre-retirement row");
+
+        let database = redb::Database::open(&path).expect("open disposable Memory with redb");
+        let write = database
+            .begin_write()
+            .expect("begin historical archive insert");
+        {
+            let mut table = write
+                .open_table(redb::TableDefinition::<String, &[u8]>::new(
+                    "deployment-record",
+                ))
+                .expect("open deployment-record table");
+            table
+                .insert("41".to_string(), archive.as_ref())
+                .expect("insert historical deployment archive");
+        }
+        write.commit().expect("commit historical archive");
+        drop(database);
+
+        let successor = Store::open(&path).expect("successor Memory opens archived record");
+        let records = successor
+            .records::<ordinary::DeploymentRecord>()
+            .expect("successor decodes archived deployment rows");
+        let record = records
+            .iter()
+            .find(|record| *record.deployment_identifier.payload() == 41)
+            .expect("historical deployment remains queryable");
+        assert_eq!(
+            record.deployment_request_identity.deployment_environment,
+            ordinary::DeploymentEnvironment::UserEnvironment(ordinary::UserName::from("ada"))
+        );
+        assert_eq!(
+            record
+                .deployment_request_identity
+                .requested_deployment_action,
+            ordinary::RequestedDeploymentAction::UserEnvironment(
+                ordinary::UserEnvironmentAction::ActivateNow
+            )
+        );
+        assert_eq!(
+            record.deployment_request_identity.activation_effect,
+            ordinary::ActivationEffect::LiveActivation
+        );
+        assert_eq!(
+            record.deployment_request_identity.source_revision_policy,
+            ordinary::SourceRevisionPolicy::ResolveAndRecord
+        );
+        assert_eq!(
+            record.optional_deployment_terminal,
+            Some(ordinary::DeploymentTerminal::Succeeded)
+        );
     }
 
     fn store_user_generation(

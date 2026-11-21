@@ -36,5 +36,5 @@ unsafe_code = "forbid"
 
 [dev-dependencies]
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3" }
-signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "c012e5023f5b95bdac055f4c943414aaba4b0625" }
+signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "40bdd63f50feff9c9a07b12386346a34d0ab5229" }
 tempfile = "3"
