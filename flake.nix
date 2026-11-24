@@ -191,6 +191,8 @@
             commonArguments
             // {
               inherit cargoArtifacts;
+              nativeBuildInputs = commonArguments.nativeBuildInputs ++ [ pkgs.dbus ];
+              LOJIX_TEST_DBUS_SESSION_CONFIG = "${pkgs.dbus}/share/dbus-1/session.conf";
             }
           );
 

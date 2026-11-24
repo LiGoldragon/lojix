@@ -8021,6 +8021,11 @@ pub(crate) trait DetachedActivation {
     /// terminal unit readable; UnitNew announces a still-pending registration.
     async fn prepare_observer(&self) -> std::result::Result<DetachedActivationObserver, String>;
 
+    async fn prepare_observer_on_connection(
+        &self,
+        connection: Connection,
+    ) -> std::result::Result<DetachedActivationObserver, String>;
+
     fn terminal_outcome(
         outcome: Option<DetachedActivationOutcome>,
     ) -> Option<memory::DeploymentTerminal>;
@@ -8080,6 +8085,13 @@ impl DetachedActivation for DetachedActivationUnit {
         let connection = Connection::system()
             .await
             .map_err(|error| format!("connect to systemd for detached activation: {error}"))?;
+        self.prepare_observer_on_connection(connection).await
+    }
+
+    async fn prepare_observer_on_connection(
+        &self,
+        connection: Connection,
+    ) -> std::result::Result<DetachedActivationObserver, String> {
         let manager = Self::manager_proxy(&connection).await?;
         let unit_new = manager
             .receive_signal("UnitNew")
@@ -9672,8 +9684,306 @@ mod tests {
     //! behavior is proven later at S5 on a live VM.
 
     use super::*;
+    #[cfg(target_os = "linux")]
+    use std::io::BufRead as _;
+    #[cfg(target_os = "linux")]
+    use std::io::Read as _;
+    #[cfg(target_os = "linux")]
+    use std::process::{Child, Command, Stdio};
+    #[cfg(target_os = "linux")]
+    use std::sync::Mutex as StdMutex;
+    #[cfg(target_os = "linux")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(target_os = "linux")]
+    use tokio::sync::watch;
 
     const STORE: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-toplevel";
+
+    #[cfg(target_os = "linux")]
+    const PRIVATE_SYSTEMD_NAME: &str = "org.freedesktop.systemd1";
+    #[cfg(target_os = "linux")]
+    const PRIVATE_SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";
+    #[cfg(target_os = "linux")]
+    const PRIVATE_UNIT_NAME: &str = "lojix-self-switch-deploy-41.service";
+    #[cfg(target_os = "linux")]
+    const PRIVATE_UNIT_PATH: &str = "/org/freedesktop/systemd1/unit/fixture";
+    #[cfg(target_os = "linux")]
+    const PRIVATE_UNIT_INTERFACE: &str = "org.freedesktop.systemd1.Unit";
+
+    #[cfg(target_os = "linux")]
+    struct PrivateSessionBus {
+        child: Child,
+        address: String,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl PrivateSessionBus {
+        fn start() -> Self {
+            let mut command = Command::new("dbus-daemon");
+            if let Some(config) = std::env::var_os("LOJIX_TEST_DBUS_SESSION_CONFIG") {
+                command.arg(format!("--config-file={}", config.to_string_lossy()));
+            } else {
+                command.arg("--session");
+            }
+            let mut child = command
+                .args(["--nofork", "--nopidfile", "--print-address=1"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("start isolated D-Bus broker");
+            let mut address = String::new();
+            std::io::BufReader::new(child.stdout.take().expect("broker address pipe"))
+                .read_line(&mut address)
+                .expect("read isolated broker address");
+            if address.trim().is_empty() {
+                let status = child.wait().expect("wait for failed private broker");
+                let mut diagnostic = String::new();
+                child
+                    .stderr
+                    .take()
+                    .expect("broker diagnostic pipe")
+                    .read_to_string(&mut diagnostic)
+                    .expect("read broker diagnostic");
+                panic!("private broker prints its address; {status}: {diagnostic}");
+            }
+            Self {
+                child,
+                address: address.trim().to_string(),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for PrivateSessionBus {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Default)]
+    struct PrivateManagerLedger {
+        subscription_senders: StdMutex<Vec<String>>,
+        get_unit_senders: StdMutex<Vec<String>>,
+    }
+
+    #[cfg(target_os = "linux")]
+    struct PrivateManager(Arc<PrivateManagerLedger>);
+
+    #[cfg(target_os = "linux")]
+    #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
+    impl PrivateManager {
+        fn subscribe(
+            &self,
+            #[zbus(header)] header: zbus::message::Header<'_>,
+        ) -> zbus::fdo::Result<()> {
+            let sender = header
+                .sender()
+                .ok_or_else(|| zbus::fdo::Error::Failed("Subscribe has no sender".into()))?;
+            self.0
+                .subscription_senders
+                .lock()
+                .expect("manager subscription senders")
+                .push(sender.to_string());
+            Ok(())
+        }
+
+        fn get_unit(
+            &self,
+            _unit_name: &str,
+            #[zbus(header)] header: zbus::message::Header<'_>,
+        ) -> zbus::fdo::Result<zbus::zvariant::OwnedObjectPath> {
+            let sender = header
+                .sender()
+                .ok_or_else(|| zbus::fdo::Error::Failed("GetUnit has no sender".into()))?;
+            self.0
+                .get_unit_senders
+                .lock()
+                .expect("manager GetUnit senders")
+                .push(sender.to_string());
+            Ok(zbus::zvariant::OwnedObjectPath::try_from(PRIVATE_UNIT_PATH)
+                .expect("canonical fixture unit object path"))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Clone)]
+    struct PrivateUnit {
+        active_state: Arc<StdMutex<String>>,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
+    impl PrivateUnit {
+        #[zbus(property)]
+        fn active_state(&self) -> String {
+            self.active_state
+                .lock()
+                .expect("fixture ActiveState")
+                .clone()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Clone)]
+    struct PrivateService {
+        result: Arc<StdMutex<String>>,
+        main_code: Arc<StdMutex<i32>>,
+        main_status: Arc<StdMutex<i32>>,
+        result_reads: Arc<AtomicUsize>,
+        result_read_events: watch::Sender<usize>,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[zbus::interface(name = "org.freedesktop.systemd1.Service")]
+    impl PrivateService {
+        #[zbus(property)]
+        fn result(&self) -> String {
+            let reads = self.result_reads.fetch_add(1, Ordering::SeqCst) + 1;
+            self.result_read_events.send_replace(reads);
+            self.result.lock().expect("fixture Result").clone()
+        }
+
+        #[zbus(property)]
+        fn exec_main_code(&self) -> i32 {
+            *self.main_code.lock().expect("fixture ExecMainCode")
+        }
+
+        #[zbus(property)]
+        fn exec_main_status(&self) -> i32 {
+            *self.main_status.lock().expect("fixture ExecMainStatus")
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn detached_observer_receives_terminal_change_on_private_bus() {
+        let bus = PrivateSessionBus::start();
+        let ledger = Arc::new(PrivateManagerLedger::default());
+        let unit_state = PrivateUnit {
+            active_state: Arc::new(StdMutex::new("activating".into())),
+        };
+        let (result_read_events, _) = watch::channel(0usize);
+        let service_state = PrivateService {
+            result: Arc::new(StdMutex::new("success".into())),
+            main_code: Arc::new(StdMutex::new(0)),
+            main_status: Arc::new(StdMutex::new(0)),
+            result_reads: Arc::new(AtomicUsize::new(0)),
+            result_read_events,
+        };
+        let server = zbus::connection::Builder::address(bus.address.as_str())
+            .expect("address private broker")
+            .name(PRIVATE_SYSTEMD_NAME)
+            .expect("claim systemd manager name")
+            .serve_at(PRIVATE_SYSTEMD_PATH, PrivateManager(ledger.clone()))
+            .expect("serve private systemd manager")
+            .serve_at(PRIVATE_UNIT_PATH, unit_state.clone())
+            .expect("serve private unit interface")
+            .serve_at(PRIVATE_UNIT_PATH, service_state.clone())
+            .expect("serve private service interface")
+            .build()
+            .await
+            .expect("build private systemd service");
+        let observer_connection = zbus::connection::Builder::address(bus.address.as_str())
+            .expect("address observer to private broker")
+            .build()
+            .await
+            .expect("connect observer to private broker");
+
+        let bus_proxy = Proxy::new(
+            &server,
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+        )
+        .await
+        .expect("open private broker query");
+        let names: Vec<String> = bus_proxy
+            .call("ListNames", &())
+            .await
+            .expect("list private broker clients");
+        assert_eq!(
+            names.iter().filter(|name| name.starts_with(':')).count(),
+            2,
+            "the broker contains only the fake manager and observer clients: {names:?}"
+        );
+
+        let unit = DetachedActivationUnit::new(PRIVATE_UNIT_NAME.to_string());
+        let mut observer = unit
+            .prepare_observer_on_connection(observer_connection)
+            .await
+            .expect("prepare the detached observer on the private bus");
+        assert_eq!(
+            observer.initial_outcome().await.expect("initial unit read"),
+            Some(DetachedActivationOutcome::Running),
+            "the accepted helper is still running at the observer's first read"
+        );
+
+        let mut result_reads = service_state.result_read_events.subscribe();
+        let mut completion = tokio::spawn(async move { observer.await_completion().await });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while *result_reads.borrow() < 2 {
+                result_reads
+                    .changed()
+                    .await
+                    .expect("observer's service-property read remains observable");
+            }
+        })
+        .await
+        .expect("observer has installed its ActiveState match before the helper exits");
+
+        let subscription_senders = ledger
+            .subscription_senders
+            .lock()
+            .expect("manager subscription senders")
+            .clone();
+        let get_unit_senders = ledger
+            .get_unit_senders
+            .lock()
+            .expect("manager GetUnit senders")
+            .clone();
+        assert!(!get_unit_senders.is_empty());
+
+        *unit_state.active_state.lock().expect("fixture ActiveState") = "inactive".into();
+        *service_state.result.lock().expect("fixture Result") = "success".into();
+        *service_state
+            .main_code
+            .lock()
+            .expect("fixture ExecMainCode") = 1;
+        *service_state
+            .main_status
+            .lock()
+            .expect("fixture ExecMainStatus") = 0;
+        if !subscription_senders.is_empty() {
+            let terminal_state = zbus::zvariant::Value::from("inactive");
+            let changed = std::collections::HashMap::from([("ActiveState", terminal_state)]);
+            server
+                .emit_signal(
+                    None::<&str>,
+                    PRIVATE_UNIT_PATH,
+                    "org.freedesktop.DBus.Properties",
+                    "PropertiesChanged",
+                    &(PRIVATE_UNIT_INTERFACE, changed, Vec::<&str>::new()),
+                )
+                .await
+                .expect("broadcast terminal property change to the private bus");
+        }
+
+        let outcome =
+            match tokio::time::timeout(std::time::Duration::from_secs(3), &mut completion).await {
+                Ok(joined) => joined.expect("observer task").expect("observer result"),
+                Err(_) => {
+                    completion.abort();
+                    panic!("observer did not receive the terminal property-change broadcast");
+                }
+            };
+        assert_eq!(outcome, Some(DetachedActivationOutcome::Succeeded));
+        assert_eq!(subscription_senders.len(), 1);
+        assert!(get_unit_senders
+            .iter()
+            .all(|sender| sender == &subscription_senders[0]));
+    }
 
     fn host_submission(action: ordinary::HostDeployAction) -> memory::DeploySubmission {
         memory::DeploySubmission::Host(meta::HostDeployment {
