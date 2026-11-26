@@ -1,3 +1,13 @@
+# 0.10.8 to 0.10.9
+
+This release is a same-schema controller recovery bridge. It changes the
+package identity while retaining the Horizon, Unison, Signal contract and
+stored record layouts of 0.10.8. A same-host `BaseHost` activation therefore
+restarts the Nexus without activating a Home environment; the successor reads
+every retained same-host activation unit and records its real terminal
+outcome. Use this bridge before a Horizon archive boundary when retained
+activation units must be reconciled.
+
 # 0.10.7 to 0.10.8
 
 Host activation clears EFI boot-entry overrides only when the target boot
