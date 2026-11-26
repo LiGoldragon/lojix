@@ -1,3 +1,13 @@
+# 0.10.9 to 0.10.10
+
+Horizon gains the typed `RouterUsbParentPowerOn` capability. The Nexus, both
+clients and the Horizon fixture move together: Horizon `ae1d4a89`, ordinary
+Signal `9a86693b`, and meta Signal `adbfa377`. Its vector payload preserves
+the archived `NodeCapability` width and alignment. The frozen 0.17.2-writer
+v5 deploy-job fixture proves that a complete in-flight job containing a
+payload-bearing capability still decodes without quarantine; existing
+controller jobs therefore retain their supported terminal reconciliation.
+
 # 0.10.8 to 0.10.9
 
 This release is a same-schema controller recovery bridge. It changes the
