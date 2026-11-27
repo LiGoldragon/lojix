@@ -8,7 +8,10 @@
       { [] None None [] None }
       { «ssh-ed25519 AAAAfixture» None None }
       Some.True
-      []
+      [ Router.{}
+        RouterUsbParentPowerOn.[
+          { 0000:c7:00.0 2 0b95 1790 0200 00000000009525 } ]
+        PreferredWiredInternet.enp0s31f6 ]
       None } ]
   []
   []

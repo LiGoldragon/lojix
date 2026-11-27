@@ -1,3 +1,12 @@
+# 0.10.8 to 0.10.11
+
+Forward-port the canonical ordinary and owner contracts with the paired Horizon
+0.19.0 release. Horizon adds the append-only `RouterUsbParentPowerOn` and
+`PreferredWiredInternet` capabilities; standalone user-environment retirement
+and same-host activation recovery remain intact. Frozen v5 deploy jobs written
+against Horizon 0.17.2 and 0.18.0 decode without quarantine, proving the
+complete stored deployment envelope across both additions.
+
 # 0.10.7 to 0.10.8
 
 Host activation clears EFI boot-entry overrides only when the target boot

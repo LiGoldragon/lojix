@@ -1,6 +1,6 @@
 [package]
 name = "meta-lojix-client"
-version = "0.10.8"
+version = "0.10.11"
 edition = "2024"
 rust-version = "1.89"
 publish = false
@@ -13,10 +13,10 @@ path = "src/main.rs"
 lojix = { path = "../..", default-features = false }
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "4dff16b4f7412febc3b71aac8b49680cd20988cb" }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3" }
-meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "9eff251e5d849b90c80f2e7d97481c027792ad7c", features = ["datom"] }
-signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "40bdd63f50feff9c9a07b12386346a34d0ab5229" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix", rev = "3e53a61ffb8bb1f3786b997aaa42fba65290cc60", features = ["datom"] }
+signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix", rev = "3b5c3f15cd32b7ba7b3631fee831c9848886cf2e" }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "f35460de930943ea1a8a972453ccf3a092a655b5", default-features = false }
-horizon-lib = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "4d206ff2b7370a8db412c5e813ad0d60ce870599", package = "horizon-lib" }
+horizon-lib = { git = "https://github.com/LiGoldragon/horizon-rs", rev = "8336cb6b2477f08dd2595486cac338a04e9d4f22", package = "horizon-lib" }
 
 [lints.rust]
 unsafe_code = "forbid"
