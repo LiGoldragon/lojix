@@ -7564,6 +7564,7 @@ pub(crate) trait DetachedActivation {
 
     /// What is known of a unit PID 1 no longer holds: that it is gone, and
     /// whatever its journal kept.
+    #[cfg(test)]
     fn vanished(&self) -> DetachedActivationFailure;
 
     /// The failure completed with the unit's journal tail, read over the
@@ -7708,6 +7709,7 @@ impl DetachedActivation for DetachedActivationUnit {
         .outcome()
     }
 
+    #[cfg(test)]
     fn vanished(&self) -> DetachedActivationFailure {
         DetachedActivationFailure {
             unit_name: self.name.clone(),

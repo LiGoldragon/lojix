@@ -15,9 +15,7 @@ use crate::schema_runtime::{
     DaemonRuntime as _, DeployDriving as _, DeployJobResuming as _, DetachedActivation as _,
     DetachedDeploymentRecording as _, DetachedObserving as _, RuntimeCore as _, TestDriving as _,
 };
-use crate::{
-    DeploymentLedger as _, DurableStore as _, GenerationLedger as _, NexusPersistable as _,
-};
+use crate::{DeploymentLedger as _, DurableStore as _, NexusPersistable as _};
 use std::fmt::{Display, Formatter};
 use std::io::Write;
 use std::sync::Arc;

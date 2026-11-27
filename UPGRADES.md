@@ -1,3 +1,13 @@
+# 0.10.10 to 0.10.11
+
+Horizon gains the typed `PreferredWiredInternet` capability. The Nexus, both
+clients and the Horizon fixture move together: Horizon `8336cb6b`, ordinary
+Signal `0ad6122d`, and meta Signal `32c2dcb8`. The additive String payload
+preserves the archived `NodeCapability` width and alignment. Frozen v5 deploy
+jobs written against both Horizon 0.17.2 and 0.18.0 decode without quarantine,
+including the preceding payload-bearing USB parent-power capability, so
+existing controller jobs retain their supported terminal reconciliation.
+
 # 0.10.9 to 0.10.10
 
 Horizon gains the typed `RouterUsbParentPowerOn` capability. The Nexus, both
